@@ -27,7 +27,7 @@ use crate::{
     },
     generation::{
         SpeechAudio, detect_voice_activity, diarize, edit_image, generate_image, generate_speech,
-        transcribe,
+        identify_language, transcribe,
     },
     inference_for_server_builder::{
         InferenceRsForServerBuilder, ModelConfig, ModelLoadSettings, defaults, parse_device_layers,
@@ -49,9 +49,10 @@ use crate::{
     openai::{
         ChatCompletionRequest, CompletionRequest, DecisionRequest, DecisionResponse,
         DiarizationOutput, DiarizationRequest, EmbeddingRequest, EmbeddingResponse,
-        ImageEditRequest, ImageGenerationRequest, ModelObjects, OpenAiToolSurface, RerankRequest,
-        RerankResponse, SpeechGenerationRequest, TranscriptionOutput, TranscriptionRequest,
-        TranscriptionSessionRequest, VoiceActivityRequest, VoiceActivityResponse,
+        ImageEditRequest, ImageGenerationRequest, LanguageIdRequest, LanguageIdResponse,
+        ModelObjects, OpenAiToolSurface, RerankRequest, RerankResponse, SpeechGenerationRequest,
+        TranscriptionOutput, TranscriptionRequest, TranscriptionSessionRequest,
+        VoiceActivityRequest, VoiceActivityResponse,
     },
     operations::{
         self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
@@ -1761,6 +1762,19 @@ impl Engine {
         audio: &[u8],
     ) -> Result<String, ApiError> {
         to_json(&self.voice_activity(parse_json(request)?, audio).await?)
+    }
+
+    /// The spoken language of encoded audio, from a language identification model.
+    pub async fn language_id(
+        &self,
+        request: LanguageIdRequest,
+        audio: &[u8],
+    ) -> Result<LanguageIdResponse, ApiError> {
+        identify_language(self.state(), request, audio).await
+    }
+
+    pub async fn language_id_json(&self, request: &[u8], audio: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.language_id(parse_json(request)?, audio).await?)
     }
 
     /// Who speaks when in encoded audio, from a diarization model.

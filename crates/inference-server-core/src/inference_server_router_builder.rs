@@ -18,7 +18,7 @@ use crate::openapi_doc::get_openapi_doc;
 use crate::{
     anthropic::{anthropic_count_tokens, anthropic_error_response, anthropic_messages},
     approvals::resolve_agent_approval,
-    audio_analysis::{diarization, transcription, translation, voice_activity},
+    audio_analysis::{diarization, language_id, transcription, translation, voice_activity},
     chat_completion::chatcompletions,
     completions::completions,
     embeddings::{decisions, embeddings, rerank},
@@ -46,7 +46,7 @@ use crate::{
         CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE, DECISIONS_ROUTE, DEFAULT_MODEL_ROUTE,
         DIARIZATION_ROUTE, EMBEDDINGS_ROUTE, FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE,
         HEALTH_ROUTE, IMAGE_EDIT_ROUTE, IMAGE_GENERATION_ROUTE, JOB_EVENTS_ROUTE, JOB_FILE_ROUTE,
-        JOB_ROUTE, JOBS_ROUTE, LAYOUT_DETECT_ROUTE, LIST_LORA_ADAPTERS_ROUTE,
+        JOB_ROUTE, JOBS_ROUTE, LANGUAGE_ID_ROUTE, LAYOUT_DETECT_ROUTE, LIST_LORA_ADAPTERS_ROUTE,
         LOAD_LORA_ADAPTER_ROUTE, MANAGER_DELETE_ROUTE, MANAGER_DOWNLOAD_ROUTE,
         MANAGER_INVENTORY_ROUTE, MANAGER_LOAD_ROUTE, MANAGER_MODELS_ROUTE,
         MANAGER_SAVED_MODEL_ROUTE, MANAGER_SAVED_ROUTE, MANAGER_UNLOAD_ROUTE, MODEL_ALIAS_ROUTE,
@@ -412,6 +412,10 @@ fn init_router(
         .route(
             DIARIZATION_ROUTE.path,
             post(diarization).layer(DefaultBodyLimit::max(audio_limit)),
+        )
+        .route(
+            LANGUAGE_ID_ROUTE.path,
+            post(language_id).layer(DefaultBodyLimit::max(audio_limit)),
         )
         .route(AGENT_APPROVAL_ROUTE.path, post(resolve_agent_approval))
         .route(RESPONSES_ROUTE.path, post(create_response))

@@ -50,5 +50,6 @@ mod rwkv_tiny;
 mod silero_tiny;
 mod sortformer_tiny;
 mod ultravox_tiny;
+mod voxlingua_tiny;
 mod voxtral_chat_tiny;
 mod whisper_tiny;

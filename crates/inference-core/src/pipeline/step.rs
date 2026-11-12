@@ -19,12 +19,12 @@ use super::{
 #[cfg(feature = "cuda")]
 use super::{cuda_graph::CudaDecodeGraphLaunch, execution};
 use crate::{
-    IntervalLogger,
+    IntervalLogger, Response,
     paged_attention::PagedAttentionMeta,
     pipeline::text_models_inputs_processor::NoncausalMmContext,
     prefix_cacher::PrefixCacheManagerV2,
     scheduler::modality_signature,
-    sequence::{SeqStepType, Sequence, SequenceState},
+    sequence::{SeqStepType, Sequence, SequenceState, StopReason},
 };
 
 /// Moves prompt rows that go on to decode into the completion state once their prompt is done.
@@ -979,7 +979,13 @@ impl dyn Pipeline {
                         results
                     })
                     .collect::<Vec<_>>();
-                response::send_voice_activity_responses(input_seqs, results).await?;
+                response::send_analysis_responses(
+                    input_seqs,
+                    results,
+                    Response::VoiceActivity,
+                    StopReason::DetectedSpeech,
+                )
+                .await?;
             }
             ForwardInputsResult::Diarization { .. } => {
                 let results = results
@@ -991,7 +997,31 @@ impl dyn Pipeline {
                         results
                     })
                     .collect::<Vec<_>>();
-                response::send_diarization_responses(input_seqs, results).await?;
+                response::send_analysis_responses(
+                    input_seqs,
+                    results,
+                    Response::Diarization,
+                    StopReason::Diarized,
+                )
+                .await?;
+            }
+            ForwardInputsResult::LanguageId { .. } => {
+                let results = results
+                    .into_iter()
+                    .flat_map(|r| {
+                        let ForwardInputsResult::LanguageId { results } = r else {
+                            unreachable!("All results must have same type, `LanguageId`")
+                        };
+                        results
+                    })
+                    .collect::<Vec<_>>();
+                response::send_analysis_responses(
+                    input_seqs,
+                    results,
+                    Response::LanguageId,
+                    StopReason::IdentifiedLanguage,
+                )
+                .await?;
             }
             ForwardInputsResult::BlockGeneration { .. } => {
                 let mut denoise_times = Vec::with_capacity(results.len());

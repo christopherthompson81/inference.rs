@@ -98,6 +98,7 @@ async fn a_transcription_request_decodes_the_clip() -> anyhow::Result<()> {
         diarization_model: None,
         overlap_pass: None,
         alignment_model: None,
+        language_model: None,
         task: Default::default(),
     };
     let output = model

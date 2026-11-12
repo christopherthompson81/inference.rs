@@ -63,6 +63,21 @@ pub struct ParakeetFiles {
     pub weights: Vec<PathBuf>,
 }
 
+// `language`'s prompt: its own entry, else (a bare `de`) the one regional entry it is the code of (`de-DE`)
+fn prompt_id(ids: &HashMap<String, usize>, language: &str) -> Option<usize> {
+    if let Some(id) = ids.get(language) {
+        return Some(*id);
+    }
+    let mut regional = ids.iter().filter(|(name, _)| {
+        name.split_once('-')
+            .is_some_and(|(code, _)| code.eq_ignore_ascii_case(language))
+    });
+    match (regional.next(), regional.next()) {
+        (Some((_, id)), None) => Some(*id),
+        _ => None,
+    }
+}
+
 // Nemotron-3.5's language conditioning: a one-hot prompt joins each encoder frame, through a two-layer projector
 struct Prompts {
     linear_1: Linear,
@@ -107,7 +122,7 @@ impl Prompts {
         let Some(language) = language else {
             return Ok(self.default);
         };
-        self.ids.get(language).copied().ok_or_else(|| {
+        prompt_id(&self.ids, language).ok_or_else(|| {
             let mut known: Vec<&str> = self.ids.keys().map(String::as_str).collect();
             known.sort_unstable();
             msg(format!(
@@ -266,8 +281,11 @@ impl Parakeet {
             return Ok(None);
         };
         let language = options.language.as_deref();
-        prompts.id(language)?;
-        Ok(language)
+        match prompts.id(language) {
+            Err(_) if options.language_identified => Ok(None),
+            Err(error) => Err(error),
+            Ok(_) => Ok(language),
+        }
     }
 
     /// As `transcribe`, but audio past `LONG_FORM_SECONDS` is cut at the VAD's silences into windows of at most
@@ -812,6 +830,20 @@ mod tests {
             start,
             end,
         }
+    }
+
+    #[test]
+    fn a_bare_code_names_its_one_regional_prompt() {
+        let ids: HashMap<String, usize> = [("en-US", 0), ("en-GB", 1), ("de-DE", 2), ("fr", 3)]
+            .into_iter()
+            .map(|(name, id)| (name.to_string(), id))
+            .collect();
+        assert_eq!(prompt_id(&ids, "de-DE"), Some(2));
+        assert_eq!(prompt_id(&ids, "de"), Some(2));
+        assert_eq!(prompt_id(&ids, "fr"), Some(3));
+        // two English entries: a bare `en` names neither
+        assert_eq!(prompt_id(&ids, "en"), None);
+        assert_eq!(prompt_id(&ids, "zz"), None);
     }
 
     #[test]

@@ -10,7 +10,10 @@ use inference_api::api_error::ApiError;
 use crate::{
     form::{Field, invalid, multipart_payload, read_form},
     handler_core::openai_error_response,
-    openai::{DiarizationRequest, TranscriptionRequest, TranscriptionTask, VoiceActivityRequest},
+    openai::{
+        DiarizationRequest, LanguageIdRequest, TranscriptionRequest, TranscriptionTask,
+        VoiceActivityRequest,
+    },
     types::OwnedEngine,
 };
 
@@ -48,6 +51,8 @@ const VOICE_ACTIVITY_FIELDS: &[(&str, Field)] = &[
     ("speech_pad_ms", Field::Number),
     ("return_probabilities", Field::Flag),
 ];
+const LANGUAGE_ID_FIELDS: &[(&str, Field)] =
+    &[("top_k", Field::Integer), ("return_embedding", Field::Flag)];
 const DIARIZATION_FIELDS: &[(&str, Field)] = &[
     ("threshold", Field::Number),
     ("return_probabilities", Field::Flag),
@@ -204,6 +209,45 @@ pub async fn voice_activity(
         };
     match engine.voice_activity(request, &audio).await {
         Ok(activity) => (StatusCode::OK, axum::Json(activity)).into_response(),
+        Err(error) => openai_error_response(error),
+    }
+}
+
+/// The multipart form `/v1/audio/language` takes.
+#[cfg(test)]
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code)]
+pub struct LanguageIdForm {
+    /// The audio to identify: WAV, MP3, FLAC, OGG and the other formats symphonia decodes.
+    #[schema(value_type = String, format = Binary)]
+    file: Vec<u8>,
+    #[schema(inline)]
+    request: LanguageIdRequest,
+}
+
+/// Language identification endpoint handler: the likeliest spoken languages of an upload.
+#[cfg_attr(test, utoipa::path(
+    post,
+    tag = "inference.rs",
+    path = "/v1/audio/language",
+    request_body(content = inline(LanguageIdForm), content_type = "multipart/form-data"),
+    responses((status = 200, description = "Likeliest languages", body = crate::openai::LanguageIdResponse))
+))]
+pub async fn language_id(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<Multipart, MultipartRejection>,
+) -> Response {
+    let multipart = match multipart_payload(payload, INVALID_CODE) {
+        Ok(multipart) => multipart,
+        Err(error) => return openai_error_response(error),
+    };
+    let (request, audio) =
+        match read_audio_form::<LanguageIdRequest>(multipart, LANGUAGE_ID_FIELDS).await {
+            Ok(form) => form,
+            Err(error) => return openai_error_response(error),
+        };
+    match engine.language_id(request, &audio).await {
+        Ok(identified) => (StatusCode::OK, axum::Json(identified)).into_response(),
         Err(error) => openai_error_response(error),
     }
 }

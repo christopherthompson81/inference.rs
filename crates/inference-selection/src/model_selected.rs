@@ -645,6 +645,12 @@ pub enum ModelSelected {
         model_id: String,
     },
 
+    /// Select a spoken language identifier: a SpeechBrain ECAPA-TDNN classifier (VoxLingua107), a directory or HF repo
+    LanguageId {
+        /// Model ID to load from. This may be a HF hub repo or a local path.
+        model_id: String,
+    },
+
     /// Select an embedding model, without quantization or adapters
     Embedding {
         /// Model ID to load from. This may be a HF hub repo or a local path.
@@ -717,7 +723,7 @@ impl ModelSelected {
             } => ModelDType::F32,
             Self::Diarization { dtype, .. } => *dtype,
             // the VAD runs in F32 whatever is asked
-            Self::VoiceActivity { .. } => ModelDType::F32,
+            Self::VoiceActivity { .. } | Self::LanguageId { .. } => ModelDType::F32,
         }
     }
 
@@ -735,6 +741,7 @@ impl ModelSelected {
             | Self::Speech { .. }
             | Self::Transcription { .. }
             | Self::VoiceActivity { .. }
+            | Self::LanguageId { .. }
             | Self::Diarization { .. } => None,
         }
     }
@@ -776,6 +783,7 @@ impl ModelSelected {
             | Self::Speech { .. }
             | Self::Transcription { .. }
             | Self::VoiceActivity { .. }
+            | Self::LanguageId { .. }
             | Self::Diarization { .. }
             | Self::Embedding { .. } => None,
         }
@@ -795,6 +803,7 @@ impl ModelSelected {
             | Self::Speech { .. }
             | Self::Transcription { .. }
             | Self::VoiceActivity { .. }
+            | Self::LanguageId { .. }
             | Self::Diarization { .. } => None,
         }
     }

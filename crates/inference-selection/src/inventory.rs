@@ -57,6 +57,7 @@ pub enum InventoryKind {
     Transcription,
     VoiceActivity,
     Diarization,
+    LanguageId,
     /// A multimodal projector (mmproj GGUF), loaded beside a text GGUF rather than on its own.
     Projector,
     /// A document layout detector (PP-DocLayoutV3), loaded apart from the engine.
@@ -76,6 +77,7 @@ impl From<DetectedModelKind> for InventoryKind {
             DetectedModelKind::Transcription => Self::Transcription,
             DetectedModelKind::VoiceActivity => Self::VoiceActivity,
             DetectedModelKind::Diarization => Self::Diarization,
+            DetectedModelKind::LanguageId => Self::LanguageId,
         }
     }
 }

@@ -64,6 +64,7 @@ pub enum ManagedKind {
     Transcription,
     VoiceActivity,
     Diarization,
+    LanguageId,
     /// Document layout detection, through `POST /v1/layout/detect`.
     Layout,
 }
@@ -77,6 +78,7 @@ impl From<ModelCategory> for ManagedKind {
             ModelCategory::Transcription => Self::Transcription,
             ModelCategory::VoiceActivity => Self::VoiceActivity,
             ModelCategory::Diarization => Self::Diarization,
+            ModelCategory::LanguageId => Self::LanguageId,
             ModelCategory::Speech => Self::Speech,
             ModelCategory::Embedding => Self::Embedding,
         }
@@ -929,6 +931,7 @@ fn loadable_kind(entry: &InventoryModel) -> Result<ManagedKind, ApiError> {
         Some(InventoryKind::Transcription) => ManagedKind::Transcription,
         Some(InventoryKind::VoiceActivity) => ManagedKind::VoiceActivity,
         Some(InventoryKind::Diarization) => ManagedKind::Diarization,
+        Some(InventoryKind::LanguageId) => ManagedKind::LanguageId,
         Some(InventoryKind::Layout) => ManagedKind::Layout,
         Some(InventoryKind::Projector) => {
             return Err(ApiError::invalid_request(

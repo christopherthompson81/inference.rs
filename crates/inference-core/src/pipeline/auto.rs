@@ -24,6 +24,9 @@ use tracing::{debug, info, warn};
 
 const SORTFORMER_NAME: &str = "sortformer";
 const GGUF_EXTENSION: &str = "gguf";
+// a SpeechBrain repo's `config.json` names the inference class that reads it
+const SPEECHBRAIN_INTERFACE: &str = "speechbrain_interface";
+const SPEECHBRAIN_ENCODER_CLASSIFIER: &str = "EncoderClassifier";
 // what a Hub recogniser's `.nemo` or repo is named for: Parakeet, the `stt_*` FastConformers, Nemotron ASR
 const ASR_NAMES: [&str; 5] = ["parakeet", "stt_", "fastconformer", "asr", "speech"];
 
@@ -216,6 +219,7 @@ enum Detected {
     Transcription(crate::pipeline::TranscriptionLoaderType),
     VoiceActivity,
     Diarization,
+    LanguageId,
 }
 
 fn supports_dynamic_lora(detected: &Detected) -> bool {
@@ -452,9 +456,40 @@ impl AutoLoader {
                 });
                 *guard = Some(loader);
             }
+            Detected::LanguageId => {
+                let loader: Box<dyn Loader> = Box::new(super::LanguageIdLoader {
+                    model_id: self.model_id.clone(),
+                });
+                *guard = Some(loader);
+            }
         }
         Ok(())
     }
+}
+
+// a SpeechBrain `EncoderClassifier` repo with its label encoder and both checkpoints; the loader checks the
+// hyperparams build an ECAPA-TDNN with an x-vector classifier
+fn is_speechbrain_language_id(artifacts: &ConfigArtifacts) -> bool {
+    let interface = artifacts
+        .contents
+        .as_deref()
+        .and_then(|config| serde_json::from_str::<serde_json::Value>(config).ok())
+        .and_then(|config| {
+            config
+                .get(SPEECHBRAIN_INTERFACE)
+                .and_then(|v| v.as_str().map(str::to_string))
+        });
+    let has = |name: &str| artifacts.repo_files.iter().any(|f| f == name);
+    use inference_models_speech::voxlingua;
+    interface.as_deref() == Some(SPEECHBRAIN_ENCODER_CLASSIFIER)
+        && [
+            voxlingua::HYPERPARAMS,
+            voxlingua::LABELS,
+            voxlingua::EMBEDDING_MODEL,
+            voxlingua::CLASSIFIER,
+        ]
+        .into_iter()
+        .all(has)
 }
 
 fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
@@ -491,6 +526,11 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
         && crate::pipeline::DiarizationLoaderType::auto_detect_from_config(config).is_some()
     {
         return Ok(Detected::Diarization);
+    }
+
+    if is_speechbrain_language_id(artifacts) {
+        info!("Detected a SpeechBrain ECAPA-TDNN classifier; routing as language identification.");
+        return Ok(Detected::LanguageId);
     }
 
     if artifacts.sentence_transformers_present {
@@ -690,6 +730,7 @@ pub enum DetectedModelKind {
     Transcription,
     VoiceActivity,
     Diarization,
+    LanguageId,
 }
 
 /// A model's kind and, where the kind has several, the loader that serves it.
@@ -710,6 +751,7 @@ impl From<Detected> for DetectedModel {
             Detected::Transcription(tp) => (DetectedModelKind::Transcription, spec_name(&tp)),
             Detected::VoiceActivity => (DetectedModelKind::VoiceActivity, None),
             Detected::Diarization => (DetectedModelKind::Diarization, None),
+            Detected::LanguageId => (DetectedModelKind::LanguageId, None),
         };
         Self { kind, loader }
     }

@@ -289,7 +289,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `ModelSelected`
 
-One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedDiarization, ModelSelectedVoiceActivity, ModelSelectedEmbedding]`.
+One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedDiarization, ModelSelectedVoiceActivity, ModelSelectedLanguageId, ModelSelectedEmbedding]`.
 
 
 ## `ModelSelectedDiarization`
@@ -378,6 +378,15 @@ Select a GGUF model.
 | `tokenizer_json` | `str \| None` | optional |
 | `topology` | `str \| None` | optional |
 | `write_uqff` | `UqffWriteSpec \| None` | optional |
+
+
+## `ModelSelectedLanguageId`
+
+Select a spoken language identifier: a SpeechBrain ECAPA-TDNN classifier (VoxLingua107), a directory or HF repo
+
+| Field | Type |
+| --- | --- |
+| `model_id` | `str` |
 
 
 ## `ModelSelectedLora`

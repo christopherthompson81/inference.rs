@@ -1,5 +1,6 @@
 //! Writes the tiny random-weight PaddleOCR-VL checkpoint the ABI tests use, and tiny speech models beside it
-//! (`parakeet/`, the streaming `parakeet_streaming/`, `silero/`, `diarization/`), for binding tests in other languages.
+//! (`parakeet/`, the streaming `parakeet_streaming/`, `silero/`, `diarization/`, `language_id/`), for binding tests in
+//! other languages.
 //! Usage: cargo run -p inference-ffi --example tiny_checkpoint -- <directory>
 
 use std::path::Path;
@@ -15,6 +16,10 @@ mod diarization_support;
 #[allow(clippy::duplicate_mod)]
 mod silero_support;
 
+#[path = "../../inference/tests/support/voxlingua_tiny.rs"]
+#[allow(clippy::duplicate_mod)]
+mod language_id_support;
+
 #[path = "../../inference/tests/support/parakeet_tiny.rs"]
 // each support file includes the recorder it needs, so both bring a copy
 #[allow(clippy::duplicate_mod)]
@@ -25,6 +30,9 @@ const STREAMING_DIR: &str = "parakeet_streaming";
 const STREAMING_HEAD: &str = "nemotron_asr_streaming";
 const SILERO_DIR: &str = "silero";
 const DIARIZATION_DIR: &str = "diarization";
+const LANGUAGE_ID_DIR: &str = "language_id";
+// the fixture's winning language, then the rest
+const LANGUAGES: [(&str, &str); 2] = [("de", "German"), ("en", "English")];
 
 fn copy_files(from: &Path, to: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(to)?;
@@ -51,6 +59,11 @@ fn main() -> anyhow::Result<()> {
     copy_files(
         diarization.path(),
         &Path::new(&target).join(DIARIZATION_DIR),
+    )?;
+    let language_id = language_id_support::tiny_language_id(&LANGUAGES)?;
+    copy_files(
+        language_id.path(),
+        &Path::new(&target).join(LANGUAGE_ID_DIR),
     )?;
     println!("{target}");
     Ok(())

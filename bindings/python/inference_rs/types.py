@@ -147,6 +147,7 @@ class ManagedKind(str, Enum):
     TRANSCRIPTION = "transcription"
     VOICE_ACTIVITY = "voice_activity"
     DIARIZATION = "diarization"
+    LANGUAGE_ID = "language_id"
     LAYOUT = "layout"
 
 
@@ -174,6 +175,7 @@ class ModelCategory(str, Enum):
     TRANSCRIPTION = "transcription"
     VOICE_ACTIVITY = "voice_activity"
     DIARIZATION = "diarization"
+    LANGUAGE_ID = "language_id"
     SPEECH = "speech"
     EMBEDDING = "embedding"
 
@@ -1578,6 +1580,34 @@ class JsonSchemaResponseFormat:
 
 
 @dataclass(kw_only=True)
+class LanguageIdRequest:
+    """Spoken language identification request; the audio travels beside it (a multipart `file` over HTTP). A clip past a minute is read for its first minute."""
+
+    model: str | None = None
+    return_embedding: bool | None = None
+    top_k: int | None = None
+
+
+@dataclass(kw_only=True)
+class LanguageIdResponse:
+    ambiguous: bool
+    duration: float
+    embedding: list[float] | None = None
+    language: str
+    languages: list[LanguageScore]
+    probability: float
+
+
+@dataclass(kw_only=True)
+class LanguageScore:
+    """A language and how likely the audio is in it."""
+
+    language: str
+    name: str
+    probability: float
+
+
+@dataclass(kw_only=True)
 class LayoutDetectRequest:
     """A page to find the layout regions of."""
 
@@ -2072,6 +2102,14 @@ class ModelSelectedVoiceActivity:
 
     model_id: str
     _external = 'VoiceActivity'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedLanguageId:
+    """Select a spoken language identifier: a SpeechBrain ECAPA-TDNN classifier (VoxLingua107), a directory or HF repo"""
+
+    model_id: str
+    _external = 'LanguageId'
 
 
 @dataclass(kw_only=True)
@@ -3400,6 +3438,7 @@ class TranscriptionRequest:
     condition_on_previous_text: bool | None = None
     diarization_model: str | None = None
     language: str | None = None
+    language_model: str | None = None
     model: str | None = None
     overlap_pass: bool | None = None
     patience: float | None = None
@@ -3600,7 +3639,7 @@ JobRequest = Any
 McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]
-ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedDiarization, ModelSelectedVoiceActivity, ModelSelectedEmbedding]
+ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedDiarization, ModelSelectedVoiceActivity, ModelSelectedLanguageId, ModelSelectedEmbedding]
 OpenAiCodeInterpreterContainer = Union[str, OpenAiCodeInterpreterAutoContainer]
 OpenAiNamespaceEntry = Union[OpenAiResponsesFunctionTool, Any]
 OpenAiShellEnvironment = Union[OpenAiShellEnvironmentContainerAuto, OpenAiShellEnvironmentLocal, OpenAiShellEnvironmentContainerReference]

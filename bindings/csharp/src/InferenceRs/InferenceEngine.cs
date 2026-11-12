@@ -546,6 +546,17 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_voice_activity));
     }
 
+    /// <summary>The likeliest spoken languages of encoded audio, from a language identification model.</summary>
+    public string LanguageId(string requestJson, byte[] audio)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        using var bytes = new PinnedBytes(audio);
+        var status = NativeMethods.inference_language_id(
+            engine.Handle, request.Pointer, request.Length, bytes.Pointer, bytes.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_language_id));
+    }
+
     /// <summary>Answers the approval an <c>agentic_tool_approval_required</c> stream event named.</summary>
     public string ResolveApproval(string approvalId, string decisionJson)
     {

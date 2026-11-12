@@ -511,6 +511,15 @@ INFERENCE_API void inference_transcription_session_free(inference_transcription_
 INFERENCE_API inference_status inference_voice_activity(const inference_engine *engine, const char *request,
                                                        size_t request_len, const uint8_t *audio, size_t audio_len,
                                                        inference_string **out_response);
+/* The spoken language of audio, from a language identification model (VoxLingua107). request holds the POST
+ * /v1/audio/language form fields as JSON ({"model"?, "top_k"?, "return_embedding"?}; top_k defaults to 5, 0 lists
+ * every language); audio is audio_len bytes of an encoded file (at most 64 MiB), read for its first minute.
+ * out_response receives {"language", "probability", "ambiguous", "duration", "languages": [{"language", "name",
+ * "probability"}], "embedding"?}, languages likeliest first. Audio that does not decode, or a model that is not a
+ * language identification one, is INFERENCE_ERR_INVALID_REQUEST. */
+INFERENCE_API inference_status inference_language_id(const inference_engine *engine, const char *request,
+                                                    size_t request_len, const uint8_t *audio, size_t audio_len,
+                                                    inference_string **out_response);
 /* Who speaks when in audio, from a speaker diarization model (Nemotron-3 or Sortformer). request holds the POST
  * /v1/audio/diarization form fields as JSON ({"model"?, "threshold"? (0.5), "response_format"?: "json" | "rttm",
  * "return_probabilities"?}); audio is audio_len bytes of an encoded file (at most 64 MiB). out_blob receives, as JSON,

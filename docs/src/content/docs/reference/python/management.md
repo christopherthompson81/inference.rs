@@ -305,6 +305,40 @@ One image an edit request conditions on.
 | `image_url` | `str` |
 
 
+## `LanguageIdRequest`
+
+Spoken language identification request; the audio travels beside it (a multipart `file` over HTTP). A clip past a minute is read for its first minute.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `model` | `str \| None` | optional |
+| `return_embedding` | `bool \| None` | optional |
+| `top_k` | `int \| None` | optional |
+
+
+## `LanguageIdResponse`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `ambiguous` | `bool` | required |
+| `duration` | `float` | required |
+| `embedding` | `list[float] \| None` | optional |
+| `language` | `str` | required |
+| `languages` | `list[LanguageScore]` | required |
+| `probability` | `float` | required |
+
+
+## `LanguageScore`
+
+A language and how likely the audio is in it.
+
+| Field | Type |
+| --- | --- |
+| `language` | `str` |
+| `name` | `str` |
+| `probability` | `float` |
+
+
 ## `LoadLoraAdapterRequest`
 
 | Field | Type | Default |
@@ -414,6 +448,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `ManagedKind.TRANSCRIPTION` | `'transcription'` |
 | `ManagedKind.VOICE_ACTIVITY` | `'voice_activity'` |
 | `ManagedKind.DIARIZATION` | `'diarization'` |
+| `ManagedKind.LANGUAGE_ID` | `'language_id'` |
 | `ManagedKind.LAYOUT` | `'layout'` |
 
 
@@ -520,6 +555,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `ModelCategory.TRANSCRIPTION` | `'transcription'` |
 | `ModelCategory.VOICE_ACTIVITY` | `'voice_activity'` |
 | `ModelCategory.DIARIZATION` | `'diarization'` |
+| `ModelCategory.LANGUAGE_ID` | `'language_id'` |
 | `ModelCategory.SPEECH` | `'speech'` |
 | `ModelCategory.EMBEDDING` | `'embedding'` |
 
@@ -914,6 +950,7 @@ Speech recognition request; the audio itself travels beside it (a multipart `fil
 | `condition_on_previous_text` | `bool \| None` | optional |
 | `diarization_model` | `str \| None` | optional |
 | `language` | `str \| None` | optional |
+| `language_model` | `str \| None` | optional |
 | `model` | `str \| None` | optional |
 | `overlap_pass` | `bool \| None` | optional |
 | `patience` | `float \| None` | optional |

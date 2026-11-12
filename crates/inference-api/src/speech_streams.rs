@@ -274,12 +274,15 @@ async fn transcribe(
     let max_window_seconds = source.max_window_seconds;
     let spans = source.spans.take();
     let audio = load_audio(source, bytes, false, canceled).await?;
+    let mut request = request;
+    let identified = crate::generation::identify_language_of(state, &mut request, &audio).await?;
     let (progress, windowed) = noting_windows(Some(report(events.clone(), canceled.clone())));
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let options = TranscriptionOptions {
         resume_at,
         max_window_seconds,
         spans,
+        language_identified: identified,
         ..crate::generation::decode_options(&request)
     };
     let message = |audio| RequestMessage::Transcription {

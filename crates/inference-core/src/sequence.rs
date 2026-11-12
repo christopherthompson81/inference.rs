@@ -119,6 +119,7 @@ pub enum StopReason {
     Transcribed,
     DetectedSpeech,
     Diarized,
+    IdentifiedLanguage,
     ToolCalls,
 }
 
@@ -136,6 +137,7 @@ impl Display for StopReason {
             StopReason::Transcribed => write!(f, "transcribed"),
             StopReason::DetectedSpeech => write!(f, "detected_speech"),
             StopReason::Diarized => write!(f, "diarized"),
+            StopReason::IdentifiedLanguage => write!(f, "identified_language"),
             StopReason::ToolCalls => write!(f, "tool_calls"),
         }
     }
@@ -153,6 +155,7 @@ impl StopReason {
             StopReason::Transcribed => "transcribed",
             StopReason::DetectedSpeech => "detected_speech",
             StopReason::Diarized => "diarized",
+            StopReason::IdentifiedLanguage => "identified_language",
             StopReason::ToolCalls => "tool_calls",
         }
     }
