@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 
-const CHANGES_EXT: &str = "changes";
+pub(crate) const CHANGES_EXT: &str = "changes";
 const INDEX_FILE: &str = "index.json";
 // its mtime is when tracking began, on the same clock as the project's file times
 const STARTED_FILE: &str = "started";

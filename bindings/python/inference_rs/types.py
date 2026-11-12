@@ -1046,6 +1046,7 @@ class CompletionUsageResponse:
     completion_tokens: int
     prompt_tokens: int
     prompt_tokens_details: PromptTokensDetailsResponse | None = None
+    speculative: SpeculativeUsageResponse | None = None
     total_completion_time_sec: float
     total_prompt_time_sec: float
     total_time_sec: float
@@ -3285,6 +3286,15 @@ class SpeculativeStats:
 
     data: list[ModelSpeculativeStats]
     object: str
+
+
+@dataclass(kw_only=True)
+class SpeculativeUsageResponse:
+    """Speculative decoding's drafts over one request."""
+
+    accepted_tokens: int
+    proposed_tokens: int
+    steps: int
 
 
 @dataclass(kw_only=True)

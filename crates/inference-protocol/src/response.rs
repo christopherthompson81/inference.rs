@@ -89,6 +89,14 @@ pub struct PromptTokensDetails {
     pub cached_tokens: usize,
 }
 
+/// Speculative decoding's drafts over one request: verify steps, draft tokens proposed, and those the model accepted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct SpeculativeUsage {
+    pub steps: usize,
+    pub proposed_tokens: usize,
+    pub accepted_tokens: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 /// OpenAI compatible (superset) usage during a request.
 pub struct Usage {
@@ -104,6 +112,9 @@ pub struct Usage {
     pub total_time_sec: f32,
     pub total_prompt_time_sec: f32,
     pub total_completion_time_sec: f32,
+    /// Present when the request decoded with a drafter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speculative: Option<SpeculativeUsage>,
 }
 
 #[derive(Debug, Clone, Serialize)]

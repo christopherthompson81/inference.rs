@@ -341,6 +341,7 @@ impl AgenticUsageAccumulator {
                 total_time_sec,
                 total_prompt_time_sec: self.total_prompt_time_sec,
                 total_completion_time_sec: self.total_completion_time_sec,
+                speculative: None,
             }
         })
     }
@@ -1617,6 +1618,7 @@ mod tests {
             total_time_sec: 0.0,
             total_prompt_time_sec: 0.0,
             total_completion_time_sec: 0.0,
+            speculative: None,
         });
 
         // No text chunk was held: the tool-call chunk is what ends the run.

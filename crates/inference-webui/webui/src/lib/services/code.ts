@@ -60,6 +60,10 @@ export type CodeEvent =
   | { type: "label"; id: string; label: string }
   /** The history before message `end` is being folded into a summary, to fit the model's context. */
   | { type: "compacting"; end: number }
+  /** A summary being written streamed `chars` more characters. */
+  | { type: "summary_text"; chars: number }
+  /** One summary request finished (a long history takes several), with the server's usage report. */
+  | { type: "summary_usage"; usage: Record<string, any> }
   /** It was: the model now sees the summary and the messages from `start` on (system prompt counted). */
   | { type: "compacted"; start: number; at: number | null; context_estimate: number }
   | {
@@ -141,6 +145,24 @@ export async function approve(
     approval_id: approvalId,
     decision,
   });
+}
+
+/** Deletes a saved session and the copies it kept of the files it changed; one running a prompt is refused. */
+export async function deleteSession(sessionId: string) {
+  await post("delete", { session_id: sessionId });
+}
+
+/** A folder under the code roots, with its sessions and those of the folders below it. */
+export interface CodeFolder {
+  name: string;
+  path: string;
+  sessions: number;
+  sessions_below: number;
+}
+
+/** The folders in `path` (the code roots when it is empty), for picking a project. */
+export async function listFolders(path: string): Promise<{ path: string | null; folders: CodeFolder[] }> {
+  return get("folders", { path });
 }
 
 export async function interrupt(sessionId: string) {

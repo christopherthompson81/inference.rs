@@ -108,7 +108,9 @@ applies: in **Ask** mode you approve each edit and test run as it comes, and **R
 
 To work in your own projects, name the directories they live in with `--code-root DIR`, once per directory, or with
 `code_roots` under `[server]` in a config file. A leading `~/` is the server user's home directory. Then type a
-project's absolute path (or one starting `~/`) and press **New session**. The server opens a path only when it is a
+project's absolute path (or one starting `~/`), or pick it with **Browse folders...**, which walks the roots one
+level at a time and shows each folder's sessions (and how many lie further down); press **New session**. The server
+opens a path only when it is a
 directory under one of the roots, after following symlinks and `..`, so a link inside a root can't lead out of it:
 
 ```bash
@@ -145,9 +147,17 @@ them on it, or pick them with the paperclip. They go to the model with the promp
 
 Under the prompt box, a ring shows how full the model's context is, as tokens used of its context length (the ring
 turns amber at 80%, where the agent summarizes the history). Beside it are the agent's time on the prompt (HH:MM:SS.S,
-less time spent waiting on an approval), the prefill time, the decode rate and the cached prompt tokens. While a reply
-streams, the context, prefill and rate are estimates (marked `~`) from the harness's prompt count and the text so far;
-the server's own figures replace them when each request ends. The cached count only comes with those figures.
+less time spent waiting on an approval), the prefill time and rate (prompt tokens read, not served from the prefix
+cache, per second), the decode rate, the cached prompt tokens and, with a speculative drafter, the draft tokens
+accepted per step and the share of drafts accepted. While a reply streams, the context, prefill and rate are estimates
+(marked `~`) from the harness's prompt count and the text so far; the server's own figures replace them when each
+request ends. The cached count and the drafts only come with those figures.
+
+While the history is being summarized, its marker in the log counts the time and the summary's writing rate; once
+done it shows the time taken, the summary requests, and the rates they read the history and wrote the summary at.
+
+A session's menu (the corner button on its row, or a right-click) deletes it, with the copies it kept for diffs; the
+project's files stay as they are. A session running a prompt can't be deleted.
 
 The log follows new output while it is scrolled to the bottom. Scroll up and it stays where you put it; scroll back
 down and it follows again.

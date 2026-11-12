@@ -108,7 +108,7 @@ Non-streaming chat responses carry four inference.rs fields beyond the OpenAI sh
 - `files` (array of `File` objects): see [file wire schemas](#file-wire-schemas-and-semantics).
 - `adapter_generation` (string): exact immutable LoRA generation used for the response; omitted for base-model requests.
 
-The `usage` object is a superset of OpenAI's, adding timing fields such as `avg_tok_per_sec`, `avg_prompt_tok_per_sec`, `avg_compl_tok_per_sec`, and total prompt/completion times.
+The `usage` object is a superset of OpenAI's, adding timing fields such as `avg_tok_per_sec`, `avg_prompt_tok_per_sec`, `avg_compl_tok_per_sec`, and total prompt/completion times. A request decoded with a speculative drafter also carries `speculative`: its verify `steps`, the draft tokens `proposed_tokens`, and the `accepted_tokens` the model kept.
 
 ## Agent approval flow
 

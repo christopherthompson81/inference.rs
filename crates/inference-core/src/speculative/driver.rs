@@ -695,6 +695,11 @@ where
         num_accepted_tokens,
         &accepted_per_pos,
     );
+    for (seq, outcome) in seqs.iter_mut().zip(outcomes.iter()) {
+        if let Some(outcome) = outcome {
+            seq.record_drafts(outcome.proposed_drafts, outcome.accepted_drafts);
+        }
+    }
     {
         let mut tuner = autotuner(target);
         if tuner.is_active() {

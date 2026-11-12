@@ -1,8 +1,8 @@
 use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     AdapterGenerationId, AdapterLease, AudioInput, ChatCompletionResponse, FINISH_REASON_CANCELED,
-    FINISH_REASON_LENGTH, PromptTokensDetails, RequestCancellation, Usage, VideoInput,
-    get_mut_arcmutex, get_mut_group,
+    FINISH_REASON_LENGTH, PromptTokensDetails, RequestCancellation, SpeculativeUsage, Usage,
+    VideoInput, get_mut_arcmutex, get_mut_group,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::LayerCaches,
     reasoning_parsers::{ReasoningMode, ReasoningParser},
@@ -281,6 +281,8 @@ pub struct Sequence {
     /// These tokens should be skipped during prefill.
     prefix_cache_len: usize,
     prefix_cache_hit_recorded: bool,
+    // this sequence's speculative verify steps and their drafts, for its usage report
+    speculative: SpeculativeUsage,
     block_hash_revision: u64,
     /// Number of logical tokens represented in model/cache state.
     num_computed_tokens: usize,
@@ -425,6 +427,7 @@ impl Sequence {
             prefill_prompt_toks: None,
             prefix_cache_len: 0,
             prefix_cache_hit_recorded: false,
+            speculative: SpeculativeUsage::default(),
             block_hash_revision: 0,
             num_computed_tokens: 0,
             decode_recurrent_prefix_owner: None,
@@ -738,6 +741,13 @@ impl Sequence {
     /// These tokens should be skipped during prefill.
     pub fn prefix_cache_len(&self) -> usize {
         self.prefix_cache_len
+    }
+
+    /// Counts one speculative verify step of this sequence: `proposed` draft tokens, `accepted` of them kept.
+    pub(crate) fn record_drafts(&mut self, proposed: usize, accepted: usize) {
+        self.speculative.steps += 1;
+        self.speculative.proposed_tokens += proposed;
+        self.speculative.accepted_tokens += accepted;
     }
 
     /// Set the number of prefix tokens that are cached.
@@ -1439,6 +1449,7 @@ impl Sequence {
         group.total_prompt_toks = self.prompt_len;
         group.total_cached_toks = self.prefix_cache_len();
         group.total_toks = self.len();
+        group.speculative = self.speculative;
     }
 
     pub fn add_image_to_group(&self, image: DynamicImage) {
@@ -1867,6 +1878,7 @@ pub struct SequenceGroup {
     pub total_prompt_toks: usize,
     pub total_cached_toks: usize,
     pub total_toks: usize,
+    pub speculative: SpeculativeUsage,
     pub total_prompt_time: u128,
     pub total_time: u128,
     pub total_completion_time: u128,
@@ -1902,6 +1914,7 @@ impl SequenceGroup {
             total_prompt_toks: 0,
             total_cached_toks: 0,
             total_toks: 0,
+            speculative: SpeculativeUsage::default(),
             total_prompt_time: 0,
             total_time: 0,
             total_completion_time: 0,
@@ -1975,6 +1988,7 @@ impl SequenceGroup {
             },
             total_time_sec: self.total_time as f32 / 1000.,
             total_completion_time_sec: self.total_completion_time as f32 / 1000.,
+            speculative: (self.speculative.steps > 0).then_some(self.speculative),
             total_prompt_time_sec: self.total_prompt_time as f32 / 1000.,
         }
     }
@@ -2314,6 +2328,7 @@ mod tests {
             total_time_sec: 0.0,
             total_prompt_time_sec: 0.0,
             total_completion_time_sec: 0.0,
+            speculative: None,
         }
     }
 

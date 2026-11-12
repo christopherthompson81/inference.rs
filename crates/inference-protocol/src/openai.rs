@@ -1451,6 +1451,19 @@ pub struct CompletionUsageResponse {
     pub total_time_sec: f32,
     pub total_prompt_time_sec: f32,
     pub total_completion_time_sec: f32,
+    /// Present when the request decoded with a drafter.
+    pub speculative: Option<SpeculativeUsageResponse>,
+}
+
+/// Speculative decoding's drafts over one request.
+#[derive(Debug, ToSchema)]
+pub struct SpeculativeUsageResponse {
+    /// Verify steps the drafter proposed for.
+    pub steps: usize,
+    /// Draft tokens proposed over those steps.
+    pub proposed_tokens: usize,
+    /// Draft tokens the model accepted; `accepted_tokens / steps` is the extra tokens a step yields.
+    pub accepted_tokens: usize,
 }
 
 #[derive(Debug, ToSchema)]

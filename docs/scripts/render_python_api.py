@@ -122,6 +122,7 @@ GROUPS = [
                 "BuiltinTool",
                 "ReasoningEffort",
                 "PromptTokens",
+                "SpeculativeUsage",
                 "AdapterGeneration",
                 "AdapterSelection",
                 "SerializedVideo",
