@@ -656,10 +656,14 @@ against its own release on the same clips:
 | Voxtral-Mini-4B-Realtime (q4_k) | the same transcripts, in 11.1 GB instead of 16.3 and about half the time |
 | Kokoro-82M (both files) | speaks the same text |
 | Qwen3-TTS 0.6B / 1.7B (Base, CustomVoice, VoiceDesign) | speaks the same text; Base packages keep the codec encoder, so they clone with `reference_text` |
+| Nemotron-3 Diarization (`audio-cpp/Nemotron-3-Diarization-GGUF`) | the same speakers; segment edges at most one 10 ms frame apart |
 
-Not loaded: Sortformer's package is the offline v1, not the streaming Sortformer this runs, and Nemotron-3
-Diarization's is audio.cpp's own conversion of the `.nemo` (its own config and tensor names), not a release's
-layout.
+Nemotron-3 Diarization's package is audio.cpp's own conversion of the `.nemo`: its tensors keep the `.nemo`'s names
+(query, key and value in one matrix) and its config is audio.cpp's. It loads with the release's offline chunking
+around the speaker cache (340-frame chunks, 40 of lookahead, a 40-frame FIFO, updates every 300), not the `.nemo`'s
+streaming settings its config carries (264-frame chunks, no lookahead or FIFO), so it diarizes as the release does.
+
+Not loaded: Sortformer's package is the offline v1, not the streaming Sortformer this runs.
 
 ## Qwen3-ASR: audio in, transcript out
 

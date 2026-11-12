@@ -30,7 +30,7 @@ use inference_models_qwen::vibevoice_asr::streaming::{
 use inference_models_speech::cohere_asr::{self, CohereAsr, CohereAsrFiles};
 use inference_models_speech::diarization::{
     DiarizationOptions, Diarizer, Nemotron3Diarizer, Nemotron3Files, SortformerDiarizer,
-    is_sortformer,
+    is_sortformer, release_name,
 };
 use inference_models_speech::nemo::{self, parakeet_encoder_name};
 use inference_models_speech::parakeet::{
@@ -60,6 +60,8 @@ const WEIGHTS_INDEX: &str = "model.safetensors.index.json";
 const GENERATION_CONFIG: &str = "generation_config.json";
 const GGUF_EXTENSION: &str = "gguf";
 const NEMOTRON3_DIARIZATION_TYPE: &str = "nemotron3_diarization";
+// audio.cpp's own `model_type` for its package of the `.nemo`
+const NEMOTRON3_AUDIOCPP_TYPE: &str = "nemotron_3_diar";
 // the streaming checkpoints' class in their `config.json`, read without the model family built in
 const VIBEVOICE_STREAMING_ARCHITECTURE: &str = "VibeVoiceForASRStreamingTraining";
 const PREPROCESSOR_CONFIG: &str = "preprocessor_config.json";
@@ -507,13 +509,15 @@ impl DiarizationLoaderType {
     /// Detects the architecture from a `config.json`'s `model_type`.
     pub fn auto_detect_from_config(config: &str) -> Option<Self> {
         let value: serde_json::Value = serde_json::from_str(config).ok()?;
-        (value.get("model_type")?.as_str()? == NEMOTRON3_DIARIZATION_TYPE)
-            .then_some(Self::Nemotron3)
+        matches!(
+            value.get("model_type")?.as_str()?,
+            NEMOTRON3_DIARIZATION_TYPE | NEMOTRON3_AUDIOCPP_TYPE
+        )
+        .then_some(Self::Nemotron3)
     }
 }
 
-// a checkpoint's `model.safetensors`, else every shard its index names
-// an audio.cpp package's weights are its GGUF
+// an audio.cpp package's GGUF, a checkpoint's `model.safetensors`, else every shard its index names
 fn checkpoint_weights(
     package: Option<&Package>,
     get: &dyn Fn(&str) -> Result<PathBuf>,
@@ -559,7 +563,22 @@ impl Loader for DiarizationLoader {
         let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
         // Nemotron-3's repo carries a `.nemo` beside its transformers files; those win where a config resolves
         let transformers_config = (!id.is_file()).then(|| get(CONFIG).ok()).flatten();
-        let diarizer = if let Some(config) = transformers_config {
+        let diarizer = if let Some(package) = inference_gguf::audiocpp::unpack(id)? {
+            let gguf = AudioCppGguf::open(&package.gguf)?;
+            if gguf.family() != NEMOTRON3_AUDIOCPP_TYPE {
+                anyhow::bail!(
+                    "`{}` is an audio.cpp `{}` GGUF, not a diarization model this loads",
+                    package.gguf.display(),
+                    gguf.family()
+                )
+            }
+            let vb = gguf.dense_var_builder(None, dtype, options.device, Some(release_name))?;
+            Diarizer::Nemotron3(Box::new(Nemotron3Diarizer::from_audiocpp(
+                &package.dir.join(CONFIG),
+                &package.dir.join(PROCESSOR_CONFIG),
+                vb,
+            )?))
+        } else if let Some(config) = transformers_config {
             let files = Nemotron3Files {
                 config,
                 processor_config: get(PROCESSOR_CONFIG)?,
