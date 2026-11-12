@@ -193,9 +193,12 @@ pub(super) enum Head {
     Transducer {
         encoder_projector: Linear,
         predictor: Predictor,
-        joint: DecodeLinear,
+        // one joint output layer, or a multisoftmax model's one per language over its share of the vocabulary
+        joints: Vec<DecodeLinear>,
         vocab: usize,
         blank: u32,
+        // the predictor's first input: the blank, or a multisoftmax model's shared padding id past every language
+        start: u32,
         durations: Vec<usize>,
         max_symbols_per_step: usize,
     },
@@ -227,24 +230,49 @@ impl Head {
         } else {
             Vec::new()
         };
+        let blank = cfg.blank_token_id.unwrap_or(cfg.vocab_size as u32 - 1);
+        let head = vb.pp("joint").pp("head");
+        // a multisoftmax joint emits a language's tokens and a blank after them, its local ids fed to the predictor
+        let (joints, vocab, joint_blank) = match cfg.language_vocab() {
+            Some(per) => (
+                cfg.languages
+                    .iter()
+                    .map(|l| Ok(DecodeLinear::new(linear(dec, per + 1, head.pp(l))?)))
+                    .collect::<Result<Vec<_>>>()?,
+                per + 1,
+                per as u32,
+            ),
+            None => (
+                vec![DecodeLinear::new(linear(
+                    dec,
+                    cfg.vocab_size + durations.len(),
+                    head,
+                )?)],
+                cfg.vocab_size,
+                blank,
+            ),
+        };
         Ok(Self::Transducer {
             encoder_projector: linear(hidden, dec, vb.pp("encoder_projector"))?,
             predictor: Predictor::new(cfg, dec, vb.pp("decoder"))?,
-            joint: DecodeLinear::new(linear(
-                dec,
-                cfg.vocab_size + durations.len(),
-                vb.pp("joint").pp("head"),
-            )?),
-            vocab: cfg.vocab_size,
-            blank: cfg.blank_token_id.unwrap_or(cfg.vocab_size as u32 - 1),
+            joints,
+            vocab,
+            blank: joint_blank,
+            start: blank,
             durations,
             max_symbols_per_step: cfg.max_symbols_per_step,
         })
     }
 
     /// Decoding of `(1, frames, hidden)` encoder output into emissions in frame order: greedy, or a transducer
-    /// beam search over `beam` hypotheses (NeMo's MALSD for TDT, its default search for RNN-T).
-    pub(super) fn decode(&self, encoded: &Tensor, beam: Option<usize>) -> Result<Vec<Emission>> {
+    /// beam search over `beam` hypotheses (NeMo's MALSD for TDT, its default search for RNN-T). `joint` picks a
+    /// multisoftmax model's language, whose local token ids the emissions carry.
+    pub(super) fn decode(
+        &self,
+        encoded: &Tensor,
+        beam: Option<usize>,
+        joint: usize,
+    ) -> Result<Vec<Emission>> {
         match self {
             Self::Ctc { .. } if beam.is_some_and(|b| b > 1) => Err(Error::Msg(
                 "beam search decodes transducer (RNN-T, TDT) heads; this one is CTC".into(),
@@ -253,18 +281,20 @@ impl Head {
             Self::Transducer {
                 encoder_projector,
                 predictor,
-                joint,
+                joints,
                 vocab,
                 blank,
+                start,
                 durations,
                 max_symbols_per_step,
             } => {
                 let frames = encoder_projector.forward(encoded)?.squeeze(0)?;
                 let search = Transducer {
                     predictor,
-                    joint,
+                    joint: &joints[joint],
                     vocab: *vocab,
                     blank: *blank,
+                    start: *start,
                     durations,
                     max_symbols_per_step: *max_symbols_per_step,
                 };
@@ -346,9 +376,10 @@ impl Head {
                 Self::Transducer {
                     encoder_projector,
                     predictor,
-                    joint,
+                    joints,
                     vocab,
                     blank,
+                    start,
                     durations,
                     max_symbols_per_step,
                 },
@@ -357,9 +388,10 @@ impl Head {
                 let frames = encoder_projector.forward(encoded)?.squeeze(0)?;
                 let search = Transducer {
                     predictor,
-                    joint,
+                    joint: &joints[0],
                     vocab: *vocab,
                     blank: *blank,
+                    start: *start,
                     durations,
                     max_symbols_per_step: *max_symbols_per_step,
                 };
@@ -381,6 +413,7 @@ struct Transducer<'a> {
     joint: &'a DecodeLinear,
     vocab: usize,
     blank: u32,
+    start: u32,
     durations: &'a [usize],
     max_symbols_per_step: usize,
 }
@@ -393,7 +426,7 @@ impl Transducer<'_> {
 
     fn greedy_start(&self, like: &Tensor) -> Result<Greedy> {
         Ok(Greedy {
-            state: self.predictor.start(&[self.blank], like)?,
+            state: self.predictor.start(&[self.start], like)?,
             frame: 0,
             symbols: 0,
         })
@@ -536,7 +569,7 @@ impl Transducer<'_> {
             score: 0.0,
             tokens: Vec::new(),
             emissions: Vec::new(),
-            state: self.predictor.start(&[self.blank], frames)?,
+            state: self.predictor.start(&[self.start], frames)?,
             pending: None,
         };
         self.rnnt_beam(frames, beam_size, start)
@@ -604,7 +637,7 @@ impl Transducer<'_> {
                 ..Slot::default()
             })
             .collect();
-        let mut state = self.predictor.start(&vec![self.blank; beam], frames)?;
+        let mut state = self.predictor.start(&vec![self.start; beam], frames)?;
         while slots.iter().any(|s| s.next_frame <= last_frame) {
             let at: Vec<u32> = slots
                 .iter()

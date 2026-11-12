@@ -217,6 +217,7 @@ impl Parakeet {
             num_prompts: None,
             prompt_intermediate_size: None,
             default_prompt_id: None,
+            languages: Vec::new(),
         };
         let processor = ProcessorConfig {
             feature_extractor: FeatureConfig {

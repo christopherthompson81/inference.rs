@@ -23,6 +23,9 @@ pub struct NemoMelConfig {
     pub normalize: bool,
     /// The filter bank and window rounded to bfloat16, as Nemotron 3.5 Transcribe stores them.
     pub bf16_constants: bool,
+    /// NeMo 1.x's STFT, as AI4Bharat's fork computes it: the audio padded by reflection rather than zeros, and the
+    /// frame its padding completes counted valid (`len / hop + 1` frames).
+    pub reflect_pad: bool,
 }
 
 /// Log-mel features as NeMo computes them: preemphasis, a centred zero-padded STFT under a symmetric Hann window,
@@ -107,7 +110,8 @@ impl NemoMel {
         } = self.config;
         let half = n_fft / 2;
         // torch.stft(center=True) pads n_fft/2 zeros each side; NeMo keeps (len + 2 * (n_fft/2) - n_fft) / hop frames
-        let frames = (samples.len() + 2 * half - n_fft) / hop_length;
+        let frames =
+            (samples.len() + 2 * half - n_fft) / hop_length + usize::from(self.config.reflect_pad);
         if frames < 2 {
             bail!(
                 "audio is too short: {} samples give {frames} feature frames",
@@ -125,6 +129,16 @@ impl NemoMel {
                 s - coefficient * previous
             };
             previous = s;
+        }
+        if self.config.reflect_pad {
+            if samples.len() <= half {
+                bail!("audio is too short to reflect {half} samples");
+            }
+            let len = samples.len();
+            for k in 1..=half {
+                padded[half - k] = padded[half + k];
+                padded[half + len - 1 + k] = padded[half + len - 1 - k];
+            }
         }
         let mut features = vec![0f64; frames * n_mels];
         features.par_chunks_mut(n_mels).enumerate().for_each_init(
@@ -192,6 +206,9 @@ impl NemoMel {
     pub fn stream(&self) -> Result<NemoMelStream> {
         if self.config.normalize {
             bail!("normalised features need the whole utterance; they cannot be streamed");
+        }
+        if self.config.reflect_pad {
+            bail!("reflect-padded features need the audio's end; they cannot be streamed");
         }
         Ok(NemoMelStream {
             padded: vec![0f64; self.config.n_fft / 2],
@@ -278,6 +295,7 @@ mod tests {
             preemphasis: Some(0.97),
             normalize: true,
             bf16_constants: false,
+            reflect_pad: false,
         })
     }
 
@@ -288,6 +306,29 @@ mod tests {
         assert_eq!(frames, 100);
         assert_eq!(features.len(), 100 * 128);
         assert!(mel.features(&[0.0; 200]).is_err());
+        Ok(())
+    }
+
+    // NeMo 1.x's frontend keeps the frame its padding completes, and reflection changes only the edge frames
+    #[test]
+    fn reflect_padding_counts_the_last_frame_and_moves_only_the_edges() -> Result<()> {
+        let samples: Vec<f32> = (0..16_000)
+            .map(|i| (i as f32 * 0.021).sin() * 0.3)
+            .collect();
+        let raw = |reflect_pad| {
+            NemoMel::new(NemoMelConfig {
+                normalize: false,
+                reflect_pad,
+                ..parakeet().config().clone()
+            })
+            .features(&samples)
+        };
+        let (zero, zero_frames) = raw(false)?;
+        let (reflect, reflect_frames) = raw(true)?;
+        assert_eq!(reflect_frames, zero_frames + 1);
+        let row = |f: &[f32], t: usize| f[t * 128..(t + 1) * 128].to_vec();
+        assert_ne!(row(&zero, 0), row(&reflect, 0));
+        assert_eq!(row(&zero, 50), row(&reflect, 50));
         Ok(())
     }
 

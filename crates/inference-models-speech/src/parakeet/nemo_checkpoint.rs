@@ -18,6 +18,8 @@ const RNNT_DECODER: &str = "RNNTDecoder";
 const CTC_DECODER: &str = "ConvASRDecoder";
 // NeMo's tokenizer kinds: SentencePiece BPE is the one this decodes
 const SENTENCEPIECE: &str = "bpe";
+// an aggregate of one SentencePiece model per language, their vocabularies concatenated (IndicConformer)
+const MULTILINGUAL: &str = "multilingual";
 // the prompted 3.5 class, whose prompt module this does not map
 const PROMPTED_CLASS: &str = "WithPrompt";
 const DEFAULT_MAX_SYMBOLS: usize = 10;
@@ -65,11 +67,26 @@ struct DecodingConfig {
 }
 
 #[derive(Debug, Clone, inference_json::FromJson)]
+struct LanguageTokenizer {
+    model_path: String,
+}
+
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct TokenizerConfig {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
     model_path: Option<String>,
+    /// A multilingual (aggregate) tokenizer's SentencePiece model per language.
+    #[serde(default)]
+    langs: HashMap<String, LanguageTokenizer>,
+}
+
+#[derive(Debug, Clone, Default, inference_json::FromJson)]
+struct JointConfig {
+    /// A multisoftmax joint's languages, in vocabulary order.
+    #[serde(default)]
+    language_keys: Vec<String>,
 }
 
 /// The parts of a NeMo ASR `model_config.yaml` a Parakeet-family model needs.
@@ -82,6 +99,8 @@ struct AsrConfig {
     #[serde(default)]
     decoding: Option<DecodingConfig>,
     tokenizer: TokenizerConfig,
+    #[serde(default)]
+    joint: Option<JointConfig>,
 }
 
 impl AsrConfig {
@@ -186,6 +205,7 @@ pub(super) fn read_recogniser(archive: &NemoArchive) -> Result<NemoRecogniser> {
         num_prompts: None,
         prompt_intermediate_size: None,
         default_prompt_id: None,
+        languages: nemo.joint.clone().unwrap_or_default().language_keys,
     };
     let processor = ProcessorConfig {
         feature_extractor: FeatureConfig {
@@ -198,8 +218,31 @@ pub(super) fn read_recogniser(archive: &NemoArchive) -> Result<NemoRecogniser> {
         },
         prompt_dictionary: HashMap::new(),
     };
-    let model_path = match (&nemo.tokenizer.kind, &nemo.tokenizer.model_path) {
-        (kind, Some(path)) if kind == SENTENCEPIECE => path,
+    let pieces = match (&nemo.tokenizer.kind, &nemo.tokenizer.model_path) {
+        (kind, Some(path)) if kind == SENTENCEPIECE => {
+            sentencepiece_pieces(&archive.member(path)?)?
+        }
+        (kind, _) if kind == MULTILINGUAL && !config.languages.is_empty() => {
+            let mut pieces = Vec::new();
+            for language in &config.languages {
+                let tokenizer = nemo.tokenizer.langs.get(language).ok_or_else(|| {
+                    msg(format!(
+                        "the tokenizer has no model for language `{language}`"
+                    ))
+                })?;
+                pieces.extend(sentencepiece_pieces(
+                    &archive.member(&tokenizer.model_path)?,
+                )?);
+            }
+            if pieces.len() + 1 != config.vocab_size {
+                return Err(msg(format!(
+                    "the languages' tokenizers hold {} pieces; the decoder takes {}",
+                    pieces.len(),
+                    config.vocab_size - 1
+                )));
+            }
+            pieces
+        }
         (kind, _) => {
             return Err(msg(format!(
                 "a `{kind}` tokenizer is not one this decodes; SentencePiece BPE is"
@@ -210,7 +253,7 @@ pub(super) fn read_recogniser(archive: &NemoArchive) -> Result<NemoRecogniser> {
         config,
         processor,
         mel,
-        pieces: sentencepiece_pieces(&archive.member(model_path)?)?,
+        pieces,
         streaming,
     })
 }
@@ -227,7 +270,20 @@ impl Parakeet {
             ..
         } = read_recogniser(&archive)?;
         let tokenizer = piece_tokenizer(&pieces)?;
+        let per_language = config
+            .language_vocab()
+            .map(|per| {
+                pieces
+                    .chunks(per)
+                    .map(piece_tokenizer)
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
         let vb = archive.var_builder(|name| parakeet_name(name, streaming), dtype, device)?;
-        Self::new(config, processor, tokenizer, vb)
+        let model = Self::new(config, processor, tokenizer, vb)?;
+        Ok(match per_language {
+            Some(tokenizers) => model.with_language_tokenizers(tokenizers),
+            None => model,
+        })
     }
 }

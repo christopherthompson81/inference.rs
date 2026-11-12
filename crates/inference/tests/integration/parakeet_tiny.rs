@@ -13,7 +13,8 @@ mod concurrent_cases;
 #[path = "../support/parakeet_tiny.rs"]
 mod support;
 use support::{
-    HEADS, LANGUAGES, PROMPTED, tiny_parakeet_checkpoint, tiny_parakeet_gguf, tiny_parakeet_nemo,
+    HEADS, LANGUAGES, MULTI_LANGUAGES, PROMPTED, SHARED_PIECE, language_pieces,
+    tiny_multisoftmax_nemo, tiny_parakeet_checkpoint, tiny_parakeet_gguf, tiny_parakeet_nemo,
 };
 
 // off the model's 16 kHz, so the request is resampled
@@ -294,6 +295,57 @@ async fn a_prompted_model_takes_the_requested_language() -> anyhow::Result<()> {
         .expect_err("a language outside the dictionary transcribed");
     assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
     assert!(err.message.contains("de-DE"), "{err}");
+    Ok(())
+}
+
+// a multisoftmax model (IndicConformer's layout) decodes through the named language's joint and writes only that
+// language's pieces, though the languages share one; it must be told a language it has
+async fn a_multisoftmax_model_writes_only_the_named_language() -> anyhow::Result<()> {
+    let (_dir, nemo) = tiny_multisoftmax_nemo()?;
+    let model = TranscriptionModelBuilder::new(nemo.to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let wav = chirp_wav_of(LONG_SECONDS / 4.0);
+    let mut transcribed = Vec::new();
+    for (index, language) in MULTI_LANGUAGES.iter().enumerate() {
+        let mut asked = request(TranscriptionResponseFormat::VerboseJson);
+        asked.language = Some(format!("{language}-IN"));
+        let out = model.transcription(asked, &wav).await?;
+        let parsed: VerboseTranscriptionResponse = serde_json::from_str(&out.body)?;
+        let own = language_pieces(index);
+        let shared = SHARED_PIECE.trim_start_matches('\u{2581}');
+        for word in parsed.text.split_whitespace() {
+            let mut rest = word;
+            // each word is a run of the language's own pieces and the shared one, spaces stripped
+            while !rest.is_empty() {
+                let piece = own
+                    .iter()
+                    .map(|p| p.trim_start_matches('\u{2581}'))
+                    .chain([shared])
+                    .filter(|p| !p.is_empty() && *p != "<unk>")
+                    .find(|p| rest.starts_with(p))
+                    .unwrap_or_else(|| {
+                        panic!("`{word}` in {language} has another language's piece")
+                    });
+                rest = &rest[piece.len()..];
+            }
+        }
+        transcribed.push(parsed.text);
+    }
+    assert_ne!(
+        transcribed[0], transcribed[1],
+        "the language does not pick the joint"
+    );
+
+    for language in [None, Some("bn")] {
+        let mut asked = request(TranscriptionResponseFormat::Text);
+        asked.language = language.map(str::to_string);
+        let err = model.transcription(asked, &wav).await.unwrap_err();
+        assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+        assert!(err.message.contains("hi, ta"), "{err}");
+    }
     Ok(())
 }
 
@@ -670,6 +722,7 @@ concurrent_cases!(
         undecodable_audio_is_an_invalid_request: 0,
         too_short_audio_fails_only_its_own_request: 0,
         a_prompted_model_takes_the_requested_language: 0,
+        a_multisoftmax_model_writes_only_the_named_language: 0,
         a_nemo_checkpoint_transcribes_as_its_transformers_layout: 0,
         an_asr_gguf_transcribes_as_its_transformers_layout: 0,
         a_written_asr_gguf_transcribes_as_its_nemo: 0,

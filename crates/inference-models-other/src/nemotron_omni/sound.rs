@@ -78,6 +78,7 @@ impl SoundConfig {
             preemphasis: Some(PREEMPHASIS),
             normalize: true,
             bf16_constants: false,
+            reflect_pad: false,
         }
     }
 

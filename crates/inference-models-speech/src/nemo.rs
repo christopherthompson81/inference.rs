@@ -339,6 +339,7 @@ impl NemoPreprocessorConfig {
             preemphasis: Some(self.preemph),
             normalize,
             bf16_constants: false,
+            reflect_pad: false,
         })
     }
 }
