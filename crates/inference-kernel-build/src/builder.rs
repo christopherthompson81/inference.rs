@@ -23,6 +23,8 @@ const SIZE_COMPRESSION_SINCE: (u32, u32) = (12, 8);
 pub const BUILD_DIR_LOCK: &str = ".lock";
 #[cfg(target_os = "linux")]
 const PROC_LOCKS: &str = "/proc/locks";
+// the directory under a profile that holds build scripts' output
+const BUILD_DIR: &str = "build";
 
 /// Each GPU arch's copy of a loadable library sits in `sm<arch>/`; `inference_tensor::kernel_library` matches it.
 pub const ARCH_DIR_PREFIX: &str = "sm";
@@ -1229,15 +1231,23 @@ fn persistent_lib_root() -> Result<PathBuf> {
     Ok(cache.join("inference-rs").join("kernels").join("built"))
 }
 
-/// `<target>/<profile>/cuda-kernels`, derived from `OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out`.
+/// `<target>/<profile>/cuda-kernels`, from `OUT_DIR`.
 fn shared_lib_root() -> Result<PathBuf> {
     let out_dir =
         std::env::var("OUT_DIR").map_err(|_| Error::LinkingFailed("OUT_DIR not set".into()))?;
-    let out_dir = PathBuf::from(out_dir);
-    let profile_dir = out_dir.ancestors().nth(3).ok_or_else(|| {
-        Error::LinkingFailed(format!("unexpected OUT_DIR layout: {}", out_dir.display()))
-    })?;
-    Ok(profile_dir.join("cuda-kernels"))
+    profile_dir(Path::new(&out_dir)).map(|dir| dir.join("cuda-kernels"))
+}
+
+// OUT_DIR is `<profile>/build/<pkg>-<hash>/out`, or `<profile>/build/<pkg>/<hash>/out` since Cargo 1.100
+fn profile_dir(out_dir: &Path) -> Result<PathBuf> {
+    out_dir
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|name| name == BUILD_DIR))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            Error::LinkingFailed(format!("unexpected OUT_DIR layout: {}", out_dir.display()))
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1322,6 +1332,18 @@ mod tests {
         assert_eq!(lib("dir/mmvq_instance_iq4_k.cu"), "kernels_iq4_k");
         assert_eq!(lib("dir/mmvq_instance_iq4_ks.cu"), "kernels");
         assert_eq!(lib("dir/mmvq_quantize.cu"), "kernels");
+    }
+
+    #[test]
+    fn the_profile_dir_is_found_in_either_cargo_build_layout() {
+        let profile = Path::new("/t/target/debug");
+        for out in [
+            "build/inference-nn-0123456789abcdef/out",
+            "build/inference-nn/0123456789abcdef/out",
+        ] {
+            assert_eq!(profile_dir(&profile.join(out)).unwrap(), profile);
+        }
+        assert!(profile_dir(Path::new("/t/out")).is_err());
     }
 
     #[test]
