@@ -93,6 +93,10 @@ pub struct ParakeetConfig {
     pub prompt_intermediate_size: Option<usize>,
     #[serde(default)]
     pub default_prompt_id: Option<usize>,
+    /// A multisoftmax model's languages (IndicConformer), in vocabulary order: each owns an equal share of the
+    /// vocabulary and its own joint output layer, `joint.head.<language>`.
+    #[serde(default)]
+    pub languages: Vec<String>,
 }
 
 fn default_max_symbols_per_step() -> usize {
@@ -109,6 +113,11 @@ pub const MODEL_TYPES: [(&str, HeadKind); 5] = [
 ];
 
 impl ParakeetConfig {
+    /// A multisoftmax model's tokens per language: its vocabulary (the predictor's padding id aside) split evenly.
+    pub fn language_vocab(&self) -> Option<usize> {
+        (!self.languages.is_empty()).then(|| (self.vocab_size - 1) / self.languages.len())
+    }
+
     pub fn head(&self) -> Option<HeadKind> {
         MODEL_TYPES
             .iter()

@@ -160,6 +160,9 @@ pub struct Parakeet {
     encoder: Encoder,
     prompts: Option<Prompts>,
     head: Head,
+    // a multisoftmax model's languages, each with its tokenizer over its local ids (their pieces overlap)
+    languages: Vec<String>,
+    language_tokenizers: Vec<Tokenizer>,
     tokenizer: Tokenizer,
     kind: HeadKind,
     frame_seconds: f64,
@@ -226,6 +229,8 @@ impl Parakeet {
             // streaming checkpoints see each chunk's raw log-mel, so offline ones normalize alone
             normalize: !enc.is_streaming(),
             bf16_constants: false,
+            // multisoftmax checkpoints come from AI4Bharat's NeMo 1.x fork, whose own inference pads this way
+            reflect_pad: !config.languages.is_empty(),
         });
         let frame_seconds =
             (fe.hop_length * enc.subsampling_factor) as f64 / f64::from(fe.sampling_rate);
@@ -233,6 +238,8 @@ impl Parakeet {
             encoder: Encoder::new(enc, vb.pp("encoder"))?,
             prompts: Prompts::new(&config, &processor, &tokenizer, vb.pp("prompt_projector"))?,
             head: Head::new(&config, kind, enc.hidden_size, vb.clone())?,
+            language_tokenizers: Vec::new(),
+            languages: config.languages.clone(),
             mel,
             tokenizer,
             kind,
@@ -277,6 +284,11 @@ impl Parakeet {
                 "beam search decodes transducer (RNN-T, TDT) heads; this one is CTC",
             ));
         }
+        if !self.languages.is_empty() {
+            return self
+                .multisoftmax_language(options)
+                .map(|_| options.language.as_deref());
+        }
         let Some(prompts) = &self.prompts else {
             return Ok(None);
         };
@@ -286,6 +298,40 @@ impl Parakeet {
             Err(error) => Err(error),
             Ok(_) => Ok(language),
         }
+    }
+
+    // a multisoftmax model's joint for the request's language, which it must be told: it identifies none itself
+    fn multisoftmax_language(&self, options: &TranscriptionOptions) -> Result<usize> {
+        let known = || self.languages.join(", ");
+        let Some(language) = options.language.as_deref() else {
+            return Err(msg(format!(
+                "this model does not identify the language; name one of {} (or a `language_model`)",
+                known()
+            )));
+        };
+        self.joint_for(Some(language)).ok_or_else(|| {
+            let how = if options.language_identified {
+                "the identified language"
+            } else {
+                "language"
+            };
+            msg(format!(
+                "this model does not transcribe {how} `{language}`; it takes {}",
+                known()
+            ))
+        })
+    }
+
+    // the joint `language` (its primary subtag, as `hi` of `hi-IN`) selects; the only one of other models
+    fn joint_for(&self, language: Option<&str>) -> Option<usize> {
+        if self.languages.is_empty() {
+            return Some(0);
+        }
+        let language = language?;
+        let code = language.split(['-', '_']).next().unwrap_or(language);
+        self.languages
+            .iter()
+            .position(|l| l.eq_ignore_ascii_case(code))
     }
 
     /// As `transcribe`, but audio past `LONG_FORM_SECONDS` is cut at the VAD's silences into windows of at most
@@ -394,6 +440,9 @@ impl Parakeet {
         let todo: Vec<usize> = (0..windows.len())
             .filter(|&i| !done(windows[i].1))
             .collect();
+        let joint = self
+            .joint_for(language)
+            .ok_or_else(|| msg("a multisoftmax model needs its language"))?;
         for group in self.batches(&todo, windows) {
             if inference_tensor::utils::exiting() {
                 return Err(msg(TRANSCRIPTION_STOPPED));
@@ -403,9 +452,9 @@ impl Parakeet {
                 let (start, end) = windows[index];
                 let offset = start as f64 / f64::from(rate);
                 let duration = (end - start) as f64 / f64::from(rate);
-                let emissions = self.head.decode(&encoded, beam)?;
+                let emissions = self.emissions_in(&encoded, beam, joint)?;
                 drop(encoded);
-                let part = self.transcription(&emissions, duration, language)?;
+                let part = self.transcription_in(&emissions, duration, language, joint)?;
                 merged.language = merged.language.or(part.language.clone());
                 let shift = |t: TimedText| TimedText {
                     start: t.start + offset,
@@ -514,7 +563,22 @@ impl Parakeet {
         duration: f64,
         language: Option<&str>,
     ) -> Result<Transcription> {
-        let mut transcription = self.text(emissions, duration)?;
+        self.transcription_in(emissions, duration, language, 0)
+    }
+
+    // as `transcription`, a multisoftmax model's emissions read by its `joint`'th language's tokenizer
+    fn transcription_in(
+        &self,
+        emissions: &[Emission],
+        duration: f64,
+        language: Option<&str>,
+        joint: usize,
+    ) -> Result<Transcription> {
+        let tokenizer = self
+            .language_tokenizers
+            .get(joint)
+            .unwrap_or(&self.tokenizer);
+        let mut transcription = self.text(emissions, duration, tokenizer)?;
         let identified = self.prompts.as_ref().and_then(|prompts| {
             emissions
                 .iter()
@@ -631,13 +695,39 @@ impl Parakeet {
 
     /// Token ids and their frames, before detokenisation: greedy, or a beam of `beam` hypotheses.
     pub fn emissions(&self, encoded: &Tensor, beam: Option<usize>) -> Result<Vec<Emission>> {
-        self.head.decode(encoded, beam)
+        self.emissions_in(encoded, beam, 0)
     }
 
-    fn text(&self, emissions: &[Emission], duration: f64) -> Result<Transcription> {
+    /// As [`Parakeet::emissions`], in a multisoftmax model's `joint`'th language, its local ids.
+    pub fn emissions_in(
+        &self,
+        encoded: &Tensor,
+        beam: Option<usize>,
+        joint: usize,
+    ) -> Result<Vec<Emission>> {
+        self.head.decode(encoded, beam, joint)
+    }
+
+    /// A multisoftmax model's tokenizer per language, in `languages` order, each over its local ids.
+    pub fn with_language_tokenizers(mut self, tokenizers: Vec<Tokenizer>) -> Self {
+        self.language_tokenizers = tokenizers;
+        self
+    }
+
+    /// A multisoftmax model's languages, in vocabulary order; none for other models.
+    pub fn languages(&self) -> &[String] {
+        &self.languages
+    }
+
+    fn text(
+        &self,
+        emissions: &[Emission],
+        duration: f64,
+        tokenizer: &Tokenizer,
+    ) -> Result<Transcription> {
         let ids: Vec<u32> = emissions.iter().map(|e| e.token).collect();
-        let text = self.tokenizer.decode(&ids, true).map_err(msg)?;
-        let mut stream = self.tokenizer.decode_stream(true);
+        let text = tokenizer.decode(&ids, true).map_err(msg)?;
+        let mut stream = tokenizer.decode_stream(true);
         let mut tokens: Vec<TimedText> = Vec::new();
         for e in emissions {
             let Some(piece) = stream.step(e.token).map_err(msg)? else {

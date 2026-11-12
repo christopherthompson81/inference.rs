@@ -27,8 +27,8 @@ const GGUF_EXTENSION: &str = "gguf";
 // a SpeechBrain repo's `config.json` names the inference class that reads it
 const SPEECHBRAIN_INTERFACE: &str = "speechbrain_interface";
 const SPEECHBRAIN_ENCODER_CLASSIFIER: &str = "EncoderClassifier";
-// what a Hub recogniser's `.nemo` or repo is named for: Parakeet, the `stt_*` FastConformers, Nemotron ASR
-const ASR_NAMES: [&str; 5] = ["parakeet", "stt_", "fastconformer", "asr", "speech"];
+// what a Hub recogniser's `.nemo` or repo is named for: Parakeet, the `stt_*` and other Conformers, Nemotron ASR
+const ASR_NAMES: [&str; 5] = ["parakeet", "stt_", "conformer", "asr", "speech"];
 
 /// Automatically selects the appropriate loader based on repository/config metadata.
 pub struct AutoLoader {

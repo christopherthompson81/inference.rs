@@ -485,6 +485,7 @@ impl Nemotron3Diarizer {
             preemphasis: fe.preemphasis,
             normalize: false,
             bf16_constants: false,
+            reflect_pad: false,
         };
         Self::with_features(config, mel, vb)
     }

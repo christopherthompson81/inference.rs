@@ -691,6 +691,7 @@ impl SupportedArch for TranscriptionLoaderType {
                     "Parakeet (CTC, RNN-T, TDT)",
                     "Nemotron streaming ASR (English, and 3.5 multilingual)",
                     "FastConformer hybrid RNN-T/CTC (`.nemo`)",
+                    "IndicConformer (22 Indian languages, `.nemo`)",
                 ],
                 modalities: &[Audio, Text],
                 examples: &[
@@ -698,6 +699,7 @@ impl SupportedArch for TranscriptionLoaderType {
                     ex!("nvidia/nemotron-speech-streaming-en-0.6b"),
                     ex!("nvidia/nemotron-3.5-asr-streaming-0.6b"),
                     ex!("nvidia/stt_en_fastconformer_hybrid_large_pc"),
+                    ex!("ai4bharat/IndicConformer"),
                 ],
             },
             Self::Whisper => ArchMetadata {

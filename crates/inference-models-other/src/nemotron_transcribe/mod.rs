@@ -200,6 +200,7 @@ pub fn mel_config(num_mel_bins: usize) -> NemoMelConfig {
         preemphasis: Some(inputs_processor::PREEMPHASIS),
         normalize: false,
         bf16_constants: true,
+        reflect_pad: false,
     }
 }
 

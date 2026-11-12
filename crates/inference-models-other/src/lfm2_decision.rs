@@ -326,6 +326,7 @@ impl Audio {
             preemphasis: Some(AUDIO_PREEMPHASIS),
             normalize: true,
             bf16_constants: false,
+            reflect_pad: false,
         });
         Ok(Self {
             encoder,

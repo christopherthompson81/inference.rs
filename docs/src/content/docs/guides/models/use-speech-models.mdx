@@ -1,11 +1,11 @@
 ---
 title: Speech models
-description: Parakeet, Whisper, Cohere Transcribe, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, VoxLingua107 for spoken language identification, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
+description: Parakeet, Whisper, Cohere Transcribe, IndicConformer, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, VoxLingua107 for spoken language identification, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports fourteen speech-related model families:
+inference.rs supports fifteen speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), and the cache-aware
   Nemotron streaming ASR, served via `/v1/audio/transcriptions` with word and segment timestamps.
@@ -13,6 +13,8 @@ inference.rs supports fourteen speech-related model families:
   `/v1/audio/transcriptions` with word and segment timestamps, up to 100 languages identified or forced.
 - **Cohere Transcribe**: a FastConformer encoder-decoder recogniser for 14 languages, each request naming its
   language (or a language identifier), served via `/v1/audio/transcriptions`.
+- **IndicConformer**: AI4Bharat's FastConformer recogniser for 22 Indian languages, from its `.nemo`, each request
+  naming its language, with word timestamps, served via `/v1/audio/transcriptions`.
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
@@ -508,6 +510,28 @@ choosing OpenAI's default, plain greedy, beam 5 or a prompt. On synthetic speech
 times match exactly (to 0.000 s, over four windows) in each mode, except where a window falls back to a sampled
 temperature on both sides, whose draws differ; earlier, word times fell within 0.02 s for large-v3-turbo (FP16),
 large-v3 and small.
+
+## IndicConformer: speech recognition in 22 Indian languages
+
+```bash
+inference serve -m ai4bharat/IndicConformer
+```
+
+AI4Bharat's IndicConformer (600M, CC-BY-4.0) transcribes the 22 scheduled languages of India: as, bn, brx, doi, gu, hi,
+kn, kok, ks, mai, ml, mni, mr, ne, or, pa, sa, sat, sd, ta, te, ur. It loads from `ai4bharat/IndicConformer`'s `.nemo`
+(the multilingual repo's ONNX parts do not load) as a Parakeet-family FastConformer with an RNN-T head of one output
+layer per language, each over that language's 256 SentencePiece tokens, and gives word timestamps as Parakeet does.
+
+- **It does not identify the language**: a request names one (`language=hi`, or `hi-IN`), or a language identifier
+  with `language_model`. Spoken Hindi and Urdu are close enough that an identifier may name either; name the
+  language when the script matters.
+- It writes no punctuation. Its frontend is the one AI4Bharat's NeMo fork computes (the STFT padded by reflection),
+  which differs from NVIDIA's models at the clip's edges.
+- Not yet: its CTC head (the RNN-T one decodes), and GGUF.
+
+`scripts/indic_conformer_parity.sh` checks a build against the ONNX export AI4Bharat publishes
+(`ai4bharat/indic-conformer-600m-multilingual`) through onnxruntime: features, encoder output and RNN-T token ids
+match exactly on FLEURS clips in Hindi, Tamil, Bengali, Marathi and Urdu, on the CPU and CUDA.
 
 ## Cohere Transcribe: speech recognition in 14 languages
 

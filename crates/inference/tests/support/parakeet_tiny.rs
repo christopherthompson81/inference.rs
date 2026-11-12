@@ -228,6 +228,101 @@ pub fn tiny_parakeet_nemo(head: &str) -> anyhow::Result<(tempfile::TempDir, std:
     Ok((dir, nemo))
 }
 
+/// The tiny multisoftmax model's languages: each a SentencePiece model of `MULTI_PIECES` pieces, `<unk>`, one piece
+/// both share (as Devanagari languages do) and its own, which only it can write.
+pub const MULTI_LANGUAGES: [&str; 2] = ["hi", "ta"];
+pub const SHARED_PIECE: &str = "\u{2581}x";
+const MULTI_PIECES: usize = 8;
+const MULTI_CHECKPOINT: &str = "tiny_multisoftmax.nemo";
+
+/// The pieces language `index` owns, after `<unk>` and the shared one: `▁h1`, `h2`, ... for the first.
+pub fn language_pieces(index: usize) -> Vec<String> {
+    let letter = MULTI_LANGUAGES[index].chars().next().expect("a code");
+    let mut pieces = vec!["<unk>".to_string(), SHARED_PIECE.to_string()];
+    pieces.extend((2..MULTI_PIECES).map(|i| match i % 2 {
+        0 => format!("\u{2581}{letter}{i}"),
+        _ => format!("{letter}{i}"),
+    }));
+    pieces
+}
+
+/// A tiny multisoftmax RNN-T `.nemo` (IndicConformer's layout from AI4Bharat's NeMo fork): one joint output layer
+/// per language, a multilingual tokenizer of one SentencePiece model each, random weights under NeMo's names.
+pub fn tiny_multisoftmax_nemo() -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf)> {
+    let fixtures = Path::new(FIXTURES);
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixtures.join(CONFIG))?)?;
+    let vocab = MULTI_PIECES * MULTI_LANGUAGES.len();
+    config["model_type"] = "parakeet_rnnt".into();
+    config["durations"] = serde_json::json!([]);
+    config["vocab_size"] = (vocab + 1).into();
+    config["blank_token_id"] = vocab.into();
+    config["languages"] = serde_json::json!(MULTI_LANGUAGES);
+    let processor: ProcessorConfig =
+        serde_json::from_str(&std::fs::read_to_string(fixtures.join(PROCESSOR_CONFIG))?)?;
+    let parsed: ParakeetConfig = serde_json::from_value(config.clone())?;
+    let pieces: Vec<String> = (0..MULTI_LANGUAGES.len())
+        .flat_map(language_pieces)
+        .collect();
+    let piece_list: Vec<inference_models_speech::nemo::Piece> = pieces
+        .iter()
+        .map(|p| inference_models_speech::nemo::Piece {
+            text: p.clone(),
+            special: p == "<unk>",
+        })
+        .collect();
+    let tokenizer = inference_models_speech::nemo::piece_tokenizer(&piece_list)?;
+    let mut tensors = recording::record_tensors(|vb| {
+        Parakeet::new(parsed, processor, tokenizer, vb).map(|_| ())
+    })?;
+    for (name, t) in tensors.iter_mut() {
+        if name.ends_with(RUNNING_VAR) {
+            *t = (t.abs()? + 1.0)?;
+        }
+    }
+    let mut renamed: Vec<(String, inference_tensor::Tensor)> = tensors
+        .into_iter()
+        .map(|(n, t)| (inference_models_speech::nemo::nemo_name(&n, false), t))
+        .collect();
+    renamed.sort_by(|a, b| a.0.cmp(&b.0));
+    let named: Vec<(&str, &inference_tensor::Tensor)> =
+        renamed.iter().map(|(n, t)| (n.as_str(), t)).collect();
+    let models: Vec<(String, Vec<u8>)> = (0..MULTI_LANGUAGES.len())
+        .map(|i| {
+            (
+                format!("tokenizer_{}.model", MULTI_LANGUAGES[i]),
+                sentencepiece_model(&language_pieces(i)),
+            )
+        })
+        .collect();
+    let members: Vec<(&str, &[u8])> = models
+        .iter()
+        .map(|(n, m)| (n.as_str(), m.as_slice()))
+        .collect();
+    let langs: String = MULTI_LANGUAGES
+        .iter()
+        .map(|l| format!("    {l}:\n      type: bpe\n      model_path: nemo:tokenizer_{l}.model\n"))
+        .collect();
+    let keys: String = MULTI_LANGUAGES
+        .iter()
+        .map(|l| format!("  - {l}\n"))
+        .collect();
+    let yaml = nemo_yaml(&config, "parakeet_rnnt")
+        .replace(
+            "target: nemo.collections.asr.models.rnnt_bpe_models.EncDecRNNTBPEModel",
+            "target: nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models.EncDecHybridRNNTCTCBPEModel",
+        )
+        .replace(
+            &format!("tokenizer:\n  type: bpe\n  model_path: nemo:{NEMO_TOKENIZER}\n"),
+            &format!("tokenizer:\n  type: multilingual\n  langs:\n{langs}"),
+        )
+        + &format!("  multisoftmax: true\njoint:\n  multilingual: true\n  language_keys:\n{keys}");
+    let dir = tempfile::tempdir()?;
+    let nemo = dir.path().join(MULTI_CHECKPOINT);
+    inference_models_speech::nemo::write_nemo(&nemo, &yaml, &named, &members)?;
+    Ok((dir, nemo))
+}
+
 const GGUF_CHECKPOINT: &str = "tiny_parakeet.gguf";
 const GGUF_LSTM_PREFIX: &str = "decoder.prediction.dec_rnn.lstm.";
 
