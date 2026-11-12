@@ -11,6 +11,7 @@
     CodeEvent,
     CodeMessage,
     CodePart,
+    CodeFolder,
     CodeSessionInfo,
     Decision,
     FileChange,
@@ -67,8 +68,17 @@
   type Item =
     | { kind: "reasoning" | "text" | "notice"; text: string }
     | { kind: "user"; text: string; images: string[] }
-    | { kind: "compaction"; state: "running" | "done" | "stopped"; at: number | null }
+    | ({ kind: "compaction"; state: "running" | "done" | "stopped"; at: number | null } & CompactionRun)
     | ToolItem;
+  // a compaction seen live: when it began and ended, its summary's first text, how much streamed, and each request's usage
+  interface CompactionRun {
+    startedAt: number | null;
+    finishedAt: number | null;
+    firstAt: number | null;
+    chars: number;
+    requests: Record<string, any>[];
+  }
+  const NO_RUN: CompactionRun = { startedAt: null, finishedAt: null, firstAt: null, chars: 0, requests: [] };
   // the model request under way: when it went, its estimated prompt, and what has streamed back since
   interface Round {
     start: number;
@@ -142,6 +152,10 @@
   let pendingImages = $state<string[]>([]);
   let imageInput = $state<HTMLInputElement | null>(null);
   let canSeeImages = $derived(modelStore.selectedInputModalities.includes("vision"));
+  // the session menu, from its corner button or a right-click
+  let menu = $state<{ session: CodeSessionInfo; x: number; y: number } | null>(null);
+  // the folder picker: the folder shown (null for the code roots) and its folders
+  let browsing = $state<{ path: string | null; folders: CodeFolder[] } | null>(null);
   let blocks = $derived(groupActivity(items));
   let container = $state<HTMLDivElement | null>(null);
   let sideTab = $state<"sessions" | "files">("sessions");
@@ -191,7 +205,7 @@
   ): Item[] {
     const out: Item[] = [];
     for (const [index, message] of messages.entries()) {
-      if (index === compactedBefore) out.push({ kind: "compaction", state: "done", at: compactedAt });
+      if (index === compactedBefore) out.push({ kind: "compaction", state: "done", at: compactedAt, ...NO_RUN });
       if (message.role === "user") {
         const parts: CodePart[] = Array.isArray(message.content) ? message.content : [];
         // the turn that showed the model the images tool calls returned: they go under those calls
@@ -427,13 +441,25 @@
         labels[event.id] = event.label;
         break;
       case "compacting":
-        items.push({ kind: "compaction", state: "running", at: null });
+        items.push({ kind: "compaction", state: "running", at: null, ...NO_RUN, requests: [], startedAt: Date.now() });
+        break;
+      case "summary_text": {
+        const item = runningCompaction();
+        if (item) {
+          item.firstAt ??= Date.now();
+          item.chars += event.chars;
+        }
+        break;
+      }
+      case "summary_usage":
+        runningCompaction()?.requests.push(event.usage);
         break;
       case "compacted": {
-        const item = items.findLast((item) => item.kind === "compaction" && item.state === "running");
-        if (item?.kind === "compaction") {
+        const item = runningCompaction();
+        if (item) {
           item.state = "done";
           item.at = event.at;
+          item.finishedAt = Date.now();
         }
         usage = null;
         contextEstimate = event.context_estimate;
@@ -454,6 +480,48 @@
     if (replaying) return;
     syncClock();
     void scrollDown();
+  }
+
+  function runningCompaction() {
+    const item = items.findLast((item) => item.kind === "compaction" && item.state === "running");
+    return item?.kind === "compaction" ? item : undefined;
+  }
+
+  // a compaction's figures: time so far (or taken), and the summary requests' reading and writing rates
+  function compactionStats(item: CompactionRun): string {
+    const parts: string[] = [];
+    if (item.startedAt != null) parts.push(clock(((item.finishedAt ?? now) - item.startedAt) / 1000));
+    const done = item.requests;
+    if (done.length) {
+      const sum = (key: string) => done.reduce((total, usage) => total + Number(usage[key] ?? 0), 0);
+      const cached = done.reduce((total, usage) => total + Number(usage.prompt_tokens_details?.cached_tokens ?? 0), 0);
+      const read = sum("prompt_tokens") - cached;
+      const written = sum("completion_tokens");
+      const readTime = sum("total_prompt_time_sec");
+      const writeTime = sum("total_completion_time_sec");
+      parts.push(`${done.length} request${done.length === 1 ? "" : "s"}`);
+      if (readTime > 0) parts.push(`read ${count(read)} tokens at ${count(Math.round(read / readTime))} tok/s`);
+      if (writeTime > 0) parts.push(`wrote ${count(written)} at ${(written / writeTime).toFixed(1)} tok/s`);
+    }
+    if (item.finishedAt == null && item.firstAt != null && now > item.firstAt) {
+      parts.push(`~${(item.chars / CHARS_PER_TOKEN / ((now - item.firstAt) / 1000)).toFixed(1)} tok/s`);
+    }
+    return parts.join(" · ");
+  }
+
+  // prompt tokens the server read (not served from its cache) per second of prefill
+  function prefillRate(usage: Record<string, any>): number | null {
+    const time = Number(usage.total_prompt_time_sec ?? 0);
+    const read = Number(usage.prompt_tokens ?? 0) - Number(usage.prompt_tokens_details?.cached_tokens ?? 0);
+    return time > 0 && read > 0 ? read / time : null;
+  }
+
+  // draft tokens accepted per speculative step, and the share of proposed drafts that were
+  function drafts(usage: Record<string, any>): string | null {
+    const spec = usage.speculative;
+    if (!spec?.steps) return null;
+    const share = spec.proposed_tokens ? Math.round((100 * spec.accepted_tokens) / spec.proposed_tokens) : 0;
+    return `drafts ${(spec.accepted_tokens / spec.steps).toFixed(2)}/step (${share}%)`;
   }
 
   async function scrollDown() {
@@ -691,6 +759,56 @@
     return tokens.toLocaleString();
   }
 
+  function showMenu(event: MouseEvent, session: CodeSessionInfo) {
+    event.preventDefault();
+    event.stopPropagation();
+    menu = { session, x: event.clientX, y: event.clientY };
+  }
+
+  async function deleteSession(session: CodeSessionInfo) {
+    menu = null;
+    const title = session.title || "(empty session)";
+    if (!confirm(`Delete the session "${title}"? Its history and the copies it kept for diffs go too; the project's files stay as they are.`))
+      return;
+    try {
+      await code.deleteSession(session.id);
+      if (session.id === sessionId) {
+        sessionId = null;
+        items = [];
+        usage = null;
+        contextEstimate = null;
+        resetFiles();
+        store(SESSION_KEY, "");
+      }
+    } catch (e) {
+      error = `${e}`;
+    }
+    await refreshSessions();
+  }
+
+  async function browse(path: string | null) {
+    try {
+      const listing = await code.listFolders(path ?? "");
+      browsing = { path: listing.path, folders: listing.folders };
+    } catch (e) {
+      error = `${e}`;
+    }
+  }
+
+  // a code root's parent is the roots list
+  function parentOf(path: string): string | null {
+    if (roots.includes(path)) return null;
+    return path.slice(0, path.lastIndexOf("/")) || null;
+  }
+
+  function useFolder(path: string) {
+    project = path;
+    projectPath = "";
+    browsing = null;
+    store(PROJECT_KEY, path);
+    void refreshSessions();
+  }
+
   function setDescribe(on: boolean) {
     describe = on;
     store(DESCRIBE_KEY, on ? "on" : "off");
@@ -755,6 +873,17 @@
   onDestroy(() => stream?.abort());
 
   $effect(() => {
+    if (!menu) return;
+    const close = () => (menu = null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+    };
+  });
+
+  $effect(() => {
     if (available && project && !projectPath) void refreshSessions();
   });
 </script>
@@ -780,6 +909,11 @@
           bind:value={project}
           onchange={() => refreshSessions()}
         />
+        <button
+          class="-mt-1 self-start text-xs text-blue-600 hover:underline dark:text-blue-400"
+          onclick={() => (browsing ? (browsing = null) : browse(projectPath || null))}
+          >{browsing ? "Close the folder list" : "Browse folders..."}</button
+        >
       {:else}
         <p class="text-xs text-gray-500 dark:text-gray-400">
           Start the server with <code>--code-root DIR</code> (repeat for more) to open your own projects here.
@@ -821,28 +955,93 @@
           onclick={() => (sideTab = "files")}>Files{changes.length ? ` (${changes.length})` : ""}</button
         >
       </div>
-      {#if sideTab === "files"}
+      {#if browsing}
+        <div class="flex min-h-0 flex-1 flex-col gap-1" data-browser>
+          <div class="flex items-center gap-1 text-xs text-gray-500">
+            {#if browsing.path}
+              <button
+                class="rounded px-1 hover:bg-gray-100 dark:hover:bg-gray-800"
+                onclick={() => browsing && browse(parentOf(browsing.path ?? ""))}
+                aria-label="Up a folder"
+                title="Up a folder">&uarr;</button
+              >
+              <span class="min-w-0 flex-1 truncate" title={browsing.path}>{browsing.path}</span>
+              <button
+                class="rounded bg-blue-600 px-2 py-0.5 text-white hover:bg-blue-700"
+                onclick={() => browsing?.path && useFolder(browsing.path)}>Use this folder</button
+              >
+            {:else}
+              <span>Code roots</span>
+            {/if}
+          </div>
+          <div class="min-h-0 flex-1 overflow-y-auto">
+            {#each browsing.folders as folder (folder.path)}
+              <div class="flex items-center gap-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-900">
+                <button class="min-w-0 flex-1 truncate px-2 py-1 text-left text-sm" onclick={() => browse(folder.path)} title={folder.path}>
+                  {folder.name}
+                </button>
+                {#if folder.sessions}
+                  <button
+                    class="shrink-0 rounded px-1.5 text-xs text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/40"
+                    onclick={() => useFolder(folder.path)}
+                    title="Open this project's sessions"
+                    >{folder.sessions} session{folder.sessions === 1 ? "" : "s"}</button
+                  >
+                {/if}
+                {#if folder.sessions_below}
+                  <span class="shrink-0 pr-2 text-xs text-gray-400" title="Sessions in folders below this one">+{folder.sessions_below} below</span>
+                {/if}
+              </div>
+            {:else}
+              <p class="px-2 text-xs text-gray-400">No folders here.</p>
+            {/each}
+          </div>
+        </div>
+      {:else if sideTab === "files"}
         <CodeFiles {sessionId} {changes} selected={selectedFile} onSelect={selectFile} />
       {:else}
         <div class="min-h-0 flex-1 overflow-y-auto">
           <!-- a session nothing was sent in is only worth listing while it's open -->
           {#each sessions.filter((s) => s.title || s.id === sessionId) as session (session.id)}
-            <button
-              class="mb-1 block w-full rounded-md px-2 py-1.5 text-left text-sm {session.id === sessionId
-                ? 'bg-gray-200 dark:bg-gray-800'
-                : 'hover:bg-gray-100 dark:hover:bg-gray-900'}"
-              onclick={() => open(session.id)}
-              disabled={running}
-            >
-              <span class="block truncate text-gray-800 dark:text-gray-200">{session.title || "(empty session)"}</span>
-              <span class="block text-xs text-gray-400">{relativeTime(session.modified)}</span>
-            </button>
+            <div class="group/session relative mb-1" data-session={session.id}>
+              <button
+                class="block w-full rounded-md py-1.5 pr-7 pl-2 text-left text-sm {session.id === sessionId
+                  ? 'bg-gray-200 dark:bg-gray-800'
+                  : 'hover:bg-gray-100 dark:hover:bg-gray-900'}"
+                onclick={() => open(session.id)}
+                oncontextmenu={(e) => showMenu(e, session)}
+                disabled={running}
+              >
+                <span class="block truncate text-gray-800 dark:text-gray-200">{session.title || "(empty session)"}</span>
+                <span class="block text-xs text-gray-400">{relativeTime(session.modified)}</span>
+              </button>
+              <button
+                class="absolute top-1.5 right-1 rounded px-1 text-gray-400 opacity-0 group-hover/session:opacity-100 hover:bg-gray-300 hover:text-gray-700 focus:opacity-100 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+                onclick={(e) => showMenu(e, session)}
+                aria-label="Session actions"
+                title="Session actions">&#8943;</button
+              >
+            </div>
           {:else}
             <p class="text-xs text-gray-400">No sessions in this project yet.</p>
           {/each}
         </div>
       {/if}
     </aside>
+    {#if menu}
+      <div
+        class="fixed z-50 min-w-36 rounded-md border border-gray-200 bg-white py-1 text-sm shadow-lg dark:border-gray-700 dark:bg-gray-900"
+        style="left: {menu.x}px; top: {menu.y}px"
+        role="menu"
+      >
+        <button
+          class="block w-full px-3 py-1.5 text-left text-red-600 hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-950/40"
+          role="menuitem"
+          disabled={running && menu.session.id === sessionId}
+          onclick={() => menu && deleteSession(menu.session)}>Delete session</button
+        >
+      </div>
+    {/if}
 
     <div class="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row" bind:this={split}>
       <section class="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -904,10 +1103,12 @@
                       <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
                     </svg>
                     <span class="animate-pulse">Summarizing the earlier history to fit the context...</span>
+                    <span class="tabular-nums">{compactionStats(item)}</span>
                   {:else if item.state === "stopped"}
                     <span>Summarizing stopped; the history is as it was</span>
                   {:else}
                     <span>History summarized{item.at ? ` ${when(new Date(item.at * 1000).toISOString())}` : ""}</span>
+                    {#if item.startedAt != null}<span class="tabular-nums">· {compactionStats(item)}</span>{/if}
                   {/if}
                   <span class="h-px flex-1 bg-gray-200 dark:bg-gray-800"></span>
                 </div>
@@ -1124,9 +1325,12 @@
                 {#if live.tokPerSec > 0}<span>~{live.tokPerSec.toFixed(1)} tok/s</span>{/if}
                 {#if usage}<span>{count(usage.prompt_tokens_details?.cached_tokens ?? 0)} cached (last request)</span>{/if}
               {:else if usage}
+                {@const rate = prefillRate(usage)}
+                {@const drafted = drafts(usage)}
                 <span>{count(usage.prompt_tokens_details?.cached_tokens ?? 0)} cached</span>
-                <span>prefill {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s</span>
+                <span>prefill {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s{rate ? ` (${count(Math.round(rate))} tok/s)` : ""}</span>
                 <span>{Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)} tok/s</span>
+                {#if drafted}<span title="Speculative decoding: draft tokens the model accepted per step, and the share of drafts accepted">{drafted}</span>{/if}
               {/if}
             </div>
           {/if}

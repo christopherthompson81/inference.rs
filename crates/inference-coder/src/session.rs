@@ -308,6 +308,17 @@ impl Session {
         Ok(sessions)
     }
 
+    /// Deletes the session at `path` with the copies it kept of the files it changed.
+    pub fn delete(path: &Path) -> Result<()> {
+        std::fs::remove_file(path).with_context(|| format!("deleting {}", path.display()))?;
+        let kept = path.with_extension(crate::changes::CHANGES_EXT);
+        if kept.exists() {
+            std::fs::remove_dir_all(&kept)
+                .with_context(|| format!("deleting {}", kept.display()))?;
+        }
+        Ok(())
+    }
+
     /// The newest session for the project at `root`.
     pub fn latest_for(dir: &Path, root: &Path) -> Result<Option<PathBuf>> {
         Ok(Self::list(dir)?
@@ -493,6 +504,11 @@ mod tests {
             Session::find(dir.path(), &session.id[..12]).unwrap(),
             session.path
         );
+        let kept = session.path.with_extension(crate::changes::CHANGES_EXT);
+        std::fs::create_dir_all(&kept).unwrap();
+        Session::delete(&session.path).unwrap();
+        assert!(!session.path.exists() && !kept.exists());
+        assert!(Session::list(dir.path()).unwrap().is_empty());
     }
 
     #[test]

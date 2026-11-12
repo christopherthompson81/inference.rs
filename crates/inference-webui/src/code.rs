@@ -318,6 +318,68 @@ pub(crate) async fn list_sessions(
 }
 
 #[derive(inference_json::FromJson)]
+pub(crate) struct FoldersQuery {
+    /// The directory to list; empty lists the code roots.
+    #[serde(default)]
+    path: String,
+}
+
+/// One level of folders under the code roots for picking a project, each with how many sessions it has and how many
+/// lie further down.
+pub(crate) async fn folders(
+    Extension(code): Extension<Arc<CodeState>>,
+    QueryParams(query): QueryParams<FoldersQuery>,
+) -> Response {
+    let dir = match query.path.trim() {
+        "" => None,
+        path => match code.project(path) {
+            Ok(dir) => Some(dir),
+            Err(refusal) => return refusal.into_response(),
+        },
+    };
+    let code = code.clone();
+    let listed = tokio::task::spawn_blocking(move || {
+        let roots = Session::list(&code.sessions_dir)?
+            .into_iter()
+            .map(|s| s.root)
+            .collect::<Vec<_>>();
+        let entry = |path: PathBuf| {
+            let here = roots.iter().filter(|root| **root == path).count();
+            let below = roots
+                .iter()
+                .filter(|root| **root != path && root.starts_with(&path))
+                .count();
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            json!({"name": name, "path": path, "sessions": here, "sessions_below": below})
+        };
+        let folders = match &dir {
+            None => code.roots.iter().cloned().map(entry).collect::<Vec<_>>(),
+            Some(dir) => {
+                let mut children = std::fs::read_dir(dir)?
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    // hidden folders (.git, caches) are rarely projects
+                    .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                    .map(|e| e.path())
+                    .collect::<Vec<_>>();
+                children.sort();
+                children.into_iter().map(entry).collect()
+            }
+        };
+        anyhow::Ok(json!({"path": dir, "folders": folders}))
+    })
+    .await;
+    match listed {
+        Ok(Ok(body)) => Json(body).into_response(),
+        Ok(Err(error)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+#[derive(inference_json::FromJson)]
 pub(crate) struct OpenRequest {
     #[serde(default)]
     project: String,
@@ -644,6 +706,47 @@ pub(crate) async fn attach(
 }
 
 #[derive(inference_json::FromJson)]
+pub(crate) struct DeleteRequest {
+    session_id: String,
+}
+
+/// Deletes a saved session and the copies it kept of the files it changed; a session running a prompt is refused.
+pub(crate) async fn delete_session(
+    Extension(code): Extension<Arc<CodeState>>,
+    JsonBody(request): JsonBody<DeleteRequest>,
+) -> Response {
+    let id = &request.session_id;
+    let Ok(path) = Session::find(&code.sessions_dir, id) else {
+        return not_found(id);
+    };
+    // the session's project must be one this server may open, as for opening it
+    // `id` may be a prefix; the live sessions go by the whole id
+    let id = match Session::open(&path) {
+        Ok(session) if code.allows(&session.root) => session.id,
+        Ok(_) => {
+            return bad_request("that session's project is outside the code roots").into_response();
+        }
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    {
+        let mut live = code.live.lock().unwrap();
+        if let Some(session) = live.get(&id) {
+            if session.agent.try_lock().is_err() {
+                return (StatusCode::CONFLICT, "a prompt is running in that session")
+                    .into_response();
+            }
+            live.shift_remove(&id);
+        }
+    }
+    match Session::delete(&path) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response(),
+    }
+}
+
+#[derive(inference_json::FromJson)]
 pub(crate) struct ApproveRequest {
     session_id: String,
     approval_id: String,
@@ -818,6 +921,16 @@ impl AgentUi for WebUi {
 
     fn compacting(&mut self, end: usize) {
         self.emit(json!({"type": "compacting", "end": end}));
+    }
+
+    fn summary_text(&mut self, delta: &str) {
+        self.emit(json!({"type": "summary_text", "chars": delta.len()}));
+    }
+
+    fn summary_done(&mut self, turn: &Turn) {
+        if let Some(usage) = &turn.usage {
+            self.emit(json!({"type": "summary_usage", "usage": usage}));
+        }
     }
 
     fn compacted(&mut self, compaction: &Compaction, context_tokens: usize) {

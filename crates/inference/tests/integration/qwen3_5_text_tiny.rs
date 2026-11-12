@@ -516,6 +516,17 @@ async fn hybrid_autotuned_dflash_drafts_and_keeps_greedy_output() -> anyhow::Res
         .sum();
     assert!(drafts > 0, "DFlash never drafted");
     decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    // a reply reports its own drafts beside the server-wide counters
+    let request = RequestBuilder::new()
+        .add_message(TextMessageRole::User, "count")
+        .set_sampler_max_len(GRAPH_MAX_LEN)
+        .set_sampler_topk(1);
+    let spec = model.send_chat_request(request).await?.usage.speculative;
+    let spec = spec.expect("a DFlash reply reports its drafts");
+    assert!(
+        spec.steps > 0 && spec.accepted_tokens <= spec.proposed_tokens,
+        "{spec:?}"
+    );
     Ok(())
 }
 

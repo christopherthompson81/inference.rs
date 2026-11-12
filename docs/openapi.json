@@ -5545,6 +5545,17 @@
               }
             ]
           },
+          "speculative": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SpeculativeUsageResponse",
+                "description": "Present when the request decoded with a drafter."
+              }
+            ]
+          },
           "total_completion_time_sec": {
             "type": "number",
             "format": "float"
@@ -15074,6 +15085,32 @@
           "object": {
             "type": "string",
             "example": "list"
+          }
+        }
+      },
+      "SpeculativeUsageResponse": {
+        "type": "object",
+        "description": "Speculative decoding's drafts over one request.",
+        "required": [
+          "steps",
+          "proposed_tokens",
+          "accepted_tokens"
+        ],
+        "properties": {
+          "accepted_tokens": {
+            "type": "integer",
+            "description": "Draft tokens the model accepted; `accepted_tokens / steps` is the extra tokens a step yields.",
+            "minimum": 0
+          },
+          "proposed_tokens": {
+            "type": "integer",
+            "description": "Draft tokens proposed over those steps.",
+            "minimum": 0
+          },
+          "steps": {
+            "type": "integer",
+            "description": "Verify steps the drafter proposed for.",
+            "minimum": 0
           }
         }
       },

@@ -76,6 +76,14 @@ pub trait AgentUi: Send {
     fn compacting(&mut self, end: usize) {
         let _ = end;
     }
+    /// Text of the summary being written, as it streams.
+    fn summary_text(&mut self, delta: &str) {
+        let _ = delta;
+    }
+    /// One summary request finished (a long history takes several); its usage says how fast it ran.
+    fn summary_done(&mut self, turn: &Turn) {
+        let _ = turn;
+    }
     /// It was; the model now sees the summary and the messages from `compaction.start`, about `context_tokens` in all.
     fn compacted(&mut self, compaction: &Compaction, context_tokens: usize) {
         let _ = (compaction, context_tokens);
@@ -386,7 +394,7 @@ impl Agent {
             let mut attempt = 0;
             let (next, text) = loop {
                 let next = self.chunk_end(cursor, end, summary.as_deref(), budget);
-                match self.summarize(summary.as_deref(), cursor, next).await {
+                match self.summarize(summary.as_deref(), cursor, next, ui).await {
                     Ok(text) => break (next, text),
                     Err(_) if attempt < SUMMARY_RETRIES && budget.is_some() => {
                         budget = budget.map(|b| b / 2);
@@ -430,7 +438,13 @@ impl Agent {
         last.unwrap_or(end)
     }
 
-    async fn summarize(&mut self, summary: Option<&str>, from: usize, to: usize) -> Result<String> {
+    async fn summarize(
+        &mut self,
+        summary: Option<&str>,
+        from: usize,
+        to: usize,
+        ui: &mut dyn AgentUi,
+    ) -> Result<String> {
         let mut messages = self
             .session
             .messages
@@ -458,8 +472,11 @@ impl Agent {
         let mut stream = self.backend.stream(Value::Object(request)).await?;
         let mut turn = Turn::default();
         while let Some(chunk) = stream.next().await {
-            turn.apply(&chunk?);
+            if let Some(text) = turn.apply(&chunk?).content {
+                ui.summary_text(&text);
+            }
         }
+        ui.summary_done(&turn);
         self.learn_ratio(&turn, chars);
         let text = turn.content.trim();
         if text.is_empty() {

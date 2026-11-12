@@ -334,6 +334,7 @@ Legacy OpenAI compatible text completion request
 | `completion_tokens` | `int` | required |
 | `prompt_tokens` | `int` | required |
 | `prompt_tokens_details` | `PromptTokensDetailsResponse \| None` | optional |
+| `speculative` | `SpeculativeUsageResponse \| None` | optional |
 | `total_completion_time_sec` | `float` | required |
 | `total_prompt_time_sec` | `float` | required |
 | `total_time_sec` | `float` | required |
@@ -933,6 +934,17 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `frames` | `list[str]` |
 | `sampled_indices` | `list[int]` |
 | `total_num_frames` | `int` |
+
+
+## `SpeculativeUsageResponse`
+
+Speculative decoding's drafts over one request.
+
+| Field | Type |
+| --- | --- |
+| `accepted_tokens` | `int` |
+| `proposed_tokens` | `int` |
+| `steps` | `int` |
 
 
 ## `StopTokens`
