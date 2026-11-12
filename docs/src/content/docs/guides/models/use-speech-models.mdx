@@ -586,7 +586,10 @@ two-voice recording transcribe in about 50 s on an RTX 3090.
   length on a GPU.
 - Hotwords: the request's `prompt` (names, terms, the topic) goes into the model's prompt as context, as
   Microsoft's `context_info`.
-- Not yet: GGUF.
+- Microsoft's own layout (`microsoft/VibeVoice-ASR`) loads too, with the same result as the `-HF` port. That repo
+  ships no tokenizer, so from the Hub pass `--tok-model-id Qwen/Qwen2.5-7B`.
+- GGUF: audio.cpp's (see [audio.cpp GGUFs](#audiocpp-ggufs)). Its q8_0 writes the same text and speakers in 17.1 GB
+  instead of 21.9 GB, with five minutes in 29 s instead of 49 s; segment times run 0.01 to 0.05 s later.
 
 ```bash
 curl http://localhost:1234/v1/audio/transcriptions -F file=@meeting.wav -F response_format=verbose_json \
@@ -619,6 +622,25 @@ are those turns, timed by the windows they span (so adjacent turns can overlap b
 
 `scripts/vibevoice_asr_parity.sh --streaming` compares each window's greedy tokens with Microsoft's
 `streaming_generate` in F32 on the CPU (identical on both sizes, with and without hotwords).
+
+audio.cpp's GGUFs of both sizes load as well. Over five minutes, the 1.5B q8_0 and q4_k write exactly what bf16
+does (3.9 and 3.2 GB instead of 5.3). The 7B q4_k differs from bf16 by one punctuation mark, in 7.2 GB instead of
+17.0 and at twice the speed.
+
+### audio.cpp GGUFs
+
+[audio.cpp](https://github.com/0xShug0/audio.cpp) publishes GGUFs for many speech models
+([audio-cpp/audio.cpp-gguf](https://huggingface.co/audio-cpp/audio.cpp-gguf), one folder per model). Each file is a
+whole checkpoint: its tensors under their own names (quantized or not) and its config, tokenizer and other files
+embedded. Pass the file, or a directory holding just that GGUF, as the model:
+
+```bash
+inference serve -m ~/models/VibeVoice-ASR-Streaming-7B-GGUF/vibevoice-asr-streaming-7b-q4_k.gguf
+```
+
+The embedded files are unpacked once into `~/.cache/inference-rs/audiocpp/`. Quantized weights run as the file
+stores them. These load so far: VibeVoice-ASR and VibeVoice-ASR Streaming (both sizes). Other families' GGUFs do
+not load yet.
 
 ## Qwen3-ASR: audio in, transcript out
 

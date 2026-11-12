@@ -750,12 +750,33 @@ pub(crate) fn local_file_missing_error(model_id: &Path, file: &str) -> anyhow::E
     )
 }
 
+// an audio.cpp GGUF reads as the checkpoint directory its embedded files unpack to
+fn local_root(model_id: &Path) -> Result<std::borrow::Cow<'_, Path>> {
+    if !model_id.exists() {
+        return Ok(model_id.into());
+    }
+    Ok(match inference_gguf::audiocpp::unpack(model_id)? {
+        Some(package) => package.dir.into(),
+        None => model_id.into(),
+    })
+}
+
+/// The audio.cpp GGUF `model_id` names, as a checkpoint's one weight file, when it names one.
+pub(crate) fn audiocpp_weights(model_id: &Path) -> Option<PathBuf> {
+    model_id
+        .exists()
+        .then(|| inference_gguf::audiocpp::find(model_id))
+        .flatten()
+        .filter(|_| !(model_id.is_dir() && model_id.join("config.json").exists()))
+}
+
 pub(crate) fn list_repo_files(
     api: &ApiRepo,
     model_id: &Path,
     should_error: bool,
     revision: &str,
 ) -> Result<Vec<String>> {
+    let model_id = &*local_root(model_id)?;
     if model_id.exists() {
         let listing = fs::read_dir(model_id).map_err(|err| {
             anyhow!(
@@ -884,6 +905,7 @@ pub(crate) fn get_file(
     file: &str,
     revision: &str,
 ) -> Result<PathBuf> {
+    let model_id = &*local_root(model_id)?;
     if model_id.exists() {
         let path = model_id.join(file);
         if !path.exists() {
@@ -915,6 +937,8 @@ pub(crate) fn try_get_file(
     file: &str,
     revision: &str,
 ) -> std::result::Result<Option<PathBuf>, ApiError> {
+    let unpacked = local_root(model_id).ok();
+    let model_id = unpacked.as_deref().unwrap_or(model_id);
     if model_id.exists() {
         let path = model_id.join(file);
         if path.exists() {

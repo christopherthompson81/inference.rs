@@ -5,7 +5,9 @@ use crate::vibevoice_asr::{
     inputs_processor::clip_tokens, transcription::VIBEVOICE_ASR,
 };
 
-const TEXT_LAYER_INDEX_PATTERN: &str = r"language_model\.model\.layers\.(\d+)\.";
+// either layout's decoder: transformers' `language_model.model`, Microsoft's `model.language_model`
+const TEXT_LAYER_INDEX_PATTERN: &str =
+    r"(?:language_model\.model|model\.language_model)\.layers\.(\d+)\.";
 // a minute of 24 kHz audio, what one encoder chunk and a clip's attention budget are sized by
 const MINUTE_SAMPLES: usize = 1_440_000;
 
@@ -19,7 +21,7 @@ impl MultimodalPromptPrefixer for VibeVoiceAsrPrefixer {}
 
 impl VibeVoiceAsrLoader {
     fn config(config: &str) -> Result<VibeVoiceAsrConfig> {
-        Ok(VibeVoiceAsrConfig::from_json(config)?)
+        Ok(VibeVoiceAsrConfig::parse(config)?)
     }
 }
 
@@ -93,16 +95,16 @@ impl MultimodalModelLoader for VibeVoiceAsrLoader {
 impl IsqModelLoader for VibeVoiceAsrLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
-            r"^language_model\.model\.embed_tokens\.weight$",
-            r"^language_model\.lm_head\.(weight|bias)$",
+            r"^(?:language_model\.model|model\.language_model)\.embed_tokens\.weight$",
+            r"^(?:language_model\.)?lm_head\.(weight|bias)$",
         ])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
-            r"^language_model\.lm_head\.(weight|bias)$",
-            r"^language_model\.model\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
-            r"^language_model\.model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
+            r"^(?:language_model\.)?lm_head\.(weight|bias)$",
+            r"^(?:language_model\.model|model\.language_model)\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
+            r"^(?:language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -154,10 +156,11 @@ impl DeviceMappedModelLoader for VibeVoiceAsrLoader {
     ) -> Result<usize> {
         let cfg = Self::config(config)?;
         let tc = cfg.text();
+        let (stack, head) = cfg.text_prefixes();
         let (embed_pack, head_pack) = super::language_model_pack_factors(
             quantization,
-            "language_model.model.embed_tokens.weight",
-            "language_model.lm_head.weight",
+            &format!("{stack}.embed_tokens.weight"),
+            &format!("{head}.weight"),
             tc.tie_word_embeddings,
             dtype,
             weight_pack_factor,

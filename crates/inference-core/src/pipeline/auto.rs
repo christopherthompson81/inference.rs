@@ -279,6 +279,12 @@ impl AutoLoader {
         token_source: &TokenSource,
         silent: bool,
     ) -> Result<ConfigArtifacts> {
+        let local = Path::new(&self.model_id);
+        if inference_gguf::audiocpp::find(local).is_some() {
+            return local_config_artifacts(local, &local.join("config.json"), |config| {
+                self.apply_config_overrides(config)
+            });
+        }
         let cache = self.hf_cache_path.clone().map(Cache::new);
         let api = build_api_with_cache(token_source, !silent, cache)?;
         let revision = revision.unwrap_or_else(|| "main".to_string());
@@ -676,6 +682,13 @@ fn local_config_artifacts(
     config_path: &Path,
     apply_overrides: impl Fn(&str) -> Result<String>,
 ) -> Result<ConfigArtifacts> {
+    // an audio.cpp GGUF routes by the checkpoint files it carries
+    let package = inference_gguf::audiocpp::unpack(model_root)?;
+    let unpacked_config = package.as_ref().map(|p| p.dir.join("config.json"));
+    let (model_root, config_path) = match (&package, &unpacked_config) {
+        (Some(package), Some(config)) => (package.dir.as_path(), config.as_path()),
+        _ => (model_root, config_path),
+    };
     let contents = match std::fs::read_to_string(config_path) {
         Ok(contents) => Some(contents),
         // a model that is one file has no config beside it

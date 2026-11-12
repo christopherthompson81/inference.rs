@@ -6,7 +6,6 @@
 
 use inference_nn::decoder::DecoderStack;
 use inference_nn::kv_cache::KvCache;
-use inference_nn::layers::Activation;
 use inference_nn::loaders::TimedSegment;
 use inference_nn::model::NormalLoadingMetadata;
 use inference_nn::paged_attention::AttentionImplementation;
@@ -15,7 +14,7 @@ use inference_tensor::nn::{Linear, Module};
 use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 use tokenizers::Tokenizer;
 
-use super::config::EncoderConfig;
+use super::config::UpstreamTokenizer;
 use super::{AudioEmbedder, AudioSpec, EncoderNames};
 use crate::qwen2_audio::config::TextConfig;
 
@@ -40,46 +39,9 @@ const STRIPPED: [&str; 7] = [
 // the reference's budget per window
 const MAX_NEW_TOKENS: usize = 256;
 const SPEAKER_MARK: &str = "Speaker ";
-// the upstream encoders' fixed sizes, which their config does not state
-const ENCODER_KERNEL: usize = 7;
-const ENCODER_FFN_EXPANSION: usize = 4;
 const KV_DIM: usize = 2;
 // the cache's first allocation, in positions; it grows on demand
 const CACHE_CAPACITY: usize = 4096;
-const DEPTH_SEPARATOR: char = '-';
-
-#[derive(Debug, Clone, inference_json::FromJson)]
-struct UpstreamTokenizer {
-    channels: usize,
-    encoder_ratios: Vec<usize>,
-    encoder_depths: String,
-    encoder_n_filters: usize,
-    vae_dim: usize,
-    layernorm_eps: f64,
-}
-
-impl UpstreamTokenizer {
-    // as transformers' port names it: its ratios run stem-first, the reverse of how the upstream config lists them
-    fn encoder(&self) -> Result<EncoderConfig> {
-        let depths = self
-            .encoder_depths
-            .split(DEPTH_SEPARATOR)
-            .map(|d| d.trim().parse::<usize>())
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| inference_tensor::Error::Msg(format!("`encoder_depths`: {e}")))?;
-        Ok(EncoderConfig {
-            channels: self.channels,
-            depths,
-            downsampling_ratios: self.encoder_ratios.iter().rev().copied().collect(),
-            ffn_expansion: ENCODER_FFN_EXPANSION,
-            hidden_act: Activation::Gelu,
-            hidden_size: self.vae_dim,
-            kernel_size: ENCODER_KERNEL,
-            num_filters: self.encoder_n_filters,
-            rms_norm_eps: self.layernorm_eps,
-        })
-    }
-}
 
 /// A streaming checkpoint's `config.json`, the fields the model reads.
 #[derive(Debug, Clone, inference_json::FromJson)]

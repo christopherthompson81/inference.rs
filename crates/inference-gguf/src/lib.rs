@@ -1,3 +1,4 @@
+pub mod audiocpp;
 pub mod base_model;
 mod chat_template;
 pub mod embedding_gguf;

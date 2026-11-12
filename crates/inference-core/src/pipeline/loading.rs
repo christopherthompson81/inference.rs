@@ -1149,6 +1149,16 @@ impl WeightFiles<'_> {
         placeholders: Option<Vec<regex::Regex>>,
         device_for_tensor: DeviceForTensor,
     ) -> Result<inference_quant::ShardedVarBuilder> {
+        if let [file] = self.paths.get_weight_filenames()
+            && inference_gguf::audiocpp::is_audiocpp_gguf(file)
+        {
+            let vb = inference_gguf::audiocpp::AudioCppGguf::open(file)?.var_builder(
+                None,
+                self.dtype,
+                self.device,
+            )?;
+            return Ok(with_uqff(vb, self.uqff_reader.clone()));
+        }
         let vb = crate::utils::varbuilder_utils::from_mmaped_safetensors(
             self.paths.get_weight_filenames().to_vec(),
             Some(self.dtype),
