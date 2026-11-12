@@ -827,7 +827,6 @@ impl DecoderLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn forward_attention_output(
         &self,
         x: &Tensor,

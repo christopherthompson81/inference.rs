@@ -85,10 +85,8 @@ impl<S: WithDType, const N1: usize, const N2: usize, const N3: usize> NdArray
 
     fn to_cpu_storage(&self) -> CpuStorage {
         let mut vec = Vec::with_capacity(N1 * N2 * N3);
-        for i1 in 0..N1 {
-            for i2 in 0..N2 {
-                vec.extend(self[i1][i2])
-            }
+        for row in self.iter().flatten() {
+            vec.extend(row)
         }
         S::to_cpu_storage_owned(vec)
     }
@@ -103,12 +101,8 @@ impl<S: WithDType, const N1: usize, const N2: usize, const N3: usize, const N4: 
 
     fn to_cpu_storage(&self) -> CpuStorage {
         let mut vec = Vec::with_capacity(N1 * N2 * N3 * N4);
-        for i1 in 0..N1 {
-            for i2 in 0..N2 {
-                for i3 in 0..N3 {
-                    vec.extend(self[i1][i2][i3])
-                }
-            }
+        for row in self.iter().flatten().flatten() {
+            vec.extend(row)
         }
         S::to_cpu_storage_owned(vec)
     }

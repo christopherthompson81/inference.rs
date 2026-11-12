@@ -10,7 +10,6 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 license.workspace = true
-homepage.workspace = true
 
 [dependencies]
 inference-api.workspace = true

@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 description = "OS-level sandbox for subprocesses spawned by inference.rs (code execution, tools)."
 license.workspace = true
-homepage.workspace = true
 keywords = ["sandbox", "isolation", "security", "ai", "llm"]
 categories = ["os"]
 repository.workspace = true

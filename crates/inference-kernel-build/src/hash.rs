@@ -115,11 +115,7 @@ impl BuildCache {
         }
 
         // Check object path matches
-        if entry.object_path != object_path.to_string_lossy() {
-            return true;
-        }
-
-        false
+        entry.object_path != object_path.to_string_lossy()
     }
 
     /// Update cache entry for a compiled file

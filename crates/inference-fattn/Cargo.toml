@@ -11,7 +11,7 @@ license.workspace = true
 [dependencies]
 inference-tensor.workspace = true
 # the quantized K/V row format
-inference-paged-attn.workspace = true
+inference-paged-attn = { workspace = true, optional = true }
 float8.workspace = true
 half = { workspace = true }
 
@@ -23,4 +23,4 @@ anyhow = { workspace = true, features = ["backtrace"] }
 
 [features]
 default = []
-cuda = ["dep:inference-kernel-build", "inference-tensor/cuda"]
+cuda = ["dep:inference-kernel-build", "dep:inference-paged-attn", "inference-tensor/cuda"]

@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Decision models' prompt formats and answers for inference.rs: how each family reads a question and what its scores mean"
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 

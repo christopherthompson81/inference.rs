@@ -142,8 +142,14 @@ fn ngram_rows(
             };
             for ngram in 2..=ple.ngram_size {
                 let mut mixed = u64::from(shifted(0)) * hash.layer_multipliers[0];
-                for k in 1..ngram {
-                    mixed ^= u64::from(shifted(k)) * hash.layer_multipliers[k];
+                for (k, multiplier) in hash
+                    .layer_multipliers
+                    .iter()
+                    .enumerate()
+                    .take(ngram)
+                    .skip(1)
+                {
+                    mixed ^= u64::from(shifted(k)) * multiplier;
                 }
                 let first_head = (ngram - 2) * ple.heads_per_ngram;
                 for head in first_head..first_head + ple.heads_per_ngram {
