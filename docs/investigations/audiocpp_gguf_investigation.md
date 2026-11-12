@@ -235,3 +235,34 @@ no issue                     91 folders: ASR 19, TTS 35, voice conversion 6, mus
 ```
 
 The per-folder list is the phase 3 comment on #747.
+
+## Run 10 - 2026-11-12 11:40
+
+Question (#926): Nemotron-3 Diarization's package, `audio-cpp/Nemotron-3-Diarization-GGUF` (audio.cpp's conversion of
+the `.nemo`, its own config, NeMo names)?
+
+Matching the release's `model.safetensors` against the `.nemo`'s `model_weights.ckpt` tensor by tensor (shape and
+sums) gives the renaming: `encoder.pre_encode.proj` -> `model.audio_tower.embedder.projection`, `embed_norm` ->
+`input_layer_norm`, `final_norm` -> `layer_norm`, `norm1/2` -> `layer_norm1/2`, `ffn.net.0/3` -> `mlp.fc1/2`,
+`attn.out_proj` -> `self_attn.o_proj`, `sortformer_modules.first_hidden_to_hidden` -> `classifier.dense`,
+`single_hidden_to_spks` -> `classifier.out_proj`, `encoder_proj` -> `model.proj`, `subpixel_upsample` ->
+`model.upsampler.conv`, `learnable_sil_emb` -> `silence_embeds`. `attn.w_qkv` split in thirds equals the release's
+`q_proj`, `k_proj`, `v_proj` exactly (no RoPE permutation), which the encoder fuses anyway. Unused by the release:
+`activity_head`, `hidden_to_spks`, the featurizer's filterbank and window.
+
+audio.cpp's config carries the `.nemo`'s streaming settings (`chunk_len` 264, `fifo_len` 0, no right context, update
+every 264); the transformers release's config chunks offline at 340 / 40 / 40 / 300. The package loads with the
+release's chunking, what the diarizer was checked with; the speaker-cache settings are the same in both.
+
+`/v1/audio/diarization`, q8_0 package against the release (F32 safetensors), CUDA:
+
+```
+76 s, two synthetic voices alternating (Kokoro af_heart / am_adam)   21 vs 21 segments, both speakers, same speaker
+                                                                     on each; 2 edges 10 ms (one frame) apart
+305 s clip (both runs hear one speaker)                              96 vs 96 segments; 5 edges 10 ms apart
+```
+
+The tiny test's first version passed trivially: probing for the fused `qkv_proj` first, the recording backend (which
+reports every name present) recorded the tiny release with a fused matrix too, so both sides were the same file; it
+also passed with q, k and v swapped. The model now probes the release's `q_proj` first, and the test fails when the
+package's thirds are swapped (`[q, v, k]`, `[k, q, v]`).

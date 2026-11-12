@@ -15,6 +15,56 @@ use super::{DEFAULT_THRESHOLD, Diarization, speaker_segments};
 
 const LAYER_NORM_EPS: f64 = 1e-5;
 const UPSAMPLE_KERNEL: usize = 3;
+// the fused [query | key | value] rows a `.nemo` stores, under the release's attention prefix
+const FUSED_QKV: &str = "qkv_proj";
+// audio.cpp's package of the `.nemo` leaves these to the `.nemo`; the transformers release's values (its positions,
+// and the offline chunking around the speaker cache that this diarizer was checked with)
+const RELEASE_POSITIONS: usize = 5000;
+const RELEASE_CHUNK_LENGTH: usize = 340;
+const RELEASE_CHUNK_RIGHT_CONTEXT: usize = 40;
+const RELEASE_FIFO_LENGTH: usize = 40;
+const RELEASE_CACHE_UPDATE_PERIOD: usize = 300;
+// the `.nemo`'s names for the release's tensors (`encoder.layers.N.attn.w_qkv` becomes the fused projection)
+const NEMO_NAMES: [(&str, &str); 14] = [
+    (
+        "encoder.pre_encode.proj.",
+        "model.audio_tower.embedder.projection.",
+    ),
+    ("encoder.embed_norm.", "model.audio_tower.input_layer_norm."),
+    ("encoder.final_norm.", "model.audio_tower.layer_norm."),
+    ("encoder.layers.", "model.audio_tower.layers."),
+    (".norm1.", ".layer_norm1."),
+    (".norm2.", ".layer_norm2."),
+    (".ffn.net.0.", ".mlp.fc1."),
+    (".ffn.net.3.", ".mlp.fc2."),
+    (".attn.out_proj.", ".self_attn.o_proj."),
+    (".attn.w_qkv.", ".self_attn.qkv_proj."),
+    (
+        "sortformer_modules.first_hidden_to_hidden.",
+        "classifier.dense.",
+    ),
+    (
+        "sortformer_modules.single_hidden_to_spks.",
+        "classifier.out_proj.",
+    ),
+    ("sortformer_modules.encoder_proj.", "model.proj."),
+    (
+        "sortformer_modules.subpixel_upsample.",
+        "model.upsampler.conv.",
+    ),
+];
+const NEMO_SILENCE: &str = "sortformer_modules.learnable_sil_emb";
+const RELEASE_SILENCE: &str = "silence_embeds";
+
+/// The transformers release's name for a `.nemo` tensor (audio.cpp's package keeps the `.nemo`'s names).
+pub fn release_name(nemo: &str) -> String {
+    if nemo == NEMO_SILENCE {
+        return RELEASE_SILENCE.to_string();
+    }
+    NEMO_NAMES
+        .iter()
+        .fold(nemo.to_string(), |name, (from, to)| name.replace(from, to))
+}
 
 fn msg(e: impl std::fmt::Display) -> Error {
     Error::Msg(e.to_string())
@@ -81,6 +131,80 @@ struct FeatureConfig {
 #[derive(Debug, Clone, inference_json::FromJson)]
 struct ProcessorConfig {
     feature_extractor: FeatureConfig,
+}
+
+#[derive(Debug, Clone, inference_json::FromJson)]
+struct AudioCppEncoder {
+    feat_in: usize,
+    hidden_size: usize,
+    intermediate_size: usize,
+    num_attention_heads: usize,
+    num_hidden_layers: usize,
+    subsampling_factor: usize,
+    rope_theta: f64,
+}
+
+#[derive(Debug, Clone, inference_json::FromJson)]
+struct AudioCppHead {
+    hidden_size: usize,
+}
+
+#[derive(Debug, Clone, inference_json::FromJson)]
+struct AudioCppStreaming {
+    spkcache_len: usize,
+    spkcache_sil_frames_per_spk: usize,
+    pred_score_threshold: f32,
+    scores_boost_latest: f32,
+    min_pos_scores_rate: f64,
+    strong_boost_rate: f64,
+    weak_boost_rate: f64,
+}
+
+// audio.cpp's own `config.json` for its package of the `.nemo` (`model_type = nemotron_3_diar`)
+#[derive(Debug, Clone, inference_json::FromJson)]
+struct AudioCppConfig {
+    num_speakers: usize,
+    encoder: AudioCppEncoder,
+    head: AudioCppHead,
+    streaming: AudioCppStreaming,
+}
+
+impl From<AudioCppConfig> for Nemotron3Config {
+    fn from(c: AudioCppConfig) -> Self {
+        let (e, s) = (c.encoder, c.streaming);
+        Self {
+            audio_config: AudioConfig {
+                hidden_size: e.hidden_size,
+                intermediate_size: e.intermediate_size,
+                num_hidden_layers: e.num_hidden_layers,
+                num_attention_heads: e.num_attention_heads,
+                num_mel_bins: e.feat_in,
+                max_position_embeddings: RELEASE_POSITIONS,
+                subsampling_factor: e.subsampling_factor,
+                rope_parameters: RopeParameters {
+                    rope_theta: e.rope_theta,
+                },
+            },
+            head_config: HeadConfig {
+                audio_hidden_size: e.hidden_size,
+                hidden_size: c.head.hidden_size,
+                num_speakers: c.num_speakers,
+            },
+            streaming_config: StreamingConfig {
+                speaker_cache_length: s.spkcache_len,
+                speaker_cache_silence_frames_per_speaker: s.spkcache_sil_frames_per_spk,
+                prediction_score_threshold: s.pred_score_threshold,
+                latest_frames_score_boost: s.scores_boost_latest,
+                min_positive_scores_rate: s.min_pos_scores_rate,
+                strong_boost_rate: s.strong_boost_rate,
+                weak_boost_rate: s.weak_boost_rate,
+            },
+            chunk_length: RELEASE_CHUNK_LENGTH,
+            chunk_right_context: RELEASE_CHUNK_RIGHT_CONTEXT,
+            fifo_length: RELEASE_FIFO_LENGTH,
+            speaker_cache_update_period: RELEASE_CACHE_UPDATE_PERIOD,
+        }
+    }
 }
 
 /// The files of a Nemotron-3 Diarization checkpoint.
@@ -210,10 +334,14 @@ impl Layer {
             None => {
                 let weight = |name: &str| attn.pp(name).get((h, h), "weight");
                 // one [query | key | value] product: three of 512 columns ran a fifth slower a FLOP than one of 1536
-                let qkv = Tensor::cat(
-                    &[weight("q_proj")?, weight("k_proj")?, weight("v_proj")?],
-                    0,
-                )?;
+                let qkv = if attn.pp("q_proj").contains_tensor("weight") {
+                    Tensor::cat(
+                        &[weight("q_proj")?, weight("k_proj")?, weight("v_proj")?],
+                        0,
+                    )?
+                } else {
+                    attn.pp(FUSED_QKV).get((3 * h, h), "weight")?
+                };
                 let dense = |linear: Result<Linear>| linear.map(NemoProjection::Dense);
                 NemoLayerProjections {
                     qkv: NemoQkv::Fused(NemoProjection::Dense(Linear::new(qkv, None))),
@@ -473,6 +601,14 @@ impl Nemotron3Diarizer {
         let config: Nemotron3Config = read_json(config)?;
         let processor: ProcessorConfig = read_json(processor_config)?;
         Self::new(config, &processor.feature_extractor, vb)
+    }
+
+    /// audio.cpp's package of the `.nemo`: its own `config` and `processor_config`, its weights from `vb` under the
+    /// release's names ([`release_name`]); the chunking around the speaker cache is the release's.
+    pub fn from_audiocpp(config: &Path, processor_config: &Path, vb: VarBuilder) -> Result<Self> {
+        let config: AudioCppConfig = read_json(config)?;
+        let processor: ProcessorConfig = read_json(processor_config)?;
+        Self::new(config.into(), &processor.feature_extractor, vb)
     }
 
     fn new(config: Nemotron3Config, fe: &FeatureConfig, vb: VarBuilder) -> Result<Self> {
