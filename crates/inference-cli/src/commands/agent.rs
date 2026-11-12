@@ -10,9 +10,9 @@ use anyhow::{Context, Result, bail};
 use inference_api::engine_chat::{ReasoningEffort, resolve_reasoning_controls};
 use inference_api::{Engine, initialize_logging};
 use inference_coder::{
-    Agent, AgentConfig, AgentUi, Approval, ChatBackend, EngineBackend, HttpBackend, Interrupt,
-    PermissionMode, Permissions, Session, ToolCall, ToolKind, ToolOutcome, Turn, TurnEnd,
-    default_tools, prompt::system_prompt,
+    Agent, AgentConfig, AgentUi, Approval, COMPACT_COMMAND, ChatBackend, Compaction, EngineBackend,
+    HttpBackend, Interrupt, PermissionMode, Permissions, Session, ToolCall, ToolKind, ToolOutcome,
+    Turn, TurnEnd, default_tools, prompt::system_prompt,
 };
 use rustyline::{DefaultEditor, error::ReadlineError};
 use serde_json::{Map, Value, json};
@@ -43,6 +43,7 @@ const HELP: &str = "\
 /resume <id>       switch to a session
 /mode <mode>       ask, auto or read-only
 /context           how full the context is
+/compact           fold the history before the latest prompt into a summary (also done on its own near the limit)
 /exit              quit (also Ctrl-D)
 Ctrl-C stops the model or the running tool; a second one quits.";
 
@@ -186,6 +187,12 @@ async fn headless(agent: &mut Agent, prompt: &str) -> Result<()> {
     let handler = interrupt.clone();
     ctrlc::set_handler(move || handler.trigger()).context("installing the Ctrl-C handler")?;
     let mut ui = Headless;
+    if prompt.trim() == COMPACT_COMMAND {
+        if !agent.compact(&mut ui).await? {
+            eprintln!("nothing before the latest prompt to fold");
+        }
+        return Ok(());
+    }
     let end = agent.send(prompt, &mut ui, &interrupt).await?;
     println!();
     match end {
@@ -230,6 +237,17 @@ impl AgentUi for Headless {
             summarize(call, args)
         );
         Box::pin(async { Approval::Deny })
+    }
+
+    fn compacting(&mut self, end: usize) {
+        eprintln!("* summarizing the first {} messages", end - 1);
+    }
+
+    fn compacted(&mut self, compaction: &Compaction) {
+        eprintln!(
+            "* the model now sees a summary and the messages from {} on",
+            compaction.start
+        );
     }
 }
 
@@ -342,6 +360,19 @@ impl AgentUi for Repl {
             self.last_usage = turn.usage.clone();
         }
     }
+
+    fn compacting(&mut self, end: usize) {
+        self.finish_block(false);
+        println!("{DIM}summarizing the first {} messages...{RESET}", end - 1);
+    }
+
+    fn compacted(&mut self, compaction: &Compaction) {
+        println!(
+            "{DIM}the model now sees a summary and the messages from {} on{RESET}",
+            compaction.start
+        );
+        self.last_usage = None;
+    }
 }
 
 fn print_approval_preview(call: &ToolCall, args: &Value) {
@@ -416,6 +447,12 @@ fn print_context(agent: &Agent, usage: Option<&Value>) {
         agent.session.id,
         agent.session.messages.len()
     );
+    if let Some(compaction) = &agent.session.compaction {
+        println!(
+            "messages before {} are summarized for the model",
+            compaction.start
+        );
+    }
     if let Some(usage) = usage {
         println!("context: {} tokens", usage["total_tokens"]);
     }
@@ -527,6 +564,14 @@ async fn repl(mut agent: Agent, sessions_dir: &Path) -> Result<()> {
                     Err(error) => println!("{RED}{error}{RESET}"),
                 },
                 "context" => print_context(&agent, ui.last_usage.as_ref()),
+                name if Some(name) == COMPACT_COMMAND.strip_prefix('/') => match agent
+                    .compact(&mut ui)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => println!("{DIM}nothing before the latest prompt to fold{RESET}"),
+                    Err(error) => println!("{RED}error: {error:#}{RESET}"),
+                },
                 _ => println!("{RED}unknown command /{name} (try /help){RESET}"),
             }
             continue;

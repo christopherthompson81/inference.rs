@@ -7,6 +7,9 @@ use futures::{future::BoxFuture, stream::BoxStream};
 use serde_json::Value;
 
 const CHAT_PATH: &str = "/v1/chat/completions";
+const MODELS_PATH: &str = "/v1/models";
+// the name requests use for the server's default model
+const DEFAULT_MODEL: &str = "default";
 const SSE_DATA: &str = "data:";
 const SSE_DONE: &str = "[DONE]";
 // a turn's prefill can take minutes at long context; the stream itself has no deadline
@@ -18,6 +21,27 @@ pub trait ChatBackend: Send + Sync {
 
     /// What the model is, for the session header and the banner.
     fn describe(&self) -> String;
+
+    /// The most tokens a prompt to `model` may hold, where the backend can tell.
+    fn context_tokens<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Option<usize>> {
+        let _ = model;
+        Box::pin(async { None })
+    }
+}
+
+/// `model`'s `max_model_len` in a `/v1/models` listing, `default` naming the listing's default model.
+pub fn listed_context_tokens(models: &Value, model: &str) -> Option<usize> {
+    let models = models["data"].as_array()?;
+    models
+        .iter()
+        .find(|m| m["id"] == model)
+        .or_else(|| {
+            (model == DEFAULT_MODEL)
+                .then(|| models.iter().find(|m| m["default"] == true))
+                .flatten()
+        })
+        .and_then(|m| m["max_model_len"].as_u64())
+        .and_then(|tokens| usize::try_from(tokens).ok())
 }
 
 /// The engine in this process.
@@ -64,6 +88,13 @@ impl ChatBackend for EngineBackend {
 
     fn describe(&self) -> String {
         self.model.clone()
+    }
+
+    fn context_tokens<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Option<usize>> {
+        Box::pin(async move {
+            let models = serde_json::to_value(self.engine.models().ok()?).ok()?;
+            listed_context_tokens(&models, model)
+        })
     }
 }
 
@@ -149,6 +180,19 @@ impl ChatBackend for HttpBackend {
     fn describe(&self) -> String {
         format!("{} at {}", self.model, self.url.trim_end_matches(CHAT_PATH))
     }
+
+    // the server names the model itself, whatever the request says
+    fn context_tokens<'a>(&'a self, _model: &'a str) -> BoxFuture<'a, Option<usize>> {
+        Box::pin(async move {
+            let url = format!("{}{MODELS_PATH}", self.url.trim_end_matches(CHAT_PATH));
+            let mut get = self.client.get(&url);
+            if let Some(key) = &self.api_key {
+                get = get.bearer_auth(key);
+            }
+            let models = get.send().await.ok()?.json::<Value>().await.ok()?;
+            listed_context_tokens(&models, &self.model)
+        })
+    }
 }
 
 enum SseEvent {
@@ -188,7 +232,18 @@ fn parse_sse_event(event: &str) -> SseEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{SseEvent, parse_sse_event};
+    use super::{SseEvent, listed_context_tokens, parse_sse_event};
+    use serde_json::json;
+
+    #[test]
+    fn a_listing_gives_a_models_context_and_the_defaults() {
+        let models = json!({"data": [{"id": "chat", "max_model_len": 262_144, "default": true},
+            {"id": "small", "max_model_len": 4096}, {"id": "embed"}]});
+        assert_eq!(listed_context_tokens(&models, "small"), Some(4096));
+        assert_eq!(listed_context_tokens(&models, "default"), Some(262_144));
+        assert_eq!(listed_context_tokens(&models, "embed"), None);
+        assert_eq!(listed_context_tokens(&models, "missing"), None);
+    }
 
     #[test]
     fn sse_events_parse_into_chunks_and_the_end() {

@@ -18,9 +18,9 @@ use axum::response::{IntoResponse, Response};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_coder::{
-    Agent, AgentConfig, AgentUi, Approval, Changes, ChatBackend, DEFAULT_MAX_REPLY_TOKENS,
-    DEFAULT_MAX_ROUNDS, EngineBackend, Interrupt, PermissionMode, Permissions, Session, ToolCall,
-    ToolKind, ToolOutcome, Turn, TurnEnd,
+    Agent, AgentConfig, AgentUi, Approval, COMPACT_COMMAND, Changes, ChatBackend, Compaction,
+    DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS, EngineBackend, Interrupt, PermissionMode,
+    Permissions, Session, ToolCall, ToolKind, ToolOutcome, Turn, TurnEnd,
     activity::{Run, RunTracker},
     default_tools,
     prompt::system_prompt,
@@ -293,6 +293,8 @@ pub(crate) async fn open_session(
         "project": session.root,
         // the system prompt is the harness's, not part of the conversation shown
         "messages": session.messages.iter().skip(1).collect::<Vec<_>>(),
+        // where the model's view begins past a summary, counted as `messages` is (without the system prompt)
+        "compacted_before": session.compaction.as_ref().map(|c| c.start - 1),
         "labels": *live.labels.lock().unwrap(),
     }))
     .into_response()
@@ -458,18 +460,27 @@ pub(crate) async fn send(
             labeller,
             runs: RunTracker::default(),
         };
-        let result = agent.send(&request.prompt, &mut ui, &live.interrupt).await;
-        if let Some(run) = ui.runs.finish() {
-            ui.label(run);
-        }
-        let event = match result {
-            Ok(end) => json!({"type": "done", "end": match end {
-                TurnEnd::Done => "done",
-                TurnEnd::Interrupted => "interrupted",
-                TurnEnd::RoundLimit => "round_limit",
-                TurnEnd::ReplyLimit => "reply_limit",
-            }}),
-            Err(error) => json!({"type": "error", "message": format!("{error:#}")}),
+        let event = if request.prompt.trim() == COMPACT_COMMAND {
+            match agent.compact(&mut ui).await {
+                Ok(folded) => {
+                    json!({"type": "done", "end": if folded { "compacted" } else { "nothing_to_compact" }})
+                }
+                Err(error) => json!({"type": "error", "message": format!("{error:#}")}),
+            }
+        } else {
+            let result = agent.send(&request.prompt, &mut ui, &live.interrupt).await;
+            if let Some(run) = ui.runs.finish() {
+                ui.label(run);
+            }
+            match result {
+                Ok(end) => json!({"type": "done", "end": match end {
+                    TurnEnd::Done => "done",
+                    TurnEnd::Interrupted => "interrupted",
+                    TurnEnd::RoundLimit => "round_limit",
+                    TurnEnd::ReplyLimit => "reply_limit",
+                }}),
+                Err(error) => json!({"type": "error", "message": format!("{error:#}")}),
+            }
         };
         let _ = events.send(event);
     });
@@ -657,6 +668,14 @@ impl AgentUi for WebUi {
         if let Some(usage) = &turn.usage {
             self.emit(json!({"type": "usage", "usage": usage}));
         }
+    }
+
+    fn compacting(&mut self, end: usize) {
+        self.emit(json!({"type": "compacting", "end": end}));
+    }
+
+    fn compacted(&mut self, compaction: &Compaction) {
+        self.emit(json!({"type": "compacted", "start": compaction.start}));
     }
 }
 

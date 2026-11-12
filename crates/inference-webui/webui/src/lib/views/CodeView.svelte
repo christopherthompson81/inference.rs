@@ -31,6 +31,7 @@
   const CLOCK_TICK_MS = 1000;
   // an activity line names this many files before it counts them instead
   const LABEL_FILES = 2;
+  const COMPACTED_NOTICE = "The earlier history was summarized: the model now sees the summary and the messages after this point";
   // the agent's own words for a call the user turned down
   const DECLINED = "the user declined this call";
   const MODES: { id: PermissionMode; label: string }[] = [
@@ -129,9 +130,10 @@
     return `${name}(${cut(detail ?? JSON.stringify(args), SUMMARY_CHARS)})`;
   }
 
-  function fromMessages(messages: CodeMessage[]): Item[] {
+  function fromMessages(messages: CodeMessage[], compactedBefore: number | null = null): Item[] {
     const out: Item[] = [];
-    for (const message of messages) {
+    for (const [index, message] of messages.entries()) {
+      if (index === compactedBefore) out.push({ kind: "notice", text: COMPACTED_NOTICE });
       if (message.role === "user") {
         out.push({ kind: "user", text: message.content ?? "" });
       } else if (message.role === "assistant") {
@@ -317,7 +319,16 @@
       case "label":
         labels[event.id] = event.label;
         break;
+      case "compacting":
+        items.push({ kind: "notice", text: "Summarizing the earlier history to fit the model's context..." });
+        break;
+      case "compacted":
+        items.push({ kind: "notice", text: COMPACTED_NOTICE });
+        usage = null;
+        break;
       case "done":
+        if (event.end === "nothing_to_compact")
+          items.push({ kind: "notice", text: "Nothing before the latest prompt to summarize" });
         if (event.end === "interrupted") items.push({ kind: "notice", text: "Interrupted" });
         if (event.end === "round_limit") items.push({ kind: "notice", text: "Stopped at the round limit" });
         if (event.end === "reply_limit")
@@ -416,7 +427,7 @@
       if (session.session_id !== sessionId) resetFiles();
       sessionId = session.session_id;
       projectPath = session.project;
-      items = fromMessages(session.messages);
+      items = fromMessages(session.messages, session.compacted_before);
       labels = session.labels ?? {};
       usage = null;
       agentMs = 0;
@@ -776,7 +787,7 @@
             <textarea
               class="min-w-0 flex-1 resize-none rounded-xl border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm outline-none focus:border-blue-400 focus:bg-white focus:ring-1 focus:ring-blue-400 dark:border-gray-600 dark:bg-gray-800 dark:focus:bg-gray-900"
               rows="2"
-              placeholder="Describe a change (Enter sends, Shift+Enter for a new line)"
+              placeholder={`Describe a change (Enter sends, Shift+Enter for a new line; ${code.COMPACT_COMMAND} summarizes the history)`}
               bind:value={prompt}
               onkeydown={onKeydown}
             ></textarea>
