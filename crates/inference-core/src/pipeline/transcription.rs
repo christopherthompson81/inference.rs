@@ -21,6 +21,11 @@ use hf_hub::{Repo, RepoType};
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
 use inference_audio::mel::StreamResampler;
+#[cfg(feature = "models-qwen")]
+use inference_models_qwen::vibevoice_asr::streaming::{
+    StreamingConfig, StreamingFrames, StreamingSession as VibeVoiceSession, StreamingTranscript,
+    VibeVoiceStreaming,
+};
 use inference_models_speech::cohere_asr::{self, CohereAsr, CohereAsrFiles};
 use inference_models_speech::diarization::{
     DiarizationOptions, Diarizer, Nemotron3Diarizer, Nemotron3Files, SortformerDiarizer,
@@ -54,6 +59,9 @@ const WEIGHTS_INDEX: &str = "model.safetensors.index.json";
 const GENERATION_CONFIG: &str = "generation_config.json";
 const GGUF_EXTENSION: &str = "gguf";
 const NEMOTRON3_DIARIZATION_TYPE: &str = "nemotron3_diarization";
+// the streaming checkpoints' class in their `config.json`, read without the model family built in
+const VIBEVOICE_STREAMING_ARCHITECTURE: &str = "VibeVoiceForASRStreamingTraining";
+const PREPROCESSOR_CONFIG: &str = "preprocessor_config.json";
 // the engine's sequence bookkeeping wants a length; one-shot audio requests never reach it
 const METADATA_MAX_SEQ_LEN: usize = 1024;
 // an open session holds its caches (about 15 MB for a 0.6B model) until it finishes, closes or idles this long
@@ -69,6 +77,9 @@ pub enum TranscriptionLoaderType {
     Whisper,
     #[serde(rename = "cohere_asr")]
     CohereAsr,
+    /// VibeVoice-ASR Streaming, from Microsoft's layout.
+    #[serde(rename = "vibevoice_streaming")]
+    VibeVoiceStreaming,
 }
 
 impl FromStr for TranscriptionLoaderType {
@@ -78,8 +89,10 @@ impl FromStr for TranscriptionLoaderType {
             "parakeet" => Ok(Self::Parakeet),
             "whisper" => Ok(Self::Whisper),
             "cohere_asr" => Ok(Self::CohereAsr),
+            "vibevoice_streaming" => Ok(Self::VibeVoiceStreaming),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `parakeet`, `whisper`, `cohere_asr`."
+                "Unknown architecture `{a}`. Possible architectures: `parakeet`, `whisper`, `cohere_asr`, \
+                 `vibevoice_streaming`."
             )),
         }
     }
@@ -93,6 +106,9 @@ impl TranscriptionLoaderType {
         }
         if cohere_asr::is_cohere_asr_config(config) {
             return Some(Self::CohereAsr);
+        }
+        if config.contains(VIBEVOICE_STREAMING_ARCHITECTURE) {
+            return Some(Self::VibeVoiceStreaming);
         }
         let value: serde_json::Value = serde_json::from_str(config).ok()?;
         let model_type = value.get("model_type")?.as_str()?;
@@ -109,8 +125,18 @@ enum AsrCheckpoint {
     Transformers(ParakeetFiles),
     Whisper(WhisperFiles),
     CohereAsr(CohereAsrFiles),
+    VibeVoiceStreaming(VibeVoiceStreamingFiles),
     Nemo(PathBuf),
     Gguf(PathBuf),
+}
+
+/// A streaming VibeVoice checkpoint's files.
+#[derive(Clone, Debug)]
+pub struct VibeVoiceStreamingFiles {
+    config: PathBuf,
+    preprocessor_config: PathBuf,
+    tokenizer: PathBuf,
+    weights: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +152,7 @@ impl ModelPaths for TranscriptionModelPaths {
             AsrCheckpoint::Transformers(files) => &files.config,
             AsrCheckpoint::Whisper(files) => &files.config,
             AsrCheckpoint::CohereAsr(files) => &files.config,
+            AsrCheckpoint::VibeVoiceStreaming(files) => &files.config,
             AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => file,
         }
     }
@@ -134,6 +161,7 @@ impl ModelPaths for TranscriptionModelPaths {
             AsrCheckpoint::Transformers(files) => &files.tokenizer,
             AsrCheckpoint::Whisper(files) => &files.tokenizer,
             AsrCheckpoint::CohereAsr(files) => &files.tokenizer,
+            AsrCheckpoint::VibeVoiceStreaming(files) => &files.tokenizer,
             AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => file,
         }
     }
@@ -142,6 +170,7 @@ impl ModelPaths for TranscriptionModelPaths {
             AsrCheckpoint::Transformers(files) => &files.weights,
             AsrCheckpoint::Whisper(files) => &files.weights,
             AsrCheckpoint::CohereAsr(files) => &files.weights,
+            AsrCheckpoint::VibeVoiceStreaming(files) => &files.weights,
             AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => std::slice::from_ref(file),
         }
     }
@@ -295,6 +324,8 @@ enum AudioModel {
     },
     Whisper(Box<Whisper>),
     CohereAsr(Box<CohereAsr>),
+    #[cfg(feature = "models-qwen")]
+    VibeVoiceStreaming(Box<VibeVoiceStreaming>),
     Silero(SileroVad),
     Diarizer(Diarizer),
     LanguageId(Box<VoxLingua>),
@@ -306,6 +337,8 @@ impl AudioModel {
             Self::Parakeet { asr, .. } => asr.device(),
             Self::Whisper(asr) => asr.device(),
             Self::CohereAsr(asr) => asr.device(),
+            #[cfg(feature = "models-qwen")]
+            Self::VibeVoiceStreaming(asr) => asr.device(),
             Self::Silero(vad) => vad.device(),
             Self::Diarizer(diarizer) => diarizer.device(),
             Self::LanguageId(lid) => lid.device(),
@@ -323,9 +356,102 @@ pub struct TranscriptionPipeline {
 
 // a streamed transcription between its client's requests
 struct StreamSession {
-    stream: ParakeetStream,
+    stream: StreamState,
     resampler: StreamResampler,
     last_used: Instant,
+}
+
+// a session's decoding state, on the model that opened it
+enum StreamState {
+    Parakeet(Box<ParakeetStream>),
+    #[cfg(feature = "models-qwen")]
+    VibeVoice(Box<VibeVoiceSession>),
+}
+
+// a recogniser that transcribes audio as it arrives
+#[derive(Clone, Copy)]
+enum Live<'a> {
+    Parakeet(&'a Parakeet),
+    #[cfg(feature = "models-qwen")]
+    VibeVoice(&'a VibeVoiceStreaming),
+}
+
+impl Live<'_> {
+    fn sample_rate(self) -> u32 {
+        match self {
+            Self::Parakeet(asr) => asr.sample_rate(),
+            #[cfg(feature = "models-qwen")]
+            Self::VibeVoice(asr) => asr.sample_rate(),
+        }
+    }
+
+    fn open(
+        self,
+        options: &inference_models_speech::TranscriptionOptions,
+    ) -> std::result::Result<StreamState, String> {
+        match self {
+            Self::Parakeet(asr) if !asr.can_stream() => Err(
+                "this checkpoint transcribes whole recordings; only a cache-aware streaming one (Nemotron streaming ASR) or VibeVoice-ASR Streaming streams"
+                    .into(),
+            ),
+            Self::Parakeet(asr) => Ok(StreamState::Parakeet(Box::new(
+                asr.stream(options).map_err(|e| e.to_string())?,
+            ))),
+            #[cfg(feature = "models-qwen")]
+            Self::VibeVoice(asr) => Ok(StreamState::VibeVoice(Box::new(
+                asr.start(options.prompt.as_deref())
+                    .map_err(|e| e.to_string())?,
+            ))),
+        }
+    }
+
+    // the text `pcm` (at the model's rate) adds
+    fn push(self, state: &mut StreamState, pcm: &[f32]) -> anyhow::Result<String> {
+        match (self, state) {
+            (Self::Parakeet(asr), StreamState::Parakeet(stream)) => {
+                Ok(asr.stream_push(stream, pcm)?)
+            }
+            #[cfg(feature = "models-qwen")]
+            (Self::VibeVoice(asr), StreamState::VibeVoice(session)) => Ok(asr
+                .push(session, pcm)?
+                .into_iter()
+                .map(|window| window.text)
+                .collect()),
+            #[allow(unreachable_patterns)]
+            _ => anyhow::bail!("a session opened on another model"),
+        }
+    }
+
+    // the last text and the session's whole transcription
+    fn finish(
+        self,
+        state: StreamState,
+    ) -> anyhow::Result<(String, inference_models_speech::Transcription)> {
+        match (self, state) {
+            (Self::Parakeet(asr), StreamState::Parakeet(stream)) => Ok(asr.stream_finish(*stream)?),
+            #[cfg(feature = "models-qwen")]
+            (Self::VibeVoice(asr), StreamState::VibeVoice(session)) => {
+                let (windows, whole) = asr.finish(*session)?;
+                let last = windows.into_iter().map(|window| window.text).collect();
+                Ok((last, streamed_transcription(whole)))
+            }
+            #[allow(unreachable_patterns)]
+            _ => anyhow::bail!("a session opened on another model"),
+        }
+    }
+}
+
+// a streamed transcript as the engine's transcription: its turns as the segments, no word times
+#[cfg(feature = "models-qwen")]
+fn streamed_transcription(whole: StreamingTranscript) -> inference_models_speech::Transcription {
+    inference_models_speech::Transcription {
+        text: whole.text,
+        tokens: Vec::new(),
+        words: Vec::new(),
+        duration: whole.duration,
+        language: None,
+        segments: whole.segments,
+    }
 }
 
 pub struct TranscriptionLoader {
@@ -352,6 +478,24 @@ impl DiarizationLoaderType {
         (value.get("model_type")?.as_str()? == NEMOTRON3_DIARIZATION_TYPE)
             .then_some(Self::Nemotron3)
     }
+}
+
+// a checkpoint's `model.safetensors`, else every shard its index names
+fn checkpoint_weights(get: &dyn Fn(&str) -> Result<PathBuf>) -> Result<Vec<PathBuf>> {
+    if let Ok(weights) = get(WEIGHTS) {
+        return Ok(vec![weights]);
+    }
+    let index: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(get(WEIGHTS_INDEX)?)?)?;
+    let mut shards = index["weight_map"]
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("`{WEIGHTS_INDEX}` has no `weight_map`"))?
+        .values()
+        .filter_map(|shard| shard.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    shards.sort();
+    shards.dedup();
+    shards.iter().map(|shard| get(shard)).collect()
 }
 
 /// Loads a speaker diarization model: Nemotron-3 from the transformers layout, or a Streaming Sortformer `.nemo`.
@@ -720,26 +864,20 @@ impl Loader for TranscriptionLoader {
             };
             return self.load_model_from_path(&paths, options);
         }
-        if arch == Some(TranscriptionLoaderType::Whisper) {
-            let weights = match get(WEIGHTS) {
-                Ok(weights) => vec![weights],
-                Err(_) => {
-                    let index: serde_json::Value =
-                        serde_json::from_str(&std::fs::read_to_string(get(WEIGHTS_INDEX)?)?)?;
-                    let mut shards = index["weight_map"]
-                        .as_object()
-                        .ok_or_else(|| anyhow::anyhow!("`{WEIGHTS_INDEX}` has no `weight_map`"))?
-                        .values()
-                        .filter_map(|shard| shard.as_str().map(str::to_string))
-                        .collect::<Vec<_>>();
-                    shards.sort();
-                    shards.dedup();
-                    shards
-                        .iter()
-                        .map(|shard| get(shard))
-                        .collect::<Result<Vec<_>>>()?
-                }
+        if arch == Some(TranscriptionLoaderType::VibeVoiceStreaming) {
+            let paths = TranscriptionModelPaths {
+                checkpoint: AsrCheckpoint::VibeVoiceStreaming(VibeVoiceStreamingFiles {
+                    config: get(CONFIG)?,
+                    preprocessor_config: get(PREPROCESSOR_CONFIG)?,
+                    tokenizer: get(TOKENIZER)?,
+                    weights: checkpoint_weights(&get)?,
+                }),
+                vad: None,
             };
+            return self.load_model_from_path(&paths, options);
+        }
+        if arch == Some(TranscriptionLoaderType::Whisper) {
+            let weights = checkpoint_weights(&get)?;
             let paths = TranscriptionModelPaths {
                 checkpoint: AsrCheckpoint::Whisper(WhisperFiles {
                     config: get(CONFIG)?,
@@ -842,6 +980,8 @@ impl Loader for TranscriptionLoader {
                 files.config.display()
             )
         }
+        // a Qwen2 decoder keeps its release dtype (bf16 where the device takes it), not the encoders' f16
+        let options_dtype = dtype.try_into_dtype(&[device])?;
         let dtype = audio_dtype(dtype, device)?;
         let vad = match (&paths.vad, self.vad_model_id.as_deref()) {
             (Some(file), _) => Some(read_silero(file, device)?),
@@ -858,6 +998,9 @@ impl Loader for TranscriptionLoader {
             AsrCheckpoint::CohereAsr(files) => Some(AudioModel::CohereAsr(Box::new(
                 CohereAsr::load(files, device, dtype)?,
             ))),
+            AsrCheckpoint::VibeVoiceStreaming(files) => {
+                Some(load_vibevoice_streaming(files, device, options_dtype)?)
+            }
             _ => None,
         };
         if let Some(model) = decoder {
@@ -868,8 +1011,10 @@ impl Loader for TranscriptionLoader {
             )?)));
         }
         let asr = match &paths.checkpoint {
-            AsrCheckpoint::Whisper(_) | AsrCheckpoint::CohereAsr(_) => {
-                unreachable!("an encoder-decoder checkpoint loaded above")
+            AsrCheckpoint::Whisper(_)
+            | AsrCheckpoint::CohereAsr(_)
+            | AsrCheckpoint::VibeVoiceStreaming(_) => {
+                unreachable!("a decoder checkpoint loaded above")
             }
             AsrCheckpoint::Transformers(files) => Parakeet::load(files, device, dtype)?,
             AsrCheckpoint::Nemo(nemo) => Parakeet::load_nemo(nemo, device, dtype)?,
@@ -893,6 +1038,40 @@ impl Loader for TranscriptionLoader {
     fn get_kind(&self) -> ModelKind {
         ModelKind::Normal
     }
+}
+
+#[cfg(feature = "models-qwen")]
+fn load_vibevoice_streaming(
+    files: &VibeVoiceStreamingFiles,
+    device: &Device,
+    dtype: inference_tensor::DType,
+) -> Result<AudioModel> {
+    let read = |path: &PathBuf| std::fs::read_to_string(path);
+    let config: StreamingConfig = serde_json::from_str(&read(&files.config)?)?;
+    let frames: StreamingFrames = serde_json::from_str(&read(&files.preprocessor_config)?)?;
+    let tokenizer = Tokenizer::from_file(&files.tokenizer).map_err(anyhow::Error::msg)?;
+    // SAFETY: the weights are read-only for the model's life; a file changed underneath it is undefined
+    let vb = unsafe {
+        inference_quant::ShardedSafeTensors::sharded(
+            &files.weights,
+            dtype,
+            device,
+            None,
+            Arc::new(|_| true),
+        )?
+    };
+    Ok(AudioModel::VibeVoiceStreaming(Box::new(
+        VibeVoiceStreaming::new(&config, &frames, tokenizer, vb)?,
+    )))
+}
+
+#[cfg(not(feature = "models-qwen"))]
+fn load_vibevoice_streaming(
+    _files: &VibeVoiceStreamingFiles,
+    _device: &Device,
+    _dtype: inference_tensor::DType,
+) -> Result<AudioModel> {
+    anyhow::bail!("VibeVoice-ASR Streaming needs the `models-qwen` feature")
 }
 
 // `auto` is f16 where it would be bf16 on CUDA, and on a discrete Vulkan GPU with matrix cores: activations half the
@@ -928,6 +1107,8 @@ impl TranscriptionPipeline {
             AudioModel::Parakeet { .. } | AudioModel::Whisper(_) | AudioModel::CohereAsr(_) => {
                 vec![SupportedModality::Text]
             }
+            #[cfg(feature = "models-qwen")]
+            AudioModel::VibeVoiceStreaming(_) => vec![SupportedModality::Text],
             AudioModel::Silero(_) | AudioModel::Diarizer(_) | AudioModel::LanguageId(_) => {
                 Vec::new()
             }
@@ -983,7 +1164,7 @@ impl TranscriptionPipeline {
 
 // one op of a streamed session on recogniser `asr`; a session whose push fails is dropped, as its state may have moved
 fn stream_step(
-    asr: &Parakeet,
+    asr: Live<'_>,
     sessions: &mut HashMap<u64, StreamSession>,
     request: &TranscriptionStreamRequest,
 ) -> std::result::Result<TranscriptionStreamUpdate, String> {
@@ -999,19 +1180,13 @@ fn stream_step(
             options,
             sample_rate,
         } => {
-            if !asr.can_stream() {
-                return Err(
-                    "this checkpoint transcribes whole recordings; only a cache-aware streaming one (Nemotron streaming ASR) streams"
-                        .into(),
-                );
-            }
             if sessions.len() >= MAX_STREAM_SESSIONS {
                 return Err(format!(
                     "{MAX_STREAM_SESSIONS} streamed transcriptions are open on this model; finish or close one first"
                 ));
             }
             let session = StreamSession {
-                stream: asr.stream(options).map_err(|e| e.to_string())?,
+                stream: asr.open(options)?,
                 resampler: StreamResampler::new(*sample_rate, asr.sample_rate())
                     .map_err(|e| e.to_string())?,
                 last_used: Instant::now(),
@@ -1025,7 +1200,7 @@ fn stream_step(
             let delta = session
                 .resampler
                 .push(pcm)
-                .and_then(|pcm| Ok(asr.stream_push(&mut session.stream, &pcm)?));
+                .and_then(|pcm| asr.push(&mut session.stream, &pcm));
             if delta.is_err() {
                 sessions.remove(&id);
             }
@@ -1035,11 +1210,9 @@ fn stream_step(
             let mut session = sessions.remove(&id).ok_or_else(|| unknown_session(id))?;
             let tail = session.resampler.finish().map_err(|e| e.to_string())?;
             let mut delta = asr
-                .stream_push(&mut session.stream, &tail)
+                .push(&mut session.stream, &tail)
                 .map_err(|e| e.to_string())?;
-            let (last, transcription) = asr
-                .stream_finish(session.stream)
-                .map_err(|e| e.to_string())?;
+            let (last, transcription) = asr.finish(session.stream).map_err(|e| e.to_string())?;
             delta.push_str(&last);
             Ok(update(delta, Some(transcription)))
         }
@@ -1139,7 +1312,8 @@ impl Pipeline for TranscriptionPipeline {
                     .zip(&progress)
                     .map(|((input, request), progress)| match input {
                         AudioRequest::Stream(stream) => {
-                            stream_step(asr, sessions, stream).map(TranscriptionOutcome::Stream)
+                            stream_step(Live::Parakeet(asr), sessions, stream)
+                                .map(TranscriptionOutcome::Stream)
                         }
                         AudioRequest::Audio(_) if request.translate => {
                             Err("Parakeet transcribes; it does not translate".to_string())
@@ -1186,6 +1360,31 @@ impl Pipeline for TranscriptionPipeline {
                             .transcribe(&audio.mono(), audio.sample_rate, request)
                             .map(TranscriptionOutcome::Whole)
                             .map_err(|e| e.to_string()),
+                    })
+                    .collect(),
+            },
+            #[cfg(feature = "models-qwen")]
+            AudioModel::VibeVoiceStreaming(asr) => ForwardInputsResult::Transcription {
+                transcripts: audios
+                    .iter()
+                    .zip(&transcription)
+                    .map(|(input, request)| match input {
+                        AudioRequest::Stream(stream) => {
+                            stream_step(Live::VibeVoice(asr), sessions, stream)
+                                .map(TranscriptionOutcome::Stream)
+                        }
+                        AudioRequest::Audio(_) if request.translate => {
+                            Err("VibeVoice-ASR Streaming transcribes; it does not translate"
+                                .to_string())
+                        }
+                        AudioRequest::Audio(audio) => inference_audio::mel::resample(
+                            &audio.mono(),
+                            audio.sample_rate,
+                            asr.sample_rate(),
+                        )
+                        .and_then(|pcm| Ok(asr.transcribe(&pcm, request.prompt.as_deref())?))
+                        .map(|whole| TranscriptionOutcome::Whole(streamed_transcription(whole)))
+                        .map_err(|e| e.to_string()),
                     })
                     .collect(),
             },
@@ -1250,6 +1449,8 @@ impl Pipeline for TranscriptionPipeline {
             AudioModel::Parakeet { .. } | AudioModel::Whisper(_) | AudioModel::CohereAsr(_) => {
                 ModelCategory::Transcription
             }
+            #[cfg(feature = "models-qwen")]
+            AudioModel::VibeVoiceStreaming(_) => ModelCategory::Transcription,
             AudioModel::Silero(_) => ModelCategory::VoiceActivity,
             AudioModel::Diarizer(_) => ModelCategory::Diarization,
             AudioModel::LanguageId(_) => ModelCategory::LanguageId,

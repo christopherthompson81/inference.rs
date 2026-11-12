@@ -52,6 +52,7 @@ mod silero_tiny;
 mod sortformer_tiny;
 mod ultravox_tiny;
 mod vibevoice_asr_tiny;
+mod vibevoice_streaming_tiny;
 mod voxlingua_tiny;
 mod voxtral_chat_tiny;
 mod whisper_tiny;

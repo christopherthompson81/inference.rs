@@ -17,7 +17,7 @@ const LANGUAGES: [(&str, &str); 8] = [
     ("it", "Italian"),
 ];
 
-fn prompt(language: Option<&str>) -> anyhow::Result<String> {
+fn prompt(language: Option<&str>, _context: Option<&str>) -> anyhow::Result<String> {
     let language = match language {
         None => String::new(),
         Some(code) => {
@@ -55,12 +55,12 @@ mod tests {
     #[test]
     fn a_language_precedes_the_transcribe_token() -> anyhow::Result<()> {
         assert_eq!(
-            prompt(None)?,
+            prompt(None, None)?,
             "<s>[INST][BEGIN_AUDIO][AUDIO][/INST][TRANSCRIBE]"
         );
-        assert!(prompt(Some("en"))?.ends_with("[/INST]lang:en[TRANSCRIBE]"));
-        assert!(prompt(Some("German"))?.ends_with("[/INST]lang:de[TRANSCRIBE]"));
-        assert!(prompt(Some("ja")).is_err());
+        assert!(prompt(Some("en"), None)?.ends_with("[/INST]lang:en[TRANSCRIBE]"));
+        assert!(prompt(Some("German"), None)?.ends_with("[/INST]lang:de[TRANSCRIBE]"));
+        assert!(prompt(Some("ja"), None).is_err());
         Ok(())
     }
 }

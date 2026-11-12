@@ -6,16 +6,67 @@
 # Not part of local_ci.sh: it needs torch and transformers 5.19, the checkpoint (about 30 GB of RAM in F32), and a CUDA
 # build (the F32 runs are on the CPU).
 #
-# Usage: scripts/vibevoice_asr_parity.sh <checkpoint dir> <clip.wav>...
+# --streaming checks a streaming checkpoint (VibeVoice-ASR-Streaming-1.5B/7B) instead, against Microsoft's
+# `streaming_generate` (`pip install git+https://github.com/microsoft/VibeVoice`, transformers 4.57): each window's
+# greedy token ids, F32 on the CPU, its latent noise (`fix_std`) zeroed; --context passes hotwords to both.
+#
+# Usage: scripts/vibevoice_asr_parity.sh [--streaming [--context <text>]] <checkpoint dir> <clip.wav>...
 set -euo pipefail
 
+streaming=0
+context=""
+while [[ ${1:-} == --* ]]; do
+    case $1 in
+        --streaming) streaming=1 ;;
+        --context) context=$2; shift ;;
+        *) break ;;
+    esac
+    shift
+done
 if [[ $# -lt 2 ]]; then
-    sed -n '9p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '13p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 model=$(realpath "$1")
 shift
 root=$(cd "$(dirname "$0")/.." && pwd)
+
+if [[ $streaming == 1 ]]; then
+    dumps=$(mktemp -d)
+    trap 'rm -rf "$dumps"' EXIT
+    cd "$root"
+    cargo build -q -p inference-models-qwen --example vibevoice_streaming_parity
+    for clip in "$@"; do
+        python3 -P -W ignore - "$model" "$(realpath "$clip")" "$dumps/ref.safetensors" "$context" <<'PY'
+import json, sys, torch, soundfile as sf, torchaudio
+from safetensors.torch import save_file
+from vibevoice.modular.modeling_vibevoice_asr import VibeVoiceASRForConditionalGeneration
+from vibevoice.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
+model_dir, clip, out, context = sys.argv[1:5]
+cfg = json.load(open(f"{model_dir}/preprocessor_config.json"))
+frame = cfg["speech_tok_compress_ratio"] / cfg["target_sample_rate"]
+tok = VibeVoiceASRProcessor.from_pretrained(model_dir).tokenizer
+m = VibeVoiceASRForConditionalGeneration.from_pretrained(model_dir, dtype=torch.float32).eval()
+m.model.acoustic_tokenizer.fix_std.zero_()
+wav, sr = sf.read(clip, dtype="float32", always_2d=True)
+wav = torch.from_numpy(wav.mean(1))
+wav = torchaudio.functional.resample(wav, sr, 24000) if sr != 24000 else wav
+# each window's ids, as the loop hands them to the tokenizer
+ids, decode = [], tok.decode
+tok.decode = lambda t, **k: (ids.append(list(t)), decode(t, **k))[1]
+with torch.no_grad():
+    for i, n, text in m.streaming_generate(audio_tensor=wav, tokenizer=tok, chunk_duration=cfg["chunk_frames"] * frame,
+                                           text_audio_delay=cfg["lookahead_frames"] * frame, sample_rate=24000,
+                                           max_new_tokens_per_chunk=256, temperature=0.0, context_info=context or None):
+        print(f"reference [{i + 1}/{n}] {text!r}")
+save_file({"ids": torch.tensor([t for w in ids for t in w + [-1]], dtype=torch.int64)}, out)
+PY
+        args=("$model" "$(realpath "$clip")" "$dumps/ref.safetensors")
+        [[ -n $context ]] && args+=(--context "$context")
+        target/debug/examples/vibevoice_streaming_parity "${args[@]}"
+    done
+    exit 0
+fi
 dumps=$(mktemp -d)
 port=18499
 trap 'rm -rf "$dumps"; [[ -n ${server:-} ]] && kill "$server" 2>/dev/null || true' EXIT

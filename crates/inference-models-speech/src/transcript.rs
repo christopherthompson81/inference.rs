@@ -17,6 +17,9 @@ pub struct Transcription {
     pub duration: f64,
     /// The language the model was told, or identified (Nemotron-3.5's tag, as `de-DE`).
     pub language: Option<String>,
+    /// Spans a model times itself, with their speakers (VibeVoice-ASR Streaming's turns); none for a model whose
+    /// words are timed.
+    pub segments: Vec<inference_nn::loaders::TimedSegment>,
 }
 
 /// What a windowed transcription reports as it goes.
@@ -59,7 +62,7 @@ pub struct TranscriptionOptions {
     /// or improbable window, as OpenAI's `transcribe`; above 0, every window at that temperature.
     #[serde(default)]
     pub temperature: Option<f32>,
-    /// Text Whisper takes as what came before the audio (OpenAI's `initial_prompt`).
+    /// Text Whisper takes as what came before the audio (OpenAI's `initial_prompt`); VibeVoice-ASR's context (hotwords).
     #[serde(default)]
     pub prompt: Option<String>,
     /// Whisper conditions each window on the previous one's text (on unless `false`).

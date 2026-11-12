@@ -354,6 +354,7 @@ impl CohereAsr {
             " "
         };
         Ok(Transcription {
+            segments: Vec::new(),
             text: texts.join(separator),
             tokens: Vec::<TimedText>::new(),
             words: Vec::new(),

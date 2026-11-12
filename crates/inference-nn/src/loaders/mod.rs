@@ -277,7 +277,7 @@ pub struct TranscriptText {
 }
 
 /// A span of a transcript as the model timed it, with the speaker it names.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct TimedSegment {
     pub start: f64,
     pub end: f64,
@@ -298,7 +298,7 @@ pub struct AlignedWord {
 /// answer prefix that forces an ISO-639-1 `language` when one is given, and the parse of its answer.
 #[derive(Clone, Copy)]
 pub struct AudioTranscriber {
-    pub prompt: fn(language: Option<&str>) -> anyhow::Result<String>,
+    pub prompt: fn(language: Option<&str>, context: Option<&str>) -> anyhow::Result<String>,
     pub parse: fn(&str) -> TranscriptText,
     /// The model's own speaker attribution, for a model that writes it.
     pub speakers: Option<SpeakerPrompt>,
@@ -308,7 +308,7 @@ pub struct AudioTranscriber {
 /// and the parse of its answer to the plain transcript (the model's alignment head times the tagged answer).
 #[derive(Clone, Copy)]
 pub struct SpeakerPrompt {
-    pub prompt: fn(language: Option<&str>) -> anyhow::Result<String>,
+    pub prompt: fn(language: Option<&str>, context: Option<&str>) -> anyhow::Result<String>,
     pub parse: fn(&str) -> TranscriptText,
 }
 

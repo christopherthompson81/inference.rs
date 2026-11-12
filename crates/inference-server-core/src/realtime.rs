@@ -467,6 +467,7 @@ impl Connection {
         let request = TranscriptionSessionRequest {
             model: self.config.model.clone(),
             language: self.config.language.clone(),
+            prompt: self.config.prompt.clone(),
             response_format: TranscriptionResponseFormat::Json,
             ..TranscriptionSessionRequest::new(self.config.rate)
         };

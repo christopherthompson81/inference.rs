@@ -5,6 +5,7 @@
 pub mod config;
 pub mod encoder;
 pub mod inputs_processor;
+pub mod streaming;
 pub mod transcription;
 
 use inference_quant::ShardedVarBuilder;
@@ -21,7 +22,9 @@ use crate::{
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     utils::unvarbuilder::UnVarBuilder,
 };
+pub use config::EncoderConfig;
 pub use config::VibeVoiceAsrConfig;
+pub use encoder::EncoderNames;
 use encoder::{EncoderCache, SpeechEncoder};
 
 const MODEL: &str = "VibeVoice-ASR";
@@ -44,11 +47,18 @@ struct Branch {
 }
 
 impl Branch {
-    fn new(latent: usize, hidden: usize, name: &str, vb: &ShardedVarBuilder) -> Result<Self> {
+    // `names` are the first linear's, the norm's and the second linear's paths under `vb`
+    fn new(
+        latent: usize,
+        hidden: usize,
+        names: [String; 3],
+        vb: &ShardedVarBuilder,
+    ) -> Result<Self> {
+        let [linear_1, norm, linear_2] = names;
         Ok(Self {
-            linear_1: linear_b(latent, hidden, true, vb.pp(format!("{name}_linear_1")))?,
-            norm: RmsNorm::new(hidden, PROJECTOR_EPS, vb.pp(format!("{name}_norm")))?,
-            linear_2: linear_b(hidden, hidden, true, vb.pp(format!("{name}_linear_2")))?,
+            linear_1: linear_b(latent, hidden, true, vb.pp(linear_1))?,
+            norm: RmsNorm::new(hidden, PROJECTOR_EPS, vb.pp(norm))?,
+            linear_2: linear_b(hidden, hidden, true, vb.pp(linear_2))?,
         })
     }
 
@@ -67,30 +77,69 @@ pub struct AudioEmbedder {
     chunk: usize,
 }
 
+/// The audio half's shape and where a checkpoint keeps it.
+pub struct AudioSpec<'a> {
+    pub acoustic: &'a EncoderConfig,
+    pub semantic: &'a EncoderConfig,
+    /// The decoder's width.
+    pub hidden: usize,
+    pub names: EncoderNames,
+}
+
 impl AudioEmbedder {
     /// `vb` is the checkpoint's root.
     pub fn new(cfg: &VibeVoiceAsrConfig, vb: &ShardedVarBuilder) -> Result<Self> {
-        let hidden = cfg.text().hidden_size;
-        let projector = vb.pp("multi_modal_projector");
-        let (acoustic, semantic) = (
-            &cfg.acoustic_tokenizer_encoder_config,
-            &cfg.semantic_tokenizer_encoder_config,
-        );
-        Ok(Self {
-            acoustic: SpeechEncoder::new(acoustic, vb.pp("acoustic_tokenizer_encoder"))?,
-            semantic: SpeechEncoder::new(semantic, vb.pp("semantic_tokenizer_encoder"))?,
-            acoustic_branch: Branch::new(acoustic.hidden_size, hidden, "acoustic", &projector)?,
-            semantic_branch: Branch::new(semantic.hidden_size, hidden, "semantic", &projector)?,
-            chunk: cfg.acoustic_tokenizer_chunk_size.min(
-                ENCODE_SECONDS * inputs_processor::SAMPLE_RATE as usize / cfg.hop_length()
-                    * cfg.hop_length(),
+        let spec = AudioSpec {
+            acoustic: &cfg.acoustic_tokenizer_encoder_config,
+            semantic: &cfg.semantic_tokenizer_encoder_config,
+            hidden: cfg.text().hidden_size,
+            names: EncoderNames::Transformers,
+        };
+        Self::from_spec(&spec, vb)
+    }
+
+    /// `vb` is the checkpoint's root, under either naming.
+    pub fn from_spec(spec: &AudioSpec<'_>, vb: &ShardedVarBuilder) -> Result<Self> {
+        let (acoustic, semantic, hidden) = (spec.acoustic, spec.semantic, spec.hidden);
+        let (encoders, branches): ([ShardedVarBuilder; 2], [[String; 3]; 2]) = match spec.names {
+            EncoderNames::Transformers => (
+                [
+                    vb.pp("acoustic_tokenizer_encoder"),
+                    vb.pp("semantic_tokenizer_encoder"),
+                ],
+                ["acoustic", "semantic"].map(|b| {
+                    [
+                        format!("multi_modal_projector.{b}_linear_1"),
+                        format!("multi_modal_projector.{b}_norm"),
+                        format!("multi_modal_projector.{b}_linear_2"),
+                    ]
+                }),
             ),
+            EncoderNames::Upstream => (
+                [
+                    vb.pp("model.acoustic_tokenizer.encoder"),
+                    vb.pp("model.semantic_tokenizer.encoder"),
+                ],
+                ["acoustic", "semantic"].map(|b| {
+                    ["fc1", "norm", "fc2"].map(|part| format!("model.{b}_connector.{part}"))
+                }),
+            ),
+        };
+        let [acoustic_vb, semantic_vb] = encoders;
+        let [acoustic_names, semantic_names] = branches;
+        let hop = acoustic.hop_length();
+        Ok(Self {
+            acoustic: SpeechEncoder::new(acoustic, spec.names, acoustic_vb)?,
+            semantic: SpeechEncoder::new(semantic, spec.names, semantic_vb)?,
+            acoustic_branch: Branch::new(acoustic.hidden_size, hidden, acoustic_names, vb)?,
+            semantic_branch: Branch::new(semantic.hidden_size, hidden, semantic_names, vb)?,
+            chunk: ENCODE_SECONDS * inputs_processor::SAMPLE_RATE as usize / hop * hop,
         })
     }
 
     /// One embedding per hop of `(1, 1, samples)` audio: both encoders over chunks of `ENCODE_SECONDS`, each
-    /// carrying its causal context into the next, as the reference encodes its minutes. The reference adds Gaussian noise to the
-    /// acoustic latents (its VAE's sampling); its mean, none, is taken here, so a transcript repeats.
+    /// carrying its causal context into the next, as the reference encodes its minutes. The reference adds Gaussian
+    /// noise to the acoustic latents (its VAE's sampling); its mean, none, is taken here, so a transcript repeats.
     pub fn embed(&self, audio: &Tensor) -> Result<Tensor> {
         let dtype = self.acoustic_branch.linear_1.weight().dtype();
         let audio = audio.to_dtype(dtype)?;

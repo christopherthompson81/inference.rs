@@ -1,14 +1,9 @@
 //! The talker (a Qwen3 decoder predicting each frame's first code) and the code predictor (a small Qwen3 decoder
 //! filling the frame's other codebooks), both over the shared decoder stack with caches of their own.
 
-use std::sync::Arc;
-
-use indicatif::MultiProgress;
-use inference_nn::attention::FlashParams;
 use inference_nn::decoder::{DecoderSpec, DecoderStack, ModuleNames, QkNorm, RopeKind};
-use inference_nn::device_map::DummyDeviceMapper;
 use inference_nn::kv_cache::KvCache;
-use inference_nn::model::{ModelForwardContext, NormalLoadingMetadata};
+use inference_nn::model::NormalLoadingMetadata;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{Embedding, Linear, Module};
@@ -65,19 +60,6 @@ impl Qwen3Stack {
     }
 }
 
-fn metadata(device: &Device) -> NormalLoadingMetadata {
-    NormalLoadingMetadata {
-        mapper: Box::new(DummyDeviceMapper {
-            nm_device: device.clone(),
-        }),
-        loading_isq: false,
-        real_device: device.clone(),
-        multi_progress: Arc::new(MultiProgress::new()),
-        matformer_slicing_config: None,
-        rope_pairing: None,
-    }
-}
-
 fn linear(in_dim: usize, out_dim: usize, bias: bool, vb: &ShardedVarBuilder) -> Result<Linear> {
     let weight = vb.get((out_dim, in_dim), "weight")?;
     let bias = bias.then(|| vb.get(out_dim, "bias")).transpose()?;
@@ -103,24 +85,6 @@ impl StackCache {
     pub fn reset(&mut self) {
         self.0.iter_mut().for_each(KvCache::reset);
     }
-}
-
-// the normed hidden states of `xs` (`(1, tokens, hidden)`) after the `offset` positions already in `cache`
-fn run_stack(
-    stack: &DecoderStack,
-    xs: Tensor,
-    cache: &mut StackCache,
-    offset: usize,
-) -> Result<Tensor> {
-    let tokens = xs.dim(1)?;
-    let shape = Tensor::zeros((1, tokens), DType::U32, xs.device())?;
-    let masks = stack.masks(&shape, xs.dtype(), &cache.0, offset == 0)?;
-    let offsets = [offset];
-    let context_lens = [(0, tokens)];
-    let position_ids = [offset + tokens];
-    let flash = FlashParams::empty(true);
-    let mut ctx = ModelForwardContext::new(&offsets, &context_lens, &position_ids, None, &flash);
-    stack.forward(xs, &masks, Some(&mut cache.0), &mut ctx)
 }
 
 pub struct CodePredictor {
@@ -161,7 +125,7 @@ impl CodePredictor {
             vb_m.clone(),
             None,
             true,
-            metadata(device),
+            NormalLoadingMetadata::single_device(device),
             &AttentionImplementation::Eager,
         )?;
         let tables = (1..groups - 1)
@@ -234,7 +198,9 @@ impl CodePredictor {
         cache: &mut StackCache,
         offset: usize,
     ) -> Result<Tensor> {
-        let hidden = run_stack(&self.stack, self.project(xs)?, cache, offset)?;
+        let hidden = self
+            .stack
+            .forward_cached(self.project(xs)?, &mut cache.0, offset)?;
         let last = hidden.i((.., hidden.dim(1)? - 1, ..))?;
         self.heads[group - 1].forward(&last)
     }
@@ -275,7 +241,7 @@ impl Talker {
             vb_m.clone(),
             None,
             true,
-            metadata(device),
+            NormalLoadingMetadata::single_device(device),
             &AttentionImplementation::Eager,
         )?;
         let projection = vb.pp("text_projection");
@@ -350,7 +316,7 @@ impl Talker {
         cache: &mut StackCache,
         offset: usize,
     ) -> Result<(Tensor, Tensor)> {
-        let hidden = run_stack(&self.stack, xs, cache, offset)?;
+        let hidden = self.stack.forward_cached(xs, &mut cache.0, offset)?;
         let last = hidden.narrow(1, hidden.dim(1)? - 1, 1)?;
         let logits = self.head.forward(&last.squeeze(1)?)?;
         Ok((last, logits))

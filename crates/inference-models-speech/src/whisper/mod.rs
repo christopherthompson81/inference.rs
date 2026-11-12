@@ -678,6 +678,7 @@ impl Whisper {
         }
         words.retain(|word| !word.text.is_empty());
         Ok(Transcription {
+            segments: Vec::new(),
             text: text.trim().to_string(),
             tokens: Vec::new(),
             words,

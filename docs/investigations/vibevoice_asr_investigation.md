@@ -78,3 +78,109 @@ The noise moves only times, by a frame or two of rounding; ours leaves it out, s
 
 Not done: the streaming checkpoints (`VibeVoiceForASRStreamingTraining`, 1.5B and 7B), hotword context in the
 prompt ("with extra info: ..."), multi-pass decoding of recordings past the KV budget, and the third-party GGUF.
+
+## Run 5 - 2026-11-11 22:40
+
+Question: what do the streaming checkpoints (`microsoft/VibeVoice-ASR-Streaming-1.5B` and `-7B`) compute?
+
+They declare `VibeVoiceForASRStreamingTraining` (`model_type` `vibevoice`, Microsoft's layout, which transformers does
+not have). Reference: Microsoft's `microsoft/VibeVoice` repo (`modeling_vibevoice_asr.py`, `streaming_generate`), in a
+venv over the system torch with transformers 4.57.3 (`/mnt/data/vibevoice-venv`).
+
+- The same encoders and projector under other names: `model.{acoustic,semantic}_tokenizer.encoder.downsample_layers.0`
+  is the stem conv and `.1..6` the strided ones, `stages.N.M` the ConvNeXt blocks (their mixer one `.conv` deeper),
+  `head.conv.conv`; `model.{acoustic,semantic}_connector.{fc1,norm,fc2}`; the decoder at `model.language_model` with
+  `lm_head` at the root (the 1.5B ties it). The config lists the encoder ratios last-first ([8, 5, 5, 4, 2, 2]) and
+  its depths as "3-3-3-3-3-3-8"; kernel 7, FFN 4x and exact GELU are fixed in the code.
+- `preprocessor_config.json`: `normalize_audio` false (no loudness scaling, unlike the offline model), windows of 22
+  frames (70,400 samples, 2.93 s) and 4 of lookahead (0.53 s), each window encoded alone (no context carried), the last
+  zero-padded to the whole window.
+- Loop: the prompt "You are a helpful assistant that transcribes audio input into text output. Please transcribe the
+  following audios streamingly with these keys: speaker, content\n" (31 tokens, no chat template) prefilled; per window
+  `<|object_ref_start|>`, its 26 embeddings, `<|object_ref_end|>`, greedy to `<|text_chunk_end|>` or EOS (256 at
+  most), then `<|text_chunk_end|>` fed so the cache ends on it; the cache runs the whole recording.
+- Text per window, a turn opening with `\n Speaker N:`; 1.5B on the dialogue, f32 CPU, noise off:
+  `[1/5] ' \n Speaker 0:Did you finish ...'`, `[2/5] ' \n Speaker 1:Almost. I just need to add the budget '`,
+  `[3/5] 'numbers from last quarter. \n Speaker 0:Great. '`, `[4/5] 'Send it to me ... I will read '`, `[5/5] 'it
+  tonight.'`.
+
+## Run 6 - 2026-11-11 22:55
+
+Question: do ours (`streaming.rs`: the offline audio half under the upstream names, the Qwen2 stack through
+`DecoderStack::forward_cached` with its own KV cache) match?
+
+`examples/vibevoice_streaming_parity.rs` against the reference's per-window token ids:
+
+```
+first try: every window "4.5 million." (ids 0 of 15 equal)
+  --parts: prompt ids equal (31); window 0 embeddings cosine 1.000000
+```
+
+The audio and prompt were exact, so the decoder: `forward_cached` (new, moved from Qwen3-TTS's talker) built its mask
+only for the first call, as a prompt chunk; every later call with several tokens (a window's 28) attended to its own
+future. The talker never fed more than one token after its first call, so it never showed. The mask is now built at
+any offset.
+
+```
+1.5B, f32 CPU: windows 15/15, 15/15, 13/13, 13/13, 3/3 ids equal (26 s)
+1.5B, bf16 CUDA: the same (0.73 s); f16 CUDA: the same (0.76 s)
+7B, f32 CPU: 15/15, 15/15, 13/13, 14/14, 3/3 (86 s); bf16 CUDA: the same (1.7 s)
+```
+
+Exact, both sizes. bf16 is kept on CUDA (the release dtype; f16, though equal here, is unmeasured on long Qwen2 runs).
+
+## Run 7 - 2026-11-11 23:05
+
+Question: served, whole and live?
+
+`inference serve -m VibeVoice-ASR-Streaming-1.5B` (CUDA, bf16):
+
+```
+dialogue, /v1/audio/transcriptions verbose_json: 0.6 s; turns 0-2.93, 2.93-8.80, 5.87-12.70 (window times);
+  with diarization_model=default, speakers 0, 1, 0
+305 s: 12.9 s, 49 turns, speakers 0 and 1, every line of the second voice speaker 1; 7.0 GB on the GPU
+/v1/realtime?intent=transcription, the dialogue pushed in 0.2 s pieces at real time: a delta per window at 3.8,
+  6.7, 9.9, 13.1 s and the last on commit; the completed transcript the same
+```
+
+A turn's times are its windows': it starts at the start of the window its mark is in and ends with the last window
+it reaches into, so adjacent turns can overlap by up to a window.
+
+## Run 8 - 2026-11-11 23:15
+
+Question: does the reference's latent noise (`fix_std` 0.5 on the streaming checkpoints) matter?
+
+The reference over the 64 s clip, 1.5B, f32 CPU: noise off, then seeds 0 to 2 with it on.
+
+```
+22 windows each; every seed's windows identical to the run without noise
+```
+
+Ours leaves it out here as offline.
+
+## Run 9 - 2026-11-11 23:50
+
+Question: hotwords (the request's `prompt`) and recordings past the cache budget?
+
+Context: both models take it in their prompt as Microsoft's `context_info`. Offline, transformers'
+`apply_transcription_request(prompt=...)` renders "This is a 2.00 seconds audio, with extra info: <context>\n\nPlease
+transcribe it with these keys: ..." (capital P), as ours now does; streaming, "... keys: speaker, content and extra
+info: <context>\n". `scripts/vibevoice_asr_parity.sh --streaming --context "budget, quarterly numbers"` on the 1.5B:
+
+```
+windows 15/15, 15/15, 13/13, 14/14, 3/3 ids equal (window 3 is 14 with the context, 13 without)
+```
+
+Passes: past `with_pass_positions` (the decoder's maximum by default: 65,536 positions on the 1.5B, about 74 min at
+~44 per window; 131,072 on the 7B) a window starts a new pass, its cache fresh from the prompt, and its speakers are
+numbered after every earlier pass's. 1.5B on the 305 s clip at 1,500 positions:
+
+```
+4 passes (new at 85, 170, 255 s); speakers 0-1, 2-3, 4, 5-6; 51 turns in 12.6 s
+the third pass, starting cold mid-conversation, labeled both voices 4 until its second window pair
+```
+
+A cold pass loses who is who, as expected; one pass over the same clip kept both voices apart (Run 7), so the default
+stays the whole context.
+
+Not done: GGUF (the audio.cpp container, #747).

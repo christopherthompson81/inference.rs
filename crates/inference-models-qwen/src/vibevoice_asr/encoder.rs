@@ -8,6 +8,48 @@ use inference_tensor::{Result, Tensor};
 use super::config::EncoderConfig;
 use crate::layers::{Activation, RmsNorm, linear_b};
 
+/// Where a checkpoint keeps the encoder's parts: transformers' port, or Microsoft's own layout (the streaming
+/// checkpoints), whose convs sit one wrapper deeper and whose stem is its first downsampling layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderNames {
+    Transformers,
+    Upstream,
+}
+
+impl EncoderNames {
+    // stage `i`'s conv (0 the stem) and the prefix of its blocks
+    fn stage(self, vb: &ShardedVarBuilder, i: usize) -> (ShardedVarBuilder, ShardedVarBuilder) {
+        match (self, i) {
+            (Self::Transformers, 0) => {
+                let stem = vb.pp("stem");
+                (stem.pp("conv").pp("conv"), stem.pp("stage"))
+            }
+            (Self::Transformers, i) => {
+                let layer = vb.pp("conv_layers").pp(i - 1);
+                (layer.pp("conv").pp("conv"), layer.pp("stage"))
+            }
+            (Self::Upstream, i) => (
+                vb.pp("downsample_layers").pp(i).pp(0).pp("conv").pp("conv"),
+                vb.pp("stages").pp(i),
+            ),
+        }
+    }
+
+    fn head(self, vb: &ShardedVarBuilder) -> ShardedVarBuilder {
+        match self {
+            Self::Transformers => vb.pp("head").pp("conv"),
+            Self::Upstream => vb.pp("head").pp("conv").pp("conv"),
+        }
+    }
+
+    fn mixer(self, vb: &ShardedVarBuilder) -> ShardedVarBuilder {
+        match self {
+            Self::Transformers => vb.pp("mixer").pp("conv"),
+            Self::Upstream => vb.pp("mixer").pp("conv").pp("conv").pp("conv"),
+        }
+    }
+}
+
 /// The causal context each conv carries from one chunk of audio into the next.
 pub struct EncoderCache(Vec<Option<Tensor>>);
 
@@ -88,6 +130,7 @@ struct ConvNextBlock {
 impl ConvNextBlock {
     fn new(
         cfg: &EncoderConfig,
+        names: EncoderNames,
         width: usize,
         slot: &mut usize,
         vb: &ShardedVarBuilder,
@@ -99,7 +142,7 @@ impl ConvNextBlock {
             mixer: CausalConv::new(
                 (width, width, cfg.kernel_size, 1, width),
                 slot,
-                &vb.pp("mixer").pp("conv"),
+                &names.mixer(vb),
             )?,
             gamma: vb.get(width, "gamma")?.reshape((1, (), 1))?,
             ffn_norm: RmsNorm::new(width, cfg.rms_norm_eps, vb.pp("ffn_norm"))?,
@@ -145,39 +188,35 @@ pub struct SpeechEncoder {
 }
 
 impl SpeechEncoder {
-    pub fn new(cfg: &EncoderConfig, vb: ShardedVarBuilder) -> Result<Self> {
+    pub fn new(cfg: &EncoderConfig, names: EncoderNames, vb: ShardedVarBuilder) -> Result<Self> {
         let mut slot = 0;
-        let blocks = |width: usize, count: usize, slot: &mut usize, vb: &ShardedVarBuilder| {
-            (0..count)
-                .map(|i| ConvNextBlock::new(cfg, width, slot, &vb.pp("stage").pp(i)))
-                .collect::<Result<Vec<_>>>()
-        };
-        let stem = vb.pp("stem");
-        let mut stages = vec![Stage {
-            conv: CausalConv::new(
-                (cfg.channels, cfg.num_filters, cfg.kernel_size, 1, 1),
-                &mut slot,
-                &stem.pp("conv").pp("conv"),
-            )?,
-            blocks: blocks(cfg.num_filters, cfg.depths[0], &mut slot, &stem)?,
-        }];
-        for (i, &ratio) in cfg.downsampling_ratios.iter().enumerate() {
-            let layer = vb.pp("conv_layers").pp(i);
-            let (from, to) = (cfg.num_filters << i, cfg.num_filters << (i + 1));
+        let mut stages = Vec::with_capacity(cfg.downsampling_ratios.len() + 1);
+        for i in 0..=cfg.downsampling_ratios.len() {
+            let (conv, blocks) = names.stage(&vb, i);
+            // the stem keeps the width; each downsampling conv doubles it
+            let (shape, width) = match i {
+                0 => (
+                    (cfg.channels, cfg.num_filters, cfg.kernel_size, 1, 1),
+                    cfg.num_filters,
+                ),
+                i => {
+                    let ratio = cfg.downsampling_ratios[i - 1];
+                    let (from, to) = (cfg.num_filters << (i - 1), cfg.num_filters << i);
+                    ((from, to, 2 * ratio, ratio, 1), to)
+                }
+            };
             stages.push(Stage {
-                conv: CausalConv::new(
-                    (from, to, 2 * ratio, ratio, 1),
-                    &mut slot,
-                    &layer.pp("conv").pp("conv"),
-                )?,
-                blocks: blocks(to, cfg.depths[i + 1], &mut slot, &layer)?,
+                conv: CausalConv::new(shape, &mut slot, &conv)?,
+                blocks: (0..cfg.depths[i])
+                    .map(|j| ConvNextBlock::new(cfg, names, width, &mut slot, &blocks.pp(j)))
+                    .collect::<Result<_>>()?,
             });
         }
         let last = cfg.num_filters << cfg.downsampling_ratios.len();
         let head = CausalConv::new(
             (last, cfg.hidden_size, cfg.kernel_size, 1, 1),
             &mut slot,
-            &vb.pp("head").pp("conv"),
+            &names.head(&vb),
         )?;
         Ok(Self { stages, head })
     }

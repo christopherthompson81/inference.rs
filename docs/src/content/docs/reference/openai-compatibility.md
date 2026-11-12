@@ -227,7 +227,7 @@ Voxtral and similar audio-understanding models go through `/v1/chat/completions`
 
 ## Realtime (transcription sessions)
 
-`GET /v1/realtime?intent=transcription` is a WebSocket speaking the Realtime API's transcription sessions, on a cache-aware streaming recogniser such as Nemotron streaming ASR. The official SDKs' `client.realtime.connect(extra_query={"intent": "transcription"})` connect as they do to OpenAI.
+`GET /v1/realtime?intent=transcription` is a WebSocket speaking the Realtime API's transcription sessions, on a streaming recogniser: Nemotron streaming ASR or a VibeVoice-ASR streaming checkpoint. The official SDKs' `client.realtime.connect(extra_query={"intent": "transcription"})` connect as they do to OpenAI.
 
 - **Connecting:**
   - The server sends `session.created`, or `transcription_session.created` for a client that announces the beta (an `OpenAI-Beta: realtime=v1` header or the `openai-beta.realtime-v1` subprotocol).

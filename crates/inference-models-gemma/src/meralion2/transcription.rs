@@ -7,7 +7,7 @@ use super::inputs_processor::instruction;
 
 const TRANSCRIBE: &str = "Please transcribe this speech.";
 
-fn prompt(_language: Option<&str>) -> anyhow::Result<String> {
+fn prompt(_language: Option<&str>, _context: Option<&str>) -> anyhow::Result<String> {
     Ok(format!(
         "<bos><start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n",
         instruction(TRANSCRIBE, 1)
@@ -35,7 +35,7 @@ mod tests {
     #[test]
     fn the_prompt_is_the_model_cards() -> anyhow::Result<()> {
         assert_eq!(
-            prompt(Some("en"))?,
+            prompt(Some("en"), None)?,
             "<bos><start_of_turn>user\nInstruction: Please transcribe this speech. \nFollow the text instruction \
              based on the following audio: <SpeechHere><end_of_turn>\n<start_of_turn>model\n"
         );

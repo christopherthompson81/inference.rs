@@ -63,6 +63,7 @@ pub(crate) async fn open(
     let op = TranscriptionStreamOp::Open {
         options: TranscriptionOptions {
             language: request.language.clone(),
+            prompt: request.prompt.clone(),
             ..TranscriptionOptions::default()
         },
         sample_rate: request.sample_rate,

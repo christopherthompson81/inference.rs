@@ -1043,12 +1043,13 @@ __exit__()
 
 ## `TranscriptionSessionRequest`
 
-Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push returns the text it adds; an inference.rs extension.
+Opens a streamed transcription on a streaming model (Nemotron streaming ASR, VibeVoice-ASR Streaming): mono audio is pushed as it arrives and each push returns the text it adds; an inference.rs extension.
 
 | Field | Type | Default |
 | --- | --- | --- |
 | `language` | `str \| None` | optional |
 | `model` | `str \| None` | optional |
+| `prompt` | `str \| None` | optional |
 | `response_format` | `TranscriptionResponseFormat \| None` | optional |
 | `sample_rate` | `int \| None` | optional |
 | `timestamp_granularities` | `list[TimestampGranularity] \| None` | optional |

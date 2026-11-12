@@ -499,7 +499,7 @@ async fn transcribe_inner(
             && request
                 .language
                 .as_deref()
-                .is_some_and(|l| (transcriber.prompt)(Some(l)).is_err())
+                .is_some_and(|l| (transcriber.prompt)(Some(l), None).is_err())
         {
             request.language = None;
         }
@@ -598,6 +598,28 @@ async fn transcribe_inner(
             _ => Err(unexpected(state)),
         };
     };
+    // named as its own diarizer, a model that writes speaker turns (VibeVoice-ASR Streaming) attributes them
+    if diarizer == request.model {
+        let Response::Transcription(transcript) =
+            run(state, &request.model, repr, speech(audio, None)).await?
+        else {
+            return Err(unexpected(state));
+        };
+        if transcript.segments.iter().all(|s| s.speaker.is_none()) {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                "this model does not attribute speakers itself; name a diarization model",
+                Some("diarization_unsupported"),
+                Some("diarization_model"),
+            ));
+        }
+        let segments = transcript.segments.clone();
+        let speakers: Vec<usize> = segments
+            .iter()
+            .map(|s| s.speaker.unwrap_or(0) as usize)
+            .collect();
+        return render_own_segments(&request, transcript, &segments, Some(&speakers));
+    }
     let (hook, windowed) = noting_windows(None);
     // one upload, both models over it at once
     let (transcript, diarization) = futures::join!(
@@ -614,6 +636,20 @@ async fn transcribe_inner(
     else {
         return Err(unexpected(state));
     };
+    // a model's own segments take the diarizer's speakers by overlap, as its words would
+    if transcript.words.is_empty() && !transcript.segments.is_empty() {
+        let segments = transcript.segments.clone();
+        let spans: Vec<TimedText> = segments
+            .iter()
+            .map(|s| TimedText {
+                text: s.text.clone(),
+                start: s.start,
+                end: s.end,
+            })
+            .collect();
+        let speakers = word_speakers(&spans, &diarization.segments);
+        return render_own_segments(&request, transcript, &segments, Some(&speakers));
+    }
     let ctx = PassContext {
         state,
         model: &request.model,
@@ -750,7 +786,7 @@ fn require_words(transcript: &Transcription) -> Result<(), ApiError> {
 // how an audio-in decoder is asked for its transcript: the prompt and the parse of its answer, and whether its
 // alignment head times the words
 struct TranscriptPlan {
-    prompt: fn(Option<&str>) -> anyhow::Result<String>,
+    prompt: fn(Option<&str>, Option<&str>) -> anyhow::Result<String>,
     parse: fn(&str) -> TranscriptText,
     timings: bool,
 }
@@ -764,14 +800,15 @@ async fn decode_transcript(
     audio: AudioInput,
     plan: TranscriptPlan,
 ) -> Result<(Transcription, Vec<Option<u32>>, Vec<TimedSegment>), ApiError> {
-    let prompt = (plan.prompt)(request.language.as_deref()).map_err(|error| {
-        ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            error.to_string(),
-            Some("unsupported_language"),
-            Some("language"),
-        )
-    })?;
+    let prompt =
+        (plan.prompt)(request.language.as_deref(), request.prompt.as_deref()).map_err(|error| {
+            ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                error.to_string(),
+                Some("unsupported_language"),
+                Some("language"),
+            )
+        })?;
     let tokens = crate::operations::tokenize(
         state,
         TokenizeRequest {
@@ -824,6 +861,7 @@ async fn decode_transcript(
         })
         .collect();
     let transcript = Transcription {
+        segments: Vec::new(),
         text: parsed.text,
         tokens: Vec::new(),
         words,
@@ -938,6 +976,11 @@ pub(crate) fn render_transcript(
     transcript: Transcription,
     speakers: Option<&[usize]>,
 ) -> Result<TranscriptionOutput, ApiError> {
+    // a model that times its own segments gives them
+    if transcript.words.is_empty() && !transcript.segments.is_empty() {
+        let own = transcript.segments.clone();
+        return render_own_segments(request, transcript, &own, None);
+    }
     // a model without word timings gives its whole transcript as one segment
     let segments = if transcript.words.is_empty() && !transcript.text.is_empty() {
         vec![TranscriptionSegment {
@@ -1382,6 +1425,7 @@ mod tests {
     fn a_transcript_without_words_is_one_segment() -> anyhow::Result<()> {
         let request = TranscriptionRequest::new(TranscriptionResponseFormat::Srt);
         let transcript = Transcription {
+            segments: Vec::new(),
             text: "The quick brown fox.".to_string(),
             tokens: Vec::new(),
             words: Vec::new(),
@@ -1415,6 +1459,7 @@ mod tests {
             },
         ];
         let transcript = Transcription {
+            segments: Vec::new(),
             text: "Hello there. Hi.".to_string(),
             tokens: Vec::new(),
             words: Vec::new(),

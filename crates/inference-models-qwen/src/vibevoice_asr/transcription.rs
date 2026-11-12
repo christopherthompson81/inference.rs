@@ -8,18 +8,22 @@ use super::inputs_processor::{AUDIO_BOS, AUDIO_DURATION, AUDIO_EOS, AUDIO_TOKEN}
 
 const SYSTEM: &str =
     "You are a helpful assistant that transcribes audio input into text output in JSON format.";
-const INSTRUCTION: &str =
-    "please transcribe it with these keys: Start time, End time, Speaker ID, Content";
+const KEYS: &str = "transcribe it with these keys: Start time, End time, Speaker ID, Content";
 const START: &str = "Start";
 const END: &str = "End";
 const SPEAKER: &str = "Speaker";
 const CONTENT: &str = "Content";
 
 // the template ends with the user turn; the model writes its own assistant header before the JSON
-fn prompt(_language: Option<&str>) -> anyhow::Result<String> {
+// a context (hotwords, names, the topic) goes in the user turn as the processor's `context_info` does
+fn prompt(_language: Option<&str>, context: Option<&str>) -> anyhow::Result<String> {
+    let instruction = match context.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(context) => format!("with extra info: {context}\n\nPlease {KEYS}"),
+        None => format!("please {KEYS}"),
+    };
     Ok(format!(
         "<|im_start|>system\n{SYSTEM}<|im_end|>\n<|im_start|>user\n{AUDIO_BOS}{AUDIO_TOKEN}{AUDIO_EOS}\n\
-         This is a {AUDIO_DURATION} seconds audio, {INSTRUCTION}<|im_end|>\n"
+         This is a {AUDIO_DURATION} seconds audio, {instruction}<|im_end|>\n"
     ))
 }
 
@@ -81,6 +85,17 @@ pub const VIBEVOICE_ASR: AudioTranscriber = AudioTranscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_context_joins_the_user_turn_as_transformers_writes_it() -> anyhow::Result<()> {
+        let with = prompt(None, Some(" budget, quarterly numbers "))?;
+        assert!(with.ends_with(&format!(
+            "This is a {AUDIO_DURATION} seconds audio, with extra info: budget, quarterly numbers\n\nPlease transcribe it \
+             with these keys: Start time, End time, Speaker ID, Content<|im_end|>\n"
+        )));
+        assert_eq!(prompt(None, Some(""))?, prompt(None, None)?);
+        Ok(())
+    }
 
     #[test]
     fn an_answer_parses_into_timed_speaker_segments() {
