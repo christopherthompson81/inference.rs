@@ -215,3 +215,23 @@ the free memory, and the bf16 load then has no room for the encoder on a 105 s c
 package fit there in 19.3 GB. Tests: a tiny checkpoint renamed and re-laid as transformers' decodes as the
 consolidated one (and fails with adjacent RoPE), an ISQ load of it writes a UQFF that reloads alike (residual names),
 and its audio.cpp repack decodes as its safetensors (`voxtral_tiny`).
+
+## Run 9 - 2026-11-12 10:30
+
+Question: which of the repo's 113 folders does master load, and which map to issues? Folder list from
+`HfApi.list_repo_tree("audio-cpp/audio.cpp-gguf")`, families from audio.cpp's `model_specs/*.json` at 9d409dae,
+issues from `gh issue list --state all`.
+
+Two folders not yet tried loaded as they are: `Orukeet-GGUF/orukeet-q8_0.gguf` (an adaptation of Parakeet-TDT-0.6B-v3,
+from `oruk/orukeet`'s `.nemo`, transformers layout) and `CrisperWhisper2.0-GGUF/crisperwhisper-2-large-q8_0.gguf`
+(through Whisper); both transcribe the 12.7 s dialogue correctly.
+
+```
+load now                     16 folders (+ VibeVoice-ASR-Streaming-1.5B's own repo)
+family run, package not      Sortformer-Diar-4spk-v1 (offline v1), Nemotron-3-Diarization (audio.cpp's conversion)
+open issues                  Chatterbox, Chatterbox-Turbo (#742); OmniVoice (#741); PocketTTS, PocketTTS-Small (#591)
+no issue                     91 folders: ASR 19, TTS 35, voice conversion 6, music/SFX 10, separation/enhancement 10,
+                             analysis/control 10, codec 1
+```
+
+The per-folder list is the phase 3 comment on #747.
