@@ -13,7 +13,10 @@ use tokio::sync::Notify;
 use crate::backend::ChatBackend;
 use crate::changes::Changes;
 use crate::permission::{Approval, Decision, Permissions};
-use crate::session::{Compaction, SUMMARY_ACK, Session, summary_message};
+use crate::session::{
+    Compaction, SUMMARY_ACK, Session, ToolImage, is_tool_images, summary_message,
+    tool_images_message, with_image_data, without_image_files,
+};
 use crate::tools::{Tool, ToolContext, ToolKind, ToolOutcome};
 use crate::turn::{ToolCall, Turn};
 
@@ -136,8 +139,9 @@ pub struct Agent {
     pub session: Session,
     config: AgentConfig,
     changes: Arc<Mutex<Changes>>,
-    // the model's context, asked of the backend once per model
+    // the model's context and whether it takes images, asked of the backend once per model
     window: Option<(String, Option<usize>)>,
+    vision: Option<(String, bool)>,
     chars_per_token: f64,
 }
 
@@ -155,11 +159,13 @@ impl Agent {
             tools,
             ctx: ToolContext {
                 root: session.root.clone(),
+                images: false,
             },
             permissions,
             session,
             config,
             window: None,
+            vision: None,
             chars_per_token: DEFAULT_CHARS_PER_TOKEN,
         }
     }
@@ -201,6 +207,7 @@ impl Agent {
         interrupt: &Interrupt,
     ) -> Result<TurnEnd> {
         let mut pending = vec![json!({"role": "user", "content": prompt.into()})];
+        self.ctx.images = self.reads_images().await;
         for _ in 0..self.config.max_rounds {
             self.compact_if_full(&pending, ui).await?;
             let sent = self
@@ -245,6 +252,7 @@ impl Agent {
                 self.commit(&mut pending)?;
                 return Ok(TurnEnd::Done);
             }
+            let mut images = Vec::new();
             for call in &turn.tool_calls {
                 let outcome = if interrupt.is_set() {
                     ToolOutcome::error(INTERRUPTED)
@@ -254,6 +262,15 @@ impl Agent {
                 pending.push(
                     json!({"role": "tool", "tool_call_id": call.id, "content": outcome.text}),
                 );
+                images.extend(outcome.images.into_iter().map(|path| ToolImage {
+                    call_id: call.id.clone(),
+                    shown_as: self.ctx.display(&path),
+                    path,
+                }));
+            }
+            // tool results are text, so the images they returned follow as a turn of their own
+            if !images.is_empty() {
+                pending.push(tool_images_message(&images));
             }
             self.commit(&mut pending)?;
             if interrupt.is_set() {
@@ -269,7 +286,10 @@ impl Agent {
         let start = self.session.context_start();
         let last_prompt = (start..self.session.messages.len())
             .rev()
-            .find(|&i| self.session.messages[i]["role"] == "user")
+            .find(|&i| {
+                let message = &self.session.messages[i];
+                message["role"] == "user" && !is_tool_images(message)
+            })
             .unwrap_or(start);
         let window = self.window().await;
         let end = match window {
@@ -308,6 +328,17 @@ impl Agent {
     /// About how many tokens the model's view of the session holds now, by the harness's own count.
     pub fn context_estimate(&self) -> usize {
         self.tokens(&self.session.context())
+    }
+
+    async fn reads_images(&mut self) -> bool {
+        match &self.vision {
+            Some((model, vision)) if *model == self.config.model => *vision,
+            _ => {
+                let vision = self.backend.reads_images(&self.config.model).await;
+                self.vision = Some((self.config.model.clone(), vision));
+                vision
+            }
+        }
     }
 
     async fn window(&mut self) -> Option<usize> {
@@ -458,11 +489,13 @@ impl Agent {
 
     fn request(&self, pending: &[Value]) -> Value {
         let mut request = self.config.request.clone();
+        // image files are read in here, so the session keeps only their paths
         let messages = self
             .session
             .context()
-            .into_iter()
-            .chain(pending.iter().cloned())
+            .iter()
+            .chain(pending)
+            .map(|message| with_image_data(message, false))
             .collect();
         request
             .entry("max_tokens")
@@ -561,7 +594,7 @@ impl Agent {
     }
 }
 
-// a message's JSON length, with each image counted as IMAGE_CHARS rather than its URL
+// a message's JSON length, with each image counted as IMAGE_CHARS rather than its URL or path
 fn message_chars(message: &Value) -> usize {
     let len = message.to_string().len();
     let Some(parts) = message["content"].as_array() else {
@@ -569,17 +602,24 @@ fn message_chars(message: &Value) -> usize {
     };
     parts
         .iter()
-        .filter_map(|part| part["image_url"]["url"].as_str())
-        .fold(len, |len, url| len.saturating_sub(url.len()) + IMAGE_CHARS)
+        .filter_map(|part| {
+            let reference = part["image_url"]["url"]
+                .as_str()
+                .or(part["path"].as_str())?;
+            Some(reference.len())
+        })
+        .fold(len, |len, reference| {
+            len.saturating_sub(reference) + IMAGE_CHARS
+        })
 }
 
 fn share(window: usize, share: f64) -> usize {
     (window as f64 * share) as usize
 }
 
-// a summary request needs a long tool result's gist, not all of it
+// a summary request needs a long tool result's gist, not all of it, and an image's name, not its pixels
 fn clipped(message: &Value) -> Value {
-    let mut message = message.clone();
+    let mut message = without_image_files(message);
     if message["role"] == "tool"
         && let Some(text) = message["content"].as_str()
         && text.len() > CLIPPED_RESULT_CHARS
@@ -626,6 +666,7 @@ mod tests {
         replies: Mutex<Vec<Vec<Value>>>,
         requests: Mutex<Vec<Value>>,
         window: Option<usize>,
+        vision: bool,
     }
 
     fn scripted(replies: Vec<Vec<Value>>, window: Option<usize>) -> Arc<Scripted> {
@@ -633,6 +674,7 @@ mod tests {
             replies: Mutex::new(replies),
             requests: Mutex::new(Vec::new()),
             window,
+            vision: false,
         })
     }
 
@@ -673,6 +715,11 @@ mod tests {
             let window = self.window;
             Box::pin(async move { window })
         }
+
+        fn reads_images<'a>(&'a self, _: &'a str) -> BoxFuture<'a, bool> {
+            let vision = self.vision;
+            Box::pin(async move { vision })
+        }
     }
 
     #[derive(Default)]
@@ -711,6 +758,57 @@ mod tests {
         json!({"choices": [{"delta": {"tool_calls": [
             {"index": 0, "id": id, "function": {"name": name, "arguments": args.to_string()}}]},
             "finish_reason": "tool_calls"}]})
+    }
+
+    #[tokio::test]
+    async fn an_image_read_reaches_the_next_request_and_the_session_keeps_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("shot.png"), b"png bytes").unwrap();
+        let backend = Arc::new(Scripted {
+            vision: true,
+            ..Arc::into_inner(scripted(
+                vec![
+                    vec![call("c1", "read", json!({"path": "shot.png"}))],
+                    vec![json!({"choices": [{"delta": {"content": "Looks right."},
+                        "finish_reason": "stop"}]})],
+                ],
+                None,
+            ))
+            .unwrap()
+        });
+        let session = Session::create(&dir.path().join("sessions"), &root, "m", "sys").unwrap();
+        let config = AgentConfig {
+            model: "m".into(),
+            max_rounds: 10,
+            max_reply_tokens: 64,
+            request: Map::new(),
+        };
+        let mut agent = Agent::new(
+            backend.clone(),
+            default_tools(),
+            Permissions::new(PermissionMode::Ask),
+            session,
+            config,
+        );
+        let mut ui = Recorder::default();
+        agent
+            .send("check the screenshot", &mut ui, &Interrupt::default())
+            .await
+            .unwrap();
+        assert_eq!(ui.tools, [("read".to_string(), false)]);
+        let requests = backend.requests.lock().unwrap();
+        let last = requests[1]["messages"].as_array().unwrap();
+        // system, prompt, the call, its result, then the image turn
+        let image_turn = &last[4];
+        assert_eq!(image_turn["role"], "user");
+        let url = image_turn["content"][1]["image_url"]["url"]
+            .as_str()
+            .unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+        let saved = std::fs::read_to_string(&agent.session.path).unwrap();
+        assert!(saved.contains("\"image_file\"") && !saved.contains("base64"));
     }
 
     #[tokio::test]

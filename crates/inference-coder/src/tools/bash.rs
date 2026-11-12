@@ -102,6 +102,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ToolContext {
             root: dir.path().to_path_buf(),
+            images: false,
         };
         let out = BashTool
             .run(json!({"command": "pwd; echo err >&2"}), &ctx)

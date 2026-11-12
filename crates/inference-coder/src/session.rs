@@ -20,6 +20,20 @@ const SUMMARY_HEADER: &str =
     "[Summary of the earlier part of this session, which no longer fits the context]";
 pub const SUMMARY_ACK: &str = "Understood; continuing from that summary.";
 const FORMAT_VERSION: u64 = 1;
+// a content part naming an image file by path, kept in the session file instead of the image's bytes
+const IMAGE_FILE_PART: &str = "image_file";
+const IMAGE_URL_PART: &str = "image_url";
+// what a request says in place of an image file that is gone by the time the request is built
+const MISSING_IMAGE: &str = "(this image file no longer exists)";
+/// The file extensions a read shows the model as an image, with their media types.
+pub const IMAGE_TYPES: [(&str, &str); 6] = [
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+    ("bmp", "image/bmp"),
+];
 // how much of the first prompt a listing shows
 const TITLE_CHARS: usize = 60;
 
@@ -332,6 +346,104 @@ pub fn user_content(text: &str, images: &[String]) -> Value {
         .collect()
 }
 
+/// The media type of an image file by its extension, for those a read shows as images.
+pub fn image_type(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    IMAGE_TYPES
+        .iter()
+        .find(|(known, _)| *known == ext)
+        .map(|(_, media)| *media)
+}
+
+/// An image a tool call returned: the call, the file and its name as the model saw it.
+pub struct ToolImage {
+    pub call_id: String,
+    pub path: PathBuf,
+    pub shown_as: String,
+}
+
+/// The user turn that shows the model the images tool calls returned. Each part names the file, not its bytes, so the
+/// session stays small; [`with_image_data`] reads them in when a request is built.
+pub fn tool_images_message(images: &[ToolImage]) -> Value {
+    let names = images
+        .iter()
+        .map(|image| image.shown_as.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = json!({"type": "text", "text": format!("The images the tool calls above returned: {names}")});
+    let parts = images.iter().map(
+        |image| json!({"type": IMAGE_FILE_PART, "path": image.path, "tool_call_id": image.call_id}),
+    );
+    json!({"role": "user", "content": std::iter::once(text).chain(parts).collect::<Vec<_>>()})
+}
+
+/// Whether `message` is a turn of tool images rather than one the user wrote.
+pub fn is_tool_images(message: &Value) -> bool {
+    message["role"] == "user"
+        && message["content"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|part| part["type"] == IMAGE_FILE_PART))
+}
+
+/// An image file as a `data:` URL.
+pub fn image_data_url(path: &Path) -> Option<String> {
+    use base64::Engine;
+    let media = image_type(path)?;
+    let bytes = std::fs::read(path).ok()?;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{media};base64,{data}"))
+}
+
+/// `message` with each image file part read in as an `image_url` part (one whose file is gone says so instead); with
+/// `keep_ids` each keeps the call that returned it, for a page placing it under that call.
+pub fn with_image_data(message: &Value, keep_ids: bool) -> Value {
+    let Some(parts) = message["content"].as_array() else {
+        return message.clone();
+    };
+    if !parts.iter().any(|part| part["type"] == IMAGE_FILE_PART) {
+        return message.clone();
+    }
+    let parts = parts
+        .iter()
+        .map(|part| {
+            if part["type"] != IMAGE_FILE_PART {
+                return part.clone();
+            }
+            let path = Path::new(part["path"].as_str().unwrap_or_default());
+            let mut image = match image_data_url(path) {
+                Some(url) => json!({"type": IMAGE_URL_PART, IMAGE_URL_PART: {"url": url}}),
+                None => {
+                    json!({"type": "text", "text": format!("{}: {MISSING_IMAGE}", path.display())})
+                }
+            };
+            if keep_ids {
+                image["tool_call_id"] = part["tool_call_id"].clone();
+            }
+            image
+        })
+        .collect::<Vec<_>>();
+    let mut message = message.clone();
+    message["content"] = Value::Array(parts);
+    message
+}
+
+/// `message` with each image file part as a line of text naming the file, for a request that needs no pixels.
+pub fn without_image_files(message: &Value) -> Value {
+    let Some(parts) = message["content"].as_array() else {
+        return message.clone();
+    };
+    let parts = parts
+        .iter()
+        .map(|part| match part["type"] == IMAGE_FILE_PART {
+            true => json!({"type": "text", "text": format!("[image {}]", part["path"].as_str().unwrap_or_default())}),
+            false => part.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut message = message.clone();
+    message["content"] = Value::Array(parts);
+    message
+}
+
 /// A message content's text: the string itself, or the first text part of a list of parts.
 pub fn text_of(content: &Value) -> Option<&str> {
     match content {
@@ -350,7 +462,10 @@ pub fn summary_message(summary: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Session, user_content};
+    use super::{
+        Session, ToolImage, is_tool_images, tool_images_message, user_content, with_image_data,
+        without_image_files,
+    };
     use serde_json::json;
 
     #[test]
@@ -467,6 +582,41 @@ mod tests {
         assert_eq!(
             Session::list(dir.path()).unwrap()[0].title,
             "match this mockup"
+        );
+    }
+
+    #[test]
+    fn a_tool_image_is_read_in_when_sent_and_noted_once_its_file_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, b"png").unwrap();
+        let image = ToolImage {
+            call_id: "c1".into(),
+            path: path.clone(),
+            shown_as: "shot.png".into(),
+        };
+        let message = tool_images_message(&[image]);
+        assert!(is_tool_images(&message));
+        let sent = with_image_data(&message, false);
+        assert_eq!(
+            sent["content"][1]["image_url"]["url"],
+            "data:image/png;base64,cG5n"
+        );
+        assert!(sent["content"][1].get("tool_call_id").is_none());
+        assert_eq!(
+            with_image_data(&message, true)["content"][1]["tool_call_id"],
+            "c1"
+        );
+        std::fs::remove_file(&path).unwrap();
+        let gone = with_image_data(&message, true);
+        assert_eq!(gone["content"][1]["type"], "text");
+        assert_eq!(gone["content"][1]["tool_call_id"], "c1");
+        let named = without_image_files(&message);
+        assert!(
+            named["content"][1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("shot.png")
         );
     }
 }

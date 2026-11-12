@@ -62,6 +62,7 @@
     running: boolean;
     declined: boolean;
     approval: { id: string; kind: string } | null;
+    images: string[];
   }
   type Item =
     | { kind: "reasoning" | "text" | "notice"; text: string }
@@ -193,6 +194,18 @@
       if (index === compactedBefore) out.push({ kind: "compaction", state: "done", at: compactedAt });
       if (message.role === "user") {
         const parts: CodePart[] = Array.isArray(message.content) ? message.content : [];
+        // the turn that showed the model the images tool calls returned: they go under those calls
+        const returned = parts.filter((part) => part.tool_call_id);
+        if (returned.length) {
+          for (const part of returned) {
+            const tool = findTool(out, part.tool_call_id ?? "");
+            if (!tool) continue;
+            // an image whose file is gone comes back as a note saying so
+            if (part.type === "image_url") tool.images.push(part.image_url.url);
+            else tool.result = `${tool.result ?? ""}\n${part.text}`;
+          }
+          continue;
+        }
         const images = parts.flatMap((part) => (part.type === "image_url" ? [part.image_url.url] : []));
         out.push({ kind: "user", text: textOf(message.content), images });
       } else if (message.role === "assistant") {
@@ -210,6 +223,7 @@
             running: false,
             declined: false,
             approval: null,
+            images: [],
           });
         }
       } else if (message.role === "tool") {
@@ -370,6 +384,7 @@
           running: false,
           declined: false,
           approval: { id: event.approval_id, kind: event.kind },
+          images: [],
         });
         break;
       case "tool_start": {
@@ -388,6 +403,7 @@
             running: true,
             declined: false,
             approval: null,
+            images: [],
           });
         }
         break;
@@ -397,6 +413,7 @@
         if (tool) {
           tool.result = event.text;
           tool.isError = event.is_error;
+          tool.images = event.images ?? [];
           tool.running = false;
           if (CHANGING_TOOLS.has(tool.name)) void refreshChanges();
         }
@@ -925,6 +942,8 @@
                       <span class="truncate text-gray-800 dark:text-gray-200">{summary(item.name, item.args)}</span>
                       {#if item.declined}
                         <span class="ml-auto shrink-0 text-red-500">declined</span>
+                      {:else if item.images.length}
+                        <span class="ml-auto shrink-0 text-gray-400">{item.images.length === 1 ? "image" : `${item.images.length} images`}</span>
                       {:else if item.result != null}
                         <span class="ml-auto shrink-0 text-gray-400">{lineCount(item.result)}</span>
                         {#if (item.name === "edit" || item.name === "write") && !item.isError && str(item.args.path)}
@@ -938,6 +957,13 @@
                         {/if}
                       {/if}
                     </summary>
+                    {#if item.images.length}
+                      <div class="flex flex-wrap gap-2 border-t border-gray-200 px-3 py-2 dark:border-gray-800">
+                        {#each item.images as image, i (i)}
+                          <img src={image} alt="returned by {item.name}" class="max-h-80 max-w-full rounded border border-gray-200 object-contain dark:border-gray-800" />
+                        {/each}
+                      </div>
+                    {/if}
                     {#if item.result != null}
                       <pre class="max-h-80 overflow-auto border-t border-gray-200 px-3 py-2 text-xs dark:border-gray-800">{item.result}</pre>
                     {/if}

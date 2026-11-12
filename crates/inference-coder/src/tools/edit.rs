@@ -108,6 +108,7 @@ mod tests {
         std::fs::write(&file, "let a = 1;\nlet b = 1;\n").unwrap();
         let ctx = ToolContext {
             root: dir.path().to_path_buf(),
+            images: false,
         };
         let ambiguous = EditTool
             .run(

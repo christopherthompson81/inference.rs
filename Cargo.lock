@@ -2683,6 +2683,7 @@ name = "inference-coder"
 version = "0.0.27"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "futures",

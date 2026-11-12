@@ -35,12 +35,19 @@ inference agent -m Qwen/Qwen3-8B --permission-mode auto -p "Fix the failing test
 
 | Tool | What it does |
 |---|---|
-| `read` | Reads a file with line numbers. `offset` and `limit` select a range. |
+| `read` | Reads a file with line numbers. `offset` and `limit` select a range. With a model that takes images, an image file (png, jpg, gif, webp, bmp, up to 20 MB) is shown to the model instead. |
 | `write` | Creates or replaces a whole file. |
 | `edit` | Replaces exact text. The text must occur once, unless `replace_all` is set. |
 | `bash` | Runs a command in the project directory, with stdout and stderr combined. The default timeout is 120 s and the maximum is 600 s. |
 | `grep` | Searches file contents with a regex, skipping files that `.gitignore` excludes. |
 | `glob` | Lists files that match a glob, skipping files that `.gitignore` excludes. |
+
+Reading an image is how the agent can look at its own work: it takes a screenshot with a command (a headless browser,
+for instance) and reads the file. Tool results are text, so the images a round's calls return go to the model in a
+turn after the results. The session file keeps each image's path, not its bytes, and every request reads the file
+again; an image that has since been deleted shows as a note saying so. The image counts as a fixed 4096 characters
+toward the context estimate, and the Code tab shows it under the call that read it. A model without image input
+gets an error when it reads an image.
 
 The system prompt is short. It covers the project directory, platform, date and git branch, plus the project's
 `AGENTS.md` and `CLAUDE.md` when they exist.

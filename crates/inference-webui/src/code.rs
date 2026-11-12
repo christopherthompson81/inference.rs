@@ -25,7 +25,7 @@ use inference_coder::{
     activity::{Run, RunTracker},
     default_tools,
     prompt::system_prompt,
-    session::user_content,
+    session::{image_data_url, user_content, with_image_data},
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -161,7 +161,8 @@ fn history(agent: &Agent, context_tokens: Option<usize>) -> Value {
     json!({
         "session_id": session.id,
         "project": session.root,
-        "messages": session.messages.iter().skip(1).collect::<Vec<_>>(),
+        // images tool calls returned, read in and tagged with their call for the page to place
+        "messages": session.messages.iter().skip(1).map(|m| with_image_data(m, true)).collect::<Vec<_>>(),
         // counted as `messages` is (without the system prompt)
         "compacted_before": session.compaction.as_ref().map(|c| c.start - 1),
         "compacted_at": session.compaction.as_ref().and_then(|c| c.at),
@@ -766,9 +767,14 @@ impl AgentUi for WebUi {
     }
 
     fn tool_end(&mut self, call: &ToolCall, outcome: &ToolOutcome) {
+        let images = outcome
+            .images
+            .iter()
+            .filter_map(|path| image_data_url(path))
+            .collect::<Vec<_>>();
         self.emit(
             json!({"type": "tool_end", "id": call.id, "text": outcome.text,
-            "is_error": outcome.is_error}),
+            "is_error": outcome.is_error, "images": images}),
         );
     }
 

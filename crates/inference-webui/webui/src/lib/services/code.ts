@@ -2,7 +2,10 @@ import { authedFetch } from "./auth";
 
 /** One OpenAI chat message as a Code session stores it. */
 /** A content part of a message that shows the model images. */
-export type CodePart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+/** A content part of a message that shows the model images; `tool_call_id` marks an image a tool call returned. */
+export type CodePart =
+  | { type: "text"; text: string; tool_call_id?: string }
+  | { type: "image_url"; image_url: { url: string }; tool_call_id?: string };
 
 export interface CodeMessage {
   role: "user" | "assistant" | "tool";
@@ -42,7 +45,8 @@ export type CodeEvent =
       name: string;
       args: Record<string, unknown>;
     }
-  | { type: "tool_end"; id: string; text: string; is_error: boolean }
+  /** `images`: data URLs of the images the call returned, which the model sees after the round's results. */
+  | { type: "tool_end"; id: string; text: string; is_error: boolean; images?: string[] }
   | {
       type: "approval";
       approval_id: string;
