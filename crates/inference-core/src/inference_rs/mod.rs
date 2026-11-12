@@ -344,9 +344,17 @@ impl InferenceRs {
         let modalities = metadata.modalities.clone();
         let label_decision = metadata.label_decision.clone();
         let audio_transcriber = metadata.audio_transcriber;
+        // a sequence can't outgrow the paged KV cache, however long the model itself reads
         let max_seq_len = match &category {
             ModelCategory::Diffusion | ModelCategory::Speech => None,
-            _ => Some(metadata.max_seq_len),
+            _ => Some(
+                metadata
+                    .cache_config
+                    .as_ref()
+                    .map_or(metadata.max_seq_len, |cache| {
+                        metadata.max_seq_len.min(cache.token_capacity())
+                    }),
+            ),
         };
         let generation_defaults = pipeline_guard.generation_defaults();
         let encoder_cache_counters = pipeline_guard.encoder_cache_counters();
