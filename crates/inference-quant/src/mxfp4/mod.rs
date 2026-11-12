@@ -325,10 +325,10 @@ impl MXFP4Layer {
             return ffi::HAVE_MXFP4_GEMM_KERNELS;
         }
         #[cfg(feature = "metal")]
-        if _device.is_metal() {
-            return true;
-        }
-        false
+        let metal = _device.is_metal();
+        #[cfg(not(feature = "metal"))]
+        let metal = false;
+        metal
     }
 
     /// Quantize an unquantized weight tensor to MXFP4 format.
