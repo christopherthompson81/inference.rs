@@ -54,6 +54,7 @@ mod qwen3_next;
 mod qwen3vl;
 #[cfg(test)]
 mod sizing_tests;
+mod vibevoice_asr;
 
 pub use minicpm_o::*;
 pub use muse_glimmer::*;
@@ -71,6 +72,7 @@ pub use qwen3_embedding::*;
 pub use qwen3_moe::*;
 pub use qwen3_next::*;
 pub use qwen3vl::*;
+pub use vibevoice_asr::*;
 
 inference_nn::boxed_loaders!(
     NormalModelLoader:
@@ -96,5 +98,6 @@ inference_nn::boxed_loaders!(
     Qwen3AsrLoader,
     Qwen2AudioLoader,
     AudioFlamingo3Loader,
+    VibeVoiceAsrLoader,
 );
 inference_nn::boxed_loaders!(EmbeddingModelLoader: Qwen3EmbeddingLoader);

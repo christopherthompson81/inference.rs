@@ -36,6 +36,7 @@ fn prompt(language: Option<&str>) -> anyhow::Result<String> {
 
 fn parse(answer: &str) -> TranscriptText {
     TranscriptText {
+        segments: Vec::new(),
         language: None,
         text: answer.trim().to_string(),
     }

@@ -505,6 +505,11 @@ impl SupportedArch for MultimodalLoaderType {
                     ex!("mradermacher/music-flamingo-hf-GGUF", "GGUF"),
                 ],
             },
+            Self::VibeVoiceAsr => ArchMetadata {
+                families: &["VibeVoice-ASR (speaker-attributed, timed transcripts)"],
+                modalities: &[Text, Audio],
+                examples: &[ex!("microsoft/VibeVoice-ASR-HF")],
+            },
             Self::Qwen2Audio => ArchMetadata {
                 families: &["Qwen2-Audio"],
                 modalities: &[Text, Audio],

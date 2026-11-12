@@ -1,11 +1,11 @@
 ---
 title: Speech models
-description: Parakeet, Whisper, Cohere Transcribe, IndicConformer, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, VoxLingua107 for spoken language identification, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
+description: Parakeet, Whisper, Cohere Transcribe, IndicConformer, VibeVoice-ASR, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, VoxLingua107 for spoken language identification, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports fifteen speech-related model families:
+inference.rs supports sixteen speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), and the cache-aware
   Nemotron streaming ASR, served via `/v1/audio/transcriptions` with word and segment timestamps.
@@ -15,6 +15,8 @@ inference.rs supports fifteen speech-related model families:
   language (or a language identifier), served via `/v1/audio/transcriptions`.
 - **IndicConformer**: AI4Bharat's FastConformer recogniser for 22 Indian languages, from its `.nemo`, each request
   naming its language, with word timestamps, served via `/v1/audio/transcriptions`.
+- **VibeVoice-ASR**: an audio-in decoder (7B) that writes timed, speaker-attributed segments itself, through
+  `/v1/audio/transcriptions` or `/v1/chat/completions`.
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
@@ -44,7 +46,7 @@ inference.rs supports fifteen speech-related model families:
   described in words (VoiceDesign) or a voice cloned from a clip (Base), from the release or llama.cpp's GGUFs, also
   served via `/v1/audio/speech`.
 
-Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet,
+VibeVoice-ASR, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet,
 Whisper and Cohere Transcribe are dedicated transcription models, and Dia, Kokoro and Qwen3-TTS are dedicated speech models.
 
 ## Parakeet: speech recognition
@@ -561,6 +563,35 @@ curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F language
 clips: the log-mel features, the encoder output and every chunk's greedy token ids (exact in f32, bf16 and f16 on the
 clips tried, a 70 s chunked recording among them). The reference's feature extractor adds a 1e-5 dither from torch's
 generator, which this does not; it is off on both sides for the comparison.
+
+## VibeVoice-ASR: who said what, and when, in one pass
+
+```bash
+inference serve -m microsoft/VibeVoice-ASR-HF
+```
+
+Microsoft's VibeVoice-ASR (7B, MIT) transcribes a recording and writes its own segments: each with its start and end
+in seconds, a speaker index and the text, so a transcript is diarized without a separate diarization model. Two speech
+encoders read the raw 24 kHz audio (7.5 embeddings a second) into a Qwen2.5-7B decoder; it identifies the language
+itself (trained mostly on English, with about 50 other languages). In bf16 it takes about 16.5 GB; five minutes of a
+two-voice recording transcribe in about 50 s on an RTX 3090.
+
+- `/v1/audio/transcriptions` gives the model's segments as the response's segments (`verbose_json`, `srt`, `vtt`).
+  Naming the model as its own `diarization_model` adds each segment's speaker; another diarization model's speakers
+  attach to the model's segments by overlap.
+- No word timestamps: the segments are the model's. The reference adds noise to one encoder's output; this leaves it
+  out, so a transcript repeats (the noise moves segment times by up to 0.02 s and nothing else).
+- Long recordings: every embedding sits in the prompt (27,000 positions for an hour), so the KV cache bounds the
+  length on a GPU.
+- Not yet: the streaming checkpoints, hotword context, and GGUF.
+
+```bash
+curl http://localhost:1234/v1/audio/transcriptions -F file=@meeting.wav -F response_format=verbose_json \
+  -F diarization_model=default
+```
+
+`scripts/vibevoice_asr_parity.sh` checks a build against transformers' `VibeVoiceAsrForConditionalGeneration` in F32
+on the CPU: the audio embeddings (cosine 1.000000) and the greedy answer (identical) on a two-voice clip.
 
 ## Qwen3-ASR: audio in, transcript out
 

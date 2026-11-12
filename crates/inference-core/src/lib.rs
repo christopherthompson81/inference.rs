@@ -81,7 +81,9 @@ macro_rules! skip_without_cuda {
 
 pub use inference_nn::decision;
 use inference_nn::get_mut_arcmutex;
-pub use inference_nn::loaders::{AlignedWord, AudioTranscriber, SpeakerPrompt, TranscriptText};
+pub use inference_nn::loaders::{
+    AlignedWord, AudioTranscriber, SpeakerPrompt, TimedSegment, TranscriptText,
+};
 pub use inference_nn::metal::warmup_metal_kernels;
 /// Model-load progress for hosts that show it: register a sink, get each stage's counts.
 pub mod load_progress {

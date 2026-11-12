@@ -142,7 +142,7 @@ pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};
 pub use inference_models_qwen::loaders::{
     AudioFlamingo3Loader, MiniCpmOLoader, MuseGlimmerLoader, Qwen2_5VLLoader, Qwen2AudioLoader,
     Qwen2VLLoader, Qwen3_5Loader, Qwen3_5MoeLoader, Qwen3AsrLoader, Qwen3VLLoader,
-    Qwen3VLMoELoader,
+    Qwen3VLMoELoader, VibeVoiceAsrLoader,
 };
 
 #[cfg(all(

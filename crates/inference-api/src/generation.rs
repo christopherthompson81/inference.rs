@@ -12,7 +12,7 @@ use inference_core::{
     speech_utils::{self, Sample},
 };
 
-use inference_core::{AlignedWord, TranscriptText};
+use inference_core::{AlignedWord, TimedSegment, TranscriptText};
 use inference_protocol::images::{encode_png, image_generation_response};
 
 use crate::{
@@ -517,7 +517,11 @@ async fn transcribe_inner(
             timings: wants_timings(&request),
         };
         let Some(diarizer) = request.diarization_model.clone() else {
-            let (transcript, _) = decode_transcript(state, &request, repr, audio, plain).await?;
+            let (transcript, _, segments) =
+                decode_transcript(state, &request, repr, audio, plain).await?;
+            if !segments.is_empty() {
+                return render_own_segments(&request, transcript, &segments, None);
+            }
             return render_transcript(&request, transcript, None);
         };
         // named as its own diarizer, a model that writes speaker tags attributes its words itself
@@ -535,7 +539,16 @@ async fn transcribe_inner(
                 parse: own.parse,
                 timings: true,
             };
-            let (transcript, tags) = decode_transcript(state, &request, repr, audio, plan).await?;
+            let (transcript, tags, segments) =
+                decode_transcript(state, &request, repr, audio, plan).await?;
+            // a model that times its own segments names each one's speaker
+            if !segments.is_empty() {
+                let speakers: Vec<usize> = segments
+                    .iter()
+                    .map(|s| s.speaker.unwrap_or(0) as usize)
+                    .collect();
+                return render_own_segments(&request, transcript, &segments, Some(&speakers));
+            }
             require_words(&transcript)?;
             let speakers: Vec<usize> = tags.iter().map(|tag| tag.unwrap_or(0) as usize).collect();
             return render_transcript(&request, transcript, Some(&speakers));
@@ -548,11 +561,25 @@ async fn transcribe_inner(
             decode_transcript(state, &request, repr, audio.clone(), timed),
             speaker_turns(state, &diarizer, audio),
         );
-        let (transcript, _) = transcript?;
-        require_words(&transcript)?;
+        let (transcript, _, segments) = transcript?;
+        if segments.is_empty() {
+            require_words(&transcript)?;
+        }
         let Response::Diarization(diarization) = diarization? else {
             return Err(unexpected(state));
         };
+        if !segments.is_empty() {
+            let spans: Vec<TimedText> = segments
+                .iter()
+                .map(|s| TimedText {
+                    text: s.text.clone(),
+                    start: s.start,
+                    end: s.end,
+                })
+                .collect();
+            let speakers = word_speakers(&spans, &diarization.segments);
+            return render_own_segments(&request, transcript, &segments, Some(&speakers));
+        }
         let speakers = word_speakers(&transcript.words, &diarization.segments);
         return render_transcript(&request, transcript, Some(&speakers));
     }
@@ -736,7 +763,7 @@ async fn decode_transcript(
     repr: String,
     audio: AudioInput,
     plan: TranscriptPlan,
-) -> Result<(Transcription, Vec<Option<u32>>), ApiError> {
+) -> Result<(Transcription, Vec<Option<u32>>, Vec<TimedSegment>), ApiError> {
     let prompt = (plan.prompt)(request.language.as_deref()).map_err(|error| {
         ApiError::new(
             ApiErrorKind::InvalidRequest,
@@ -803,7 +830,7 @@ async fn decode_transcript(
         duration,
         language: parsed.language,
     };
-    Ok((transcript, tags))
+    Ok((transcript, tags, parsed.segments))
 }
 
 // whether a response shows when its words were spoken: subtitles, or a verbose response with words or segments
@@ -911,7 +938,6 @@ pub(crate) fn render_transcript(
     transcript: Transcription,
     speakers: Option<&[usize]>,
 ) -> Result<TranscriptionOutput, ApiError> {
-    let format = request.response_format;
     // a model without word timings gives its whole transcript as one segment
     let segments = if transcript.words.is_empty() && !transcript.text.is_empty() {
         vec![TranscriptionSegment {
@@ -924,6 +950,38 @@ pub(crate) fn render_transcript(
     } else {
         transcript_segments(&transcript.words, speakers)
     };
+    render_segments(request, transcript, segments, speakers)
+}
+
+// the segments a model timed itself, each with its speaker when the request diarized
+fn render_own_segments(
+    request: &TranscriptionRequest,
+    transcript: Transcription,
+    own: &[TimedSegment],
+    speakers: Option<&[usize]>,
+) -> Result<TranscriptionOutput, ApiError> {
+    let segments = own
+        .iter()
+        .enumerate()
+        .map(|(id, s)| TranscriptionSegment {
+            id,
+            start: s.start,
+            end: s.end,
+            text: s.text.clone(),
+            speaker: speakers.map(|speakers| speakers[id]),
+        })
+        .collect();
+    render_segments(request, transcript, segments, None)
+}
+
+// the response in the request's format; `speakers` gives each word's speaker
+fn render_segments(
+    request: &TranscriptionRequest,
+    transcript: Transcription,
+    segments: Vec<TranscriptionSegment>,
+    speakers: Option<&[usize]>,
+) -> Result<TranscriptionOutput, ApiError> {
+    let format = request.response_format;
     let body = match format {
         TranscriptionResponseFormat::Json => serde_json::to_string(&TranscriptionResponse {
             text: transcript.text,
@@ -1335,6 +1393,53 @@ mod tests {
         assert_eq!(
             srt.body.trim(),
             "1\n00:00:00,000 --> 00:00:02,500\nThe quick brown fox."
+        );
+        Ok(())
+    }
+
+    // a model's own segments are the response's, with their speakers only when the request diarized
+    #[test]
+    fn a_models_own_segments_render_as_it_timed_them() -> anyhow::Result<()> {
+        let own = [
+            TimedSegment {
+                start: 0.0,
+                end: 2.5,
+                speaker: Some(0),
+                text: "Hello there.".to_string(),
+            },
+            TimedSegment {
+                start: 2.7,
+                end: 4.0,
+                speaker: Some(1),
+                text: "Hi.".to_string(),
+            },
+        ];
+        let transcript = Transcription {
+            text: "Hello there. Hi.".to_string(),
+            tokens: Vec::new(),
+            words: Vec::new(),
+            duration: 4.0,
+            language: None,
+        };
+        let request = TranscriptionRequest::new(TranscriptionResponseFormat::VerboseJson);
+        let speakers = [0, 1];
+        for diarized in [None, Some(&speakers[..])] {
+            let out = render_own_segments(&request, transcript.clone(), &own, diarized)?;
+            let parsed: VerboseTranscriptionResponse = serde_json::from_str(&out.body)?;
+            let spans: Vec<(f64, f64, Option<usize>)> = parsed
+                .segments
+                .iter()
+                .map(|s| (s.start, s.end, s.speaker))
+                .collect();
+            let speaker = |i: usize| diarized.map(|_| i);
+            assert_eq!(spans, [(0.0, 2.5, speaker(0)), (2.7, 4.0, speaker(1))]);
+        }
+        let srt = TranscriptionRequest::new(TranscriptionResponseFormat::Srt);
+        let out = render_own_segments(&srt, transcript, &own, None)?;
+        assert!(
+            out.body.contains("00:00:02,700 --> 00:00:04,000"),
+            "{}",
+            out.body
         );
         Ok(())
     }
