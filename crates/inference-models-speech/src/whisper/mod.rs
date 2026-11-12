@@ -5,7 +5,6 @@
 mod config;
 mod decode;
 mod languages;
-mod model;
 mod timing;
 
 use std::path::{Path, PathBuf};
@@ -18,12 +17,12 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tokenizers::Tokenizer;
 
+use crate::text_decoder::{Decoder, DecoderCache};
 pub use config::{WhisperConfig, WhisperGenerationConfig};
 use decode::{
     SECONDS_PER_TIMESTAMP, SpecialTokens, WindowSegment, apply_rules, argmax, compression_ratio,
     log_softmax, sample, split_segments,
 };
-use model::{Decoder, DecoderCache};
 use timing::WordTiming;
 
 use crate::{TimedText, Transcription, TranscriptionOptions};
@@ -151,7 +150,7 @@ impl Whisper {
         let vb = vb.pp("model");
         Ok(Self {
             encoder: WhisperEncoder::new(&config.encoder(), vb.pp("encoder"))?,
-            decoder: Decoder::new(config, vb.pp("decoder"))?,
+            decoder: Decoder::new(&config.decoder(), vb.pp("decoder"), None)?,
             start_of_previous: tokenizer.token_to_id(START_OF_PREVIOUS),
             no_speech: NO_SPEECH.iter().find_map(|t| tokenizer.token_to_id(t)),
             tokenizer,

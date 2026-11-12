@@ -5,6 +5,8 @@ use inference_nn::audio::whisper::{
 };
 use inference_nn::layers::Activation;
 
+use crate::text_decoder::{DecoderConfig, WHISPER_NAMES};
+
 const LAYER_NORM_EPS: f64 = 1e-5;
 
 /// transformers' `WhisperConfig`, the fields the model reads.
@@ -44,8 +46,19 @@ impl WhisperConfig {
         }
     }
 
-    pub fn layer_norm_eps(&self) -> f64 {
-        LAYER_NORM_EPS
+    pub fn decoder(&self) -> DecoderConfig {
+        DecoderConfig {
+            d_model: self.d_model,
+            num_layers: self.decoder_layers,
+            num_heads: self.decoder_attention_heads,
+            ffn_dim: self.decoder_ffn_dim,
+            vocab_size: self.vocab_size,
+            max_positions: self.max_target_positions,
+            activation: self.activation_function,
+            key_bias: false,
+            names: &WHISPER_NAMES,
+            model: "Whisper",
+        }
     }
 }
 

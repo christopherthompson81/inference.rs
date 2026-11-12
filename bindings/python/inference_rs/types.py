@@ -426,6 +426,7 @@ class ToolType(str, Enum):
 class TranscriptionLoaderType(str, Enum):
     PARAKEET = "parakeet"
     WHISPER = "whisper"
+    COHERE_ASR = "cohere_asr"
 
 
 class TranscriptionResponseFormat(str, Enum):

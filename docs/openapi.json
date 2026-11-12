@@ -15625,7 +15625,8 @@
         "type": "string",
         "enum": [
           "parakeet",
-          "whisper"
+          "whisper",
+          "cohere_asr"
         ]
       },
       "TranscriptionRequest": {

@@ -708,6 +708,11 @@ impl SupportedArch for TranscriptionLoaderType {
                     ex!("openai/whisper-small"),
                 ],
             },
+            Self::CohereAsr => ArchMetadata {
+                families: &["Cohere Transcribe (14 languages, named per request)"],
+                modalities: &[Audio, Text],
+                examples: &[ex!("CohereLabs/cohere-transcribe-03-2026")],
+            },
         }
     }
 }
