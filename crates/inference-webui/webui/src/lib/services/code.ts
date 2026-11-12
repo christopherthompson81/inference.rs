@@ -1,9 +1,12 @@
 import { authedFetch } from "./auth";
 
 /** One OpenAI chat message as a Code session stores it. */
+/** A content part of a message that shows the model images. */
+export type CodePart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+
 export interface CodeMessage {
   role: "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | CodePart[] | null;
   reasoning_content?: string;
   tool_calls?: { id: string; function: { name: string; arguments: string } }[];
   tool_call_id?: string;
@@ -23,6 +26,14 @@ export type Decision = "once" | "always" | "deny";
 
 /** What the agent streams while it works on a prompt. */
 export type CodeEvent =
+  /** The prompt the run is for, first of its events. */
+  | { type: "prompt"; text: string; images: string[] }
+  /** The model's context in tokens, where the server can tell. */
+  | { type: "context"; tokens: number | null }
+  /** A page attaching late has seen every event so far; the run started `elapsed_ms` ago. */
+  | { type: "caught_up"; elapsed_ms: number }
+  /** A request of about `prompt_tokens` (the harness's estimate) went to the model. */
+  | { type: "round_start"; prompt_tokens: number }
   | { type: "text"; delta: string }
   | { type: "reasoning"; delta: string }
   | {
@@ -46,7 +57,7 @@ export type CodeEvent =
   /** The history before message `end` is being folded into a summary, to fit the model's context. */
   | { type: "compacting"; end: number }
   /** It was: the model now sees the summary and the messages from `start` on (system prompt counted). */
-  | { type: "compacted"; start: number }
+  | { type: "compacted"; start: number; at: number | null; context_estimate: number }
   | {
       type: "done";
       end: "done" | "interrupted" | "round_limit" | "reply_limit" | "compacted" | "nothing_to_compact";
@@ -63,11 +74,12 @@ async function failure(res: Response): Promise<Error> {
   return new Error(text || `HTTP ${res.status}`);
 }
 
-async function post(path: string, body: unknown): Promise<Response> {
+async function post(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
   const res = await authedFetch(url(path), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) throw await failure(res);
   return res;
@@ -95,6 +107,15 @@ export async function openSession(
   labels: Record<string, string>;
   /** Where the model's view begins past a summary of the earlier messages, as an index into `messages`. */
   compacted_before: number | null;
+  /** When that summary was made, in seconds since the epoch. */
+  compacted_at: number | null;
+  context_tokens: number | null;
+  /** About how many tokens the model's view of the session holds, by the harness's count. */
+  context_estimate: number;
+  /** The server's report on the last request of the last prompt run since the session loaded. */
+  usage: Record<string, any> | null;
+  /** A prompt is running: `messages` are the session as it found it, and `attach` streams its events. */
+  running: boolean;
 }> {
   return (await post("open", { project, session_id: sessionId, model })).json();
 }
@@ -122,25 +143,45 @@ export async function interrupt(sessionId: string) {
   await post("interrupt", { session_id: sessionId });
 }
 
-/** Sends a prompt and calls `onEvent` for each event until the agent finishes. */
+export interface SendOptions {
+  model: string | null;
+  mode: PermissionMode;
+  enableThinking: boolean | null;
+  describeActivity: boolean;
+  /** Data URLs of the images the prompt shows the model. */
+  images: string[];
+}
+
+/** Sends a prompt and calls `onEvent` for each event until the agent finishes; the prompt goes on if `signal` aborts. */
 export async function send(
   sessionId: string,
-  model: string | null,
   prompt: string,
-  mode: PermissionMode,
-  enableThinking: boolean | null,
-  describeActivity: boolean,
+  options: SendOptions,
   onEvent: (event: CodeEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const body: Record<string, unknown> = {
     session_id: sessionId,
     prompt,
-    mode,
-    model,
-    describe_activity: describeActivity,
+    mode: options.mode,
+    model: options.model,
+    describe_activity: options.describeActivity,
+    images: options.images,
   };
-  if (enableThinking != null) body.enable_thinking = enableThinking;
-  const res = await post("send", body);
+  if (options.enableThinking != null) body.enable_thinking = options.enableThinking;
+  await readEvents(await post("send", body, signal), onEvent);
+}
+
+/** The running prompt's events from its first, for a session `openSession` found running. */
+export async function attach(
+  sessionId: string,
+  onEvent: (event: CodeEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  await readEvents(await post("attach", { session_id: sessionId }, signal), onEvent);
+}
+
+async function readEvents(res: Response, onEvent: (event: CodeEvent) => void): Promise<void> {
   const reader = res.body?.getReader();
   if (!reader) throw new Error("no response body");
   const decoder = new TextDecoder();

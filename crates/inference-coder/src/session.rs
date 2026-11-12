@@ -39,6 +39,8 @@ pub struct Compaction {
     pub summary: String,
     pub start: usize,
     pub through: usize,
+    /// When it was folded, in seconds since the epoch; unset in sessions from before it was kept.
+    pub at: Option<u64>,
 }
 
 /// A conversation: its messages (system prompt first) and the file they are appended to.
@@ -132,6 +134,7 @@ impl Session {
                             summary: summary.to_string(),
                             start,
                             through: through.map_or(Ok(start), usize::try_from)?,
+                            at: entry.get("at").and_then(Value::as_u64),
                         });
                     }
                 }
@@ -181,14 +184,16 @@ impl Session {
             bail!("a compaction starting at message {start} is outside the session");
         }
         let through = self.messages.len();
+        let at = now_secs();
         self.write_line(
             &json!({"type": COMPACTION_TYPE, "summary": summary, "start": start,
-            "through": through}),
+            "through": through, "at": at}),
         )?;
         self.compaction = Some(Compaction {
             summary,
             start,
             through,
+            at: Some(at),
         });
         Ok(())
     }
@@ -264,7 +269,7 @@ impl Session {
                 .messages
                 .iter()
                 .find(|m| m["role"] == "user")
-                .and_then(|m| m["content"].as_str())
+                .and_then(|m| text_of(&m["content"]))
                 .map(|text| {
                     text.lines()
                         .next()
@@ -314,6 +319,30 @@ impl Session {
     }
 }
 
+/// A user turn's content: its text, then its images (data or http URLs) when it has any.
+pub fn user_content(text: &str, images: &[String]) -> Value {
+    if images.is_empty() {
+        return Value::String(text.to_string());
+    }
+    let images = images
+        .iter()
+        .map(|url| json!({"type": "image_url", "image_url": {"url": url}}));
+    std::iter::once(json!({"type": "text", "text": text}))
+        .chain(images)
+        .collect()
+}
+
+/// A message content's text: the string itself, or the first text part of a list of parts.
+pub fn text_of(content: &Value) -> Option<&str> {
+    match content {
+        Value::Array(parts) => parts
+            .iter()
+            .find(|part| part["type"] == "text")
+            .and_then(|part| part["text"].as_str()),
+        content => content.as_str(),
+    }
+}
+
 /// The message a summary of folded history is sent as.
 pub fn summary_message(summary: &str) -> Value {
     json!({"role": "user", "content": format!("{SUMMARY_HEADER}\n\n{summary}")})
@@ -321,7 +350,7 @@ pub fn summary_message(summary: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::Session;
+    use super::{Session, user_content};
     use serde_json::json;
 
     #[test]
@@ -421,6 +450,23 @@ mod tests {
         assert!(context[4].get("reasoning_content").is_none());
         assert_eq!(context[5]["reasoning_content"], "kept");
         assert_eq!(reopened.messages[4]["reasoning_content"], "thought");
+        assert!(reopened.compaction.unwrap().at.is_some());
         assert!(session.compact("x".into(), 9).is_err());
+    }
+
+    #[test]
+    fn a_prompt_with_images_lists_them_after_its_text_and_titles_by_the_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create(dir.path(), dir.path(), "m", "s").unwrap();
+        let content = user_content("match this mockup", &["data:image/png;base64,AAAA".into()]);
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(user_content("plain", &[]), "plain");
+        session
+            .append(json!({"role": "user", "content": content}))
+            .unwrap();
+        assert_eq!(
+            Session::list(dir.path()).unwrap()[0].title,
+            "match this mockup"
+        );
     }
 }

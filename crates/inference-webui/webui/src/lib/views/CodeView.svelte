@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import CodeDiff from "../components/CodeDiff.svelte";
   import CodeFiles from "../components/CodeFiles.svelte";
   import ThinkingBlock from "../components/ThinkingBlock.svelte";
   import { modelStore } from "../stores/models.svelte";
   import { renderMarkdown } from "../utils/markdown";
+  import { when } from "../utils/when";
   import * as code from "../services/code";
   import type {
     CodeEvent,
     CodeMessage,
+    CodePart,
     CodeSessionInfo,
     Decision,
     FileChange,
@@ -20,6 +22,8 @@
   const MODE_KEY = "inference-rs-code-mode";
   const DIFF_WIDTH_KEY = "inference-rs-code-diff-width";
   const DESCRIBE_KEY = "inference-rs-code-describe-activity";
+  // the session last open, reopened when the tab comes back (or the page reloads) and attached to if still running
+  const SESSION_KEY = "inference-rs-code-session";
   // the diff pane's share of the width, kept between these so neither side vanishes
   const MIN_DIFF_SHARE = 0.2;
   const MAX_DIFF_SHARE = 0.8;
@@ -27,8 +31,16 @@
   // calls after which the project may have changed
   const CHANGING_TOOLS = new Set(["edit", "write", "bash"]);
   const SUMMARY_CHARS = 100;
-  // how often the agent clock redraws while a prompt runs
-  const CLOCK_TICK_MS = 1000;
+  // how often the agent clock and the live stats redraw while a prompt runs
+  const CLOCK_TICK_MS = 100;
+  // streamed characters per token, for the live estimate until the server's count arrives
+  const CHARS_PER_TOKEN = 4;
+  // the share of the context past which the agent summarizes the history (the harness's COMPACT_AT)
+  const COMPACT_SHARE = 0.8;
+  // within this many pixels of the bottom the log keeps following new output
+  const FOLLOW_PX = 48;
+  const RING_RADIUS = 7;
+  const RING_LENGTH = 2 * Math.PI * RING_RADIUS;
   // an activity line names this many files before it counts them instead
   const LABEL_FILES = 2;
   const COMPACTED_NOTICE = "The earlier history was summarized: the model now sees the summary and the messages after this point";
@@ -51,7 +63,20 @@
     declined: boolean;
     approval: { id: string; kind: string } | null;
   }
-  type Item = { kind: "user" | "reasoning" | "text" | "notice"; text: string } | ToolItem;
+  type Item =
+    | { kind: "reasoning" | "text" | "notice"; text: string }
+    | { kind: "user"; text: string; images: string[] }
+    | { kind: "compaction"; state: "running" | "done" | "stopped"; at: number | null }
+    | ToolItem;
+  // the model request under way: when it went, its estimated prompt, and what has streamed back since
+  interface Round {
+    start: number;
+    promptTokens: number;
+    firstAt: number | null;
+    chars: number;
+    // false once a late page joined past the prefill, which it didn't see
+    prefillSeen: boolean;
+  }
 
   function stored<T extends string>(key: string, fallback: T): T {
     try {
@@ -93,6 +118,29 @@
   let activeSince = $state<number | null>(null);
   let now = $state(Date.now());
   let agentSeconds = $derived((agentMs + (activeSince != null ? now - activeSince : 0)) / 1000);
+  let contextTokens = $state<number | null>(null);
+  let contextEstimate = $state<number | null>(null);
+  let round = $state<Round | null>(null);
+  let live = $derived.by(() => {
+    if (!round) return null;
+    const tokens = Math.round(round.chars / CHARS_PER_TOKEN);
+    const decoding = round.firstAt != null ? (now - round.firstAt) / 1000 : 0;
+    return {
+      context: round.promptTokens + tokens,
+      prefill: round.prefillSeen ? ((round.firstAt ?? now) - round.start) / 1000 : null,
+      tokPerSec: decoding > 0 ? tokens / decoding : 0,
+    };
+  });
+  // what the context holds: live while a reply streams, the server's count after it, the harness's estimate before
+  let contextUsed = $derived(live?.context ?? usage?.total_tokens ?? contextEstimate);
+  let contextShare = $derived(contextTokens && contextUsed != null ? Math.min(1, contextUsed / contextTokens) : null);
+  let follow = true;
+  // a late page replays the run's events before it shows them live
+  let replaying = false;
+  let stream: AbortController | null = null;
+  let pendingImages = $state<string[]>([]);
+  let imageInput = $state<HTMLInputElement | null>(null);
+  let canSeeImages = $derived(modelStore.selectedInputModalities.includes("vision"));
   let blocks = $derived(groupActivity(items));
   let container = $state<HTMLDivElement | null>(null);
   let sideTab = $state<"sessions" | "files">("sessions");
@@ -130,15 +178,27 @@
     return `${name}(${cut(detail ?? JSON.stringify(args), SUMMARY_CHARS)})`;
   }
 
-  function fromMessages(messages: CodeMessage[], compactedBefore: number | null = null): Item[] {
+  function textOf(content: CodeMessage["content"]): string {
+    if (!Array.isArray(content)) return content ?? "";
+    return content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+  }
+
+  function fromMessages(
+    messages: CodeMessage[],
+    compactedBefore: number | null = null,
+    compactedAt: number | null = null,
+  ): Item[] {
     const out: Item[] = [];
     for (const [index, message] of messages.entries()) {
-      if (index === compactedBefore) out.push({ kind: "notice", text: COMPACTED_NOTICE });
+      if (index === compactedBefore) out.push({ kind: "compaction", state: "done", at: compactedAt });
       if (message.role === "user") {
-        out.push({ kind: "user", text: message.content ?? "" });
+        const parts: CodePart[] = Array.isArray(message.content) ? message.content : [];
+        const images = parts.flatMap((part) => (part.type === "image_url" ? [part.image_url.url] : []));
+        out.push({ kind: "user", text: textOf(message.content), images });
       } else if (message.role === "assistant") {
         if (message.reasoning_content?.trim()) out.push({ kind: "reasoning", text: message.reasoning_content.trim() });
-        if (message.content?.trim()) out.push({ kind: "text", text: message.content.trim() });
+        const text = textOf(message.content).trim();
+        if (text) out.push({ kind: "text", text });
         for (const call of message.tool_calls ?? []) {
           out.push({
             kind: "tool",
@@ -155,7 +215,7 @@
       } else if (message.role === "tool") {
         const tool = findTool(out, message.tool_call_id ?? "");
         if (tool) {
-          tool.result = message.content ?? "";
+          tool.result = textOf(message.content);
           tool.declined = tool.result === DECLINED;
         }
       }
@@ -266,8 +326,37 @@
 
   function onEvent(event: CodeEvent) {
     switch (event.type) {
+      case "prompt":
+        items.push({ kind: "user", text: event.text, images: event.images ?? [] });
+        follow = true;
+        break;
+      case "context":
+        contextTokens = event.tokens;
+        break;
+      case "caught_up":
+        replaying = false;
+        agentMs = 0;
+        activeSince = Date.now() - event.elapsed_ms;
+        // the replayed output arrived at once: rate what streams from here, with what came before in the prompt
+        if (round) {
+          round.promptTokens += Math.round(round.chars / CHARS_PER_TOKEN);
+          round.chars = 0;
+          round.start = Date.now();
+          if (round.firstAt != null) {
+            round.firstAt = Date.now();
+            round.prefillSeen = false;
+          }
+        }
+        break;
+      case "round_start":
+        round = { start: Date.now(), promptTokens: event.prompt_tokens, firstAt: null, chars: 0, prefillSeen: true };
+        break;
       case "text":
       case "reasoning":
+        if (round) {
+          round.firstAt ??= Date.now();
+          round.chars += event.delta.length;
+        }
         appendText(event.type, event.delta);
         break;
       case "approval":
@@ -315,17 +404,24 @@
       }
       case "usage":
         usage = event.usage;
+        round = null;
         break;
       case "label":
         labels[event.id] = event.label;
         break;
       case "compacting":
-        items.push({ kind: "notice", text: "Summarizing the earlier history to fit the model's context..." });
+        items.push({ kind: "compaction", state: "running", at: null });
         break;
-      case "compacted":
-        items.push({ kind: "notice", text: COMPACTED_NOTICE });
+      case "compacted": {
+        const item = items.findLast((item) => item.kind === "compaction" && item.state === "running");
+        if (item?.kind === "compaction") {
+          item.state = "done";
+          item.at = event.at;
+        }
         usage = null;
+        contextEstimate = event.context_estimate;
         break;
+      }
       case "done":
         if (event.end === "nothing_to_compact")
           items.push({ kind: "notice", text: "Nothing before the latest prompt to summarize" });
@@ -338,13 +434,20 @@
         error = event.message;
         break;
     }
+    if (replaying) return;
     syncClock();
     void scrollDown();
   }
 
   async function scrollDown() {
+    if (!follow) return;
     await tick();
-    if (container) container.scrollTop = container.scrollHeight;
+    if (container && follow) container.scrollTop = container.scrollHeight;
+  }
+
+  // scrolling up stops the log following new output; back near the bottom it follows again
+  function onScroll() {
+    if (container) follow = container.scrollHeight - container.scrollTop - container.clientHeight < FOLLOW_PX;
   }
 
   async function refreshSessions() {
@@ -421,23 +524,31 @@
     handle.addEventListener("pointerup", up);
   }
 
-  async function open(id?: string) {
+  // `remembered`: the session the tab had open last, which may since have gone
+  async function open(id?: string, remembered = false) {
     try {
       const session = await code.openSession(project, modelStore.selectedModel, id);
       if (session.session_id !== sessionId) resetFiles();
       sessionId = session.session_id;
       projectPath = session.project;
-      items = fromMessages(session.messages, session.compacted_before);
+      items = fromMessages(session.messages, session.compacted_before, session.compacted_at);
       labels = session.labels ?? {};
-      usage = null;
+      usage = session.usage;
+      round = null;
+      contextTokens = session.context_tokens;
+      contextEstimate = session.context_estimate;
       agentMs = 0;
       error = "";
       store(PROJECT_KEY, project);
+      store(SESSION_KEY, session.session_id);
+      follow = true;
       await refreshSessions();
       void refreshChanges();
       void scrollDown();
+      if (session.running) void run((signal) => code.attach(session.session_id, onEvent, signal), true);
     } catch (e) {
-      error = `${e}`;
+      if (remembered) store(SESSION_KEY, "");
+      else error = `${e}`;
     }
   }
 
@@ -449,9 +560,11 @@
       resetFiles();
       sessionId = demo.session_id;
       projectPath = demo.project;
+      store(SESSION_KEY, demo.session_id);
       items = [];
       labels = {};
       usage = null;
+      contextEstimate = null;
       agentMs = 0;
       error = "";
       await refreshSessions();
@@ -464,28 +577,101 @@
 
   async function submit() {
     const text = prompt.trim();
-    if (!text || running) return;
+    const images = canSeeImages ? pendingImages : [];
+    if ((!text && !images.length) || running) return;
     if (!sessionId) await open();
     if (!sessionId) return;
+    const id = sessionId;
     prompt = "";
+    pendingImages = [];
     error = "";
-    items.push({ kind: "user", text });
+    const options = {
+      model: modelStore.selectedModel,
+      mode,
+      enableThinking: thinking === "default" ? null : thinking === "on",
+      describeActivity: describe,
+      images,
+    };
+    await run((signal) => code.send(id, text, options, onEvent, signal), false);
+  }
+
+  // follows a prompt's events to its end; leaving the tab aborts only the stream, never the prompt
+  async function run(listen: (signal: AbortSignal) => Promise<void>, late: boolean) {
+    stream?.abort();
+    const controller = new AbortController();
+    stream = controller;
     running = true;
+    replaying = late;
     agentMs = 0;
     activeSince = null;
-    syncClock();
-    void scrollDown();
+    if (!late) syncClock();
     try {
-      await code.send(sessionId, modelStore.selectedModel, text, mode, thinking === "default" ? null : thinking === "on", describe, onEvent);
+      await listen(controller.signal);
     } catch (e) {
-      error = `${e}`;
+      if (!controller.signal.aborted) error = `${e}`;
     } finally {
-      running = false;
-      for (const item of items) if (item.kind === "tool") item.running = false;
-      syncClock();
-      void refreshSessions();
-      void refreshChanges();
+      if (stream === controller) {
+        stream = null;
+        running = false;
+        replaying = false;
+        round = null;
+        for (const item of items) {
+          if (item.kind === "tool") item.running = false;
+          if (item.kind === "compaction" && item.state === "running") item.state = "stopped";
+        }
+        syncClock();
+        void refreshSessions();
+        void refreshChanges();
+        void scrollDown();
+      }
     }
+  }
+
+  function readImage(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addImages(files: Iterable<File>) {
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) continue;
+      try {
+        pendingImages.push(await readImage(file));
+      } catch (e) {
+        error = `${e}`;
+      }
+    }
+  }
+
+  function onPaste(event: ClipboardEvent) {
+    if (!canSeeImages) return;
+    const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+    if (!files.length) return;
+    event.preventDefault();
+    void addImages(files);
+  }
+
+  function onDrop(event: DragEvent) {
+    if (!canSeeImages || !event.dataTransfer?.files.length) return;
+    event.preventDefault();
+    void addImages(event.dataTransfer.files);
+  }
+
+  // HH:MM:SS.S
+  function clock(seconds: number): string {
+    const tenths = Math.floor(seconds * 10);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const hours = Math.floor(tenths / 36000);
+    const minutes = Math.floor(tenths / 600) % 60;
+    return `${pad(hours)}:${pad(minutes)}:${((tenths % 600) / 10).toFixed(1).padStart(4, "0")}`;
+  }
+
+  function count(tokens: number): string {
+    return tokens.toLocaleString();
   }
 
   function setDescribe(on: boolean) {
@@ -539,9 +725,17 @@
     return typeof value === "string" ? value : "";
   }
 
-  onMount(() => {
-    if (available) void refreshSessions();
+  let restored = false;
+  // once the page knows it may use the tab (capabilities arrive after mount on a fresh load)
+  $effect(() => {
+    if (!available || restored) return;
+    restored = true;
+    void refreshSessions();
+    const last = stored(SESSION_KEY, "");
+    if (last && project.trim()) void open(last, true);
   });
+
+  onDestroy(() => stream?.abort());
 
   $effect(() => {
     if (available && project && !projectPath) void refreshSessions();
@@ -664,7 +858,7 @@
           </select>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4" bind:this={container}>
+        <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4" bind:this={container} onscroll={onScroll}>
           <div class="mx-auto flex max-w-3xl flex-col gap-3">
             {#if items.length === 0}
               <p class="mt-8 text-center text-sm text-gray-400">
@@ -674,7 +868,32 @@
             {/if}
             {#snippet entryView(item: Item, index: number)}
               {#if item.kind === "user"}
-                <div class="self-end rounded-2xl bg-blue-600 px-4 py-2 text-sm whitespace-pre-wrap text-white">{item.text}</div>
+                {#if item.images.length}
+                  <div class="flex flex-wrap justify-end gap-2 self-end">
+                    {#each item.images as image, i (i)}
+                      <img src={image} alt="attached" class="max-h-40 max-w-60 rounded-lg border border-gray-200 object-contain dark:border-gray-800" />
+                    {/each}
+                  </div>
+                {/if}
+                {#if item.text}
+                  <div class="self-end rounded-2xl bg-blue-600 px-4 py-2 text-sm whitespace-pre-wrap text-white">{item.text}</div>
+                {/if}
+              {:else if item.kind === "compaction"}
+                <div class="flex items-center gap-2 text-xs text-gray-400" data-compaction={item.state} title={COMPACTED_NOTICE}>
+                  <span class="h-px flex-1 bg-gray-200 dark:bg-gray-800"></span>
+                  {#if item.state === "running"}
+                    <svg class="h-3.5 w-3.5 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                    <span class="animate-pulse">Summarizing the earlier history to fit the context...</span>
+                  {:else if item.state === "stopped"}
+                    <span>Summarizing stopped; the history is as it was</span>
+                  {:else}
+                    <span>History summarized{item.at ? ` ${when(new Date(item.at * 1000).toISOString())}` : ""}</span>
+                  {/if}
+                  <span class="h-px flex-1 bg-gray-200 dark:bg-gray-800"></span>
+                </div>
               {:else if item.kind === "reasoning"}
                 <ThinkingBlock reasoning={item.text} streaming={running && index === items.length - 1} />
               {:else if item.kind === "text"}
@@ -782,14 +1001,57 @@
           </div>
         </div>
 
-        <div class="shrink-0 border-t border-gray-200 px-4 py-3 dark:border-gray-800">
+        <div
+          class="shrink-0 border-t border-gray-200 px-4 py-3 dark:border-gray-800"
+          role="group"
+          ondragover={(e) => canSeeImages && e.preventDefault()}
+          ondrop={onDrop}
+        >
+          {#if pendingImages.length}
+            <div class="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
+              {#each pendingImages as image, i (i)}
+                <div class="relative">
+                  <img src={image} alt="to send" class="h-16 w-16 rounded-md border border-gray-200 object-cover dark:border-gray-700" />
+                  <button
+                    class="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-gray-700 text-xs text-white hover:bg-red-600"
+                    onclick={() => pendingImages.splice(i, 1)}
+                    aria-label="Remove image">&times;</button
+                  >
+                </div>
+              {/each}
+            </div>
+          {/if}
           <div class="mx-auto flex max-w-3xl items-end gap-2">
+            {#if canSeeImages}
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                class="hidden"
+                bind:this={imageInput}
+                onchange={(e) => {
+                  void addImages(e.currentTarget.files ?? []);
+                  e.currentTarget.value = "";
+                }}
+              />
+              <button
+                class="rounded-xl border border-gray-300 px-3 py-2.5 text-gray-500 hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-gray-800"
+                onclick={() => imageInput?.click()}
+                title="Attach images (or paste or drop them here)"
+                aria-label="Attach images"
+              >
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                </svg>
+              </button>
+            {/if}
             <textarea
               class="min-w-0 flex-1 resize-none rounded-xl border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm outline-none focus:border-blue-400 focus:bg-white focus:ring-1 focus:ring-blue-400 dark:border-gray-600 dark:bg-gray-800 dark:focus:bg-gray-900"
               rows="2"
               placeholder={`Describe a change (Enter sends, Shift+Enter for a new line; ${code.COMPACT_COMMAND} summarizes the history)`}
               bind:value={prompt}
               onkeydown={onKeydown}
+              onpaste={onPaste}
             ></textarea>
             {#if running}
               <button class="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700" onclick={stop}>Stop</button>
@@ -797,19 +1059,50 @@
               <button
                 class="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
                 onclick={submit}
-                disabled={!prompt.trim()}
+                disabled={!prompt.trim() && !(canSeeImages && pendingImages.length)}
               >
                 Send
               </button>
             {/if}
           </div>
-          {#if usage || agentSeconds > 0}
-            <p class="mx-auto mt-1 max-w-3xl text-xs text-gray-400" data-agent-seconds={agentSeconds.toFixed(1)}>
-              agent {agentSeconds.toFixed(1)} s{#if usage}, context {usage.total_tokens} tokens, {usage.prompt_tokens_details
-                  ?.cached_tokens ?? 0} cached, prefill {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s, {Number(
-                  usage.avg_compl_tok_per_sec ?? 0,
-                ).toFixed(1)} tok/s{/if}
-            </p>
+          {#if sessionId}
+            <div class="mx-auto mt-1 flex max-w-3xl flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-400 tabular-nums">
+              {#if contextTokens && contextShare != null && contextUsed != null}
+                <span
+                  class="flex items-center gap-1.5"
+                  data-context-used={contextUsed}
+                  title="The model's context: what this session holds of it (summarized at {COMPACT_SHARE * 100}%)"
+                >
+                  <svg class="h-4 w-4 -rotate-90" viewBox="0 0 18 18" aria-hidden="true">
+                    <circle cx="9" cy="9" r={RING_RADIUS} fill="none" stroke-width="2.5" class="stroke-gray-200 dark:stroke-gray-700" />
+                    <circle
+                      cx="9"
+                      cy="9"
+                      r={RING_RADIUS}
+                      fill="none"
+                      stroke-width="2.5"
+                      stroke-linecap="round"
+                      stroke-dasharray={RING_LENGTH}
+                      stroke-dashoffset={RING_LENGTH * (1 - contextShare)}
+                      class={contextShare >= COMPACT_SHARE ? "stroke-amber-500" : "stroke-blue-500"}
+                    />
+                  </svg>
+                  {live || !usage ? "~" : ""}{count(contextUsed)} / {count(contextTokens)} tokens ({Math.round(contextShare * 100)}%)
+                </span>
+              {/if}
+              {#if agentSeconds > 0}
+                <span data-agent-seconds={agentSeconds.toFixed(1)}>agent {clock(agentSeconds)}</span>
+              {/if}
+              {#if live}
+                {#if live.prefill != null}<span>prefill {live.prefill.toFixed(1)} s</span>{/if}
+                {#if live.tokPerSec > 0}<span>~{live.tokPerSec.toFixed(1)} tok/s</span>{/if}
+                {#if usage}<span>{count(usage.prompt_tokens_details?.cached_tokens ?? 0)} cached (last request)</span>{/if}
+              {:else if usage}
+                <span>{count(usage.prompt_tokens_details?.cached_tokens ?? 0)} cached</span>
+                <span>prefill {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s</span>
+                <span>{Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)} tok/s</span>
+              {/if}
+            </div>
           {/if}
         </div>
       </section>

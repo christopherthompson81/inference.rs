@@ -38,6 +38,8 @@ const CLIPPED_RESULT_CHARS: usize = 16_000;
 const CLIP_MARK: &str = "\n[... clipped ...]\n";
 // JSON characters per prompt token until a reply's usage says (about what code and tool output run at)
 const DEFAULT_CHARS_PER_TOKEN: f64 = 3.0;
+// an image counts as this many characters instead of its encoded bytes (about 1.4K tokens at the default ratio)
+const IMAGE_CHARS: usize = 4096;
 // a summary request the server still refuses is retried over half as much history, this many times
 const SUMMARY_RETRIES: usize = 3;
 const COMPACT_PROMPT: &str = "Write a summary of this session so far for yourself: the earlier messages are about \
@@ -59,6 +61,10 @@ pub trait AgentUi: Send {
         args: &'a Value,
         kind: ToolKind,
     ) -> BoxFuture<'a, Approval>;
+    /// A request of about `prompt_tokens` (the harness's estimate) is going to the model.
+    fn round_start(&mut self, prompt_tokens: usize) {
+        let _ = prompt_tokens;
+    }
     /// One model reply finished; its usage says how full the context is.
     fn round_end(&mut self, turn: &Turn) {
         let _ = turn;
@@ -67,9 +73,9 @@ pub trait AgentUi: Send {
     fn compacting(&mut self, end: usize) {
         let _ = end;
     }
-    /// It was; the model now sees the summary and the messages from `compaction.start`.
-    fn compacted(&mut self, compaction: &Compaction) {
-        let _ = compaction;
+    /// It was; the model now sees the summary and the messages from `compaction.start`, about `context_tokens` in all.
+    fn compacted(&mut self, compaction: &Compaction, context_tokens: usize) {
+        let _ = (compaction, context_tokens);
     }
 }
 
@@ -185,25 +191,27 @@ impl Agent {
         self.backend.clone()
     }
 
-    /// Runs one user prompt to its answer. Messages reach the session a round at a time, each assistant reply with its
-    /// tool results, so the history on disk never holds a call without a result.
+    /// Runs one user prompt (text, or content parts from [`crate::session::user_content`]) to its answer. Messages
+    /// reach the session a round at a time, each assistant reply with its tool results, so the history on disk never
+    /// holds a call without a result.
     pub async fn send(
         &mut self,
-        prompt: &str,
+        prompt: impl Into<Value>,
         ui: &mut dyn AgentUi,
         interrupt: &Interrupt,
     ) -> Result<TurnEnd> {
-        let mut pending = vec![json!({"role": "user", "content": prompt})];
+        let mut pending = vec![json!({"role": "user", "content": prompt.into()})];
         for _ in 0..self.config.max_rounds {
             self.compact_if_full(&pending, ui).await?;
-            let (turn, interrupted) = self.stream_turn(&pending, ui, interrupt).await?;
             let sent = self
                 .session
                 .context()
                 .iter()
                 .chain(&pending)
-                .map(|m| m.to_string().len())
-                .sum();
+                .map(message_chars)
+                .sum::<usize>();
+            ui.round_start((sent as f64 / self.chars_per_token) as usize);
+            let (turn, interrupted) = self.stream_turn(&pending, ui, interrupt).await?;
             self.learn_ratio(&turn, sent);
             ui.round_end(&turn);
             if interrupted {
@@ -292,6 +300,16 @@ impl Agent {
         Ok(())
     }
 
+    /// The most tokens a prompt to the current model may hold, where the backend can tell.
+    pub async fn context_window(&mut self) -> Option<usize> {
+        self.window().await
+    }
+
+    /// About how many tokens the model's view of the session holds now, by the harness's own count.
+    pub fn context_estimate(&self) -> usize {
+        self.tokens(&self.session.context())
+    }
+
     async fn window(&mut self) -> Option<usize> {
         match &self.window {
             Some((model, window)) if *model == self.config.model => *window,
@@ -304,10 +322,7 @@ impl Agent {
     }
 
     fn tokens<'a>(&self, messages: impl IntoIterator<Item = &'a Value>) -> usize {
-        let chars = messages
-            .into_iter()
-            .map(|m| m.to_string().len())
-            .sum::<usize>();
+        let chars = messages.into_iter().map(message_chars).sum::<usize>();
         (chars as f64 / self.chars_per_token) as usize
     }
 
@@ -355,7 +370,7 @@ impl Agent {
         let summary = summary.unwrap_or_default();
         self.session.compact(summary, end)?;
         if let Some(compaction) = &self.session.compaction {
-            ui.compacted(compaction);
+            ui.compacted(compaction, self.context_estimate());
         }
         Ok(())
     }
@@ -402,7 +417,7 @@ impl Agent {
         }
         messages.extend(chunk.iter().map(clipped));
         messages.push(json!({"role": "user", "content": COMPACT_PROMPT}));
-        let chars = messages.iter().map(|m| m.to_string().len()).sum::<usize>();
+        let chars = messages.iter().map(message_chars).sum::<usize>();
         let mut request = self.config.request.clone();
         request.insert("model".into(), Value::String(self.config.model.clone()));
         request.insert("messages".into(), Value::Array(messages));
@@ -546,6 +561,18 @@ impl Agent {
     }
 }
 
+// a message's JSON length, with each image counted as IMAGE_CHARS rather than its URL
+fn message_chars(message: &Value) -> usize {
+    let len = message.to_string().len();
+    let Some(parts) = message["content"].as_array() else {
+        return len;
+    };
+    parts
+        .iter()
+        .filter_map(|part| part["image_url"]["url"].as_str())
+        .fold(len, |len, url| len.saturating_sub(url.len()) + IMAGE_CHARS)
+}
+
 fn share(window: usize, share: f64) -> usize {
     (window as f64 * share) as usize
 }
@@ -569,8 +596,8 @@ fn clipped(message: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, AgentUi, CLIP_MARK, CLIPPED_RESULT_CHARS, COMPACT_PROMPT, Interrupt,
-        TurnEnd, clipped,
+        Agent, AgentConfig, AgentUi, CLIP_MARK, CLIPPED_RESULT_CHARS, COMPACT_PROMPT, IMAGE_CHARS,
+        Interrupt, TurnEnd, clipped, message_chars,
     };
     use crate::backend::ChatBackend;
     use crate::permission::{Approval, PermissionMode, Permissions};
@@ -582,6 +609,17 @@ mod tests {
     use futures::stream::BoxStream;
     use serde_json::{Map, Value, json};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn an_image_counts_as_a_fixed_share_of_the_context_not_its_bytes() {
+        let image = format!("data:image/png;base64,{}", "A".repeat(1 << 20));
+        let content = crate::session::user_content("look", &[image]);
+        let message = json!({"role": "user", "content": content});
+        let text = json!({"role": "user", "content": [{"type": "text", "text": "look"}]});
+        let without_url = message.to_string().len() - (1 << 20) - "data:image/png;base64,".len();
+        assert_eq!(message_chars(&message), without_url + IMAGE_CHARS);
+        assert_eq!(message_chars(&text), text.to_string().len());
+    }
 
     // replays canned replies and records the requests it was sent; a summary request gets `summary <n>`
     struct Scripted {
@@ -664,7 +702,7 @@ mod tests {
             Box::pin(async { Approval::Once })
         }
         fn round_end(&mut self, _: &Turn) {}
-        fn compacted(&mut self, compaction: &Compaction) {
+        fn compacted(&mut self, compaction: &Compaction, _: usize) {
             self.compactions.push(compaction.clone());
         }
     }
