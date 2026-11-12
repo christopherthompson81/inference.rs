@@ -185,10 +185,7 @@ pub struct Qwen3Tts {
 impl Qwen3Tts {
     /// A checkpoint directory: `config.json`, `model.safetensors`, the tokenizer files and `speech_tokenizer/`.
     pub fn load(dir: &Path, dtype: DType, device: &Device) -> anyhow::Result<Self> {
-        let cfg = Qwen3TtsConfig::from_json(&std::fs::read_to_string(dir.join(CONFIG))?)?;
         let codec_dir = dir.join(CODEC_DIR);
-        let codec_cfg: CodecConfig =
-            serde_json::from_str(&std::fs::read_to_string(codec_dir.join(CONFIG))?)?;
         // SAFETY: the weights are read-only for the model's life; a file changed underneath it is undefined
         let vb = unsafe {
             ShardedSafeTensors::sharded(
@@ -211,14 +208,20 @@ impl Qwen3Tts {
                 }),
             )?
         };
-        Self::new(
-            cfg,
-            &codec_cfg,
-            &vb,
-            &codec_vb,
-            tokenizer::load(dir)?,
-            device,
-        )
+        Self::load_with(dir, &vb, &codec_vb, device)
+    }
+
+    /// `dir`'s configs and tokenizer over the talker's weights `vb` and the codec's `codec_vb` (f32, as stored).
+    pub fn load_with(
+        dir: &Path,
+        vb: &ShardedVarBuilder,
+        codec_vb: &ShardedVarBuilder,
+        device: &Device,
+    ) -> anyhow::Result<Self> {
+        let cfg = Qwen3TtsConfig::from_json(&std::fs::read_to_string(dir.join(CONFIG))?)?;
+        let codec_cfg: CodecConfig =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(CODEC_DIR).join(CONFIG))?)?;
+        Self::new(cfg, &codec_cfg, vb, codec_vb, tokenizer::load(dir)?, device)
     }
 
     /// llama.cpp's talker GGUF with its mmproj; quantized linears keep their GGUF types.

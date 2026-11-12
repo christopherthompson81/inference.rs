@@ -154,17 +154,26 @@ fn chunks(pcm: &[f32], chunk: usize, search: usize) -> Vec<(usize, usize)> {
 
 impl CohereAsr {
     pub fn load(files: &CohereAsrFiles, device: &Device, dtype: DType) -> Result<Self> {
-        let config: CohereAsrConfig =
-            serde_json::from_str(&std::fs::read_to_string(&files.config)?).map_err(msg)?;
         let mut tensors = HashMap::new();
         for file in &files.weights {
             for (name, tensor) in inference_tensor::safetensors::load(file, &Device::Cpu)? {
                 tensors.insert(parakeet_encoder_name(&name), tensor);
             }
         }
-        let tokenizer = Tokenizer::from_file(&files.tokenizer).map_err(msg)?;
         let encoder_vb = VarBuilder::from_tensors(tensors.clone(), dtype, device);
         let vb = ShardedSafeTensors::wrap(tensors, dtype, device.clone());
+        Self::load_with(files, encoder_vb, vb)
+    }
+
+    /// `files`' config and tokenizer over weights read through `encoder_vb` and `vb`, as [`Self::new`] takes them.
+    pub fn load_with(
+        files: &CohereAsrFiles,
+        encoder_vb: VarBuilder,
+        vb: ShardedVarBuilder,
+    ) -> Result<Self> {
+        let config: CohereAsrConfig =
+            serde_json::from_str(&std::fs::read_to_string(&files.config)?).map_err(msg)?;
+        let tokenizer = Tokenizer::from_file(&files.tokenizer).map_err(msg)?;
         Self::new(&config, tokenizer, encoder_vb, vb)
     }
 

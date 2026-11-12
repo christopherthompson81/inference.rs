@@ -62,6 +62,7 @@ impl IsqModelLoader for VoxtralLoader {
         isq_regexes(&[
             r"^mm_streams_embeddings\.embedding_module\.tok_embeddings\.weight$",
             r"^output\.(weight|bias)$",
+            r"^language_model\.model\.embed_tokens\.weight$",
         ])
     }
 
@@ -79,6 +80,9 @@ impl IsqModelLoader for VoxtralLoader {
             r"layers\.(\d+)\.feed_forward\.w1\.(weight|bias)$",
             r"layers\.(\d+)\.feed_forward\.w3\.(weight|bias)$",
             r"layers\.(\d+)\.feed_forward\.w2\.(weight|bias)$",
+            // the same in transformers' naming
+            r"^language_model\.model\.layers\.(\d+)\.self_attn\.(q|k|v|o)_proj\.(weight|bias)$",
+            r"^language_model\.model\.layers\.(\d+)\.mlp\.(gate|up|down)_proj\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
@@ -94,6 +98,11 @@ impl IsqModelLoader for VoxtralLoader {
             r"layers\.(\d+)\.feed_forward\.w1\.(weight|bias)$",
             r"layers\.(\d+)\.feed_forward\.w3\.(weight|bias)$",
             r"layers\.(\d+)\.feed_forward\.w2\.(weight|bias)$",
+            // the same in transformers' naming
+            r"embed_tokens\.(weight|bias)$",
+            r"^language_model\.lm_head\.(weight|bias)$",
+            r"^language_model\.model\.layers\.(\d+)\.self_attn\.(q|k|v|o)_proj\.(weight|bias)$",
+            r"^language_model\.model\.layers\.(\d+)\.mlp\.(gate|up|down)_proj\.(weight|bias)$",
         ])
     }
 }
@@ -170,14 +179,18 @@ impl DeviceMappedModelLoader for VoxtralLoader {
 
         let total_encoder = conv1 + conv2 + enc_layers + enc_final_norm + adapter;
 
-        let (embedding_pack_factor, output_pack_factor) = super::language_model_pack_factors(
-            _quantization,
-            "mm_streams_embeddings.embedding_module.tok_embeddings.weight",
-            "output.weight",
-            cfg.tied_embeddings,
-            dtype,
-            weight_pack_factor,
-        )?;
+        let (embedding_pack_factor, output_pack_factor) =
+            super::language_model_pack_factors_with_aliases(
+                _quantization,
+                &[
+                    "mm_streams_embeddings.embedding_module.tok_embeddings.weight",
+                    "language_model.model.embed_tokens.weight",
+                ],
+                &["output.weight", "language_model.lm_head.weight"],
+                cfg.tied_embeddings,
+                dtype,
+                weight_pack_factor,
+            )?;
         let embeddings = cfg.vocab_size * cfg.dim / embedding_pack_factor;
         let output = if cfg.tied_embeddings {
             0

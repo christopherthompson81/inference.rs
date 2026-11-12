@@ -5,6 +5,8 @@ use inference::{
     SpeechModelBuilder,
 };
 
+#[path = "../support/audiocpp_package.rs"]
+mod package;
 #[path = "../support/kokoro_tiny.rs"]
 mod support;
 use support::{VOICES, tiny_kokoro_checkpoint, tiny_kokoro_gguf};
@@ -183,6 +185,38 @@ async fn a_kokoro_gguf_speaks_as_its_checkpoint() -> anyhow::Result<()> {
         assert_eq!(speak(detected).await?, want, "{path}");
     }
     assert_eq!(speak(named(dir).await?).await?, want);
+    Ok(())
+}
+
+// audio.cpp's package of it (its tensors under `kokoro/`, config and voice packs embedded) speaks as the checkpoint,
+// named or detected
+#[tokio::test]
+async fn an_audiocpp_package_speaks_as_its_checkpoint() -> anyhow::Result<()> {
+    let checkpoint = tiny_kokoro_checkpoint()?;
+    let speak = |model: inference::Model| async move {
+        anyhow::Ok(model.generate_speech(request(Some(PHONEMES))).await?.bytes)
+    };
+    let load = |path: &std::path::Path| {
+        ModelBuilder::new(path.to_string_lossy())
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu()
+            .build()
+    };
+    let want = speak(load(checkpoint.path()).await?).await?;
+    let dir = tempfile::tempdir()?;
+    let gguf = package::repack_all(
+        checkpoint.path(),
+        "kokoro_tts",
+        &[("kokoro", "model.safetensors")],
+        &dir.path().join("tiny-f32.gguf"),
+    )?;
+    assert_eq!(speak(load(&gguf).await?).await?, want);
+    let named = SpeechModelBuilder::new(gguf.to_string_lossy(), SpeechLoaderType::Kokoro)
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    assert_eq!(speak(named).await?, want);
     Ok(())
 }
 

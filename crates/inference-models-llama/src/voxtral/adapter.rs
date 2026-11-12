@@ -5,6 +5,8 @@ use std::sync::Arc;
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::{Result, Tensor};
 
+use super::names::Names;
+
 /// Temporal adapter that performs 4x downsampling via reshape + MLP.
 ///
 /// Input: [B, T, encoder_dim] (e.g., [B, T, 1280])
@@ -22,6 +24,7 @@ impl VoxtralTemporalAdapter {
         decoder_dim: usize,
         downsample_factor: usize,
         vb: ShardedVarBuilder,
+        names: &Names,
     ) -> Result<Self> {
         let in_features = encoder_dim * downsample_factor;
         let w_in = inference_quant::linear_b(
@@ -29,14 +32,14 @@ impl VoxtralTemporalAdapter {
             decoder_dim,
             false,
             &None,
-            vb.pp("audio_language_projection").pp("0"),
+            vb.pp(names.adapter_in),
         )?;
         let w_out = inference_quant::linear_b(
             decoder_dim,
             decoder_dim,
             false,
             &None,
-            vb.pp("audio_language_projection").pp("2"),
+            vb.pp(names.adapter_out),
         )?;
         Ok(Self {
             w_in,

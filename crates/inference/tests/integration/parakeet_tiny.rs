@@ -10,6 +10,8 @@ use inference::{
 #[macro_use]
 #[path = "../support/concurrent_cases.rs"]
 mod concurrent_cases;
+#[path = "../support/audiocpp_package.rs"]
+mod package;
 #[path = "../support/parakeet_tiny.rs"]
 mod support;
 use support::{
@@ -393,6 +395,36 @@ async fn an_asr_gguf_transcribes_as_its_transformers_layout() -> anyhow::Result<
     Ok(())
 }
 
+// the transformers layout repacked as an audio.cpp GGUF transcribes as its safetensors, named by file or directory
+async fn an_audiocpp_package_transcribes_as_its_transformers_layout() -> anyhow::Result<()> {
+    let wav = chirp_wav();
+    for head in ["parakeet_tdt", PROMPTED] {
+        let checkpoint = tiny_parakeet_checkpoint(head)?;
+        let dir = tempfile::tempdir()?;
+        let gguf = package::repack_all(
+            checkpoint.path(),
+            head,
+            &[("", "model.safetensors")],
+            &dir.path().join("tiny-f32.gguf"),
+        )?;
+        let mut bodies = Vec::new();
+        for model_id in [checkpoint.path(), &gguf, dir.path()] {
+            let model = TranscriptionModelBuilder::new(model_id.to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_force_cpu()
+                .build()
+                .await?;
+            let out = model
+                .transcription(request(TranscriptionResponseFormat::VerboseJson), &wav)
+                .await?;
+            bodies.push(out.body);
+        }
+        assert_eq!(bodies[1], bodies[0], "{head}");
+        assert_eq!(bodies[2], bodies[0], "{head}");
+    }
+    Ok(())
+}
+
 // a `.nemo` written as an `asr` GGUF with full-precision matrices loads and transcribes as the `.nemo` does
 async fn a_written_asr_gguf_transcribes_as_its_nemo() -> anyhow::Result<()> {
     use inference_api::{asr_gguf, engine::TokenSource};
@@ -725,6 +757,7 @@ concurrent_cases!(
         a_multisoftmax_model_writes_only_the_named_language: 0,
         a_nemo_checkpoint_transcribes_as_its_transformers_layout: 0,
         an_asr_gguf_transcribes_as_its_transformers_layout: 0,
+        an_audiocpp_package_transcribes_as_its_transformers_layout: 0,
         a_written_asr_gguf_transcribes_as_its_nemo: 0,
         beam_search_decodes_transducers_and_refuses_the_rest: 0,
         a_transcription_session_streams_through_the_engine: 0,

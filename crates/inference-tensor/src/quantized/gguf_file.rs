@@ -724,25 +724,52 @@ impl Header {
     }
 }
 
-impl Content {
+fn read_large_array(
+    arrays: &HashMap<String, LargeArray>,
+    magic: &VersionedMagic,
+    reader: &mut dyn ReadSeek,
+    name: &str,
+    range: std::ops::Range<u64>,
+) -> Result<Vec<u8>> {
+    let Some(array) = arrays.get(name) else {
+        crate::bail!("gguf: no large array {name}")
+    };
+    if range.start > range.end || range.end > array.len {
+        crate::bail!("gguf: {range:?} is outside {name}'s {} elements", array.len)
+    }
+    let size = array.value_type.min_disk_size(magic);
+    reader.seek(std::io::SeekFrom::Start(array.offset + range.start * size))?;
+    let mut bytes = vec![0u8; ((range.end - range.start) * size) as usize];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// A reader a large array is read back through.
+pub trait ReadSeek: std::io::Read + std::io::Seek {}
+
+impl<R: std::io::Read + std::io::Seek> ReadSeek for R {}
+
+impl Header {
     /// The raw little-endian bytes of `range` (in elements) of a large array.
-    pub fn read_large_array<R: std::io::Seek + std::io::Read>(
+    pub fn read_large_array(
         &self,
-        reader: &mut R,
+        reader: &mut dyn ReadSeek,
         name: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>> {
-        let Some(array) = self.large_arrays.get(name) else {
-            crate::bail!("gguf: no large array {name}")
-        };
-        if range.start > range.end || range.end > array.len {
-            crate::bail!("gguf: {range:?} is outside {name}'s {} elements", array.len)
-        }
-        let size = array.value_type.min_disk_size(&self.magic);
-        reader.seek(std::io::SeekFrom::Start(array.offset + range.start * size))?;
-        let mut bytes = vec![0u8; ((range.end - range.start) * size) as usize];
-        reader.read_exact(&mut bytes)?;
-        Ok(bytes)
+        read_large_array(&self.large_arrays, &self.magic, reader, name, range)
+    }
+}
+
+impl Content {
+    /// The raw little-endian bytes of `range` (in elements) of a large array.
+    pub fn read_large_array(
+        &self,
+        reader: &mut dyn ReadSeek,
+        name: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>> {
+        read_large_array(&self.large_arrays, &self.magic, reader, name, range)
     }
 
     pub fn read<R: std::io::Seek + std::io::Read>(reader: &mut R) -> Result<Self> {

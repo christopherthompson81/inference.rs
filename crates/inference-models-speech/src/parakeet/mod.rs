@@ -187,10 +187,15 @@ impl Parakeet {
     }
 
     pub fn load(files: &ParakeetFiles, device: &Device, dtype: DType) -> Result<Self> {
-        let config: ParakeetConfig = read_json(&files.config)?;
-        let processor: ProcessorConfig = read_json(&files.processor_config)?;
         // SAFETY: the weights are read-only for the model's life; a file changed underneath it is undefined
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&files.weights, dtype, device)? };
+        Self::load_with(files, vb)
+    }
+
+    /// `files`' config and tokenizer over weights `vb` reads (its `weights` unused).
+    pub fn load_with(files: &ParakeetFiles, vb: VarBuilder) -> Result<Self> {
+        let config: ParakeetConfig = read_json(&files.config)?;
+        let processor: ProcessorConfig = read_json(&files.processor_config)?;
         Self::new(
             config,
             processor,

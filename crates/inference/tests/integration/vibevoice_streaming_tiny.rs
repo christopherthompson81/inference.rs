@@ -7,6 +7,8 @@ use inference::{
     TranscriptionSessionRequest, VerboseTranscriptionResponse,
 };
 
+#[path = "../support/audiocpp_package.rs"]
+mod package;
 #[path = "../support/vibevoice_streaming_tiny.rs"]
 mod support;
 use support::{CHUNK_SAMPLES, load, tiny_checkpoint};
@@ -140,34 +142,24 @@ async fn verbose_text(model_id: &std::path::Path, wav: &[u8]) -> anyhow::Result<
 #[tokio::test]
 async fn an_audiocpp_gguf_transcribes_as_its_checkpoint() -> anyhow::Result<()> {
     let checkpoint = tiny_checkpoint()?;
-    let mut tensors = Vec::new();
-    for entry in std::fs::read_dir(checkpoint.path())? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|e| e == "safetensors") {
-            tensors.extend(inference_tensor::safetensors::load(
-                &path,
-                &inference_tensor::Device::Cpu,
-            )?);
-        }
-    }
-    tensors.sort_by(|a, b| a.0.cmp(&b.0));
-    let stored: Vec<_> = tensors
+    let weights = std::fs::read_dir(checkpoint.path())?
+        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|name| name.ends_with(".safetensors"))
+        .collect::<Vec<_>>();
+    let sources = weights
         .iter()
-        .map(|(name, t)| {
-            (
-                name.as_str(),
-                t,
-                inference_tensor::quantized::GgmlDType::F32,
-            )
-        })
-        .collect();
-    let files = ["config.json", "preprocessor_config.json", "tokenizer.json"]
-        .map(|name| std::fs::read(checkpoint.path().join(name)).map(|bytes| (name, bytes)));
-    let files = files.into_iter().collect::<std::io::Result<Vec<_>>>()?;
-    let files: Vec<_> = files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+        .map(|name| ("", name.as_str()))
+        .collect::<Vec<_>>();
     let dir = tempfile::tempdir()?;
-    let gguf = dir.path().join("tiny-f32.gguf");
-    inference_gguf::audiocpp::write_package(&gguf, "vibevoice_asr_streaming", &stored, &files)?;
+    let gguf = package::repack(
+        checkpoint.path(),
+        "vibevoice_asr_streaming",
+        &sources,
+        &["config.json", "preprocessor_config.json", "tokenizer.json"],
+        &dir.path().join("tiny-f32.gguf"),
+    )?;
 
     let mut wav = Vec::new();
     inference_models_speech::utils::write_pcm_as_wav(&mut wav, &pcm(), RATE, 1)?;

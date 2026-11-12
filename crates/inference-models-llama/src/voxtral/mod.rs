@@ -25,14 +25,24 @@ pub mod audio_processing;
 pub mod config;
 pub mod encoder;
 pub mod inputs_processor;
+pub mod names;
 
 use adapter::VoxtralTemporalAdapter;
 use config::VoxtralConfig;
 use encoder::VoxtralEncoder;
+use names::Names;
 
 const AUDIO_ENCODER_KERNEL_SIZE: usize = 3;
 const AUDIO_ENCODER_STRIDE: usize = 2;
 const AUDIO_ENCODER_LEFT_PADDING: usize = 1;
+
+// what every part of one decoder layer is built with
+struct LayerCtx<'a> {
+    names: &'a Names,
+    mapper: &'a dyn DeviceMapper,
+    layer_idx: usize,
+    loading_isq: bool,
+}
 
 struct DecoderAttention {
     wq: Arc<dyn QuantMethod>,
@@ -52,44 +62,45 @@ impl DecoderAttention {
         cfg: &VoxtralConfig,
         rotary_emb: Arc<RotaryEmbedding>,
         vb: ShardedVarBuilder,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
+        layer: &LayerCtx<'_>,
         paged_attn: Option<PagedAttention>,
     ) -> Result<Self> {
+        let names = layer.names;
         let dim = cfg.dim;
         let num_heads = cfg.n_heads;
         let num_kv_heads = cfg.n_kv_heads;
         let head_dim = cfg.head_dim;
 
-        let vb = mapper.set_device(layer_idx, vb, loading_isq);
+        let vb = layer
+            .mapper
+            .set_device(layer.layer_idx, vb, layer.loading_isq);
         let wq = inference_quant::linear_b(
             dim,
             num_heads * head_dim,
             cfg.use_biases,
             &None,
-            vb.pp("wq"),
+            vb.pp(names.q),
         )?;
         let wk = inference_quant::linear_b(
             dim,
             num_kv_heads * head_dim,
             cfg.use_biases,
             &None,
-            vb.pp("wk"),
+            vb.pp(names.k),
         )?;
         let wv = inference_quant::linear_b(
             dim,
             num_kv_heads * head_dim,
             cfg.use_biases,
             &None,
-            vb.pp("wv"),
+            vb.pp(names.v),
         )?;
         let wo = inference_quant::linear_b(
             num_heads * head_dim,
             dim,
             cfg.use_biases,
             &None,
-            vb.pp("wo"),
+            vb.pp(names.o),
         )?;
 
         Ok(Self {
@@ -177,20 +188,15 @@ struct DecoderMlp {
 }
 
 impl DecoderMlp {
-    fn new(
-        cfg: &VoxtralConfig,
-        vb: ShardedVarBuilder,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
-    ) -> Result<Self> {
-        let vb = mapper.set_device(layer_idx, vb, loading_isq);
-        let w1 =
-            inference_quant::linear_b(cfg.dim, cfg.hidden_dim, cfg.use_biases, &None, vb.pp("w1"))?;
-        let w2 =
-            inference_quant::linear_b(cfg.hidden_dim, cfg.dim, cfg.use_biases, &None, vb.pp("w2"))?;
-        let w3 =
-            inference_quant::linear_b(cfg.dim, cfg.hidden_dim, cfg.use_biases, &None, vb.pp("w3"))?;
+    fn new(cfg: &VoxtralConfig, vb: ShardedVarBuilder, layer: &LayerCtx<'_>) -> Result<Self> {
+        let names = layer.names;
+        let vb = layer
+            .mapper
+            .set_device(layer.layer_idx, vb, layer.loading_isq);
+        let (dim, hidden, bias) = (cfg.dim, cfg.hidden_dim, cfg.use_biases);
+        let w1 = inference_quant::linear_b(dim, hidden, bias, &None, vb.pp(names.gate))?;
+        let w2 = inference_quant::linear_b(hidden, dim, bias, &None, vb.pp(names.down))?;
+        let w3 = inference_quant::linear_b(dim, hidden, bias, &None, vb.pp(names.up))?;
         Ok(Self { w1, w2, w3 })
     }
 
@@ -212,9 +218,9 @@ struct AdaptiveNorm {
 }
 
 impl AdaptiveNorm {
-    fn new(dim: usize, t_cond_dim: usize, vb: ShardedVarBuilder) -> Result<Self> {
-        let w0 = inference_quant::linear_b(dim, t_cond_dim, false, &None, vb.pp("0"))?;
-        let w2 = inference_quant::linear_b(t_cond_dim, dim, false, &None, vb.pp("2"))?;
+    fn new(dim: usize, t_cond_dim: usize, vb: ShardedVarBuilder, names: &Names) -> Result<Self> {
+        let w0 = inference_quant::linear_b(dim, t_cond_dim, false, &None, vb.pp(names.ada_in))?;
+        let w2 = inference_quant::linear_b(t_cond_dim, dim, false, &None, vb.pp(names.ada_out))?;
         Ok(Self { w0, w2 })
     }
 
@@ -256,37 +262,34 @@ impl DecoderLayer {
         cfg: &VoxtralConfig,
         rotary_emb: Arc<RotaryEmbedding>,
         vb: ShardedVarBuilder,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
+        layer: &LayerCtx<'_>,
         paged_attn: Option<PagedAttention>,
     ) -> Result<Self> {
-        let attention = DecoderAttention::new(
-            cfg,
-            rotary_emb,
-            vb.pp("attention"),
+        let LayerCtx {
+            names,
             mapper,
             layer_idx,
-            loading_isq,
-            paged_attn,
-        )?;
-        let feed_forward =
-            DecoderMlp::new(cfg, vb.pp("feed_forward"), mapper, layer_idx, loading_isq)?;
+            ..
+        } = *layer;
+        let attention =
+            DecoderAttention::new(cfg, rotary_emb, vb.pp(names.attention), layer, paged_attn)?;
+        let feed_forward = DecoderMlp::new(cfg, vb.pp(names.mlp), layer)?;
         let attention_norm = RmsNorm::new(
             cfg.dim,
             cfg.norm_eps,
-            mapper.set_device(layer_idx, vb.pp("attention_norm"), false),
+            mapper.set_device(layer_idx, vb.pp(names.attention_norm), false),
         )?;
         let ffn_norm = RmsNorm::new(
             cfg.dim,
             cfg.norm_eps,
-            mapper.set_device(layer_idx, vb.pp("ffn_norm"), false),
+            mapper.set_device(layer_idx, vb.pp(names.ffn_norm), false),
         )?;
         let ada_norm = if cfg.ada_rms_norm_t_cond {
             Some(AdaptiveNorm::new(
                 cfg.dim,
                 cfg.ada_rms_norm_t_cond_dim,
-                mapper.set_device(layer_idx, vb.pp("ada_rms_norm_t_cond"), false),
+                mapper.set_device(layer_idx, vb.pp(names.ada_norm), false),
+                names,
             )?)
         } else {
             None
@@ -368,6 +371,7 @@ pub struct VoxtralModel {
     dtype: DType,
     adapter_downsample_factor: usize,
     audio_embeds_cache: Arc<Mutex<HashMap<VoxtralAudioCacheKey, Tensor>>>,
+    names: Names,
 }
 
 fn encoder_output_len(mel_frames: usize) -> Result<usize> {
@@ -567,32 +571,28 @@ impl VoxtralModel {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
         let mapper = normal_loading_metadata.mapper;
+        let names = Names::of(&vb);
 
-        // Encoder: mm_streams_embeddings.embedding_module.whisper_encoder
         let enc_cfg = &cfg.multimodal.whisper_model_args.encoder_args;
-        let vb_mm = vb.pp("mm_streams_embeddings").pp("embedding_module");
         let encoder = VoxtralEncoder::new(
             enc_cfg,
-            mapper.set_nm_device(vb_mm.pp("whisper_encoder"), false),
+            mapper.set_nm_device(vb.pp(names.encoder), false),
+            &names,
         )?;
 
-        // Adapter: mm_streams_embeddings.embedding_module.audio_language_projection
         let ds_cfg = &cfg.multimodal.whisper_model_args.downsample_args;
         let adapter = VoxtralTemporalAdapter::new(
             enc_cfg.dim,
             cfg.dim,
             ds_cfg.downsample_factor,
-            mapper.set_nm_device(vb_mm.clone(), false),
+            mapper.set_nm_device(vb.pp(names.adapter), false),
+            &names,
         )?;
 
-        // Decoder embeddings: mm_streams_embeddings.embedding_module.tok_embeddings
         let tok_embeddings = embedding(
             cfg.vocab_size,
             cfg.dim,
-            mapper.set_nm_device(
-                vb_mm.pp("tok_embeddings"),
-                normal_loading_metadata.loading_isq,
-            ),
+            mapper.set_nm_device(vb.pp(names.embeddings), normal_loading_metadata.loading_isq),
             &None,
         )?;
 
@@ -608,13 +608,13 @@ impl VoxtralModel {
                     head_dim,
                     cfg.model_max_length,
                     device,
-                    false, // !is_gptx: consolidated.safetensors stores Q/K in interleaved layout
+                    names.half_split_rope,
                     mapper.activation_dtype_on(device).unwrap_or(vb.dtype()),
                 )
             },
         )?;
 
-        let vb_layers = vb.pp("layers");
+        let vb_layers = vb.pp(names.layers);
         let layers: Vec<DecoderLayer> = NiceProgressBar::<_, 'b'>(
             0..cfg.n_layers,
             "Loading repeating layers",
@@ -638,9 +638,12 @@ impl VoxtralModel {
                 cfg,
                 rotary_emb,
                 vb_layers.pp(layer_idx),
-                &*mapper,
-                layer_idx,
-                normal_loading_metadata.loading_isq,
+                &LayerCtx {
+                    names: &names,
+                    mapper: &*mapper,
+                    layer_idx,
+                    loading_isq: normal_loading_metadata.loading_isq,
+                },
                 paged_attn,
             )
         })?;
@@ -648,7 +651,7 @@ impl VoxtralModel {
         let norm = RmsNorm::new(
             cfg.dim,
             cfg.norm_eps,
-            mapper.set_nm_device(vb.pp("norm"), false),
+            mapper.set_nm_device(vb.pp(names.norm), false),
         )?;
 
         // output (lm_head), may be tied with tok_embeddings
@@ -660,7 +663,7 @@ impl VoxtralModel {
                 cfg.vocab_size,
                 false,
                 &None,
-                mapper.set_nm_device(vb.pp("output"), normal_loading_metadata.loading_isq),
+                mapper.set_nm_device(vb.pp(names.output), normal_loading_metadata.loading_isq),
             )?
         };
 
@@ -698,6 +701,7 @@ impl VoxtralModel {
             dtype: vb.dtype(),
             adapter_downsample_factor: ds_cfg.downsample_factor,
             audio_embeds_cache: Arc::new(Mutex::new(HashMap::new())),
+            names,
         })
     }
 
@@ -881,57 +885,45 @@ impl IsqModel for VoxtralModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
-        let uvb_mm = uvb.pp("mm_streams_embeddings").pp("embedding_module");
-
-        // Embeddings
-        uvb_mm.pp("tok_embeddings").add(&self.tok_embeddings);
-        // Final norm
-        uvb.pp("norm").add(&self.norm);
-
-        // Decoder layer norms and adaptive norm weights
+        let names = &self.names;
+        uvb.pp(names.embeddings).add(&self.tok_embeddings);
+        uvb.pp(names.norm).add(&self.norm);
         for (i, layer) in self.layers.iter().enumerate() {
-            let uvb_l = uvb.pp("layers").pp(i);
-            uvb_l.pp("attention_norm").add(&layer.attention_norm);
-            uvb_l.pp("ffn_norm").add(&layer.ffn_norm);
+            let uvb_l = uvb.pp(names.layers).pp(i);
+            uvb_l.pp(names.attention_norm).add(&layer.attention_norm);
+            uvb_l.pp(names.ffn_norm).add(&layer.ffn_norm);
             if let Some(ref ada_norm) = layer.ada_norm {
-                let uvb_ada = uvb_l.pp("ada_rms_norm_t_cond");
-                uvb_ada.pp("0").add(&ada_norm.w0);
-                uvb_ada.pp("2").add(&ada_norm.w2);
+                let uvb_ada = uvb_l.pp(names.ada_norm);
+                uvb_ada.pp(names.ada_in).add(&ada_norm.w0);
+                uvb_ada.pp(names.ada_out).add(&ada_norm.w2);
             }
         }
 
-        // Encoder weights (all non-quantized)
-        let uvb_enc = uvb_mm.pp("whisper_encoder");
-        uvb_enc
-            .pp("conv_layers")
-            .pp("0")
-            .pp("conv")
-            .add(&self.encoder.conv1);
-        uvb_enc
-            .pp("conv_layers")
-            .pp("1")
-            .pp("conv")
-            .add(&self.encoder.conv2);
-        uvb_enc.pp("transformer").pp("norm").add(&self.encoder.norm);
+        // the encoder stays unquantized
+        let uvb_enc = uvb.pp(names.encoder);
+        uvb_enc.pp(names.conv1).add(&self.encoder.conv1);
+        uvb_enc.pp(names.conv2).add(&self.encoder.conv2);
+        uvb_enc.pp(names.encoder_norm).add(&self.encoder.norm);
         for (i, layer) in self.encoder.layers.iter().enumerate() {
-            let uvb_l = uvb_enc.pp("transformer").pp("layers").pp(i);
-            uvb_l.pp("attention_norm").add(&layer.attention_norm);
-            uvb_l.pp("ffn_norm").add(&layer.ffn_norm);
-            let uvb_attn = uvb_l.pp("attention");
-            uvb_attn.pp("wq").add(&layer.attention.wq);
-            uvb_attn.pp("wk").add(&layer.attention.wk);
-            uvb_attn.pp("wv").add(&layer.attention.wv);
-            uvb_attn.pp("wo").add(&layer.attention.wo);
-            let uvb_ff = uvb_l.pp("feed_forward");
-            uvb_ff.pp("w1").add(&layer.feed_forward.w1);
-            uvb_ff.pp("w2").add(&layer.feed_forward.w2);
-            uvb_ff.pp("w3").add(&layer.feed_forward.w3);
+            let uvb_l = uvb_enc.pp(names.encoder_layers).pp(i);
+            uvb_l
+                .pp(names.encoder_attention_norm)
+                .add(&layer.attention_norm);
+            uvb_l.pp(names.encoder_ffn_norm).add(&layer.ffn_norm);
+            let uvb_attn = uvb_l.pp(names.attention);
+            uvb_attn.pp(names.q).add(&layer.attention.wq);
+            uvb_attn.pp(names.k).add(&layer.attention.wk);
+            uvb_attn.pp(names.v).add(&layer.attention.wv);
+            uvb_attn.pp(names.o).add(&layer.attention.wo);
+            let uvb_ff = uvb_l.pp(names.mlp);
+            uvb_ff.pp(names.gate).add(&layer.feed_forward.w1);
+            uvb_ff.pp(names.down).add(&layer.feed_forward.w2);
+            uvb_ff.pp(names.up).add(&layer.feed_forward.w3);
         }
 
-        // Adapter weights
-        let uvb_ada = uvb_mm.pp("audio_language_projection");
-        uvb_ada.pp("0").add(&self.adapter.w_in);
-        uvb_ada.pp("2").add(&self.adapter.w_out);
+        let uvb_ada = uvb.pp(names.adapter);
+        uvb_ada.pp(names.adapter_in).add(&self.adapter.w_in);
+        uvb_ada.pp(names.adapter_out).add(&self.adapter.w_out);
 
         uvb.to_safetensors()
     }

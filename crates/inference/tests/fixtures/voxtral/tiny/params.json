@@ -1,0 +1,43 @@
+{
+  "dim": 32,
+  "n_layers": 2,
+  "head_dim": 16,
+  "hidden_dim": 64,
+  "n_heads": 2,
+  "n_kv_heads": 1,
+  "use_biases": false,
+  "causal": true,
+  "rope_theta": 1000000.0,
+  "norm_eps": 1e-05,
+  "vocab_size": 266,
+  "tied_embeddings": true,
+  "sliding_window": 8192,
+  "model_max_length": 2048,
+  "multimodal": {
+    "whisper_model_args": {
+      "encoder_args": {
+        "audio_encoding_args": {
+          "sampling_rate": 16000,
+          "frame_rate": 12.5,
+          "num_mel_bins": 128,
+          "hop_length": 160,
+          "window_size": 400,
+          "global_log_mel_max": 1.5
+        },
+        "dim": 16,
+        "n_layers": 1,
+        "head_dim": 8,
+        "hidden_dim": 32,
+        "n_heads": 2,
+        "n_kv_heads": 2,
+        "use_biases": true,
+        "rope_theta": 1000000.0,
+        "norm_eps": 1e-05,
+        "sliding_window": 750
+      },
+      "downsample_args": {"downsample_factor": 4}
+    }
+  },
+  "ada_rms_norm_t_cond": true,
+  "ada_rms_norm_t_cond_dim": 8
+}

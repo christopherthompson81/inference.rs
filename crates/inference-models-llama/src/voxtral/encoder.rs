@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::config::WhisperEncoderArgs;
+use super::names::Names;
 
 pub(super) struct EncoderAttention {
     pub(super) wq: Arc<dyn QuantMethod>,
@@ -33,6 +34,7 @@ impl EncoderAttention {
         cfg: &WhisperEncoderArgs,
         rotary_emb: Arc<RotaryEmbedding>,
         vb: ShardedVarBuilder,
+        names: &Names,
     ) -> Result<Self> {
         let dim = cfg.dim;
         let num_heads = cfg.n_heads;
@@ -42,14 +44,11 @@ impl EncoderAttention {
 
         // Per-linear bias flags matching actual weight structure:
         // wq, wv, wo have bias; wk does NOT
-        let wq =
-            inference_quant::linear_b(dim, num_heads * head_dim, use_bias, &None, vb.pp("wq"))?;
-        let wk =
-            inference_quant::linear_b(dim, num_kv_heads * head_dim, false, &None, vb.pp("wk"))?;
-        let wv =
-            inference_quant::linear_b(dim, num_kv_heads * head_dim, use_bias, &None, vb.pp("wv"))?;
-        let wo =
-            inference_quant::linear_b(num_heads * head_dim, dim, use_bias, &None, vb.pp("wo"))?;
+        let (q, kv) = (num_heads * head_dim, num_kv_heads * head_dim);
+        let wq = inference_quant::linear_b(dim, q, use_bias, &None, vb.pp(names.q))?;
+        let wk = inference_quant::linear_b(dim, kv, false, &None, vb.pp(names.k))?;
+        let wv = inference_quant::linear_b(dim, kv, use_bias, &None, vb.pp(names.v))?;
+        let wo = inference_quant::linear_b(q, dim, use_bias, &None, vb.pp(names.o))?;
 
         Ok(Self {
             wq,
@@ -131,15 +130,15 @@ pub(super) struct EncoderMlp {
 }
 
 impl EncoderMlp {
-    fn new(cfg: &WhisperEncoderArgs, vb: ShardedVarBuilder) -> Result<Self> {
+    fn new(cfg: &WhisperEncoderArgs, vb: ShardedVarBuilder, names: &Names) -> Result<Self> {
         let dim = cfg.dim;
         let hidden_dim = cfg.hidden_dim;
         let use_bias = cfg.use_biases;
 
         // Per-linear bias flags: only w2 has bias; w1, w3 do not
-        let w1 = inference_quant::linear_b(dim, hidden_dim, false, &None, vb.pp("w1"))?;
-        let w2 = inference_quant::linear_b(hidden_dim, dim, use_bias, &None, vb.pp("w2"))?;
-        let w3 = inference_quant::linear_b(dim, hidden_dim, false, &None, vb.pp("w3"))?;
+        let w1 = inference_quant::linear_b(dim, hidden_dim, false, &None, vb.pp(names.gate))?;
+        let w2 = inference_quant::linear_b(hidden_dim, dim, use_bias, &None, vb.pp(names.down))?;
+        let w3 = inference_quant::linear_b(dim, hidden_dim, false, &None, vb.pp(names.up))?;
 
         Ok(Self { w1, w2, w3 })
     }
@@ -165,11 +164,13 @@ impl EncoderLayer {
         cfg: &WhisperEncoderArgs,
         rotary_emb: Arc<RotaryEmbedding>,
         vb: ShardedVarBuilder,
+        names: &Names,
     ) -> Result<Self> {
-        let attention = EncoderAttention::new(cfg, rotary_emb, vb.pp("attention"))?;
-        let feed_forward = EncoderMlp::new(cfg, vb.pp("feed_forward"))?;
-        let attention_norm = RmsNorm::new(cfg.dim, cfg.norm_eps, vb.pp("attention_norm"))?;
-        let ffn_norm = RmsNorm::new(cfg.dim, cfg.norm_eps, vb.pp("ffn_norm"))?;
+        let attention = EncoderAttention::new(cfg, rotary_emb, vb.pp(names.attention), names)?;
+        let feed_forward = EncoderMlp::new(cfg, vb.pp(names.mlp), names)?;
+        let norm = |name| RmsNorm::new(cfg.dim, cfg.norm_eps, vb.pp(name));
+        let attention_norm = norm(names.encoder_attention_norm)?;
+        let ffn_norm = norm(names.encoder_ffn_norm)?;
         Ok(Self {
             attention,
             feed_forward,
@@ -228,14 +229,14 @@ fn encoder_position_ids(batch_size: usize, seq_len: usize) -> Result<Vec<u32>> {
 }
 
 impl VoxtralEncoder {
-    pub fn new(cfg: &WhisperEncoderArgs, vb: ShardedVarBuilder) -> Result<Self> {
+    pub fn new(cfg: &WhisperEncoderArgs, vb: ShardedVarBuilder, names: &Names) -> Result<Self> {
         let device = vb.device().clone();
         let dtype = vb.dtype();
         let n_mels = cfg.audio_encoding_args.num_mel_bins;
 
         // Conv1d weights stored as F32 (CUDA Conv1d does not support BF16).
         // Causal padding: left-pad by (kernel_size - 1) * dilation, padding=0 in Conv1d.
-        let vb_c1 = vb.pp("conv_layers").pp("0").pp("conv");
+        let vb_c1 = vb.pp(names.conv1);
         let conv1 = inference_tensor::nn::Conv1d::new(
             vb_c1
                 .get((cfg.dim, n_mels, 3), "weight")?
@@ -247,7 +248,7 @@ impl VoxtralEncoder {
                 ..Default::default()
             },
         );
-        let vb_c2 = vb.pp("conv_layers").pp("1").pp("conv");
+        let vb_c2 = vb.pp(names.conv2);
         let conv2 = inference_tensor::nn::Conv1d::new(
             vb_c2
                 .get((cfg.dim, cfg.dim, 3), "weight")?
@@ -269,22 +270,22 @@ impl VoxtralEncoder {
                 cfg.head_dim,
                 1_000_000, // large max_position for encoder
                 &device,
-                false, // !is_gptx: consolidated.safetensors stores Q/K in interleaved layout
+                names.half_split_rope,
                 dtype,
             )?),
         );
 
-        let vb_layers = vb.pp("transformer").pp("layers");
+        let vb_layers = vb.pp(names.encoder_layers);
         let mut layers = Vec::with_capacity(cfg.n_layers);
         for i in 0..cfg.n_layers {
             let rotary_emb = ropes
                 .get(&device.location())
                 .expect("No RoPE for device location!")
                 .clone();
-            layers.push(EncoderLayer::new(cfg, rotary_emb, vb_layers.pp(i))?);
+            layers.push(EncoderLayer::new(cfg, rotary_emb, vb_layers.pp(i), names)?);
         }
 
-        let norm = RmsNorm::new(cfg.dim, cfg.norm_eps, vb.pp("transformer").pp("norm"))?;
+        let norm = RmsNorm::new(cfg.dim, cfg.norm_eps, vb.pp(names.encoder_norm))?;
 
         Ok(Self {
             conv1,

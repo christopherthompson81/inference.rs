@@ -55,4 +55,5 @@ mod vibevoice_asr_tiny;
 mod vibevoice_streaming_tiny;
 mod voxlingua_tiny;
 mod voxtral_chat_tiny;
+mod voxtral_tiny;
 mod whisper_tiny;

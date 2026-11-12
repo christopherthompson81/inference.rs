@@ -129,12 +129,19 @@ struct TekkenTokenizer {
 pub(crate) const TEKKEN_TOKENIZER: &str = "tekken.json";
 pub(crate) const QWEN_TIKTOKEN_TOKENIZER: &str = "qwen.tiktoken";
 pub(crate) const KIMI_TIKTOKEN_TOKENIZER: &str = "tiktoken.model";
-pub(crate) const NATIVE_TOKENIZERS: [&str; 4] = [
+// a slow tokenizer's files: the vocabulary, with its merges and config beside it
+pub(crate) const BPE_VOCAB: &str = "vocab.json";
+pub(crate) const BPE_MERGES: &str = "merges.txt";
+pub(crate) const NATIVE_TOKENIZERS: [&str; 5] = [
     TEKKEN_TOKENIZER,
     QWEN_TIKTOKEN_TOKENIZER,
     KIMI_TIKTOKEN_TOKENIZER,
     inference_gguf::rwkv_tokenizer::RWKV_VOCAB_FILE,
+    BPE_VOCAB,
 ];
+// the slow tokenizer classes whose files build the fast one transformers converts them to
+const QWEN2_TOKENIZER_CLASSES: [&str; 2] = ["Qwen2Tokenizer", "Qwen2TokenizerFast"];
+const MERGES_HEADER: &str = "#version";
 // tokenization_kimi.py: the specials follow the ranks, two past its reserved count
 const KIMI_SPECIALS: usize = 256 + 2;
 // the embedding's rows when a vocabulary file's config does not say
@@ -318,6 +325,76 @@ fn bpe_from_ranks(
     Ok(tokenizer)
 }
 
+// transformers' conversion of `Qwen2Tokenizer`: NFC, Qwen's split, byte-level BPE over `vocab.json` and `merges.txt`,
+// and the config's added tokens at their ids
+fn load_qwen2_vocab(path: &Path) -> Result<Tokenizer> {
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(path.with_file_name(TOKENIZER_CONFIG))?)?;
+    let class = config["tokenizer_class"].as_str().unwrap_or_default();
+    if !QWEN2_TOKENIZER_CLASSES.contains(&class) {
+        anyhow::bail!(
+            "`{}` holds a `{class}` vocabulary; only Qwen2's builds without a `tokenizer.json`",
+            path.display()
+        )
+    }
+    let vocab: AHashMap<String, u32> = serde_json::from_slice(&std::fs::read(path)?)?;
+    let merges = std::fs::read_to_string(path.with_file_name(BPE_MERGES))?
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with(MERGES_HEADER))
+        .map(|line| {
+            line.split_once(' ')
+                .map(|(l, r)| (l.to_string(), r.to_string()))
+                .ok_or_else(|| anyhow!("`{line}` is not a merge"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let bpe = BpeBuilder::new()
+        .vocab_and_merges(vocab, merges)
+        .build()
+        .map_err(|e| anyhow!("Failed to build BPE model: {e}"))?;
+    let mut tokenizer = Tokenizer::new(bpe);
+    tokenizer
+        .with_normalizer(Some(tokenizers::normalizers::unicode::NFC))
+        .map_err(anyhow::Error::msg)?;
+    let split = Split::new(
+        SplitPattern::Regex(QWEN_PATTERN.to_string()),
+        SplitDelimiterBehavior::Isolated,
+        false,
+    )
+    .map_err(|e| anyhow!("Failed to create split pre-tokenizer: {e}"))?;
+    tokenizer.with_pre_tokenizer(Some(Sequence::new(vec![
+        PreTokenizerWrapper::Split(split),
+        PreTokenizerWrapper::ByteLevel(ByteLevel::new(false, true, false)),
+    ])));
+    tokenizer.with_decoder(Some(ByteLevelDecoder::new(true, true, true)));
+    let mut added = config[ADDED_TOKENS_DECODER]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, token)| {
+            Some((
+                id.parse::<u32>().ok()?,
+                token["content"].as_str()?,
+                token["special"].as_bool()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    added.sort_by_key(|(id, _, _)| *id);
+    for (id, content, special) in added {
+        let token = tokenizer::AddedToken::from(content, special);
+        if special {
+            tokenizer
+                .add_special_tokens([token])
+                .map_err(anyhow::Error::msg)?;
+        } else {
+            tokenizer.add_tokens([token]).map_err(anyhow::Error::msg)?;
+        }
+        if tokenizer.token_to_id(content) != Some(id) {
+            anyhow::bail!("added token `{content}` does not follow the vocabulary at id {id}")
+        }
+    }
+    Ok(tokenizer)
+}
+
 // RWKV's world vocabulary, padded to the config's vocabulary beside it as llama.cpp's converter pads it
 fn load_rwkv_vocab(path: &Path) -> Result<Tokenizer> {
     let vocab_size = std::fs::read_to_string(path.with_file_name("config.json"))
@@ -354,6 +431,7 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
         Some(QWEN_TIKTOKEN_TOKENIZER) => Some(load_qwen_tiktoken(p.clone())?),
         Some(KIMI_TIKTOKEN_TOKENIZER) => Some(load_kimi_tiktoken(p.as_ref())?),
         Some(inference_gguf::rwkv_tokenizer::RWKV_VOCAB_FILE) => Some(load_rwkv_vocab(p.as_ref())?),
+        Some(BPE_VOCAB) => Some(load_qwen2_vocab(p.as_ref())?),
         _ => None,
     };
     if let Some(mut tokenizer) = native {
@@ -395,8 +473,8 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
 #[cfg(test)]
 mod tests {
     use super::{
-        load_kimi_tiktoken, load_qwen_tiktoken, merge_config_added_tokens, repair_tokenizer_json,
-        tokenizer_from_bytes,
+        load_kimi_tiktoken, load_qwen_tiktoken, load_qwen2_vocab, merge_config_added_tokens,
+        repair_tokenizer_json, tokenizer_from_bytes,
     };
     use base64::Engine;
     use serde_json::{Value, json};
@@ -457,6 +535,45 @@ mod tests {
             tokenizer.token_to_id("<|extra_204|>"),
             Some(MERGED_RANK + 1 + 3 + 204)
         );
+        Ok(())
+    }
+
+    // a slow Qwen2 tokenizer's files: byte-level BPE over the merges, the config's added tokens at their ids
+    #[test]
+    fn a_qwen2_vocabulary_builds_with_its_merges_and_added_tokens() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let vocab = dir.path().join(super::BPE_VOCAB);
+        std::fs::write(
+            &vocab,
+            r#"{"a": 0, "b": 1, "\u0120": 2, "ab": 3, "\u0120b": 4}"#,
+        )?;
+        std::fs::write(
+            dir.path().join(super::BPE_MERGES),
+            "#version: 0.2\na b\n\u{120} b\n",
+        )?;
+        let config = |class: &str| {
+            format!(
+                r#"{{"tokenizer_class": "{class}", "added_tokens_decoder": {{
+                    "5": {{"content": "<|im_start|>", "special": true}},
+                    "6": {{"content": "<text>", "special": false}}}}}}"#
+            )
+        };
+        let config_path = dir.path().join(super::TOKENIZER_CONFIG);
+        std::fs::write(&config_path, config("Qwen2Tokenizer"))?;
+        let tokenizer = load_qwen2_vocab(&vocab)?;
+        let encoding = tokenizer
+            .encode("<|im_start|>ab b<text>", false)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(encoding.get_ids(), [5, 3, 4, 6]);
+        assert_eq!(
+            tokenizer
+                .decode(&[3, 4, 6], true)
+                .map_err(anyhow::Error::msg)?,
+            "ab b<text>"
+        );
+        // another class's vocabulary splits its own way
+        std::fs::write(&config_path, config("GPT2Tokenizer"))?;
+        assert!(load_qwen2_vocab(&vocab).is_err());
         Ok(())
     }
 

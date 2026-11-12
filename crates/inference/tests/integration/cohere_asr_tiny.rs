@@ -6,6 +6,8 @@ use inference::{
     TranscriptionResponseFormat, VerboseTranscriptionResponse,
 };
 
+#[path = "../support/audiocpp_package.rs"]
+mod package;
 #[path = "../support/cohere_asr_tiny.rs"]
 mod support;
 use support::tiny_cohere_asr_checkpoint;
@@ -119,5 +121,30 @@ async fn a_language_model_tells_cohere_transcribe_its_language() -> anyhow::Resu
     let body = model.transcription(identified, &tone_wav(2.0)).await?.body;
     let parsed: VerboseTranscriptionResponse = serde_json::from_str(&body)?;
     assert_eq!(parsed.language.as_deref(), Some("ja"));
+    Ok(())
+}
+
+// repacked as an audio.cpp GGUF, its encoder read under Parakeet's names, it transcribes as its safetensors
+#[tokio::test]
+async fn an_audiocpp_package_transcribes_as_its_checkpoint() -> anyhow::Result<()> {
+    let checkpoint = tiny_cohere_asr_checkpoint()?;
+    let dir = tempfile::tempdir()?;
+    let gguf = package::repack_all(
+        checkpoint.path(),
+        "cohere_asr",
+        &[("", "model.safetensors")],
+        &dir.path().join("tiny-f32.gguf"),
+    )?;
+    let wav = tone_wav(LONG_SECONDS);
+    let mut bodies = Vec::new();
+    for model_id in [checkpoint.path(), gguf.as_path()] {
+        let model = TranscriptionModelBuilder::new(model_id.to_string_lossy())
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu()
+            .build()
+            .await?;
+        bodies.push(model.transcription(request(Some("de")), &wav).await?.body);
+    }
+    assert_eq!(bodies[1], bodies[0]);
     Ok(())
 }

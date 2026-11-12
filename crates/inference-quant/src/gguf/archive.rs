@@ -1217,13 +1217,8 @@ impl ParsedShard {
                             raw.name
                         ))
                     })?;
-                    if storage_end > self.mmap.len() {
-                        inference_tensor::bail!(
-                            "padded storage for GGUF tensor `{}` ends at byte {storage_end}, beyond file length {}",
-                            raw.name,
-                            self.mmap.len()
-                        );
-                    }
+                    // a file may end at its last tensor's bytes, without the padding after them (llama.cpp loads it)
+                    let storage_end = storage_end.min(self.mmap.len());
                     (Some(absolute_start..exact_end), storage_end)
                 }
                 None => (None, available_end),
