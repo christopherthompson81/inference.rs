@@ -13,14 +13,14 @@ pub(crate) fn get_2d_grid_dims(shape: &[usize], strides: &[usize]) -> MTLSize {
     let mut grid_x: usize = 1;
     let mut grid_y: usize = 1;
 
-    for i in 0..shape.len() {
-        if strides[i] == 0 {
+    for (&dim, &stride) in shape.iter().zip(strides) {
+        if stride == 0 {
             continue;
         }
-        if grid_x.saturating_mul(shape[i]) < u32::MAX as usize {
-            grid_x *= shape[i];
+        if grid_x.saturating_mul(dim) < u32::MAX as usize {
+            grid_x *= dim;
         } else {
-            grid_y *= shape[i];
+            grid_y *= dim;
         }
     }
 
