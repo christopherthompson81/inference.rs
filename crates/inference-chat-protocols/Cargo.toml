@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Chat protocols a server offers over the inference.rs engine's chat operation: Anthropic Messages and OpenAI Responses"
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 

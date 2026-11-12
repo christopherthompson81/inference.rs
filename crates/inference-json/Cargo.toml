@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 description = "JSON decoding for inference.rs types through shared per-field helpers instead of per-type serde visitors"
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 

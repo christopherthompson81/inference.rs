@@ -154,11 +154,7 @@ pub fn should_use_gemv(x: &Tensor, w: &Tensor) -> bool {
 
     // Check that K dimensions match
     let w_k = w.dim(w.rank() - 1).unwrap_or(0);
-    if k != w_k {
-        return false;
-    }
-
-    true
+    k == w_k
 }
 
 #[cfg(feature = "cuda")]

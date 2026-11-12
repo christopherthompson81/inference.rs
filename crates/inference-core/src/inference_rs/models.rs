@@ -126,11 +126,7 @@ impl InferenceRs {
             .unloaded_models
             .read()
             .map_err(|_| InferenceRsError::EnginePoisoned)?;
-        if unloaded.contains_key(&resolved_model_id) {
-            return Ok(true);
-        }
-
-        Ok(false)
+        Ok(unloaded.contains_key(&resolved_model_id))
     }
 
     /// Get model category for a specific model. If model_id is None, uses default engine.

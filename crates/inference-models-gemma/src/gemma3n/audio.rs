@@ -777,10 +777,11 @@ impl AudioModel {
         // Subsample the mask to match audio_encodings time dimension
         let t_sub = audio_encodings.dim(1)?;
 
-        let mut time_stride_product = 1;
-        for i in 0..self.sscp_conv_stride_size.len() {
-            time_stride_product *= self.sscp_conv_stride_size[i][0];
-        }
+        let time_stride_product = self
+            .sscp_conv_stride_size
+            .iter()
+            .map(|stride| stride[0])
+            .product::<usize>();
 
         // Create indices for gathering from the original mask
         // Use f32 for the affine operation, then convert to i64 for indexing

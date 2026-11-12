@@ -102,7 +102,6 @@ resolver = "2"
 version = "0.0.27"
 edition = "2024"
 description = "Fast, flexible model inference."
-homepage = "https://github.com/christopherthompson81/inference.rs"
 repository = "https://github.com/christopherthompson81/inference.rs"
 keywords = ["llm", "inference", "machine-learning", "ai", "transformers"]
 categories = ["science", "api-bindings", "text-processing"]
@@ -123,7 +122,6 @@ serde = "1.0.228"
 siphasher = "1.0.1"
 serde_json = "1.0.149"
 tar = { version = "0.4.45", default-features = false }
-serde_path_to_error = "0.1.20"
 mime = "0.3.17"
 sha2 = "0.10.9"
 indexmap = { version = "2.13.0", features = ["serde"] }
@@ -212,7 +210,6 @@ indicatif = { version = "0.18.3", features = ["rayon"] }
 async-trait = "0.1.89"
 strum = { version = "0.28.0", features = ["derive"] }
 akin = "0.4.0"
-derive-new = "0.7.0"
 sysinfo = "0.36.1"
 csv = "1.4.0"
 uuid = "1.19.0"

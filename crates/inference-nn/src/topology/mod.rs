@@ -164,9 +164,7 @@ impl Topology {
             Self::with_capacity(capacity)
         };
         for (range, layer) in range_layers {
-            for i in range.start..range.end {
-                this.layers[i] = Some(layer.clone());
-            }
+            this.layers[range.start..range.end].fill(Some(layer));
         }
         this.patterns = pattern_layers;
         Ok(this)

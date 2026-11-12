@@ -5,7 +5,6 @@ authors = ["Eric Buehler"]
 version.workspace = true
 edition.workspace = true
 description = "Model selection for inference.rs: the loader a selection builds, quant discovery, auto-tuning and the doctor"
-homepage.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true

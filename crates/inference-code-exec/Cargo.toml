@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Python code execution for inference.rs"
 license.workspace = true
-homepage.workspace = true
 keywords = ["code-execution", "python", "ai", "llm"]
 categories = ["development-tools"]
 repository.workspace = true
