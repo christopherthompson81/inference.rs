@@ -326,6 +326,11 @@ pub struct CacheConfig {
 }
 
 impl CacheConfig {
+    /// The most tokens one sequence can hold: every block but the pool's reserved one, as the scheduler admits.
+    pub fn token_capacity(&self) -> usize {
+        self.num_gpu_blocks.saturating_sub(1) * self.block_size
+    }
+
     /// What layer `layer_idx` stores.
     pub fn layer_type(&self, layer_idx: usize) -> PagedCacheType {
         self.layer_types

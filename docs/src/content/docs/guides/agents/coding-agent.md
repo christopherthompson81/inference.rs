@@ -155,8 +155,9 @@ in the browser, and the other way round.
 ## Long sessions
 
 A session's history goes to the model with every round, so a long task eventually fills the model's context. Before
-a round whose prompt would pass 80% of the model's context length (the server's `max_model_len`), the agent folds the
-older history into a summary: the model is asked to summarize it for itself (the goal, instructions, what was done and
+a round whose prompt would pass 80% of the model's context length (the server's `max_model_len`, which is the KV
+cache's capacity when a smaller cache was set, as with `--pa-context-len`), the agent folds the older history into a
+summary: the model is asked to summarize it for itself (the goal, instructions, what was done and
 found, decisions, failures, the current state and the next steps), then sees the system prompt, that summary, and the
 most recent tenth of the context word for word, less the reasoning of those messages, which the summary stands for
 (turns after the fold keep theirs). History longer than half the context is summarized a chunk at a

@@ -1,8 +1,9 @@
 //! A tiny random-weight Qwen3.5 text checkpoint: the one text loader whose runtime config differs from the checkpoint's.
 
 use inference::{
-    IsqType, LogitsOutput, Model, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder,
-    TextMessageRole, TextMessages, TextModelBuilder,
+    IsqType, LogitsOutput, MemoryGpuConfig, Model, ModelDType, PagedAttentionMetaBuilder,
+    PromptInput, PromptLogitsRequest, RequestBuilder, TextMessageRole, TextMessages,
+    TextModelBuilder,
 };
 use inference_models_qwen::qwen3_5::{Qwen3_5TextModel, TextConfig};
 use inference_nn::paged_attention::AttentionImplementation;
@@ -21,6 +22,9 @@ mod traces;
 
 const DECLARED_CONTEXT: u64 = 1024;
 const RUNTIME_LIMIT: usize = 256;
+// a paged cache sized well under a long declared context (the cache rounds up to whole MB, ~1K tokens here)
+const PAGED_CONTEXT: usize = 128;
+const LONG_CONTEXT: u64 = 1 << 20;
 const NUM_LAYERS: usize = 4;
 const VOCAB: usize = 266;
 // the target's hidden size, which a DFlash drafter must share
@@ -192,6 +196,41 @@ async fn a_paged_gpu_bidirectional_prompt_reaches_back_from_later_tokens() -> an
         return Ok(());
     }
     assert_bidirectional_prompt(true).await
+}
+
+async fn a_paged_cache_smaller_than_the_model_caps_its_listed_length() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let patch = serde_json::json!({"max_position_embeddings": LONG_CONTEXT});
+    let checkpoint = tiny_qwen3_5_text_with(GRAPH_HEAD_DIM, false, patch)?;
+    let paged = PagedAttentionMetaBuilder::default()
+        .with_gpu_memory(MemoryGpuConfig::ContextSize(PAGED_CONTEXT))
+        .build()?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(paged)
+        .build()
+        .await?;
+    let listed = serde_json::to_value(model.models()?)?;
+    let len = listed["data"][0]["max_model_len"].as_u64().unwrap();
+    // at least the size asked for, and nowhere near the checkpoint's own context
+    assert!(
+        len >= PAGED_CONTEXT as u64 && len < LONG_CONTEXT / 64,
+        "{listed}"
+    );
+    // a prompt past it is refused as one that can never fit, not left waiting
+    let prompt = PromptInput::Tokens((0..len as u32 + 1).map(|t| 40 + t % 200).collect());
+    let scored = model
+        .prompt_logits(PromptLogitsRequest {
+            model: None,
+            prompt,
+            output: LogitsOutput::Logits,
+            audio: Vec::new(),
+        })
+        .await;
+    assert!(scored.is_err());
+    Ok(())
 }
 
 // wider than the vocabulary, so every prompt token indexes a row
@@ -1263,6 +1302,7 @@ concurrent_cases!(
         a_uqff_keeps_the_checkpoint_context_when_written_under_max_model_len: 0,
         a_bidirectional_prompt_reaches_back_from_later_tokens: 0,
         a_paged_gpu_bidirectional_prompt_reaches_back_from_later_tokens: 348,
+        a_paged_cache_smaller_than_the_model_caps_its_listed_length: 348,
         a_decision_head_replaces_the_vocabulary_logits: 0,
         a_joint_head_returns_the_hidden_states: 0,
         hybrid_autotuned_dflash_drafts_and_keeps_greedy_output: 620,
