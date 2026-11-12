@@ -12,6 +12,8 @@ const MODELS_PATH: &str = "/v1/models";
 const DEFAULT_MODEL: &str = "default";
 const SSE_DATA: &str = "data:";
 const SSE_DONE: &str = "[DONE]";
+// the input modality a listing names for images
+const VISION: &str = "vision";
 // a turn's prefill can take minutes at long context; the stream itself has no deadline
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -27,21 +29,36 @@ pub trait ChatBackend: Send + Sync {
         let _ = model;
         Box::pin(async { None })
     }
+
+    /// Whether `model` takes images, where the backend can tell.
+    fn reads_images<'a>(&'a self, model: &'a str) -> BoxFuture<'a, bool> {
+        let _ = model;
+        Box::pin(async { false })
+    }
+}
+
+// `model`'s entry in a `/v1/models` listing, `default` naming the listing's default model
+fn listed_model<'a>(models: &'a Value, model: &str) -> Option<&'a Value> {
+    let models = models["data"].as_array()?;
+    models.iter().find(|m| m["id"] == model).or_else(|| {
+        (model == DEFAULT_MODEL)
+            .then(|| models.iter().find(|m| m["default"] == true))
+            .flatten()
+    })
 }
 
 /// `model`'s `max_model_len` in a `/v1/models` listing, `default` naming the listing's default model.
 pub fn listed_context_tokens(models: &Value, model: &str) -> Option<usize> {
-    let models = models["data"].as_array()?;
-    models
-        .iter()
-        .find(|m| m["id"] == model)
-        .or_else(|| {
-            (model == DEFAULT_MODEL)
-                .then(|| models.iter().find(|m| m["default"] == true))
-                .flatten()
-        })
+    listed_model(models, model)
         .and_then(|m| m["max_model_len"].as_u64())
         .and_then(|tokens| usize::try_from(tokens).ok())
+}
+
+/// Whether `model`'s input modalities in a `/v1/models` listing include images.
+pub fn listed_vision(models: &Value, model: &str) -> bool {
+    listed_model(models, model)
+        .and_then(|m| m["modalities"]["input"].as_array())
+        .is_some_and(|input| input.iter().any(|modality| modality == VISION))
 }
 
 /// The engine in this process.
@@ -91,10 +108,20 @@ impl ChatBackend for EngineBackend {
     }
 
     fn context_tokens<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Option<usize>> {
+        Box::pin(async move { listed_context_tokens(&self.listing()?, model) })
+    }
+
+    fn reads_images<'a>(&'a self, model: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(async move {
-            let models = serde_json::to_value(self.engine.models().ok()?).ok()?;
-            listed_context_tokens(&models, model)
+            self.listing()
+                .is_some_and(|models| listed_vision(&models, model))
         })
+    }
+}
+
+impl EngineBackend {
+    fn listing(&self) -> Option<Value> {
+        serde_json::to_value(self.engine.models().ok()?).ok()
     }
 }
 
@@ -183,15 +210,26 @@ impl ChatBackend for HttpBackend {
 
     // the server names the model itself, whatever the request says
     fn context_tokens<'a>(&'a self, _model: &'a str) -> BoxFuture<'a, Option<usize>> {
+        Box::pin(async move { listed_context_tokens(&self.listing().await?, &self.model) })
+    }
+
+    fn reads_images<'a>(&'a self, _model: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(async move {
-            let url = format!("{}{MODELS_PATH}", self.url.trim_end_matches(CHAT_PATH));
-            let mut get = self.client.get(&url);
-            if let Some(key) = &self.api_key {
-                get = get.bearer_auth(key);
-            }
-            let models = get.send().await.ok()?.json::<Value>().await.ok()?;
-            listed_context_tokens(&models, &self.model)
+            self.listing()
+                .await
+                .is_some_and(|models| listed_vision(&models, &self.model))
         })
+    }
+}
+
+impl HttpBackend {
+    async fn listing(&self) -> Option<Value> {
+        let url = format!("{}{MODELS_PATH}", self.url.trim_end_matches(CHAT_PATH));
+        let mut get = self.client.get(&url);
+        if let Some(key) = &self.api_key {
+            get = get.bearer_auth(key);
+        }
+        get.send().await.ok()?.json::<Value>().await.ok()
     }
 }
 
@@ -232,7 +270,7 @@ fn parse_sse_event(event: &str) -> SseEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{SseEvent, listed_context_tokens, parse_sse_event};
+    use super::{SseEvent, listed_context_tokens, listed_vision, parse_sse_event};
     use serde_json::json;
 
     #[test]
@@ -243,6 +281,17 @@ mod tests {
         assert_eq!(listed_context_tokens(&models, "default"), Some(262_144));
         assert_eq!(listed_context_tokens(&models, "embed"), None);
         assert_eq!(listed_context_tokens(&models, "missing"), None);
+    }
+
+    #[test]
+    fn a_listing_says_which_models_take_images() {
+        let models = json!({"data": [
+            {"id": "vl", "default": true, "modalities": {"input": ["text", "vision"], "output": ["text"]}},
+            {"id": "text", "modalities": {"input": ["text"], "output": ["text"]}}, {"id": "bare"}]});
+        assert!(listed_vision(&models, "vl"));
+        assert!(listed_vision(&models, "default"));
+        assert!(!listed_vision(&models, "text"));
+        assert!(!listed_vision(&models, "bare"));
     }
 
     #[test]

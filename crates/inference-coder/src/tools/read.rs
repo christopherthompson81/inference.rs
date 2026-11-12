@@ -4,9 +4,12 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 
 use super::{Tool, ToolContext, ToolKind, ToolOutcome, str_arg, usize_arg};
+use crate::session::image_type;
 
 const DEFAULT_LINES: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
+// past this an image is refused rather than sent with every later request
+const MAX_IMAGE_BYTES: u64 = 20 << 20;
 
 pub struct ReadTool;
 
@@ -17,7 +20,8 @@ impl Tool for ReadTool {
 
     fn description(&self) -> &'static str {
         "Read a text file, with line numbers. `offset` (1-based) and `limit` select a range of lines; long files are \
-         cut at 2000 lines unless a range is given."
+         cut at 2000 lines unless a range is given. When you can see images, reading an image file (png, jpg, gif, \
+         webp, bmp) shows you the image, for instance a screenshot you took to check your work."
     }
 
     fn parameters(&self) -> Value {
@@ -44,6 +48,9 @@ impl Tool for ReadTool {
                 Ok(path) => ctx.resolve(path),
                 Err(error) => return error,
             };
+            if image_type(&path).is_some() {
+                return read_image(path, ctx).await;
+            }
             let text = match tokio::fs::read(&path).await {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(text) => text,
@@ -87,6 +94,30 @@ impl Tool for ReadTool {
     }
 }
 
+// an image goes to the model after the round's tool results; the result itself only says what it is
+async fn read_image(path: PathBuf, ctx: &ToolContext) -> ToolOutcome {
+    let shown = ctx.display(&path);
+    if !ctx.images {
+        return ToolOutcome::error(format!(
+            "{shown} is an image, and this model can't see images"
+        ));
+    }
+    let size = match tokio::fs::metadata(&path).await {
+        Ok(meta) if meta.is_file() => meta.len(),
+        Ok(_) => return ToolOutcome::error(format!("{shown} is not a file")),
+        Err(error) => return ToolOutcome::error(format!("cannot read {shown}: {error}")),
+    };
+    if size > MAX_IMAGE_BYTES {
+        return ToolOutcome::error(format!(
+            "{shown} is {size} bytes, over the {MAX_IMAGE_BYTES}-byte limit for an image"
+        ));
+    }
+    ToolOutcome::with_images(
+        format!("{shown}: an image of {size} bytes, shown to you after the tool results"),
+        vec![path],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::ReadTool;
@@ -94,11 +125,28 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
+    async fn an_image_is_shown_to_a_model_that_sees_images_and_refused_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shot.PNG"), b"\x89PNG\r\n\x1a\n").unwrap();
+        let mut ctx = ToolContext {
+            root: dir.path().to_path_buf(),
+            images: true,
+        };
+        let out = ReadTool.run(json!({"path": "shot.PNG"}), &ctx).await;
+        assert!(!out.is_error, "{}", out.text);
+        assert_eq!(out.images, [dir.path().join("shot.PNG")]);
+        ctx.images = false;
+        let out = ReadTool.run(json!({"path": "shot.PNG"}), &ctx).await;
+        assert!(out.is_error && out.images.is_empty());
+    }
+
+    #[tokio::test]
     async fn reads_a_numbered_range() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "one\ntwo\nthree\nfour\n").unwrap();
         let ctx = ToolContext {
             root: dir.path().to_path_buf(),
+            images: false,
         };
         let out = ReadTool
             .run(json!({"path": "f.txt", "offset": 2, "limit": 2}), &ctx)

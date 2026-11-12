@@ -228,6 +228,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         let ctx = ToolContext {
             root: dir.path().to_path_buf(),
+            images: false,
         };
         let out = GrepTool.run(json!({"pattern": "alpha"}), &ctx).await;
         assert!(!out.is_error, "{}", out.text);
@@ -246,6 +247,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         let ctx = ToolContext {
             root: dir.path().to_path_buf(),
+            images: false,
         };
         let out = GlobTool.run(json!({"pattern": "**/*.rs"}), &ctx).await;
         assert_eq!(out.text, "src/lib.rs\nsrc/main.rs");

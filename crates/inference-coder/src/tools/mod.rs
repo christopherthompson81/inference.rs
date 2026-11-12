@@ -26,11 +26,12 @@ pub enum ToolKind {
     Execute,
 }
 
-/// What a tool call produced: text for the model, and whether it failed.
+/// What a tool call produced: text for the model, whether it failed, and image files to show the model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolOutcome {
     pub text: String,
     pub is_error: bool,
+    pub images: Vec<PathBuf>,
 }
 
 impl ToolOutcome {
@@ -38,6 +39,7 @@ impl ToolOutcome {
         Self {
             text: text.into(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 
@@ -45,14 +47,24 @@ impl ToolOutcome {
         Self {
             text: text.into(),
             is_error: true,
+            images: Vec::new(),
+        }
+    }
+
+    /// Text, with images the model sees after the tool results.
+    pub fn with_images(text: impl Into<String>, images: Vec<PathBuf>) -> Self {
+        Self {
+            images,
+            ..Self::ok(text)
         }
     }
 }
 
-/// Where tools act: the project directory, which relative paths resolve against.
+/// Where tools act: the project directory, which relative paths resolve against, and whether the model reads images.
 #[derive(Clone, Debug)]
 pub struct ToolContext {
     pub root: PathBuf,
+    pub images: bool,
 }
 
 impl ToolContext {
@@ -160,6 +172,7 @@ mod tests {
     fn paths_resolve_against_the_root_and_fold_parents() {
         let ctx = ToolContext {
             root: PathBuf::from("/work/repo"),
+            images: false,
         };
         assert_eq!(
             ctx.resolve("src/../lib.rs"),

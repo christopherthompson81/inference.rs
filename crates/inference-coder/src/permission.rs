@@ -94,6 +94,7 @@ mod tests {
     fn reads_inside_run_and_the_rest_asks_until_allowed() {
         let ctx = ToolContext {
             root: PathBuf::from("/work/repo"),
+            images: false,
         };
         let mut permissions = Permissions::new(PermissionMode::Ask);
         let inside = json!({"path": "src/lib.rs"});
