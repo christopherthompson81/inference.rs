@@ -16,7 +16,8 @@ inference.rs supports sixteen speech-related model families:
 - **IndicConformer**: AI4Bharat's FastConformer recogniser for 22 Indian languages, from its `.nemo`, each request
   naming its language, with word timestamps, served via `/v1/audio/transcriptions`.
 - **VibeVoice-ASR**: an audio-in decoder (7B) that writes timed, speaker-attributed segments itself, through
-  `/v1/audio/transcriptions` or `/v1/chat/completions`.
+  `/v1/audio/transcriptions` or `/v1/chat/completions`; its streaming checkpoints (1.5B, 7B) transcribe live audio
+  with speaker turns, through transcription sessions and the Realtime WebSocket.
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
@@ -583,15 +584,41 @@ two-voice recording transcribe in about 50 s on an RTX 3090.
   out, so a transcript repeats (the noise moves segment times by up to 0.02 s and nothing else).
 - Long recordings: every embedding sits in the prompt (27,000 positions for an hour), so the KV cache bounds the
   length on a GPU.
-- Not yet: the streaming checkpoints, hotword context, and GGUF.
+- Hotwords: the request's `prompt` (names, terms, the topic) goes into the model's prompt as context, as
+  Microsoft's `context_info`.
+- Not yet: GGUF.
 
 ```bash
 curl http://localhost:1234/v1/audio/transcriptions -F file=@meeting.wav -F response_format=verbose_json \
-  -F diarization_model=default
+  -F diarization_model=default -F prompt="Contoso, quarterly budget"
 ```
 
 `scripts/vibevoice_asr_parity.sh` checks a build against transformers' `VibeVoiceAsrForConditionalGeneration` in F32
 on the CPU: the audio embeddings (cosine 1.000000) and the greedy answer (identical) on a two-voice clip.
+
+### Streaming checkpoints
+
+```bash
+inference serve -m microsoft/VibeVoice-ASR-Streaming-1.5B
+```
+
+`microsoft/VibeVoice-ASR-Streaming-1.5B` and `-7B` transcribe audio as it arrives. Each 2.93 s window, with 0.53 s
+of lookahead, is encoded and decoded as it completes. The decoder's cache runs the whole recording, so the model
+keeps its speakers apart from start to end. A turn starts with a speaker mark in the text: the transcript's segments
+are those turns, timed by the windows they span (so adjacent turns can overlap by a window).
+
+- Transcription sessions and the Realtime WebSocket (`/v1/realtime?intent=transcription`) give each window's text as
+  it completes, about every 3 s. Finishing a session gives the whole transcript.
+- `/v1/audio/transcriptions` runs a whole upload the same way. On an RTX 3090 in bf16, the 1.5B transcribes five
+  minutes in about 13 s using 7 GB; the 7B took 2.3 times as long on a short clip.
+- Speakers come back as each segment's speaker when the request names the model as its own `diarization_model`.
+- A session's or upload's `prompt` is the model's hotword context, as offline.
+- A recording past the decoder's context (65,536 positions on the 1.5B, about 74 minutes; twice that on the 7B)
+  continues in a new pass with a fresh cache. Its speakers are numbered after the earlier passes', since a fresh
+  pass cannot tell who is who.
+
+`scripts/vibevoice_asr_parity.sh --streaming` compares each window's greedy tokens with Microsoft's
+`streaming_generate` in F32 on the CPU (identical on both sizes, with and without hotwords).
 
 ## Qwen3-ASR: audio in, transcript out
 

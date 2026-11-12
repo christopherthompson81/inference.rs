@@ -529,7 +529,7 @@
                           "string",
                           "null"
                         ],
-                        "description": "Text to steer the transcript, taken as what came before the audio (Whisper); Parakeet ignores it."
+                        "description": "Text to steer the transcript: what came before the audio (Whisper), or context such as hotwords (VibeVoice-ASR);\nother models ignore it."
                       },
                       "response_format": {
                         "$ref": "#/components/schemas/TranscriptionResponseFormat"
@@ -673,7 +673,7 @@
                           "string",
                           "null"
                         ],
-                        "description": "Text to steer the transcript, taken as what came before the audio (Whisper); Parakeet ignores it."
+                        "description": "Text to steer the transcript: what came before the audio (Whisper), or context such as hotwords (VibeVoice-ASR);\nother models ignore it."
                       },
                       "response_format": {
                         "$ref": "#/components/schemas/TranscriptionResponseFormat"
@@ -15627,7 +15627,8 @@
         "enum": [
           "parakeet",
           "whisper",
-          "cohere_asr"
+          "cohere_asr",
+          "vibevoice_streaming"
         ]
       },
       "TranscriptionRequest": {
@@ -15705,7 +15706,7 @@
               "string",
               "null"
             ],
-            "description": "Text to steer the transcript, taken as what came before the audio (Whisper); Parakeet ignores it."
+            "description": "Text to steer the transcript: what came before the audio (Whisper), or context such as hotwords (VibeVoice-ASR);\nother models ignore it."
           },
           "response_format": {
             "$ref": "#/components/schemas/TranscriptionResponseFormat"
@@ -15790,7 +15791,7 @@
       },
       "TranscriptionSessionRequest": {
         "type": "object",
-        "description": "Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push\nreturns the text it adds; an inference.rs extension.",
+        "description": "Opens a streamed transcription on a streaming model (Nemotron streaming ASR, VibeVoice-ASR Streaming): mono audio\nis pushed as it arrives and each push returns the text it adds; an inference.rs extension.",
         "properties": {
           "language": {
             "type": [
@@ -15802,6 +15803,13 @@
           "model": {
             "type": "string",
             "example": "nvidia/nemotron-speech-streaming-en-0.6b"
+          },
+          "prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "As for [`TranscriptionRequest`]: context the model takes with the audio (VibeVoice-ASR Streaming's hotwords)."
           },
           "response_format": {
             "$ref": "#/components/schemas/TranscriptionResponseFormat",

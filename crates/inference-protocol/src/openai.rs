@@ -2291,8 +2291,8 @@ pub enum TimestampGranularity {
     Segment,
 }
 
-/// Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push
-/// returns the text it adds; an inference.rs extension.
+/// Opens a streamed transcription on a streaming model (Nemotron streaming ASR, VibeVoice-ASR Streaming): mono audio
+/// is pushed as it arrives and each push returns the text it adds; an inference.rs extension.
 #[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TranscriptionSessionRequest {
     #[schema(example = "nvidia/nemotron-speech-streaming-en-0.6b")]
@@ -2301,6 +2301,9 @@ pub struct TranscriptionSessionRequest {
     /// As for [`TranscriptionRequest`]: a Nemotron-3.5 language, unset to identify it.
     #[serde(default)]
     pub language: Option<String>,
+    /// As for [`TranscriptionRequest`]: context the model takes with the audio (VibeVoice-ASR Streaming's hotwords).
+    #[serde(default)]
+    pub prompt: Option<String>,
     /// The sample rate of the mono audio pushed; it is resampled to the model's.
     #[serde(default = "default_session_sample_rate")]
     #[schema(example = 24000)]
@@ -2322,6 +2325,7 @@ impl TranscriptionSessionRequest {
         Self {
             model: default_model(),
             language: None,
+            prompt: None,
             sample_rate,
             response_format: TranscriptionResponseFormat::default(),
             timestamp_granularities: Vec::new(),
@@ -2333,6 +2337,7 @@ impl TranscriptionSessionRequest {
         TranscriptionRequest {
             model: self.model.clone(),
             language: self.language.clone(),
+            prompt: self.prompt.clone(),
             timestamp_granularities: self.timestamp_granularities.clone(),
             ..TranscriptionRequest::new(self.response_format)
         }
@@ -2355,7 +2360,8 @@ pub struct TranscriptionRequest {
     /// The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it.
     #[serde(default)]
     pub language: Option<String>,
-    /// Text to steer the transcript, taken as what came before the audio (Whisper); Parakeet ignores it.
+    /// Text to steer the transcript: what came before the audio (Whisper), or context such as hotwords (VibeVoice-ASR);
+    /// other models ignore it.
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]

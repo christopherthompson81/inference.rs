@@ -7,7 +7,7 @@ use super::inputs_processor::SOUND_TOKEN;
 
 const INSTRUCTION: &str = "Transcribe the input speech.";
 
-fn prompt(_language: Option<&str>) -> anyhow::Result<String> {
+fn prompt(_language: Option<&str>, _context: Option<&str>) -> anyhow::Result<String> {
     Ok(format!(
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{SOUND_TOKEN}{INSTRUCTION}<|im_end|>\n<|im_start|>assistant\n"
     ))

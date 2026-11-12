@@ -1580,6 +1580,27 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         })
     }
 
+    /// One sequence's normed hidden states for `xs` `(1, tokens, hidden)` after the `offset` positions its own
+    /// `cache` holds, as a model that keeps its caches outside the engine (a speech decoder) steps them.
+    pub fn forward_cached(
+        &self,
+        xs: Tensor,
+        cache: &mut Vec<KvCache>,
+        offset: usize,
+    ) -> Result<Tensor> {
+        let tokens = xs.dim(1)?;
+        let shape = Tensor::zeros((1, tokens), DType::U32, xs.device())?;
+        // causal over the cache and these tokens at any offset: a later call can carry many (a speech window)
+        let masks = self.masks(&shape, xs.dtype(), &*cache, true)?;
+        let offsets = [offset];
+        let context_lens = [(0, tokens)];
+        let position_ids = [offset + tokens];
+        let flash = FlashParams::empty(true);
+        let mut ctx =
+            ModelForwardContext::new(&offsets, &context_lens, &position_ids, None, &flash);
+        self.forward(xs, &masks, Some(cache), &mut ctx)
+    }
+
     /// The normed hidden states; `cache` is `None` for an encoder pass over the call's tokens alone.
     pub fn forward(
         &self,

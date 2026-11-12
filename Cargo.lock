@@ -3196,7 +3196,6 @@ dependencies = [
  "clap",
  "flate2",
  "hound",
- "indicatif 0.18.3",
  "inference-audio",
  "inference-json",
  "inference-nn",

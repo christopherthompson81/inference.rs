@@ -21,11 +21,11 @@ fn render(instruction: &str) -> String {
     )
 }
 
-fn prompt(_language: Option<&str>) -> anyhow::Result<String> {
+fn prompt(_language: Option<&str>, _context: Option<&str>) -> anyhow::Result<String> {
     Ok(render(TRANSCRIBE))
 }
 
-fn speaker_prompt(_language: Option<&str>) -> anyhow::Result<String> {
+fn speaker_prompt(_language: Option<&str>, _context: Option<&str>) -> anyhow::Result<String> {
     Ok(render(TRANSCRIBE_SPEAKERS))
 }
 
@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn the_prompt_is_the_templates_rendering_of_the_default_request() -> anyhow::Result<()> {
         assert_eq!(
-            prompt(Some("en"))?,
+            prompt(Some("en"), None)?,
             "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nAudio transcription. Language: as spoken. Wording: \
              verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: \
              transcript only. <|audio|><|im_end|>\n<|im_start|>assistant\n<think></think>"

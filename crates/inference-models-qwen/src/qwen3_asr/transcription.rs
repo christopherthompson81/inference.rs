@@ -44,7 +44,7 @@ const LANGUAGES: [(&str, &str); 30] = [
     ("vi", "Vietnamese"),
 ];
 
-fn prompt(language: Option<&str>) -> anyhow::Result<String> {
+fn prompt(language: Option<&str>, _context: Option<&str>) -> anyhow::Result<String> {
     let answer = match language {
         None => String::new(),
         Some(code) => {
@@ -97,10 +97,13 @@ mod tests {
 
     #[test]
     fn a_language_hint_starts_the_answer() -> anyhow::Result<()> {
-        assert!(prompt(None)?.ends_with("<|im_start|>assistant\n"));
-        assert!(prompt(Some("en"))?.ends_with("<|im_start|>assistant\nlanguage English<asr_text>"));
-        assert!(prompt(Some("yue"))?.ends_with("language Cantonese<asr_text>"));
-        assert!(prompt(Some("xx")).is_err());
+        assert!(prompt(None, None)?.ends_with("<|im_start|>assistant\n"));
+        assert!(
+            prompt(Some("en"), None)?
+                .ends_with("<|im_start|>assistant\nlanguage English<asr_text>")
+        );
+        assert!(prompt(Some("yue"), None)?.ends_with("language Cantonese<asr_text>"));
+        assert!(prompt(Some("xx"), None).is_err());
         Ok(())
     }
 

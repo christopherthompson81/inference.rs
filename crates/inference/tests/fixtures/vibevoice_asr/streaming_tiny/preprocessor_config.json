@@ -1,0 +1,7 @@
+{
+  "speech_tok_compress_ratio": 80,
+  "target_sample_rate": 24000,
+  "normalize_audio": false,
+  "chunk_frames": 25,
+  "lookahead_frames": 5
+}

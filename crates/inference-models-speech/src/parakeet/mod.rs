@@ -431,6 +431,7 @@ impl Parakeet {
             return Err(msg(TRANSCRIPTION_STOPPED));
         }
         let mut merged = Transcription {
+            segments: Vec::new(),
             text: String::new(),
             tokens: Vec::new(),
             words: Vec::new(),
@@ -751,6 +752,7 @@ impl Parakeet {
             });
         }
         Ok(Transcription {
+            segments: Vec::new(),
             words: words(&tokens),
             text: text.trim().to_string(),
             tokens,

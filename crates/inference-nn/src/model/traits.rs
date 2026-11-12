@@ -90,6 +90,22 @@ pub struct NormalLoadingMetadata {
     pub rope_pairing: Option<RopePairing>,
 }
 
+impl NormalLoadingMetadata {
+    /// Everything on `device`, unquantized: a model a pipeline builds itself (a speech decoder's stack).
+    pub fn single_device(device: &Device) -> Self {
+        Self {
+            mapper: Box::new(crate::device_map::DummyDeviceMapper {
+                nm_device: device.clone(),
+            }),
+            loading_isq: false,
+            real_device: device.clone(),
+            multi_progress: Arc::new(MultiProgress::new()),
+            matformer_slicing_config: None,
+            rope_pairing: None,
+        }
+    }
+}
+
 pub trait MultimodalModel:
     IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin + BlockDiffusionMixin
 {

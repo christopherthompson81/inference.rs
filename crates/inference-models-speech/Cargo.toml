@@ -18,7 +18,6 @@ inference-tensor.workspace = true
 inference-audio.workspace = true
 tokenizers.workspace = true
 anyhow.workspace = true
-indicatif.workspace = true
 rustfft.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true

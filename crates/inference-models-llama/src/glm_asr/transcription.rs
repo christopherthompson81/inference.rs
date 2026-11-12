@@ -7,7 +7,7 @@ use super::inputs_processor::{AUDIO_BEGIN, AUDIO_END, AUDIO_TOKEN};
 
 const INSTRUCTION: &str = "Please transcribe this audio into text";
 
-fn prompt(_language: Option<&str>) -> anyhow::Result<String> {
+fn prompt(_language: Option<&str>, _context: Option<&str>) -> anyhow::Result<String> {
     Ok(format!(
         "<|user|>\n{AUDIO_BEGIN}{AUDIO_TOKEN}{AUDIO_END}<|user|>\n{INSTRUCTION}<|assistant|>\n"
     ))
@@ -34,7 +34,7 @@ mod tests {
     #[test]
     fn the_prompt_is_the_processors() -> anyhow::Result<()> {
         assert_eq!(
-            prompt(Some("en"))?,
+            prompt(Some("en"), None)?,
             "<|user|>\n<|begin_of_audio|><|pad|><|end_of_audio|><|user|>\nPlease transcribe this audio into text<|assistant|>\n"
         );
         Ok(())

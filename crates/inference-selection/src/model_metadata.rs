@@ -720,6 +720,14 @@ impl SupportedArch for TranscriptionLoaderType {
                 modalities: &[Audio, Text],
                 examples: &[ex!("CohereLabs/cohere-transcribe-03-2026")],
             },
+            Self::VibeVoiceStreaming => ArchMetadata {
+                families: &["VibeVoice-ASR Streaming (1.5B, 7B; speaker turns as audio arrives)"],
+                modalities: &[Audio, Text],
+                examples: &[
+                    ex!("microsoft/VibeVoice-ASR-Streaming-1.5B"),
+                    ex!("microsoft/VibeVoice-ASR-Streaming-7B"),
+                ],
+            },
         }
     }
 }

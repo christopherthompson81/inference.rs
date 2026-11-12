@@ -428,6 +428,7 @@ class TranscriptionLoaderType(str, Enum):
     PARAKEET = "parakeet"
     WHISPER = "whisper"
     COHERE_ASR = "cohere_asr"
+    VIBEVOICE_STREAMING = "vibevoice_streaming"
 
 
 class TranscriptionResponseFormat(str, Enum):
@@ -3469,10 +3470,11 @@ class TranscriptionSegment:
 
 @dataclass(kw_only=True)
 class TranscriptionSessionRequest:
-    """Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push returns the text it adds; an inference.rs extension."""
+    """Opens a streamed transcription on a streaming model (Nemotron streaming ASR, VibeVoice-ASR Streaming): mono audio is pushed as it arrives and each push returns the text it adds; an inference.rs extension."""
 
     language: str | None = None
     model: str | None = None
+    prompt: str | None = None
     response_format: TranscriptionResponseFormat | None = None
     sample_rate: int | None = None
     timestamp_granularities: list[TimestampGranularity] | None = None

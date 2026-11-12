@@ -1,0 +1,58 @@
+{
+  "architectures": [
+    "VibeVoiceForASRStreamingTraining"
+  ],
+  "model_type": "vibevoice",
+  "acoustic_tokenizer_config": {
+    "causal": true,
+    "channels": 1,
+    "conv_bias": true,
+    "encoder_depths": "1-1-1",
+    "encoder_n_filters": 4,
+    "encoder_ratios": [
+      10,
+      8
+    ],
+    "layernorm": "RMSNorm",
+    "layernorm_eps": 1e-05,
+    "mixer_layer": "depthwise_conv",
+    "pad_mode": "constant",
+    "vae_dim": 6,
+    "fix_std": 0.5,
+    "std_dist_type": "gaussian",
+    "model_type": "vibevoice_acoustic_tokenizer"
+  },
+  "semantic_tokenizer_config": {
+    "causal": true,
+    "channels": 1,
+    "conv_bias": true,
+    "encoder_depths": "1-1-1",
+    "encoder_n_filters": 4,
+    "encoder_ratios": [
+      10,
+      8
+    ],
+    "layernorm": "RMSNorm",
+    "layernorm_eps": 1e-05,
+    "mixer_layer": "depthwise_conv",
+    "pad_mode": "constant",
+    "vae_dim": 8,
+    "fix_std": 0,
+    "std_dist_type": "none",
+    "model_type": "vibevoice_semantic_tokenizer"
+  },
+  "decoder_config": {
+    "model_type": "qwen2",
+    "vocab_size": 267,
+    "hidden_size": 48,
+    "intermediate_size": 96,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "max_position_embeddings": 8192,
+    "rope_theta": 10000.0,
+    "rms_norm_eps": 1e-06,
+    "hidden_act": "silu",
+    "tie_word_embeddings": true
+  }
+}
