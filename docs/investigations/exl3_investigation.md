@@ -255,3 +255,37 @@ exllamav3, our Hessians            6.8099                           11.6339  (+5
 The 512-token reading was noise. Ours are the unquantized model's activations, collected in one pass;
 exllamav3's own are captured module by module from the state after the quantized modules before it, which lets
 each layer's LDLQ see (and compensate) its inputs' quantization error. That state propagation is phase 3.
+
+## Run 10 - 2026-11-14 08:00
+
+Phase 2, the tensor encoder (`exl3::encode::encode`), after exllamav3's `quantize_exl3`:
+
+- 2a: the Viterbi tile quantizer vendored (`quantize_tiles` with its dense specializations, and the half-integer
+  rates), in its own library `inferencequant_exl3q` that only writing opens; `pack_tile` in Rust. Both rates pack
+  as one most-significant-first stream of u32 words (whole: K bits a position; half: K and K + 1 alternating, the odd
+  positions taking the extra bit). The quantizer's states, packed and decoded by our loader's decoder, give back
+  exactly the values it reports.
+- 2b: H damped (0.025 x the mean diagonal) and rotated by the input signs and blockwise Hadamard, Cholesky by
+  cuSOLVER (`potrf`; a row-major symmetric matrix is its own column-major view, so an upper factor there is L in
+  our lower triangle, the other triangle left as input: LDLQ masks each span's rows of L to the columns left of
+  their own block instead of a k x k mask), the 16 x 16 diagonal blocks inverted on the host; the weight
+  regularized (column rms over their mean, the output Hadamard, row rms over -1.2437, the input Hadamard, a global
+  scale searched coarse-then-fine on a diagonal sample of tiles plus the extremes); LDLQ in 128-row spans of 16-row
+  blocks; rotated back; the scales refit twice (output columns in closed form, input rows by a cuSOLVER solve of
+  (Q Q^T) o H). Signs from our own seeded xorshift, not torch's RNG.
+
+Against exllamav3 on Qwen3-0.6B tensors with our phase-1 Hessians (`scripts/exl3_encode_parity.py`; "ours" is
+exllamav3's `LinearEXL3` reconstructing our tensors, which equals the error our encoder reports, so the format
+matches), output error tr(E H E^T) / tr(W H W^T):
+
+```
+                    q_proj (layer 0)        down_proj (layer 14)    o_proj (layer 27)
+2.0 3inst           0.009853 / 0.010065     0.045355 / 0.045345     0.038573 / 0.038562
+4.0 3inst           0.000660 / 0.000669     0.002998 / 0.003003     0.002561 / 0.002564
+2.5 mul1            0.004910 / 0.005009     0.022551 / 0.022604
+3.0 mcg             0.002454 / 0.002493     0.011324 / 0.011327
+4.0 mul1            0.000636 / 0.000645     0.002896 / 0.002895
+```
+
+(exllamav3 / ours). q_proj always a little above: within our own seed spread (4.0 3inst over seeds 1-6:
+0.000651 .. 0.000669). Each tensor encodes in under a second.
