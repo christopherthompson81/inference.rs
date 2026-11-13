@@ -32,6 +32,9 @@
   // calls after which the project may have changed
   const CHANGING_TOOLS = new Set(["edit", "write", "bash"]);
   const SUMMARY_CHARS = 100;
+  // a dropped stream reattaches after this long, this many times in a row before it shows the error
+  const REATTACH_MS = 2000;
+  const REATTACH_TRIES = 5;
   // how often the agent clock and the live stats redraw while a prompt runs
   const CLOCK_TICK_MS = 100;
   // streamed characters per token, for the live estimate until the server's count arrives
@@ -149,6 +152,8 @@
   // a late page replays the run's events before it shows them live
   let replaying = false;
   let stream: AbortController | null = null;
+  // reattaches since the last stream that caught up
+  let reattaches = 0;
   let pendingImages = $state<string[]>([]);
   let imageInput = $state<HTMLInputElement | null>(null);
   let canSeeImages = $derived(modelStore.selectedInputModalities.includes("vision"));
@@ -362,6 +367,7 @@
         contextTokens = event.tokens;
         break;
       case "caught_up":
+        reattaches = 0;
         replaying = false;
         agentMs = 0;
         activeSince = Date.now() - event.elapsed_ms;
@@ -690,10 +696,14 @@
     agentMs = 0;
     activeSince = null;
     if (!late) syncClock();
+    const id = sessionId;
+    let dropped = false;
     try {
       await listen(controller.signal);
     } catch (e) {
-      if (!controller.signal.aborted) error = `${e}`;
+      // fetch reports a connection lost mid-stream as a TypeError; the prompt runs on in the server
+      dropped = e instanceof TypeError && !controller.signal.aborted && reattaches < REATTACH_TRIES;
+      if (!controller.signal.aborted && !dropped) error = `${e}`;
     } finally {
       if (stream === controller) {
         stream = null;
@@ -709,6 +719,12 @@
         void refreshChanges();
         void scrollDown();
       }
+    }
+    if (dropped && id) {
+      reattaches += 1;
+      setTimeout(() => {
+        if (id === sessionId && !stream) void open(id);
+      }, REATTACH_MS);
     }
   }
 

@@ -76,7 +76,7 @@ pub trait AgentUi: Send {
     fn compacting(&mut self, end: usize) {
         let _ = end;
     }
-    /// Text of the summary being written, as it streams.
+    /// Output of a summary request as it streams, its thinking included.
     fn summary_text(&mut self, delta: &str) {
         let _ = delta;
     }
@@ -393,6 +393,12 @@ impl Agent {
         ui: &mut dyn AgentUi,
     ) -> Result<()> {
         ui.compacting(end);
+        // the whole context as the rounds send it reads from the prefix cache; a chunk at a time reads from scratch
+        if self.fits_as_sent(window)
+            && let Ok(summary) = self.summarize_as_sent(ui).await
+        {
+            return self.finish_fold(summary, end, ui);
+        }
         let mut summary = self.session.compaction.as_ref().map(|c| c.summary.clone());
         let mut cursor = self.session.context_start();
         while cursor < end {
@@ -412,12 +418,56 @@ impl Agent {
             summary = Some(text);
             cursor = next;
         }
-        let summary = summary.unwrap_or_default();
+        self.finish_fold(summary.unwrap_or_default(), end, ui)
+    }
+
+    fn finish_fold(&mut self, summary: String, end: usize, ui: &mut dyn AgentUi) -> Result<()> {
         self.session.compact(summary, end)?;
         if let Some(compaction) = &self.session.compaction {
             ui.compacted(compaction, self.context_estimate());
         }
         Ok(())
+    }
+
+    // whether the context, the summary prompt and a full reply fit the window (an unknown one is tried)
+    fn fits_as_sent(&self, window: Option<usize>) -> bool {
+        window.is_none_or(|window| {
+            let prompt = json!({"role": "user", "content": COMPACT_PROMPT});
+            let context = self.session.context();
+            self.tokens(context.iter().chain([&prompt])) + self.config.max_reply_tokens <= window
+        })
+    }
+
+    // the round's own request with the summary prompt last, so the model's template renders the same prefix (a
+    // thinking switch or a missing tool list changes the system prompt, and with it every token after)
+    async fn summarize_as_sent(&mut self, ui: &mut dyn AgentUi) -> Result<String> {
+        let prompt = [json!({"role": "user", "content": COMPACT_PROMPT})];
+        let chars = self
+            .session
+            .context()
+            .iter()
+            .chain(&prompt)
+            .map(message_chars)
+            .sum::<usize>();
+        let mut stream = self.backend.stream(self.request(&prompt)).await?;
+        let mut turn = Turn::default();
+        while let Some(chunk) = stream.next().await {
+            let delta = turn.apply(&chunk?);
+            for text in [&delta.reasoning, &delta.content].into_iter().flatten() {
+                ui.summary_text(text);
+            }
+        }
+        ui.summary_done(&turn);
+        self.learn_ratio(&turn, chars);
+        let text = turn.content.trim();
+        // with the tools listed it may call one instead, and a cut reply is part of a summary
+        if text.is_empty()
+            || !turn.tool_calls.is_empty()
+            || turn.finish_reason.as_deref() == Some(LENGTH_FINISH)
+        {
+            bail!("the model wrote no whole summary");
+        }
+        Ok(text.to_string())
     }
 
     // the furthest boundary up to `end` whose chunk fits `budget`, at least the first round past `cursor`
@@ -1054,6 +1104,39 @@ mod tests {
         assert!(context[3]["content"].as_str().unwrap().starts_with("2 "));
         // nothing before the latest prompt is left to fold
         assert!(!agent.compact(&mut ui).await.unwrap());
+    }
+
+    // with room in the window the summary request is the last round's own, prompt last, so its prefix caches
+    #[tokio::test]
+    async fn a_summary_that_fits_resends_the_round_as_it_was_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = long_session(dir.path(), 3, 10);
+        let backend = scripted(vec![answer("ok")], Some(100_000));
+        let mut agent = agent(backend.clone(), session);
+        let mut ui = Recorder::default();
+        agent
+            .send("next", &mut ui, &Interrupt::default())
+            .await
+            .unwrap();
+        assert!(agent.compact(&mut ui).await.unwrap());
+        let requests = backend.requests.lock().unwrap();
+        let [round, summary] = &requests[..] else {
+            panic!("{} requests", requests.len());
+        };
+        let sent = round["messages"].as_array().unwrap();
+        let asked = summary["messages"].as_array().unwrap();
+        assert_eq!(asked[..sent.len()], sent[..]);
+        assert_eq!(asked[sent.len()]["content"], "ok");
+        assert_eq!(asked.len(), sent.len() + 2);
+        let mut round = round.clone();
+        let mut summary = summary.clone();
+        round.as_object_mut().unwrap().remove("messages");
+        summary.as_object_mut().unwrap().remove("messages");
+        assert_eq!(summary, round);
+        assert_eq!(
+            agent.session.compaction.as_ref().unwrap().summary,
+            "summary 1"
+        );
     }
 
     #[test]
