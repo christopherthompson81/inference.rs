@@ -319,3 +319,15 @@ PPL 11.3261. A tiny Llama (128 wide, 266-token vocabulary, the head kept dense) 
 Not yet: MoE experts (the converter bails on stacked experts), tensors not in 128 blocks (exllamav3 pads them),
 models too large for the device in full precision (needs exllamav3's module streaming), and the L passes (an early
 exit after each pass's own layer would halve them).
+
+## Run 12 - 2026-11-14 11:30
+
+Converter gap 1, widths not in 128 blocks. exllamav3 zero-pads such a linear on both sides (`Linear.pad_out`; the
+padded inputs are zero, so H has zero rows there and the damping keeps it definite; the padded outputs get zero
+scales), stores the trellis, `suh` and `svh` at the padded sizes, and pads the bias at load. Ours now does the same
+in `encode`, and the loader takes a trellis up to one block wider than the linear: `Exl3Layer::with_features`
+zero-pads the input and cuts the output (a padded fused group runs layer by layer); the CPU reconstruction is cut.
+
+A 200 x 176 linear (padded to 256 x 256, 4.0 mcg): its cut decode carries the reported output error, and the kernels
+layer at 176 -> 200 multiplies as that decode does (2e-3). The tiny Llama's 266-row head now writes as a 384-row
+trellis, loads and decodes.
