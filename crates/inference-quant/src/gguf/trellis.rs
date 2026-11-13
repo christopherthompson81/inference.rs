@@ -53,6 +53,7 @@ impl Codebook {
 
     /// The state after each of `N` steps is the start times these, for a codebook with no add (which a SIMD decode
     /// uses to take a code's steps in one multiply).
+    #[cfg(any(target_arch = "x86_64", test))]
     pub(crate) const fn powers<const N: usize>(&self) -> [u32; N] {
         assert!(
             self.add == 0,
@@ -69,6 +70,7 @@ impl Codebook {
         out
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) const fn byte_sum(&self) -> (u32, i32) {
         match self.decode {
             Decode::ByteSum { mask, bias } => (mask, bias),

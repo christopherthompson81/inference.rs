@@ -31,10 +31,6 @@ const F32_ROW_SCALE: usize = 4;
 // ik's trellis: a group's eight values are eight steps of its state, each a byte sum in -126..=126
 const TRELLIS_INDEX_OFFSET: u32 = trellis::IK_INDEX_OFFSET;
 const TRELLIS_GROUP: usize = 8;
-const TRELLIS_MASK: u32 = trellis::IK.byte_sum().0;
-const TRELLIS_BIAS: i32 = trellis::IK.byte_sum().1;
-// the state after each of a group's eight steps is its start times these
-const TRELLIS_POWERS: [u32; 8] = trellis::IK.powers::<8>();
 // ik's CUDA and CPU-GEMM kernels scale IQ2_KT and IQ3_KT rows by these
 const IQ2_KT_SCALE: f32 = 1.05;
 const IQ3_KT_SCALE: f32 = 1.01;
@@ -872,9 +868,14 @@ pub(super) mod avx2 {
     use super::super::avx2::{hsum, prefetch_ahead, store_scaled};
     use super::{
         GgufType, Grid, IQ1_GRID_STEP, IQ2KL_FIRST, IQ2KL_SECOND, Iq1Kt, Iq1M, Iq1S, Iq2K, Iq2Kl,
-        Iq2Ks, Iq2Kt, Iq2S, Iq2Xs, Iq3K, Iq3Ks, Iq3Kt, Iq3Xxs, Sub, TRELLIS_BIAS,
-        TRELLIS_INDEX_OFFSET, TRELLIS_MASK, TRELLIS_POWERS, split_row,
+        Iq2Ks, Iq2Kt, Iq2S, Iq2Xs, Iq3K, Iq3Ks, Iq3Kt, Iq3Xxs, Sub, TRELLIS_INDEX_OFFSET,
+        split_row, trellis,
     };
+
+    const TRELLIS_MASK: u32 = trellis::IK.byte_sum().0;
+    const TRELLIS_BIAS: i32 = trellis::IK.byte_sum().1;
+    // the state after each of a group's eight steps is its start times these
+    const TRELLIS_POWERS: [u32; 8] = trellis::IK.powers::<8>();
 
     // The decoders below have no target feature of their own so they always inline into the AVX2 loops (a call
     // would pass the vectors through memory); each runs only where its caller has AVX2 enabled.
