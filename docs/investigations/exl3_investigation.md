@@ -80,3 +80,20 @@ stages), so no separate Hadamard launch. Our part: C ABI launchers in place of t
 small m, else the GEMM with the kernel map's default shape, no autotune), a device context (SM count, compute
 capability, the lock buffer, the shared-memory limit), the build into a kernel library per arch, and an `Exl3Layer`
 QuantMethod holding the trellis on the GPU.
+
+## Run 4 - 2026-11-13 19:30
+
+exllamav3's kernels vendored: `third_party/exllamav3` (1.6.6, MIT; headers pristine, the four torch-bound sources
+trimmed and marked), built from `kernels/cuda/exl3/*_instance_exl3.cu` into their own `inferencequant_exl3` library
+(24 bitrate x codebook units, the three half-integer ones, the half-integer GEMV, the kernel map, the device context,
+the GEMV launcher and our C ABI launcher: 6.7 MB for sm86). `Exl3Layer` keeps the trellis, `suh` and `svh` on the
+device; f16 input, f32 output, the rotations inside the kernels.
+
+GPU test against the CPU reconstruction (random 512x512 trellises, every codebook, 40 words = K 2.5; m = 1 and 32):
+max error 3.4e-4 .. 5.4e-4 of the largest output (the kernels accumulate in f16).
+
+Qwen3-0.6B-exl3 on the kernels: perplexity 3.4226 at 4.0bpw (dense f16 3.4216), 3.8432 at 3.0bpw. Decode 207 tok/s
+with zeroed scratch and output buffers, 250 with uninitialized ones (the kernels write them whole); the dense layers
+ran 465. exllamav3's own generator on the same model: 170 tok/s. A 0.6B model's decode is launch-bound (196 EXL3
+matmuls a token, ~20 us each); the comparison that matters is a large model. Decode graphs capture with the
+cooperative launches.

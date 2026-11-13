@@ -2,6 +2,14 @@
 //! value of the 16-bit window that ends at its own K bits, over weights rotated by 128-wide Hadamard transforms on
 //! both sides and scaled by the `suh` (input) and `svh` (output) vectors.
 
+#[cfg(feature = "cuda")]
+mod cuda;
+#[cfg(feature = "cuda")]
+pub(crate) mod ffi;
+
+#[cfg(feature = "cuda")]
+pub use cuda::Exl3Layer;
+
 use std::sync::Arc;
 
 use inference_tensor::{DType, Device, Result, Tensor};
@@ -53,9 +61,10 @@ impl Exl3Bits {
 /// The codebook a tensor decodes through.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Exl3Codebook {
-    ThreeInst,
-    Mcg,
-    Mul1,
+    // the kernels' `cb` numbers
+    ThreeInst = 0,
+    Mcg = 1,
+    Mul1 = 2,
 }
 
 impl Exl3Codebook {
@@ -244,6 +253,7 @@ pub fn linear_b(
     bias: bool,
     vb: &ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
+    let bias = bias.then(|| vb.get((out_dim,), "bias")).transpose()?;
     let weight = if vb.contains_tensor("trellis") {
         let trellis = vb.get_unchecked_dtype("trellis", DType::I16)?;
         if trellis.dims().len() != 3 || trellis.dims()[..2] != [in_dim / TILE, out_dim / TILE] {
@@ -257,11 +267,16 @@ pub fn linear_b(
         let svh = vb.get_unchecked_dtype("svh", DType::F32)?;
         let codebook =
             Exl3Codebook::from_markers(vb.contains_tensor("mcg"), vb.contains_tensor("mul1"));
+        // on a GPU the trellis stays as it is, multiplied by exllamav3's kernels
+        #[cfg(feature = "cuda")]
+        if vb.device().is_cuda() {
+            let layer = Exl3Layer::new_on_device(trellis, suh, svh, codebook, bias, vb.dtype())?;
+            return Ok(Arc::new(layer));
+        }
         dense_weight(&trellis, &suh, &svh, codebook, vb.dtype(), vb.device())?
     } else {
         vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?
     };
-    let bias = bias.then(|| vb.get((out_dim,), "bias")).transpose()?;
     Ok(Arc::new(UnquantLinear::new(
         QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, bias)),
     )?))
