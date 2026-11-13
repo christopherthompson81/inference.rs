@@ -41,6 +41,9 @@ TYPES = {
     "iq2_ks": 145,
     "iq3_ks": 156,
     "iq2_kl": 157,
+    "iq2_kt": 153,
+    "iq3_kt": 154,
+    "iq1_kt": 158,
 }
 DEFAULT_TYPES = ["iq4_nl", "iq4_xs"]
 # ggml_quantize_requires_imatrix: ggml aborts on these without one

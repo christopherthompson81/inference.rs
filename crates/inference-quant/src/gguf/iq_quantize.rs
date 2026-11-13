@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use super::iq_grid_quantize as grid;
 use super::iqk_quantize as iqk;
 use super::kernel::GgufType;
+use super::kt_quantize as kt;
 use super::raw::KVALUES_IQ4NL;
 
 const QK4_NL: usize = 32;
@@ -34,12 +35,12 @@ const IQ4_KS_FUDGE: f32 = 1.0;
 const IMATRIX_EPS: f32 = 1e-9;
 const SIMD_LANES: usize = 8;
 // ik_llama.cpp's codebooks: IQ4_NL's, then the same shifted
-const IQ4K_VALUES: [i8; 32] = [
+pub(super) const IQ4K_VALUES: [i8; 32] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113, -123, -100, -79, -61,
     -45, -31, -18, -6, 5, 17, 29, 42, 57, 73, 93, 117,
 ];
 // `iq4nl_index`: from `trunc(x) - values[0]`, the index (or 16 + the lower of two to compare)
-const IQ4NL_INDEX: [i8; 241] = [
+pub(super) const IQ4NL_INDEX: [i8; 241] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 17, 17, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 18, 3, 3, 3, 3, 3, 3, 3, 3,
     3, 3, 3, 3, 3, 3, 3, 3, 19, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 20, 5, 5, 5, 5, 5, 5, 5,
@@ -473,6 +474,9 @@ pub fn can_quantize(ty: GgufType) -> bool {
             | GgufType::Iq2Kl
             | GgufType::Iq3K
             | GgufType::Iq3Ks
+            | GgufType::Iq1Kt
+            | GgufType::Iq2Kt
+            | GgufType::Iq3Kt
     )
 }
 
@@ -544,6 +548,21 @@ pub fn quantize_rows(
             None,
         ),
         GgufType::Iq3K => (QK_K, cols / QK_K * iqk::BLOCK_IQ3_K, None),
+        GgufType::Iq2Kt => (
+            QK_K,
+            kt::F32_ROW_SCALE + cols / QK_K * kt::BLOCK_IQ2_KT,
+            None,
+        ),
+        GgufType::Iq1Kt => (
+            QK_K,
+            kt::F32_ROW_SCALE + cols / QK_K * kt::BLOCK_IQ1_KT,
+            None,
+        ),
+        GgufType::Iq3Kt => (
+            QK_K,
+            kt::F32_ROW_SCALE + cols / QK_K * kt::BLOCK_IQ3_KT,
+            None,
+        ),
         GgufType::Iq3Ks => (
             QK_K,
             iqk::F16_ROW_SCALE + cols / QK_K * iqk::BLOCK_IQ3_KS,
@@ -570,6 +589,7 @@ pub fn quantize_rows(
         .zip(values.par_chunks_exact(cols))
         .for_each(|(row_out, row)| match encode {
             None if ty == GgufType::Iq4Ks => quantize_iq4_ks_row(row, imatrix, row_out),
+            None if ty.is_trellis() => kt::quantize_row(ty, row, imatrix, row_out),
             None => iqk::quantize_row(ty, row, imatrix, row_out),
             Some(encode) => {
                 let size = row_out.len() / (cols / block);
@@ -649,7 +669,7 @@ mod tests {
         }
     }
 
-    const LOW_BIT: [GgufType; 12] = [
+    const LOW_BIT: [GgufType; 15] = [
         GgufType::Iq1S,
         GgufType::Iq1M,
         GgufType::Iq2Xxs,
@@ -662,13 +682,18 @@ mod tests {
         GgufType::Iq2Kl,
         GgufType::Iq3K,
         GgufType::Iq3Ks,
+        GgufType::Iq1Kt,
+        GgufType::Iq2Kt,
+        GgufType::Iq3Kt,
     ];
 
     // uniform values have an rms of 0.58; each type's bound sits a little above what it reaches, fewer bits higher
+    // (the trellis types, built for bell-shaped weights, sit above the grid types of their size here)
     #[test]
     fn low_bit_rows_round_trip_through_the_dequantizers() {
         let bounds = [
-            0.27, 0.26, 0.21, 0.18, 0.15, 0.11, 0.08, 0.15, 0.16, 0.15, 0.075, 0.08,
+            0.27, 0.26, 0.21, 0.18, 0.15, 0.11, 0.08, 0.15, 0.16, 0.15, 0.075, 0.08, 0.28, 0.23,
+            0.13,
         ];
         let cols = 512;
         let x = values(8 * cols, 3);

@@ -44,6 +44,7 @@ mod iqk_dequant;
 mod iqk_quantize;
 pub mod kernel;
 mod kt_dequant;
+mod kt_quantize;
 pub mod mapped;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
@@ -52,6 +53,7 @@ mod repack;
 pub mod requantize;
 #[cfg(feature = "cuda")]
 mod thread_workspace;
+mod trellis;
 mod weight_source;
 
 pub use weight_source::{
