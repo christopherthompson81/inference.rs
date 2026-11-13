@@ -367,6 +367,8 @@ pub enum IsqCaptureMode {
     Immediate,
     /// Capture every layer unquantized (UQFF serialization needs all of them).
     CaptureAll,
+    /// As `CaptureAll`, each layer left on its own device (a Hessian collection calibrates there).
+    CaptureAllResident,
     /// Capture matching layers unquantized for deferred quantization (e.g. calibration).
     CaptureMatches,
 }
@@ -504,7 +506,10 @@ fn resolve_immediate_isq(params: &ImmediateIsqParams, prefix: &str) -> Option<Im
             ty
         }
     });
-    if params.capture == IsqCaptureMode::CaptureAll {
+    if matches!(
+        params.capture,
+        IsqCaptureMode::CaptureAll | IsqCaptureMode::CaptureAllResident
+    ) {
         // Capture everything; topology overrides still pin per-layer ty/device.
         if let Some(override_hit) = params
             .overrides
@@ -2216,6 +2221,11 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// Begin tracking stats into an ImatrixLayerStats
     fn begin_track_stats(&self) -> Result<()> {
         inference_tensor::bail!("`{}` does not support tracking stats.", self.name())
+    }
+
+    /// Begin collecting the input Hessian (`x^T x`) for EXL3 quantization; `end_track_stats` returns it.
+    fn begin_track_hessian(&self) -> Result<()> {
+        inference_tensor::bail!("`{}` does not collect Hessians.", self.name())
     }
 
     /// End tracking stats into an ImatrixLayerStats. Returns the computed imatrix.

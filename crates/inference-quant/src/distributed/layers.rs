@@ -27,8 +27,8 @@ macro_rules! delegate_to {
         $(#[$attr])* fn $name(&self, $($arg: $ty),*) -> $ret { self.$inner.$name($($arg),*) }
     };
     (@method $i:tt tracking) => {
-        delegate_to!($i: dtype_and_device, plan_isq, begin_track_stats, stats_snapshot, process_routed_stats,
-            end_track_stats);
+        delegate_to!($i: dtype_and_device, plan_isq, begin_track_stats, begin_track_hessian, stats_snapshot,
+            process_routed_stats, end_track_stats);
     };
     (@method $i:tt activations) => {
         delegate_to!($i: activation_quantization_scheme, activation_quantization_scheme_for,
@@ -85,6 +85,7 @@ macro_rules! delegate_to {
         delegate_to!(@fn $i plan_isq(request: &crate::IsqRequest) -> Result<crate::IsqPlanParams>);
     };
     (@method $i:tt begin_track_stats) => { delegate_to!(@fn $i begin_track_stats() -> Result<()>); };
+    (@method $i:tt begin_track_hessian) => { delegate_to!(@fn $i begin_track_hessian() -> Result<()>); };
     (@method $i:tt stats_snapshot) => { delegate_to!(@fn $i stats_snapshot() -> Option<(usize, usize)>); };
     (@method $i:tt process_routed_stats) => {
         delegate_to!(@fn $i process_routed_stats(x: &Tensor, ids: &Tensor) -> Result<()>);

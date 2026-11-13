@@ -274,6 +274,10 @@ impl QuantMethod for PendingIsqLayer {
         }
     }
 
+    fn begin_track_hessian(&self) -> Result<()> {
+        self.resolve()?.begin_track_hessian()
+    }
+
     fn begin_track_stats(&self) -> Result<()> {
         self.resolve()?.begin_track_stats()
     }

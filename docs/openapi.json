@@ -9091,6 +9091,13 @@
                     ],
                     "description": "UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)."
                   },
+                  "hessians_out": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Collect each layer's input Hessian from the calibration file into this directory, as exllamav3's\nconverter takes them (`--hessians`), instead of quantizing."
+                  },
                   "hf_cache_path": {
                     "type": [
                       "string",
@@ -9254,6 +9261,13 @@
                       "null"
                     ],
                     "description": "UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)"
+                  },
+                  "hessians_out": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Collect each layer's input Hessian from the calibration file into this directory, as exllamav3's\nconverter takes them (`--hessians`), instead of quantizing."
                   },
                   "hf_cache_path": {
                     "type": [

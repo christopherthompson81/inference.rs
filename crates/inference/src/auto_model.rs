@@ -18,6 +18,7 @@ pub struct ModelBuilder {
     pub(crate) from_uqff: Option<Vec<PathBuf>>,
     pub(crate) imatrix: Option<PathBuf>,
     pub(crate) calibration_file: Option<PathBuf>,
+    pub(crate) hessians_out: Option<PathBuf>,
     pub(crate) max_edge: Option<u32>,
     pub(crate) hf_cache_path: Option<PathBuf>,
     pub(crate) matformer_config_path: Option<PathBuf>,
@@ -38,6 +39,7 @@ impl ModelBuilder {
             from_uqff: None,
             imatrix: None,
             calibration_file: None,
+            hessians_out: None,
             max_edge: None,
             hf_cache_path: None,
             matformer_config_path: None,
@@ -95,6 +97,13 @@ impl ModelBuilder {
         self
     }
 
+    /// Collect each layer's input Hessian from the calibration file into `dir` (exllamav3's `--hessians` layout,
+    /// for EXL3 quantization) instead of quantizing; takes no ISQ type.
+    pub fn with_hessians_out(mut self, dir: PathBuf) -> Self {
+        self.hessians_out = Some(dir);
+        self
+    }
+
     /// Resizes images so their longer edge is at most `max_edge` pixels, for a multimodal model.
     pub fn with_max_edge(mut self, max_edge: u32) -> Self {
         self.max_edge = Some(max_edge);
@@ -133,6 +142,7 @@ impl ModelBuilder {
             from_uqff: uqff_files(self.from_uqff.as_deref()),
             imatrix: self.imatrix.clone(),
             calibration_file: self.calibration_file.clone(),
+            hessians_out: self.hessians_out.clone(),
             max_edge: self.max_edge,
             max_seq_len: self.options.auto_map.max_seq_len,
             max_batch_size: self.options.auto_map.max_batch_size,

@@ -456,6 +456,7 @@ Select a plain model, without quantization or adapters
 | `calibration_file` | `str \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
 | `from_uqff` | `str \| None` | optional |
+| `hessians_out` | `str \| None` | optional |
 | `hf_cache_path` | `str \| None` | optional |
 | `imatrix` | `str \| None` | optional |
 | `matformer_config_path` | `str \| None` | optional |
@@ -479,6 +480,7 @@ Select a model for running via auto loader
 | `calibration_file` | `str \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
 | `from_uqff` | `str \| None` | optional |
+| `hessians_out` | `str \| None` | optional |
 | `hf_cache_path` | `str \| None` | optional |
 | `imatrix` | `str \| None` | optional |
 | `matformer_config_path` | `str \| None` | optional |

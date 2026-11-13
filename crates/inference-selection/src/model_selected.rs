@@ -155,6 +155,12 @@ pub enum ModelSelected {
         #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
+        /// Collect each layer's input Hessian from the calibration file into this directory, as exllamav3's
+        /// converter takes them (`--hessians`), instead of quantizing.
+        #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+        hessians_out: Option<PathBuf>,
+
         /// Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.
         /// Only supported on specific multimodal models.
         max_edge: Option<u32>,
@@ -241,6 +247,12 @@ pub enum ModelSelected {
         #[serde(default)]
         #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
+
+        /// Collect each layer's input Hessian from the calibration file into this directory, as exllamav3's
+        /// converter takes them (`--hessians`), instead of quantizing.
+        #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+        hessians_out: Option<PathBuf>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_seq_len")]

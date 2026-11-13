@@ -145,6 +145,7 @@ pub fn tune_model(request: TuneModelRequest) -> Result<AutoTuneResult, ApiError>
         from_uqff: None,
         imatrix: None,
         calibration_file: None,
+        hessians_out: None,
         max_edge: None,
         max_seq_len: request
             .max_seq_len
