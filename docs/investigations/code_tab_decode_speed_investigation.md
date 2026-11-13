@@ -127,3 +127,19 @@ On compaction and the disk store (the user asked whether compaction should wipe 
 store is size-capped and least-recently-used, keyed by content, so stale pre-compaction prefixes age out; GPU blocks
 of the old prefix are the cost that matters, and they leave under pressure. An explicit drop hint from the agent after
 a compaction would free them sooner; not done.
+
+## Run 6 - 2026-11-13 01:10
+
+After #935 a turn of the user's 174K-token session still prefilled for 5 minutes (00:59-01:04):
+`prompt_tokens=173904 matched=127680 reused=0 reason="checkpoint_unavailable" cause="snapshot_beyond_match"`. The
+prompt itself changed at ~127.7K tokens. The session's image reads named files by path and every request read them in
+again: eight of its `/tmp` screenshots were gone (each became a "no longer exists" note) and three game assets the agent
+regenerates had been rewritten (mtime 19:04 local), so the history changed at the first of them, and the model was
+shown pictures it never read there. With no checkpoint before the change, the whole prompt was prefilled again.
+
+Fix: the session keeps a copy of each image when it is read (`Session::keep_image`, `<session>.images/`), and the image
+turn names the copy; deleting the session deletes them. Later requests send the same bytes however the original
+changes. Sessions from before keep their path references.
+
+Not done: a change far back in a long prompt (an edited earlier message, say) still finds checkpoints only near the
+end; periodic checkpoints through a long prefix would let such a turn resume nearby instead of from zero.

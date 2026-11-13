@@ -44,8 +44,9 @@ inference agent -m Qwen/Qwen3-8B --permission-mode auto -p "Fix the failing test
 
 Reading an image is how the agent can look at its own work: it takes a screenshot with a command (a headless browser,
 for instance) and reads the file. Tool results are text, so the images a round's calls return go to the model in a
-turn after the results. The session file keeps each image's path, not its bytes, and every request reads the file
-again; an image that has since been deleted shows as a note saying so. The image counts as a fixed 4096 characters
+turn after the results. The session keeps a copy of each image as it was read, in a folder beside its file (the session
+file itself names the copy), so later requests show the model the same picture, and keep its prompt cached, though
+the original is overwritten or deleted. Deleting the session deletes the copies. The image counts as a fixed 4096 characters
 toward the context estimate, and the Code tab shows it under the call that read it. A model without image input
 gets an error when it reads an image.
 
