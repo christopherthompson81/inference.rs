@@ -32,19 +32,20 @@ impl SpeculativePrefixReplay {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SpeculativePrefixCheckpointPolicy {
     fallback_replay: SpeculativePrefixReplay,
-    text_auxiliary_state: bool,
+    auxiliary_state: bool,
 }
 
 impl SpeculativePrefixCheckpointPolicy {
-    pub fn new(fallback_replay: SpeculativePrefixReplay, text_auxiliary_state: bool) -> Self {
+    pub fn new(fallback_replay: SpeculativePrefixReplay, auxiliary_state: bool) -> Self {
         Self {
             fallback_replay,
-            text_auxiliary_state,
+            auxiliary_state,
         }
     }
 
-    pub fn replay_for(self, modality_signature: u8) -> SpeculativePrefixReplay {
-        if self.uses_auxiliary_state(modality_signature) {
+    /// The replay a resumed prefix needs: none when the drafter's state is checkpointed beside the target's.
+    pub fn replay_for(self) -> SpeculativePrefixReplay {
+        if self.uses_auxiliary_state() {
             SpeculativePrefixReplay::NotRequired
         } else {
             self.fallback_replay
@@ -55,8 +56,10 @@ impl SpeculativePrefixCheckpointPolicy {
         self.fallback_replay
     }
 
-    pub fn uses_auxiliary_state(self, modality_signature: u8) -> bool {
-        self.text_auxiliary_state && modality_signature == 0
+    /// Whether prefix checkpoints carry the drafter's state, for text and media sequences alike: the target verifies
+    /// every token, so a drafter resumed from its checkpoint can only change acceptance, never the output.
+    pub fn uses_auxiliary_state(self) -> bool {
+        self.auxiliary_state
     }
 }
 

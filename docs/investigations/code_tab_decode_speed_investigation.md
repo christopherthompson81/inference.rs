@@ -58,3 +58,72 @@ the 5-second windows of those turns as `prefill 300-400, decode 0`.
 
 Next: why the turn-end checkpoint is replaced before the next turn (pool size, eviction order, or the label requests
 that run between turns taking pool slots).
+
+## Run 4 - 2026-11-12 23:35
+
+Trying to reproduce Run 3's per-turn re-prefill on the idle LAN slot (log lines `Prefix cache reused less than the
+cached prefix`):
+
+```
+setup                                                      requests  reduced-reuse lines
+3 tool turns at 17K context (twoturn.py, raw HTTP)        3         none
+CLI agent fixing the demo package (8 rounds, auto)        8         none
+Code tab demo over /ui/api/code (labels on, in process)   8 + 4     one, a label request (no_replay_boundary)
+the user's session resumed from a copy, 62K, read-only    3         none (1,938 blocks restored from the disk store)
+the same copy cut before its last compaction, 213K        3         none
+```
+
+The 213K replay prefilled cold in 432 s (the disk store did not hold the prefix); its next two requests took 171 s and
+122 s because the agent compacted the session (213K is past 80% of the 262K context), and the request after that was
+19,176 tokens.
+
+None of these reproduce the `recurrent` / `replaced` fallback. Each turn resumed exactly where the previous one ended.
+What the live session had that these lack is still open: the user's turns ran while the Code tab page was open
+and polling, after earlier compactions in the same live server process, and with the server up for an hour of other
+requests (the checkpoint pool was full at 22:18: "Recurrent prefix cache full at 16 sequences"). Next: check whether a
+full checkpoint pool makes a decode snapshot replace the turn-end one early (the release in `snapshot_recurrent_prefixes`
+runs before the new snapshot is known to fit).
+
+## Run 5 - 2026-11-13 00:25
+
+The user's live session hit it again after the redeploy (23:46-00:07): every turn reused 2K-10K tokens less than it
+matched (`recurrent`, `replaced`), and from 23:58 reuse fell to 0 (`checkpoint_unavailable`, then `capacity` and
+`block_pressure`), re-prefilling ~155K tokens (4 minutes) a turn. The prompt grew steadily from 115K to 155K with no
+compaction in between, so compaction was not the trigger.
+
+Reproduced on a test server (same slot settings, own prefix dir) by driving a copy of that session through the Code
+tab's routes with labels on, read-only: each turn reused 2,052-2,066 tokens less than the previous prompt's end.
+Temporary trace logging (`recurrent_trace`, removed afterwards) on every checkpoint add, replace, eviction and the
+step boundaries showed:
+
+- every checkpoint of the agent's sequence was added with `aux=false` (no drafter state); only the small label
+  requests captured `aux=true`
+- a decode step landed on a block boundary at 157,184 tokens and was checkpointed; the next turn matched exactly
+  157,184 yet resumed at 155,040
+
+Cause: `SpeculativePrefixCheckpointPolicy::uses_auxiliary_state` held drafter checkpoints to text-only sequences
+(`modality_signature == 0`, from upstream ef8c2fd95, no reason given). The session holds 10 images (agent screenshot
+reads since #933), so its checkpoints never carried the drafter's state, and a resume without it must replay the
+drafter's window (`fallback_replay`, ~2K tokens): the boundary moved back past the newest checkpoints to the previous
+prompt's second-to-last chunk. With the snapshot pool under pressure that degraded to no checkpoint at all.
+
+Fix: drafter checkpoints for every sequence. The target verifies every token, so a drafter resumed from its checkpoint
+can only change acceptance, not the output. Same replay with the fix (155K tokens, images in context, labels on):
+
+```
+turn  prompt   cached   prefill
+1     155864   0        125.4 s (cold)
+2     159376   156576   3.7 s
+3     160875   159488   1.9 s
+4     162670   160864   2.5 s
+5     164799   162848   2.7 s
+```
+
+No reduced-reuse lines, 26 checkpoints with drafter state, no capture or restore errors, MTP acceptance 37.6-44.4%
+(3.6-4.1 a step) against 34% (3.4) before. Prefixes stored on disk for image sessions before the fix lack the drafter
+state, so they will not restore from disk once; new ones will.
+
+On compaction and the disk store (the user asked whether compaction should wipe it): not needed for correctness. The
+store is size-capped and least-recently-used, keyed by content, so stale pre-compaction prefixes age out; GPU blocks
+of the old prefix are the cost that matters, and they leave under pressure. An explicit drop hint from the agent after
+a compaction would free them sooner; not done.

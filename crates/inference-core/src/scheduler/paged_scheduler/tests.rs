@@ -2935,15 +2935,27 @@ fn hybrid_prefill_schedules_the_suffix_replay_boundary() {
     }
 }
 
+// the drafter's checkpoint resumes media sequences as it does text: only a drafter without checkpoints replays its window
 #[test]
-fn text_auxiliary_policy_keeps_multimodal_suffix_replay() {
-    let policy = SpeculativePrefixCheckpointPolicy::new(SpeculativePrefixReplay::Suffix(16), true);
+fn a_checkpointing_drafter_needs_no_replay_for_text_or_media() {
+    let checkpointing =
+        SpeculativePrefixCheckpointPolicy::new(SpeculativePrefixReplay::Suffix(16), true);
+    let windowed =
+        SpeculativePrefixCheckpointPolicy::new(SpeculativePrefixReplay::Suffix(16), false);
+    assert!(checkpointing.uses_auxiliary_state());
+    assert_eq!(
+        checkpointing.replay_for(),
+        SpeculativePrefixReplay::NotRequired
+    );
+    assert!(!windowed.uses_auxiliary_state());
+    assert_eq!(windowed.replay_for(), SpeculativePrefixReplay::Suffix(16));
     let logger = IntervalLogger::new(std::time::Duration::from_secs(3600), None);
 
+    // with no replay, the text prompt's chunks stop at the last checkpoint boundary before its end
     let mut text_scheduler = test_scheduler();
     text_scheduler.scheduler_visible_prompt_chunks = true;
     text_scheduler.prompt_chunks_require_block_alignment = true;
-    text_scheduler.prefix_policy = policy;
+    text_scheduler.prefix_policy = checkpointing;
     text_scheduler.config.max_num_batched_tokens = 32;
     let text = test_sequence(0, 64);
     get_mut_arcmutex!(text).set_state(SequenceState::Waiting);
@@ -2953,36 +2965,6 @@ fn text_auxiliary_policy_keeps_multimodal_suffix_replay() {
     get_mut_arcmutex!(text).set_num_computed_tokens(first_chunk.end);
     let second = text_scheduler.schedule(&logger, None);
     assert_eq!(second.scheduled_prompt_chunks.unwrap()[0].end, 56);
-
-    let mut media_scheduler = test_scheduler();
-    media_scheduler.scheduler_visible_prompt_chunks = true;
-    media_scheduler.prompt_chunks_require_block_alignment = true;
-    media_scheduler.prefix_policy = policy;
-    media_scheduler.config.max_num_batched_tokens = 32;
-    let media = test_sequence_with_images(1, 64, Some(vec![image::DynamicImage::new_rgb8(1, 1)]));
-    assert_eq!(
-        policy.replay_for(modality_signature(&*get_mut_arcmutex!(media))),
-        SpeculativePrefixReplay::Suffix(16)
-    );
-    {
-        let mut media = get_mut_arcmutex!(media);
-        media.set_mm_features(vec![MultiModalFeature {
-            kind: MultimodalKind::Image,
-            item_range: 0..1,
-            hashes: vec![1],
-            offset: 0,
-            length: 8,
-            attention_policy: crate::paged_attention::block_hash::MultimodalAttentionPolicy::Causal,
-            splittable: false,
-        }]);
-        media.set_state(SequenceState::Waiting);
-    }
-    media_scheduler.waiting.push_back(media.clone());
-    let first = media_scheduler.schedule(&logger, None);
-    let first_chunk = first.scheduled_prompt_chunks.unwrap()[0];
-    get_mut_arcmutex!(media).set_num_computed_tokens(first_chunk.end);
-    let second = media_scheduler.schedule(&logger, None);
-    assert_eq!(second.scheduled_prompt_chunks.unwrap()[0].end, 40);
 }
 
 #[test]

@@ -61,8 +61,7 @@ impl Engine {
         else {
             return Ok(());
         };
-        let restored =
-            self.fill_imported_prefix(crate::scheduler::modality_signature(seq), &imported, loaded);
+        let restored = self.fill_imported_prefix(&imported, loaded);
         if let Ok(Some((snapshot, auxiliary))) = &restored {
             get_mut_arcmutex!(disk.kv_cache_manager).cache_imported_blocks(&imported, key);
             // owned by the key's last block, as a captured snapshot is
@@ -92,7 +91,6 @@ impl Engine {
     #[allow(clippy::type_complexity)]
     fn fill_imported_prefix(
         &self,
-        modality: u8,
         imported: &[(usize, usize)],
         loaded: LoadedPrefix,
     ) -> Result<
@@ -125,7 +123,7 @@ impl Engine {
             }
             None if pipeline
                 .speculative_prefix_checkpoint_policy()
-                .uses_auxiliary_state(modality) =>
+                .uses_auxiliary_state() =>
             {
                 return Ok(None);
             }

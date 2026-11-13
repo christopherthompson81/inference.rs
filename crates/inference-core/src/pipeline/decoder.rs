@@ -1253,7 +1253,7 @@ impl Pipeline for DecoderPipeline {
             && !self.whole_prompt()
             && !self
                 .speculative_prefix_checkpoint_policy()
-                .uses_auxiliary_state(0)
+                .uses_auxiliary_state()
     }
 
     fn supports_batched_cuda_sampling(&self) -> bool {
