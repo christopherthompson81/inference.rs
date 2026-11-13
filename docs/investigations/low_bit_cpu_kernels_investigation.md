@@ -159,3 +159,23 @@ ik_llama's table types: IQ2_K, IQ2_KS, IQ2_KL, IQ3_K, IQ3_KS, against `~/Program
 
 All five, and IQ4_KS, 0 bytes differing, plain and with an imatrix. Round trips on uniform values (rms 0.58): Iq2K
 0.132, Iq2Ks 0.139, Iq2Kl 0.130, Iq3K 0.066, Iq3Ks 0.073. Left: the trellis writers (IQ1_KT, IQ2_KT, IQ3_KT).
+
+## Run 10 - 2026-11-13 19:30
+
+The trellis writers IQ1_KT, IQ2_KT, IQ3_KT. The worry was `QuantizerIQKT`'s k-means over the 65536 codes, seeded by
+`std::mt19937(1234)` with libstdc++'s distributions; but all three construct it with 256 clusters of 8-value groups,
+which `cluster_points` bins directly (each coordinate above or below its split: the range midpoint, or IQ3_KT's
+median) without the random start. So byte parity was in reach after all.
+
+- First the shared codebook (`trellis.rs`: multiplier, add, decode; ik's KT types one instance, QTIP 3INST and
+  EXL3's mcg/mul1 the same shape, #943), with the KT dequantizer and the CPU dot kernels moved onto it.
+- `find_best_match`'s cluster search emulates `hsum_float_8x8` with its permutes and unpacks literally.
+- IQ2_KT: 0 bytes differing on the first run. IQ1_KT 1 / 3 and IQ3_KT 0 / 7 bytes (plain / imatrix), every one in a
+  row's f32 scale, 1 ulp. Dropping the fusion in the final refit made it worse (22); one sum each, 17 / 15.
+- objdump of ik's `quantize_row_iq3_kt_impl`: `set_weights` inlined, its super-block `sumx2 += x*x` over the runtime
+  `n` vectorized as products in a ymm then eight in-order `vaddss` (unfused; only the scalar tail uses
+  `vfmadd231ss`). IQ1_KT's inlined copy does the same; IQ2_KT's stays scalar and fused. With that sum unfused for
+  IQ1_KT and IQ3_KT: all three 0 bytes differing, plain and with an imatrix.
+
+Round trips on uniform values (rms 0.58): Iq1Kt 0.254, Iq2Kt 0.205, Iq3Kt 0.113 (above the grid types of their size
+on uniform data; the trellis codebook is shaped for bell-curve weights). #938 step 3 done.

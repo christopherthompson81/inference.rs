@@ -44,6 +44,7 @@ mod iqk_dequant;
 mod iqk_quantize;
 pub mod kernel;
 mod kt_dequant;
+mod kt_quantize;
 pub mod mapped;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
