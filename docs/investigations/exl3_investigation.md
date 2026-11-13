@@ -331,3 +331,13 @@ zero-pads the input and cuts the output (a padded fused group runs layer by laye
 A 200 x 176 linear (padded to 256 x 256, 4.0 mcg): its cut decode carries the reported output error, and the kernels
 layer at 176 -> 200 multiplies as that decode does (2e-3). The tiny Llama's 266-row head now writes as a 384-row
 trellis, loads and decodes.
+
+## Run 13 - 2026-11-14 12:00
+
+Converter gap 2, the passes. A layer's Hessians need the model only up to it, so its pass now stops there:
+`inference_nn::decoder::stop_after_layer` (thread-local, so another model's forward in the process runs whole) makes
+the shared decoder stack's forward fail with `CALIBRATION_STOPPED` after that layer, and the calibration loop takes
+that as a finished chunk. Models outside the shared stack run their whole forward, as before.
+
+Qwen3-0.6B, 4.0 3inst, the same 485K tokens: 363 s against 625 s, and the written trellises are bit-identical to the
+whole-pass run's (q_proj of layer 0, down_proj of 13, up_proj of 27, the head).

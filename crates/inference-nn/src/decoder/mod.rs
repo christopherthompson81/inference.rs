@@ -1268,6 +1268,29 @@ struct LayerNorms {
     post: Option<(Norm, Norm)>,
 }
 
+thread_local! {
+    // the layer a calibration pass on this thread may stop after (usize::MAX: none)
+    static CALIBRATION_STOP: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// The message a decoder stack's forward stops with after the layer [`stop_after_layer`] names.
+pub const CALIBRATION_STOPPED: &str = "the calibration pass stopped after its layer";
+
+/// Ends a [`stop_after_layer`] scope.
+pub struct CalibrationStop(usize);
+
+impl Drop for CalibrationStop {
+    fn drop(&mut self) {
+        CALIBRATION_STOP.with(|stop| stop.set(self.0));
+    }
+}
+
+/// Until the guard drops, a decoder stack's forward on this thread runs layers up to `layer` and then fails with
+/// [`CALIBRATION_STOPPED`]: a calibration pass that collects one layer's inputs needs none after it.
+pub fn stop_after_layer(layer: usize) -> CalibrationStop {
+    CalibrationStop(CALIBRATION_STOP.with(|stop| stop.replace(layer)))
+}
+
 /// Pre-norm residual attention then feed-forward, the sandwich of Gemma 2 and GLM4, or Phi-2's parallel layer.
 pub struct DecoderLayer<A, F> {
     pub self_attn: A,
@@ -1639,6 +1662,9 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 masks.flash.as_ref(),
             )?;
             xs = after_layer(i, xs)?;
+            if CALIBRATION_STOP.with(|stop| i >= stop.get()) {
+                inference_tensor::bail!("{CALIBRATION_STOPPED}");
+            }
         }
         self.norm.forward(&self.mapper.cast_nm_device(&xs, false)?)
     }

@@ -117,7 +117,7 @@ pub(crate) fn write_exl3(
     }
     info!(
         "Writing EXL3 at {} bits (head {head_rate}, {codebook_name}) from `{}` ({} tokens): {} groups of layers, one \
-         calibration pass each.",
+         calibration pass each, run up to its layer.",
         config.bits,
         calibration_file.display(),
         tokens.len(),
@@ -125,10 +125,12 @@ pub(crate) fn write_exl3(
     );
     let mut weight_map = BTreeMap::new();
     let mut replaced = std::collections::HashSet::new();
-    for (shard, group) in groups.values().enumerate() {
+    for (shard, (&(rest, layer), group)) in groups.iter().enumerate() {
         for module in group {
             module.ct.begin_track_hessian()?;
         }
+        // a layer's pass needs the model only up to it (on the shared decoder stack; other models run whole)
+        let _stop = (!rest).then(|| inference_nn::decoder::stop_after_layer(layer));
         run_calibration(drive, &tokens, ctx)?;
         let mut tensors = HashMap::new();
         for module in group {
