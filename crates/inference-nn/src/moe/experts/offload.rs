@@ -24,7 +24,7 @@ use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
 
 use super::OFFLOAD_STAGING_EXPERTS;
 use super::backends::{grouped_parked_with, indexed_mmvq_with};
-use super::forward::{MoEForward, MoEForwardConfig};
+use super::forward::{MoEForward, MoEForwardConfig, MoEForwardShape};
 use super::ungated::{grouped_ungated_with, indexed_mmvq_ungated_with};
 
 // Largest batch the cache and CPU split serves (the indexed matvec's limit); a larger one stages the experts it routes
@@ -627,11 +627,42 @@ impl OffloadedExperts {
             );
         }
         if forward.shape.num_tokens <= SPLIT_MAX_TOKENS {
-            self.forward_split(forward, config, overlap)
-        } else {
-            let ys = self.forward_staged(forward, config)?;
-            Ok((ys, overlap.map(|f| f()).transpose()?))
+            return self.forward_split(forward, config, overlap);
         }
+        // a type the grouped kernels lack (IQ1_M) has the CPU take a prompt's misses, a split batch at a time
+        let staged = self
+            .shared
+            .host
+            .iter()
+            .all(|h| inference_quant::supports_mmq(h.ty()));
+        let ys = if staged {
+            self.forward_staged(forward, config)?
+        } else {
+            self.forward_in_splits(forward, config)?
+        };
+        Ok((ys, overlap.map(|f| f()).transpose()?))
+    }
+
+    fn forward_in_splits(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
+        let (tokens, hidden) = forward.shape.flat();
+        let mut outs = Vec::with_capacity(tokens.div_ceil(SPLIT_MAX_TOKENS));
+        for start in (0..tokens).step_by(SPLIT_MAX_TOKENS) {
+            let len = SPLIT_MAX_TOKENS.min(tokens - start);
+            let xs = forward.xs_flat.narrow(0, start, len)?;
+            let topk_weights = forward.topk_weights.narrow(0, start, len)?;
+            let topk_ids = forward.topk_ids.narrow(0, start, len)?;
+            let split = MoEForward {
+                xs: &xs,
+                xs_flat: &xs,
+                topk_weights: &topk_weights,
+                topk_ids: &topk_ids,
+                original_dtype: forward.original_dtype,
+                shape: MoEForwardShape::new(1, len, hidden),
+                lora: None,
+            };
+            outs.push(self.forward_split(&split, config, None)?.0);
+        }
+        Tensor::cat(&outs, 0)
     }
 
     // the cached experts on the stream, the misses through a host function on the side stream, joined at the end
@@ -1034,8 +1065,20 @@ mod tests {
                 row[..meta].copy_from_slice(&(0.002f32 / 64.0).to_le_bytes());
                 continue;
             }
+            let scale = half::f16::from_f32(0.002);
             for block in row.chunks_exact_mut(ty.type_size()) {
-                block[..2].copy_from_slice(&half::f16::from_f32(0.002).to_le_bytes());
+                if ty == inference_quant::GgufType::Iq1M {
+                    // IQ1_M spreads its f16 scale over the top nibbles of its last four words
+                    let tail = block.len() - 8;
+                    for k in 0..4 {
+                        let at = tail + 2 * k;
+                        let nibble = (scale.to_bits() >> (4 * k)) & 0xf;
+                        let word = u16::from_le_bytes([block[at], block[at + 1]]) & 0x0fff;
+                        block[at..at + 2].copy_from_slice(&(word | (nibble << 12)).to_le_bytes());
+                    }
+                } else {
+                    block[..2].copy_from_slice(&scale.to_le_bytes());
+                }
             }
         }
         bytes
@@ -1251,7 +1294,7 @@ mod tests {
         Ok(())
     }
 
-    // Nemotron-H's experts: IQ2_XXS up and down with no gate, squared ReLU between; the cache with its CPU misses and the
+    // Nemotron-H's experts (IQ2_XXS, and the other low-bit grid types) up and down with no gate, squared ReLU between; the cache with its CPU misses and the
     // staged prompt path against every expert resident on the device
     #[test]
     fn offloaded_ungated_experts_match_resident_ones() -> Result<()> {
@@ -1259,59 +1302,94 @@ mod tests {
         use super::super::ungated::{grouped_ungated_with, indexed_mmvq_ungated_with};
         let device = Device::new_cuda(0)?;
         let cuda = device.as_cuda_device()?;
-        let ty = inference_quant::GgufType::Iq2Xxs;
-        let dims = [[EXPERTS, INTER, HIDDEN], [EXPERTS, HIDDEN, INTER]];
-        let bytes = [
-            random_blocks(ty, INTER, HIDDEN, 11),
-            random_blocks(ty, HIDDEN, INTER, 12),
-        ];
-        let host = |p: usize| HostExpertStack::new(ty, dims[p], &bytes[p], cuda);
-        let mut offloaded = OffloadedExperts::new(
-            vec![host(0)?, host(1)?],
-            SLOTS,
-            TOPK,
-            cuda,
-            OffloadGate::SquaredRelu,
-        )?;
-        offloaded.staging_experts = 3;
-        let resident = (0..2)
-            .map(|p| {
-                let [_, rows, cols] = dims[p];
-                let stack = DeviceExpertStack::zeros(&[(ty, rows, cols)], EXPERTS, cuda)?;
-                // SAFETY: `bytes` outlives the test, and the synchronize below lands the copy before any read
-                unsafe { stack.fill_async(0, &bytes[p], &cuda.cuda_stream())? };
-                Ok(stack)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        cuda.cuda_stream()
-            .synchronize()
-            .map_err(inference_tensor::Error::wrap)?;
-        let resident = [&resident[0] as &dyn KernelWeight, &resident[1]];
-        let config = MoEForwardConfig {
-            num_experts: EXPERTS,
-            num_experts_per_tok: TOPK,
-            act: Activation::Relu2,
-        };
-        for step in 0..12 {
-            let run = run(&device, 2, step)?;
-            let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
-            let expected = indexed_mmvq_ungated_with(resident, &run.forward(), config)?
-                .expect("IQ2_XXS runs the indexed matvec");
-            let err = relative_error(&actual, &expected)?;
-            // the CPU quantizes activations to Q8_K, the GPU kernels to Q8_1
-            assert!(err < 0.03, "step {step}: relative error {err}");
+        use inference_quant::GgufType;
+        // the low-bit grid types run their own CPU kernels; the GPU side is the same mmvq / mmq. Largest blocks first:
+        // the process-wide staging is sized by the layers that exist at the first staged prompt
+        for ty in [
+            GgufType::Iq3Xxs,
+            GgufType::Iq2S,
+            GgufType::Iq2Xs,
+            GgufType::Iq2Xxs,
+            GgufType::Iq1M,
+            GgufType::Iq1S,
+        ] {
+            let dims = [[EXPERTS, INTER, HIDDEN], [EXPERTS, HIDDEN, INTER]];
+            let bytes = [
+                random_blocks(ty, INTER, HIDDEN, 11),
+                random_blocks(ty, HIDDEN, INTER, 12),
+            ];
+            let host = |p: usize| HostExpertStack::new(ty, dims[p], &bytes[p], cuda);
+            let mut offloaded = OffloadedExperts::new(
+                vec![host(0)?, host(1)?],
+                SLOTS,
+                TOPK,
+                cuda,
+                OffloadGate::SquaredRelu,
+            )?;
+            offloaded.staging_experts = 3;
+            let resident = (0..2)
+                .map(|p| {
+                    let [_, rows, cols] = dims[p];
+                    let stack = DeviceExpertStack::zeros(&[(ty, rows, cols)], EXPERTS, cuda)?;
+                    // SAFETY: `bytes` outlives the test, and the synchronize below lands the copy before any read
+                    unsafe { stack.fill_async(0, &bytes[p], &cuda.cuda_stream())? };
+                    Ok(stack)
+                })
+                .collect::<Result<Vec<_>>>()?;
             cuda.cuda_stream()
                 .synchronize()
                 .map_err(inference_tensor::Error::wrap)?;
+            let resident = [&resident[0] as &dyn KernelWeight, &resident[1]];
+            let config = MoEForwardConfig {
+                num_experts: EXPERTS,
+                num_experts_per_tok: TOPK,
+                act: Activation::Relu2,
+            };
+            for step in 0..12 {
+                let run = run(&device, 2, step)?;
+                let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
+                let expected = indexed_mmvq_ungated_with(resident, &run.forward(), config)?
+                    .expect("the type runs the indexed matvec");
+                let err = relative_error(&actual, &expected)?;
+                // the CPU quantizes activations to Q8_K, the GPU kernels to Q8_1
+                assert!(err < 0.03, "{ty:?} step {step}: relative error {err}");
+                cuda.cuda_stream()
+                    .synchronize()
+                    .map_err(inference_tensor::Error::wrap)?;
+            }
+            let run = run(&device, PROMPT, 0)?;
+            let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
+            if inference_quant::supports_mmq(ty) {
+                let expected = grouped_ungated_with(resident, &run.forward(), config, false)?
+                    .expect("the type runs the grouped mmq");
+                assert!(
+                    relative_error(&actual, &expected)? < 1e-5,
+                    "{ty:?}: the staged prompt path runs the same kernels"
+                );
+            } else {
+                // without grouped kernels the prompt goes through the split path, a split batch at a time
+                let expected = (0..PROMPT)
+                    .step_by(SPLIT_MAX_TOKENS)
+                    .map(|start| {
+                        let len = SPLIT_MAX_TOKENS.min(PROMPT - start);
+                        let xs = run.xs_flat.narrow(0, start, len)?;
+                        let split = MoEForward {
+                            xs: &xs,
+                            xs_flat: &xs,
+                            topk_weights: &run.weights.narrow(0, start, len)?,
+                            topk_ids: &run.ids.narrow(0, start, len)?,
+                            original_dtype: DType::F32,
+                            shape: MoEForwardShape::new(1, len, HIDDEN),
+                            lora: None,
+                        };
+                        Ok(indexed_mmvq_ungated_with(resident, &split, config)?
+                            .expect("the type runs the indexed matvec"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let err = relative_error(&actual, &Tensor::cat(&expected, 0)?)?;
+                assert!(err < 0.03, "{ty:?} prompt: relative error {err}");
+            }
         }
-        let run = run(&device, PROMPT, 0)?;
-        let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
-        let expected = grouped_ungated_with(resident, &run.forward(), config, false)?
-            .expect("IQ2_XXS runs the grouped mmq");
-        assert!(
-            relative_error(&actual, &expected)? < 1e-5,
-            "the staged prompt path runs the same kernels"
-        );
         Ok(())
     }
 

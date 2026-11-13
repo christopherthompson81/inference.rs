@@ -9,6 +9,9 @@ use super::iq_tables::{IQ2XXS_GRID, IQ3S_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
 use super::kernel::GgufType;
 use super::raw::KVALUES_IQ4NL;
 
+#[path = "grid_dot.rs"]
+mod grid;
+
 const IQ4_XS_BYTES: usize = 136;
 const IQ4_XS_SCALES_H: usize = 2;
 const IQ4_XS_SCALES_L: usize = 4;
@@ -59,7 +62,7 @@ pub(crate) fn supports(ty: GgufType) -> bool {
             | GgufType::Q4K
             | GgufType::Q5K
             | GgufType::Q6K
-    )
+    ) || grid::supports(ty)
 }
 
 /// `row` holds `ys.len()` super-blocks of `ty`, one per Q8_K block, after the row scale of a type that has one.
@@ -70,6 +73,7 @@ pub(crate) fn vec_dot(ty: GgufType, row: &[u8], ys: &[BlockQ8K]) -> f32 {
         GgufType::Iq3S => iq3_s(row, ys),
         GgufType::Iq4Xs => iq4_xs(row, ys),
         GgufType::Iq4Kss => iq4_kss(row, ys),
+        ty if grid::supports(ty) => grid::vec_dot(ty, row, ys),
         GgufType::Q2K => BlockQ2K::vec_dot(n, blocks(row), ys),
         GgufType::Q3K => BlockQ3K::vec_dot(n, blocks(row), ys),
         GgufType::Q4K => BlockQ4K::vec_dot(n, blocks(row), ys),
@@ -333,6 +337,9 @@ pub(crate) fn vec_dot_x4(ty: GgufType, row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32
             _ => {}
         }
     }
+    if grid::supports(ty) {
+        return grid::vec_dot_x4(ty, row, ys);
+    }
     ys.map(|y| vec_dot(ty, row, y))
 }
 
@@ -343,7 +350,7 @@ pub(crate) fn tile_supports(ty: GgufType) -> bool {
         return matches!(
             ty,
             GgufType::Iq2Xxs | GgufType::Iq3S | GgufType::Iq4Xs | GgufType::Iq4Kss
-        );
+        ) || grid::supports(ty);
     }
     let _ = ty;
     false
@@ -366,6 +373,7 @@ pub(crate) fn decode_tile(ty: GgufType, rows: &[u8], cols: usize, w: &mut [i16],
             GgufType::Iq2Xxs => avx2::decode_iq2_xxs(rows, w, d),
             GgufType::Iq3S => avx2::decode_iq3_s(rows, w, d),
             GgufType::Iq4Kss => avx2::decode_iq4_kss(rows, row_bytes, cols, w, d),
+            ty if grid::supports(ty) => grid::avx2::decode_tile(ty, rows, w, d),
             _ => avx2::decode_iq4_xs(rows, w, d),
         }
     }
@@ -573,7 +581,7 @@ mod avx2 {
     ];
 
     #[target_feature(enable = "avx2,fma")]
-    fn hsum(x: __m256) -> f32 {
+    pub(super) fn hsum(x: __m256) -> f32 {
         let res = _mm_add_ps(_mm256_extractf128_ps(x, 1), _mm256_castps256_ps128(x));
         let res = _mm_add_ps(res, _mm_movehl_ps(res, res));
         _mm_cvtss_f32(_mm_add_ss(res, _mm_movehdup_ps(res)))
@@ -587,7 +595,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2,fma")]
-    fn load_q8(qs: &[i8]) -> __m256i {
+    pub(super) fn load_q8(qs: &[i8]) -> __m256i {
         assert!(qs.len() >= 32);
         // SAFETY: as in `load`
         unsafe { _mm256_loadu_si256(qs.as_ptr().cast()) }
@@ -596,7 +604,7 @@ mod avx2 {
     // asks for `lines` cache lines `PREFETCH_AHEAD` bytes past `block`, which may lie past the row (a prefetch never faults)
     #[inline]
     #[target_feature(enable = "avx2,fma")]
-    fn prefetch_ahead(block: &[u8], lines: usize) {
+    pub(super) fn prefetch_ahead(block: &[u8], lines: usize) {
         let ahead = block.as_ptr().wrapping_add(PREFETCH_AHEAD).cast::<i8>();
         for line in 0..lines {
             _mm_prefetch::<_MM_HINT_T0>(ahead.wrapping_add(64 * line));
@@ -1202,7 +1210,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2,fma")]
-    fn store_scaled(w: &mut [i16], values: __m128i, scale: __m256i) {
+    pub(super) fn store_scaled(w: &mut [i16], values: __m128i, scale: __m256i) {
         assert!(w.len() >= 16);
         let v = _mm256_mullo_epi16(_mm256_cvtepi8_epi16(values), scale);
         // SAFETY: 16 writable i16 were checked above
@@ -1669,6 +1677,61 @@ mod tests {
         }
     }
 
+    const GRID_TYPES: [GgufType; 5] = [
+        GgufType::Iq1S,
+        GgufType::Iq1M,
+        GgufType::Iq2Xs,
+        GgufType::Iq2S,
+        GgufType::Iq3Xxs,
+    ];
+
+    // random blocks with a sane block scale, which IQ1_M keeps in its sub-scale words' top nibbles
+    fn grid_row(ty: GgufType, seed: u32) -> Vec<u8> {
+        let size = ty.type_size();
+        let mut row = row(size, seed);
+        if ty == GgufType::Iq1M {
+            for (i, block) in row.chunks_exact_mut(size).enumerate() {
+                let bits = half::f16::from_f32(0.01 + 0.002 * i as f32).to_bits();
+                for k in 0..4 {
+                    let at = size - 8 + 2 * k;
+                    let word = u16::from_le_bytes([block[at], block[at + 1]]);
+                    let word = (word & 0x0fff) | (((bits >> (4 * k)) & 0xf) << 12);
+                    block[at..at + 2].copy_from_slice(&word.to_le_bytes());
+                }
+            }
+        }
+        row
+    }
+
+    #[test]
+    fn grid_dots_match_dequantized_rows() {
+        let ys = activations();
+        for ty in GRID_TYPES {
+            assert!(supports(ty));
+            for seed in 0..4 {
+                let row = grid_row(ty, seed);
+                let expected = dequantized_dot(ty, &row, &ys);
+                let tolerance = 1e-3 * expected.abs().max(1.0);
+                let generic = grid::vec_dot_generic(ty, &row, &ys);
+                assert!(
+                    (generic - expected).abs() < tolerance,
+                    "{ty:?} generic {generic} vs {expected}"
+                );
+                let dispatched = vec_dot(ty, &row, &ys);
+                assert!(
+                    (dispatched - expected).abs() < tolerance,
+                    "{ty:?} {dispatched} vs {expected}"
+                );
+                let many = vec_dot_x4(ty, &row, [&ys[..]; 4]);
+                assert!(
+                    many.iter()
+                        .all(|m| (m - dispatched).abs() < 1e-5 * expected.abs().max(1.0)),
+                    "{ty:?} {many:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn block32_dots_match_the_generic_kernels() {
         let xs = (0..BLOCKS * QK32)
@@ -1751,6 +1814,20 @@ mod tests {
                 );
             }
         }
+        for ty in GRID_TYPES.into_iter().filter(|&ty| tile_supports(ty)) {
+            let rows = [0, 1].map(|seed| grid_row(ty, seed));
+            let (mut w, mut d) = (vec![0i16; 2 * BLOCKS * QK_K], vec![0f32; 2 * BLOCKS]);
+            decode_tile(ty, &rows.concat(), BLOCKS * QK_K, &mut w, &mut d);
+            let mut out = [0f32; 2];
+            tile_dot(&w, &d, &[token], &mut out);
+            for (row, out) in rows.iter().zip(out) {
+                let expected = vec_dot(ty, row, &ys);
+                assert!(
+                    (out - expected).abs() < 1e-4 * expected.abs().max(1.0),
+                    "{ty:?} tile {out} vs {expected}"
+                );
+            }
+        }
     }
 }
 
@@ -1766,6 +1843,11 @@ mod bench {
             (GgufType::Iq3S, IQ3_S_BYTES),
             (GgufType::Iq4Xs, IQ4_XS_BYTES),
             (GgufType::Iq4Kss, IQ4_KSS_BYTES),
+            (GgufType::Iq1S, GgufType::Iq1S.type_size()),
+            (GgufType::Iq1M, GgufType::Iq1M.type_size()),
+            (GgufType::Iq2Xs, GgufType::Iq2Xs.type_size()),
+            (GgufType::Iq2S, GgufType::Iq2S.type_size()),
+            (GgufType::Iq3Xxs, GgufType::Iq3Xxs.type_size()),
         ] {
             let rows = 512;
             let row_bytes = ty.row_scale_bytes() + 8 * size;
