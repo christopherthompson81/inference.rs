@@ -60,3 +60,23 @@ EXL3 4.0bpw           3.3922      3.4427      3.4216     3.4204
 The base model already differs by +0.45% between the engines; the quant's own cost is +8.0% (ours, f16) against
 +7.5% (exllamav3) at 4.0bpw. The tensors agree to f16 rounding, so the rest is the engines' forward passes on a 0.6B
 model. Next: trellis-native CUDA kernels (dense reconstruction holds the weights at f16 size).
+
+## Run 3 - 2026-11-13 18:30
+
+Kernel plan (the user chose vendoring exllamav3's kernels, MIT). The include graph of exllamav3 1.6.6's
+`quant/exl3_gemm.cu`, `exl3_gemv.cu`, `hadamard.cu`, `reconstruct.cu`, `exl3_kernel_map.cu`, `exl3_devctx.cu`:
+
+- torch-free kernel core: `exl3_gemm_kernel.cuh` (359 lines), `exl3_gemm_inner.cuh` (1005), `exl3_gemv_kernel.cuh`
+  (491), `exl3_dq.cuh`, `codebook.cuh`, `hadamard_inner.cuh`, `exl3_kernel_map.cuh`, `exl3_devctx.cuh`,
+  `coop_autotune.cuh`, `ptx.cuh`, `arch.cuh`, `compat.cuh` (plus ROCm headers, not needed).
+- torch-bound: the launchers (`exl3_gemm.cu` 892 lines: autotune hash, kernel-map choice, per-device lock buffers,
+  cooperative launches, CUDA-graph parameter recording; `exl3_kernel_map.cu`, `exl3_devctx.cu`, `hadamard.cu`,
+  `reconstruct.cu`) and `util.h`/`util.cuh`/`graph.cuh`.
+- instantiation: `comp_units/exl3_comp_unit_{1..8}_cb{0,1,2}.cu`, one translation unit per bitrate and codebook.
+
+At run time y = x W with W = diag(suh) H Wi H diag(svh) (H the 128-block Hadamard, Wi the trellis tiles): the GEMM
+and GEMV kernels take `suh`, an `A_had` scratch and `svh` and do both rotations inside (grid syncs between the
+stages), so no separate Hadamard launch. Our part: C ABI launchers in place of the torch ones (the GEMV fast path for
+small m, else the GEMM with the kernel map's default shape, no autotune), a device context (SM count, compute
+capability, the lock buffer, the shared-memory limit), the build into a kernel library per arch, and an `Exl3Layer`
+QuantMethod holding the trellis on the GPU.
