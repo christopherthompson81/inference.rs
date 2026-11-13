@@ -245,6 +245,65 @@ pub fn dense_weight(
         .to_device(device)
 }
 
+// a trellis in place of the dense weight (backends that make up any tensor asked for report both)
+fn stored_as_trellis(vb: &ShardedVarBuilder) -> bool {
+    vb.contains_tensor("trellis") && !vb.contains_tensor("weight")
+}
+
+/// EXL3's config for a layer whose checkpoint holds a trellis though its loader names no quantization (exllamav3
+/// also quantizes vision towers whose loaders build plain linears), else nothing.
+pub fn implied_config(
+    config: &Option<crate::QuantizedConfig>,
+    vb: &ShardedVarBuilder,
+) -> Option<crate::QuantizedConfig> {
+    (config.is_none() && stored_as_trellis(vb))
+        .then_some(crate::QuantizedConfig::Exl3 { bits: 0.0 })
+}
+
+/// The dense `out x in` weight (and bias, when `bias`) of a linear stored as an EXL3 trellis under `vb`, or `None`
+/// for a plain one: for loaders that build plain linears. exllamav3 pads both sides to whole 128-wide Hadamard
+/// blocks (with zeros), which this crops off.
+pub fn dense_linear_in(
+    vb: &ShardedVarBuilder,
+    in_dim: usize,
+    out_dim: usize,
+    bias: bool,
+) -> Result<Option<(Tensor, Option<Tensor>)>> {
+    if !stored_as_trellis(vb) {
+        return Ok(None);
+    }
+    let trellis = vb.get_unchecked_dtype("trellis", DType::I16)?;
+    let (k, n) = (trellis.dim(0)? * TILE, trellis.dim(1)? * TILE);
+    if trellis.dims().len() != 3
+        || k < in_dim
+        || n < out_dim
+        || k - in_dim >= HAD
+        || n - out_dim >= HAD
+    {
+        inference_tensor::bail!(
+            "{}: an EXL3 trellis of {:?} for a {in_dim} -> {out_dim} linear",
+            vb.prefix(),
+            trellis.dims()
+        );
+    }
+    let suh = vb.get_unchecked_dtype("suh", DType::F32)?;
+    let svh = vb.get_unchecked_dtype("svh", DType::F32)?;
+    let codebook =
+        Exl3Codebook::from_markers(vb.contains_tensor("mcg"), vb.contains_tensor("mul1"));
+    let weight = dense_weight(&trellis, &suh, &svh, codebook, vb.dtype(), vb.device())?
+        .narrow(0, 0, out_dim)?
+        .narrow(1, 0, in_dim)?
+        .contiguous()?;
+    let bias = bias
+        .then(|| {
+            vb.get_unchecked("bias")?
+                .narrow(0, 0, out_dim)?
+                .contiguous()
+        })
+        .transpose()?;
+    Ok(Some((weight, bias)))
+}
+
 /// An EXL3 checkpoint's linear: its trellis reconstructed into a dense layer, or the plain weight EXL3 left
 /// unquantized.
 pub fn linear_b(

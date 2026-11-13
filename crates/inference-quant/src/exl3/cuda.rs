@@ -1,7 +1,7 @@
 //! An EXL3 linear kept as its trellis on a CUDA device, multiplied by exllamav3's kernels.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use half::f16;
 use inference_tensor::{CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
@@ -23,6 +23,16 @@ pub struct Exl3Layer {
     bias: Option<Tensor>,
     // the model's dtype, which a dense reconstruction takes
     dtype: DType,
+    // the m buckets whose first launch (which may time the kernel shapes) has run outside a capture
+    tuned: AtomicU8,
+}
+
+// the launcher's autotune buckets: powers of two up to 16 rows, then 16-row steps capped at 64
+fn tune_bucket(m: usize) -> u8 {
+    match m.max(2) {
+        m @ ..=16 => m.next_power_of_two().trailing_zeros() as u8,
+        m => 4 + m.div_ceil(16).min(4) as u8 - 1,
+    }
 }
 
 impl Exl3Layer {
@@ -42,6 +52,7 @@ impl Exl3Layer {
             codebook,
             bias,
             dtype,
+            tuned: AtomicU8::new(0),
         })
     }
 
@@ -76,6 +87,11 @@ impl Exl3Layer {
         let (svh, _v) = slice_ptr(v_c.as_cuda_slice::<f16>()?, v_l.start_offset());
         let (had, _h) = slice_ptr(&a_had, 0);
         let (c, _c) = slice_ptr(&out, 0);
+        let bucket = 1u8 << tune_bucket(m);
+        // a first launch may time candidates (synchronizing, allocating), which no other thread's capture may see
+        let scope = (self.tuned.load(Ordering::Relaxed) & bucket == 0)
+            .then(inference_tensor::cuda_backend::context_wide_scope)
+            .flatten();
         // SAFETY: the pointers are the live device buffers above, sized as the kernel reads them (A m x k, the trellis
         // k/16 x n/16 x words, suh k, svh n, the scratch m x k, C m x n f32), all on this device's stream
         let ran = unsafe {
@@ -98,6 +114,10 @@ impl Exl3Layer {
         if ran < 0 {
             inference_tensor::bail!("no EXL3 kernel fits {m} x {k} -> {n} at {words} words a tile");
         }
+        if scope.is_some() {
+            self.tuned.fetch_or(bucket, Ordering::Relaxed);
+        }
+        drop(scope);
         drop((_a, _b, _u, _v, _h, _c));
         Ok(Tensor::from((
             Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
@@ -220,6 +240,10 @@ mod tests {
     use crate::QuantMethod;
     use crate::exl3::{Exl3Codebook, dense_weight};
 
+    // of the largest output: f16 accumulation measures 3.4e-4 .. 8e-4, int8 activations (mul1 at m <= 2) 6e-3
+    const F16_BOUND: f32 = 2e-3;
+    const INT8_BOUND: f32 = 1.5e-2;
+
     fn lcg(n: usize, seed: u32) -> Vec<u32> {
         let mut s = seed;
         (0..n)
@@ -231,7 +255,7 @@ mod tests {
     }
 
     // the kernels against the CPU reconstruction: random trellises (every codebook, a half-integer rate), random
-    // signed scales, one row (the GEMV path) and 32 (the GEMM)
+    // signed scales, one and two rows (the GEMVs; mul1's quantize activations to int8) and 32 (the GEMM)
     #[test]
     fn the_kernels_match_the_reconstructed_weight() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
@@ -239,7 +263,8 @@ mod tests {
             return Ok(());
         };
         let (k, n) = (512, 512);
-        let (mut ratios, mut worst) = (Vec::new(), 0f32);
+        let mut ratios = Vec::new();
+        let mut failed = false;
         for (words, codebook, seed) in [
             (48, Exl3Codebook::ThreeInst, 1),
             (64, Exl3Codebook::Mcg, 2),
@@ -268,7 +293,7 @@ mod tests {
                 None,
                 DType::F16,
             )?;
-            for m in [1, 32] {
+            for m in [1, 2, 32] {
                 let x = lcg(m * k, seed + 30)
                     .iter()
                     .map(|s| (s >> 8) as f32 / (1u32 << 24) as f32 - 0.5)
@@ -285,11 +310,11 @@ mod tests {
                     .to_scalar::<f32>()?;
                 let norm = expected.abs()?.max_all()?.to_scalar::<f32>()?;
                 ratios.push(format!("{codebook:?} {words} m {m}: {}", err / norm));
-                worst = worst.max(err / norm);
+                let int8 = codebook == Exl3Codebook::Mul1 && m <= 2;
+                failed |= err / norm > if int8 { INT8_BOUND } else { F16_BOUND };
             }
         }
-        // f16 accumulation in the kernels puts these at 3.4e-4 .. 5.4e-4 of the largest output
-        assert!(worst < 2e-3, "{ratios:?}");
+        assert!(!failed, "{ratios:?}");
         Ok(())
     }
 }

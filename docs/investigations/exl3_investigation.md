@@ -97,3 +97,57 @@ with zeroed scratch and output buffers, 250 with uninitialized ones (the kernels
 ran 465. exllamav3's own generator on the same model: 170 tok/s. A 0.6B model's decode is launch-bound (196 EXL3
 matmuls a token, ~20 us each); the comparison that matters is a large model. Decode graphs capture with the
 cooperative launches.
+
+## Run 5 - 2026-11-13 21:30
+
+A 27B hybrid (Qwen3.8-27B-exl3, 3.5bpw, mul1 codebook, with its vision tower) on the 3090.
+
+Loading first failed on the vision tower: its loaders build plain linears (`inference_nn::linear`), which found no
+dense `weight`, and the trellises are padded to multiples of 128 (a 1152 -> 4304 projection is stored as 4352, with
+`svh` and the bias padded too). Fix: `exl3::implied_config` turns a trellis into an EXL3 config where the model passed
+none, and `exl3::dense_linear_in` reconstructs a plain linear from its trellis and crops the padding (`narrow`).
+
+Decode, one short poem prompt:
+- ours EXL3 kernels: 36.3 tok/s (756 tokens)
+- ours GGUF recipe A (IQ4_KS bulk, 14 GiB): 50.6 tok/s
+- exllamav3 1.6.6 generator: 45.5 tok/s (500 tokens in 11.0 s, prefill 0.04 s). An earlier reading of 63.4 counted
+  the output by re-encoding its text (885 tokens for 500 sampled); its own `new_tokens` count is the right one.
+
+So the EXL3 path trails exllamav3 by ~20% on the same weights. Suspects: per-linear bf16 -> f16 input and f32 -> bf16
+output conversions, the default kernel shape without exllamav3's autotune, scratch allocations per call.
+
+## Run 6 - 2026-11-13 23:00
+
+Where the 27B's decode time goes (nsys, graphs off so every kernel shows; ~45 decode steps): 27.7 ms of kernels a
+token, all of the step, so GPU-bound. The EXL3 GEMMs take ~80%: the 3-bit `exl3_gemm_kernel` ran at ~80 us for a
+~33 MB tensor (~410 GB/s of the 3090's 936).
+
+exllamav3's own generator under nsys (graphs traced) runs different kernels for the same decode:
+`exl3_gemv_int8_sq_kernel` for every mul1 matmul at m = 1 (54% of its kernel time), `exl3_mgemm_kernel` for fused
+projections. The int8 GEMV is `EXL3_INT8_GEMV`, default 2 (plain int8 activations, dp4a, both Hadamards and the
+activation quantization in one launch) for mul1 tensors at K + half <= 5 (Ampere/Ada; 6 on Hopper/Blackwell).
+
+First tried its autotuner (`coop_autotune.cu`, vendored without torch; shape and grid size timed once per
+(m bucket, k, n), cached in `~/.cache/inference-rs/exl3_autotune_v1.bin`): decode unchanged at 35.5 tok/s. The tuned
+choices are mostly the default shape over all 82 SMs. Kept: it costs one tuning pass per shape at first use, and a
+shape first seen inside a capture takes the default.
+
+Then the int8 GEMV (vendored; our instances only the f32-output plain forms, one and two rows plus the cooperative
+fallback; workspace per stream, since its counters reset themselves and two models on one device would race):
+
+```
+27B 3.5bpw mul1, decode tok/s     ours before   ours int8 GEMV   exllamav3 1.6.6
+poem prompt, ~250 tokens          35.5          47.0             45.5
+```
+
+Accuracy at decode (teacher-forced, each step the previous prompt plus one token through the prefix cache, 98.9%
+hits so each scored step is an m = 1 decode; 6 passages x 96 tokens of README.md):
+
+```
+EXL3_INT8_GEMV=2 (int8)   ppl 2.88512
+EXL3_INT8_GEMV=0 (f16)    ppl 2.88555
+mean |d logprob| 0.00103, top-1 agreement 99.8%
+```
+
+Prefill perplexity cannot see it (m = 512 never takes the GEMV): 1.4134 both ways. The GPU test's int8 case
+(random 512 x 512, mul1, m = 1 and 2) measures 6e-3 of the largest output against 3.4e-4 .. 8e-4 for the f16 kernels.

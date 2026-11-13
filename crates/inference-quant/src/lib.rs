@@ -3151,7 +3151,8 @@ pub fn linear_b(
         vb
     };
 
-    let layer = if let Some(quant_conf) = &config {
+    let implied = exl3::implied_config(config, &vb);
+    let layer = if let Some(quant_conf) = implied.as_ref().or(config.as_ref()) {
         checkpoint_linear(in_dim, out_dim, quant_conf, bias, Shard::default(), &vb)?
     } else {
         let (context, required): (_, &[&str]) = if bias {
