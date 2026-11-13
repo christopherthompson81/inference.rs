@@ -210,12 +210,14 @@ pub(crate) fn write_hessians(
                 module.key
             );
         };
-        // stacked experts have no single input Hessian
-        if weight.rank() != 2 {
-            continue;
-        }
-        let in_dim = weight.dim(1)?;
-        sized.push((module, in_dim * in_dim * 4));
+        // stacked experts `[E, out, in]` collect one per expert
+        let in_dim = weight.dim(weight.rank() - 1)?;
+        let copies = if weight.rank() == 3 {
+            weight.dim(0)?
+        } else {
+            1
+        };
+        sized.push((module, copies * in_dim * in_dim * 4));
     }
     let mut passes: Vec<Vec<&TrackedModule>> = Vec::new();
     let mut bytes = 0;
@@ -260,11 +262,23 @@ pub(crate) fn write_hessians(
             } else {
                 &module.key
             };
-            let path = dir.join(format!("{key}.safetensors"));
-            inference_tensor::safetensors::save(
-                &HashMap::from([("hin".to_string(), hessian)]),
-                &path,
-            )?;
+            let save = |key: &str, h: inference_tensor::Tensor| -> Result<()> {
+                let path = dir.join(format!("{key}.safetensors"));
+                inference_tensor::safetensors::save(
+                    &HashMap::from([("hin".to_string(), h)]),
+                    &path,
+                )?;
+                Ok(())
+            };
+            // a stacked expert projection `<experts>.<proj>` writes each expert's as `<experts>.<e>.<proj>`
+            match (hessian.rank(), key.rsplit_once('.')) {
+                (3, Some((experts, proj))) => {
+                    for e in 0..hessian.dim(0)? {
+                        save(&format!("{experts}.{e}.{proj}"), hessian.get(e)?)?;
+                    }
+                }
+                _ => save(key, hessian)?,
+            }
         }
     }
     Ok(())

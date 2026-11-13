@@ -1007,9 +1007,28 @@ mod tests {
         cuda_cases,
         [
             a_tensor_dropped_on_a_thread_without_a_context_frees_cleanly,
-            selecting_no_rows_gives_an_empty_tensor
+            selecting_no_rows_gives_an_empty_tensor,
+            index_add_takes_a_destination_at_an_offset
         ]
     );
+
+    // a destination that starts inside its storage (one matrix of a stack) adds as the CPU does
+    fn index_add_takes_a_destination_at_an_offset() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let stack = Tensor::arange(0f32, 18.0, &Device::Cpu)?.reshape((2, 9))?;
+        let ids = Tensor::new(&[0u32, 4, 8], &Device::Cpu)?;
+        let add = Tensor::new(&[1f32, 2., 3.], &Device::Cpu)?;
+        let expected = stack.get(1)?.index_add(&ids, &add, 0)?.to_vec1::<f32>()?;
+        let actual = stack
+            .to_device(&device)?
+            .get(1)?
+            .index_add(&ids.to_device(&device)?, &add.to_device(&device)?, 0)?
+            .to_vec1::<f32>()?;
+        assert_eq!(actual, expected);
+        Ok(())
+    }
 
     fn selecting_no_rows_gives_an_empty_tensor() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {

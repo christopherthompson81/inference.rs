@@ -592,11 +592,13 @@ impl QuantMethod for UnquantLinear {
     }
 
     fn begin_track_hessian(&self) -> Result<()> {
-        if self.w.dims().len() != 2 {
-            inference_tensor::bail!("Hessians are collected for dense layers, not stacked experts");
+        let in_dim = self.w.dim(inference_tensor::D::Minus1)?;
+        // stacked [E, out, in] experts collect one per expert, from the rows their router sends them
+        if self.w.dims().len() == 3 {
+            self.stats.enable_routed_hessian(self.w.dim(0)?, in_dim)
+        } else {
+            self.stats.enable_hessian(in_dim, self.w.device())
         }
-        self.stats
-            .enable_hessian(self.w.dim(inference_tensor::D::Minus1)?, self.w.device())
     }
 
     fn process_routed_stats(&self, x: &Tensor, ids: &Tensor) -> Result<()> {
