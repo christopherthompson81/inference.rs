@@ -167,3 +167,142 @@ extern "C" int launch_exl3_gemm(
     cuda_check(cudaPeekAtLastError());
     return shape_idx;
 }
+
+// exl3_gemm.cu's multi-matrix key: the gemm key plus the slot counts
+static uint64_t mgemm_autotune_hash(int size_m, int size_k, int size_n, int K, bool c_fp32, int device, int cc,
+                                    int max_num_sms, int cb, int bszm_in, int bszm_out, bool half_k)
+{
+    uint64_t h = gemm_autotune_hash(size_m, size_k, size_n, K, c_fp32, device, cc, max_num_sms, cb, half_k);
+    auto mix = [&] (uint64_t v)
+    {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    mix((uint64_t) MIN(bszm_in, 24));
+    mix((uint64_t) MIN(bszm_out, 24));
+    return h;
+}
+
+// exl3_mgemm_gr's indexed mode without torch, graph recording, weights or expert-range filtering: slot j multiplies
+// A[j] (m x k, f16) by expert indices[j] (B_list, suh_list, svh_list hold each expert's device addresses) into C[j]
+// (m x n, f32 or f16). A_had is scratch for slots x m x k. Returns the kernel shape, 0 when nothing ran, -1 when no
+// kernel fits.
+extern "C" int launch_exl3_mgemm(
+    const half* A,
+    const uint16_t* const* B_list,
+    void* C,
+    int size_m,
+    int size_k,
+    int size_n,
+    int tile_u16,
+    int cb,
+    bool c_fp32,
+    const half* const* suh_list,
+    half* A_had,
+    const half* const* svh_list,
+    const int64_t* indices,
+    int slots,
+    cudaStream_t stream)
+{
+    if (!slots || !size_m || !size_n) return 0;
+    const bool half_k = (tile_u16 % 16) != 0;
+    int K = tile_u16 / 16;
+    if ((half_k && (tile_u16 % 16 != 8 || cb != 2)) || K < 1 || K > 8 || !size_k) return -1;
+
+    int device;
+    cudaGetDevice(&device);
+    int total_sms = DevCtx::instance().get_num_sms(device);
+    int cc = DevCtx::instance().get_cc(device);
+    int* locks = DevCtx::instance().get_locks(device);
+    int smem_max = DevCtx::instance().get_smem_request(device);
+
+    int bszm_in = slots;
+    int bszm_out = slots;
+    int min_index = -1;
+    int max_index = -1;
+    int num_tokens = 1;
+    half* weights = nullptr;
+    const int* size_n_list = nullptr;
+    void** c_list = nullptr;
+    const int* n_stride_list = nullptr;
+    const int* had_src_list = nullptr;
+    int num_had_src = 0;
+    void* kernelArgs[] =
+    {
+        (void*)& A,
+        (void*)& B_list,
+        (void*)& C,
+        (void*)& size_m,
+        (void*)& size_k,
+        (void*)& size_n,
+        (void*)& locks,
+        (void*)& suh_list,
+        (void*)& A_had,
+        (void*)& svh_list,
+        (void*)& indices,
+        (void*)& weights,
+        (void*)& bszm_in,
+        (void*)& bszm_out,
+        (void*)& min_index,
+        (void*)& max_index,
+        (void*)& num_tokens,
+        (void*)& size_n_list,
+        (void*)& c_list,
+        (void*)& n_stride_list,
+        (void*)& had_src_list,
+        (void*)& num_had_src
+    };
+
+    uint64_t key = mgemm_autotune_hash(size_m, size_k, size_n, K, c_fp32, device, cc, total_sms, cb, bszm_in,
+                                       bszm_out, half_k);
+    CoopAutotuneLaunch tuned;
+    if (CoopKernelAutotuner::launch_locked(key, kernelArgs, smem_max, stream, &tuned))
+    {
+        cuda_check(cudaPeekAtLastError());
+        return tuned.tag;
+    }
+    cudaStreamCaptureStatus capture;
+    cuda_check(cudaStreamIsCapturing(stream, &capture));
+    if (capture == cudaStreamCaptureStatusNone)
+    {
+        std::vector<CoopAutotuneCandidate> candidates;
+        for (int shape = 1; shape <= EXL3_GEMM_NUM_SHAPES; ++shape)
+        {
+            if (!exl3_gemm_shape_compat(shape, size_m, size_k, size_n, K, half_k)) continue;
+            fp_exl3_mgemm_kernel candidate = get_mgemm_kernel_ptr(K, shape, c_fp32, cb, half_k);
+            if (!candidate) continue;
+            int max_slices = MAX(size_k / exl3_gemm_tilesize_k_g[shape] * size_n / exl3_gemm_tilesize_n_g[shape], 1);
+            int max_sms = MAX(MIN(max_slices, total_sms), 1);
+            candidates.push_back({(void*) candidate, exl3_gemm_blockdim_g[shape], max_sms, slots, total_sms, shape});
+        }
+        if (candidates.empty()) return -1;
+        tuned = CoopKernelAutotuner::launch(key, candidates, kernelArgs, smem_max, stream,
+                                            (size_t) size_k * size_n * slots);
+        cuda_check(cudaPeekAtLastError());
+        return tuned.tag;
+    }
+
+    int block_dim;
+    int shape_idx;
+    int num_sms = total_sms;
+    fp_exl3_mgemm_kernel kernel = select_exl3_mgemm_kernel
+    (
+        cc, size_m, size_k, size_n, K, c_fp32,
+        0, &block_dim, &shape_idx,
+        &num_sms, cb, bszm_in, bszm_out, half_k
+    );
+    if (!kernel) return -1;
+    int tiles = MAX(size_k / exl3_gemm_tilesize_k_g[shape_idx] * size_n / exl3_gemm_tilesize_n_g[shape_idx], 1);
+    num_sms = tiles;
+    if (num_sms * slots > total_sms) num_sms = MAX(total_sms / slots, 1);
+    if (num_sms <= total_sms && tiles / num_sms > 48) num_sms = MIN(total_sms, num_sms * 2);
+    int concurrency = MIN(total_sms / num_sms, slots);
+    if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
+    {
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
+        kernel_attr_set[device].insert((void*) kernel);
+    }
+    EXL3_COOP_LAUNCH((void*) kernel, dim3(num_sms, 1, concurrency), block_dim, kernelArgs, smem_max, stream);
+    cuda_check(cudaPeekAtLastError());
+    return shape_idx;
+}

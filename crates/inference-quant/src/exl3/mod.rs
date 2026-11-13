@@ -8,7 +8,7 @@ mod cuda;
 pub(crate) mod ffi;
 
 #[cfg(feature = "cuda")]
-pub use cuda::Exl3Layer;
+pub use cuda::{Exl3Experts, Exl3Layer};
 
 use std::sync::Arc;
 
@@ -338,6 +338,54 @@ pub fn linear_b(
     };
     Ok(Arc::new(UnquantLinear::new(
         QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, bias)),
+    )?))
+}
+
+/// One projection of every expert, each stored as its own trellis under `experts_vb.pp(e).pp(proj)`, as one gather
+/// layer: kept as trellises on a GPU, else reconstructed into an `(experts, out, in)` stack.
+pub fn experts_b(
+    num_experts: usize,
+    in_dim: usize,
+    out_dim: usize,
+    proj: &str,
+    experts_vb: &ShardedVarBuilder,
+) -> Result<Arc<dyn QuantMethod>> {
+    let mut parts = Vec::with_capacity(num_experts);
+    for e in 0..num_experts {
+        let vb = experts_vb.pp(e).pp(proj);
+        let trellis = vb.get_unchecked_dtype("trellis", DType::I16)?;
+        if trellis.dims().len() != 3 || trellis.dims()[..2] != [in_dim / TILE, out_dim / TILE] {
+            inference_tensor::bail!(
+                "{}: an EXL3 trellis of {:?} for a {in_dim} -> {out_dim} expert",
+                vb.prefix(),
+                trellis.dims()
+            );
+        }
+        let codebook =
+            Exl3Codebook::from_markers(vb.contains_tensor("mcg"), vb.contains_tensor("mul1"));
+        let suh = vb.get_unchecked_dtype("suh", DType::F32)?;
+        let svh = vb.get_unchecked_dtype("svh", DType::F32)?;
+        parts.push((trellis, suh, svh, codebook));
+    }
+    let device = experts_vb.device();
+    #[cfg(feature = "cuda")]
+    if device.is_cuda() {
+        return Ok(Arc::new(Exl3Experts::new_on_device(
+            parts,
+            experts_vb.dtype(),
+        )?));
+    }
+    let weights = parts
+        .iter()
+        .map(|(trellis, suh, svh, codebook)| {
+            dense_weight(trellis, suh, svh, *codebook, experts_vb.dtype(), device)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Arc::new(UnquantLinear::new(
+        QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(
+            Tensor::stack(&weights, 0)?,
+            None,
+        )),
     )?))
 }
 

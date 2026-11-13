@@ -248,5 +248,10 @@ mcg and mul1 codebooks) load like GPTQ and AWQ: from the model's config, with no
 inference run -m <exl3-model-dir>
 ```
 
-The weights are reconstructed into dense layers as they load, so a model takes its unquantized size in memory. Add
-`--isq` to quantize the reconstructed layers again.
+On CUDA the weights stay as their trellises, dense layers and MoE experts alike, and run through exllamav3's own
+kernels, so a model takes its quantized size in memory. Tensors on the mul1 codebook multiply single tokens with int8
+activations, as exllamav3 does by default; `EXL3_INT8_GEMV=0` keeps them f16. Kernel shapes are timed on first use
+and cached in `~/.cache/inference-rs/exl3_autotune_v1.bin`.
+
+Elsewhere the weights are reconstructed into dense layers as they load, so a model takes its unquantized size in
+memory. Add `--isq` to quantize the reconstructed layers again.
