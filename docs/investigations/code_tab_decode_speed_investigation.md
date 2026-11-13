@@ -143,3 +143,21 @@ changes. Sessions from before keep their path references.
 
 Not done: a change far back in a long prompt (an edited earlier message, say) still finds checkpoints only near the
 end; periodic checkpoints through a long prefix would let such a turn resume nearby instead of from zero.
+
+## Run 7 - 2026-11-13 02:30
+
+A `/compact` of the user's session took about 4 minutes and the page's stream dropped ("TypeError: Error in input
+stream"). Attaching with curl showed the run had finished on the server: two summary requests of 133,289 and 23,981
+prompt tokens, then `compacted` (context ~8.9K tokens). The first one prefilled from zero.
+
+Cause: the summary request shared no prefix with the cached conversation. It sent `enable_thinking: false`, and the
+model's template (Qwen3.8, from the GGUF) writes a reasoning-effort line at the top of the system prompt only when
+thinking is on, so the prompt differed from its first tokens; it also left out the tool list, clipped long tool
+results and dropped images. The stream carried one `summary_text` event per streamed token (4,681 for this
+compaction), so a page reattaching replayed them for seconds.
+
+Fix: when the context, the summary prompt and a full reply fit the window, the summary request is the round's own
+request (same tools, thinking setting, images, unclipped results) with the summary prompt appended; it falls back to
+the chunked requests when it does not fit or the model calls a tool or runs out of tokens. Summary progress reaches the
+page at most every 500 ms, and the page reattaches by itself (up to 5 times) when its stream drops. Not measured on the
+GPU yet.

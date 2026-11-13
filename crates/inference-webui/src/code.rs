@@ -35,6 +35,8 @@ use crate::types::AppState;
 // sessions kept loaded at once; the least recently opened idle one goes first
 const MAX_LIVE_SESSIONS: usize = 32;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
+// a summary's progress reaches the page at most this often, instead of an event per token
+const SUMMARY_PROGRESS_EVERY: Duration = Duration::from_millis(500);
 // how a usage event's JSON opens ("type" sorts before "usage")
 const USAGE_EVENT: &str = r#"{"type":"usage""#;
 const DEMO_DIR_PREFIX: &str = "inference-code-demo-";
@@ -648,6 +650,8 @@ pub(crate) async fn send(
             live: live.clone(),
             labeller,
             runs: RunTracker::default(),
+            summary_chars: 0,
+            summary_sent: None,
         };
         let event = if request.prompt.trim() == COMPACT_COMMAND {
             match agent.compact(&mut ui).await {
@@ -808,6 +812,9 @@ struct WebUi {
     live: Arc<LiveSession>,
     labeller: Option<Labeller>,
     runs: RunTracker,
+    // characters of summary output not yet reported, and when the last report went
+    summary_chars: usize,
+    summary_sent: Option<Instant>,
 }
 
 // what a run's label request needs, for a task of its own beside the agent's
@@ -848,6 +855,14 @@ impl WebUi {
 
     fn emit(&self, event: Value) {
         let _ = self.events.send(event);
+    }
+
+    fn flush_summary(&mut self) {
+        if self.summary_chars > 0 {
+            self.emit(json!({"type": "summary_text", "chars": self.summary_chars}));
+            self.summary_chars = 0;
+            self.summary_sent = Some(Instant::now());
+        }
     }
 }
 
@@ -924,10 +939,19 @@ impl AgentUi for WebUi {
     }
 
     fn summary_text(&mut self, delta: &str) {
-        self.emit(json!({"type": "summary_text", "chars": delta.len()}));
+        self.summary_chars += delta.len();
+        // the first goes at once: it marks where the request's prefill ended
+        if self
+            .summary_sent
+            .is_none_or(|sent| sent.elapsed() >= SUMMARY_PROGRESS_EVERY)
+        {
+            self.flush_summary();
+        }
     }
 
     fn summary_done(&mut self, turn: &Turn) {
+        self.flush_summary();
+        self.summary_sent = None;
         if let Some(usage) = &turn.usage {
             self.emit(json!({"type": "summary_usage", "usage": usage}));
         }
