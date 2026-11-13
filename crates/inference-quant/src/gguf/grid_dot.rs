@@ -5,6 +5,7 @@
 use inference_tensor::quantized::k_quants::{BlockQ8K, QK_K};
 
 use super::super::iq_tables::{IQ1S_GRID, IQ2S_GRID, IQ2XS_GRID, IQ3XXS_GRID, KSIGNS_IQ2XS};
+use super::super::trellis;
 use super::GgufType;
 
 const IQ2_XS_QS: usize = 2;
@@ -27,14 +28,13 @@ const IQ1_FACTOR: f32 = 0.125;
 const IQ1_GRID_STEP: i8 = 8;
 const F16_ROW_SCALE: usize = 2;
 const F32_ROW_SCALE: usize = 4;
-// the trellis: each step multiplies a group's state and sums its four 6-bit bytes, a value in -126..=126
-const TRELLIS_MUL: u32 = 0xCBAC1FED;
-const TRELLIS_MASK: u32 = 0x3f3f3f3f;
-const TRELLIS_BIAS: i32 = 126;
-const TRELLIS_INDEX_OFFSET: u32 = 4096;
+// ik's trellis: a group's eight values are eight steps of its state, each a byte sum in -126..=126
+const TRELLIS_INDEX_OFFSET: u32 = trellis::IK_INDEX_OFFSET;
 const TRELLIS_GROUP: usize = 8;
+const TRELLIS_MASK: u32 = trellis::IK.byte_sum().0;
+const TRELLIS_BIAS: i32 = trellis::IK.byte_sum().1;
 // the state after each of a group's eight steps is its start times these
-const TRELLIS_POWERS: [u32; 8] = trellis_powers();
+const TRELLIS_POWERS: [u32; 8] = trellis::IK.powers::<8>();
 // ik's CUDA and CPU-GEMM kernels scale IQ2_KT and IQ3_KT rows by these
 const IQ2_KT_SCALE: f32 = 1.05;
 const IQ3_KT_SCALE: f32 = 1.01;
@@ -47,17 +47,6 @@ const IQ4K_VALUES: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 ];
 
-const fn trellis_powers() -> [u32; 8] {
-    let mut out = [0u32; 8];
-    let mut power = 1u32;
-    let mut k = 0;
-    while k < 8 {
-        power = power.wrapping_mul(TRELLIS_MUL);
-        out[k] = power;
-        k += 1;
-    }
-    out
-}
 // each byte's eight bits as bytes of -1 (bit set) or +1
 const BYTE_SIGNS: [u64; 256] = byte_signs();
 const IQ2_K_EXTRA: usize = 2;
@@ -616,12 +605,9 @@ struct Iq3Kt;
 // group `g`'s eight trellis values from its start `index`
 #[inline(always)]
 fn trellis(index: u32) -> [i8; TRELLIS_GROUP] {
-    let start = index + TRELLIS_INDEX_OFFSET;
-    std::array::from_fn(|k| {
-        let state = start.wrapping_mul(TRELLIS_POWERS[k]) & TRELLIS_MASK;
-        let sum: i32 = state.to_le_bytes().iter().map(|&b| i32::from(b)).sum();
-        (sum - TRELLIS_BIAS) as i8
-    })
+    trellis::IK
+        .values::<TRELLIS_GROUP>(index + TRELLIS_INDEX_OFFSET)
+        .map(|v| v as i8)
 }
 
 #[inline(always)]

@@ -1,16 +1,13 @@
 //! ik_llama.cpp's trellis (`IQ*_KT`) dequantization of one row, ported from its CUDA `dequantize_block_iq*_kt`.
 
 use super::kernel::GgufType;
+use super::trellis::{IK, IK_INDEX_OFFSET as INDEX_OFFSET};
 
 const QK_K: usize = 256;
 const ROW_SCALE_BYTES: usize = 4;
 const GROUP: usize = 8;
 const IQ4_KT_GROUP: usize = 4;
 const TAIL_BLOCK: usize = 32;
-const TRELLIS_MUL: u32 = 0xCBAC1FED;
-const TRELLIS_MASK: u32 = 0x3f3f3f3f;
-const TRELLIS_BIAS: i32 = 126;
-const INDEX_OFFSET: u32 = 4096;
 const IQ4_KT_HIGH_OFFSET: u32 = 32768;
 // The CUDA and CPU-GEMM kernels scale IQ2_KT by 1.05 and IQ3_KT by 1.01; ik's `dequantize_row_iq2_kt` omits its factor
 const IQ2_KT_SCALE: f32 = 1.05;
@@ -28,11 +25,9 @@ const IQ3_KT_QH: usize = 68;
 const IQ4_KT_QL: usize = 32;
 const IQ4_KT_QH: usize = 96;
 
-// Each step multiplies the state and sums its four 6-bit bytes: a roughly Gaussian value in -126..=126.
 fn trellis_next(state: &mut u32) -> i32 {
-    *state = state.wrapping_mul(TRELLIS_MUL);
-    let s = *state & TRELLIS_MASK;
-    s.to_le_bytes().iter().map(|&b| i32::from(b)).sum::<i32>() - TRELLIS_BIAS
+    *state = IK.step(*state);
+    IK.decode(*state)
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u32 {

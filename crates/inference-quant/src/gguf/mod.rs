@@ -52,6 +52,7 @@ mod repack;
 pub mod requantize;
 #[cfg(feature = "cuda")]
 mod thread_workspace;
+mod trellis;
 mod weight_source;
 
 pub use weight_source::{
