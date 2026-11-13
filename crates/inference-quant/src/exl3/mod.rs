@@ -6,6 +6,10 @@
 mod cuda;
 #[cfg(feature = "cuda")]
 pub(crate) mod ffi;
+#[cfg(feature = "cuda")]
+pub(crate) mod qffi;
+#[cfg(feature = "cuda")]
+pub mod quantize;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{Exl3Experts, Exl3Layer};
@@ -87,7 +91,7 @@ impl Exl3Codebook {
 }
 
 // the stream position each row-major tile element is encoded at, the tensor-core order exllamav3's kernels read
-fn tile_order() -> [usize; TILE_VALUES] {
+pub(crate) fn tile_order() -> [usize; TILE_VALUES] {
     let mut perm = [0usize; TILE_VALUES];
     for t in 0..32 {
         let (r0, c0) = ((t % 4) * 2, t / 4);

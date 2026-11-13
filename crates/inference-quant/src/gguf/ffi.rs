@@ -1448,8 +1448,9 @@ mod tests {
                 }
             }
         }
-        // EXL3's library is not a GGUF type's (crate::exl3::ffi opens it)
+        // EXL3's libraries are not a GGUF type's (crate::exl3::ffi opens them)
         built.remove("exl3");
+        built.remove("exl3q");
         let listed: std::collections::BTreeSet<String> = super::TYPE_LIBRARIES
             .iter()
             .map(|(name, _, _)| name.to_string())
