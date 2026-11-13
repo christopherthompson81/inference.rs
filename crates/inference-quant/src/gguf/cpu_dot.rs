@@ -373,7 +373,7 @@ pub(crate) fn decode_tile(ty: GgufType, rows: &[u8], cols: usize, w: &mut [i16],
             GgufType::Iq2Xxs => avx2::decode_iq2_xxs(rows, w, d),
             GgufType::Iq3S => avx2::decode_iq3_s(rows, w, d),
             GgufType::Iq4Kss => avx2::decode_iq4_kss(rows, row_bytes, cols, w, d),
-            ty if grid::supports(ty) => grid::avx2::decode_tile(ty, rows, w, d),
+            ty if grid::supports(ty) => grid::avx2::decode_tile(ty, rows, cols, w, d),
             _ => avx2::decode_iq4_xs(rows, w, d),
         }
     }
@@ -1677,17 +1677,36 @@ mod tests {
         }
     }
 
-    const GRID_TYPES: [GgufType; 5] = [
+    const GRID_TYPES: [GgufType; 13] = [
         GgufType::Iq1S,
         GgufType::Iq1M,
         GgufType::Iq2Xs,
         GgufType::Iq2S,
         GgufType::Iq3Xxs,
+        GgufType::Iq2K,
+        GgufType::Iq2Ks,
+        GgufType::Iq2Kl,
+        GgufType::Iq3K,
+        GgufType::Iq3Ks,
+        GgufType::Iq1Kt,
+        GgufType::Iq2Kt,
+        GgufType::Iq3Kt,
     ];
 
-    // random blocks with a sane block scale, which IQ1_M keeps in its sub-scale words' top nibbles
+    // random blocks with a sane block scale (IQ1_M keeps it in its sub-scale words' top nibbles), or random blocks
+    // behind a sane f16 row scale
     fn grid_row(ty: GgufType, seed: u32) -> Vec<u8> {
         let size = ty.type_size();
+        if ty.row_scale_bytes() == 4 {
+            let mut row = 0.0004f32.to_le_bytes().to_vec();
+            row.extend(bytes(size * BLOCKS, seed));
+            return row;
+        }
+        if ty.row_scale_bytes() > 0 {
+            let mut row = half::f16::from_f32(0.004).to_le_bytes().to_vec();
+            row.extend(bytes(size * BLOCKS, seed));
+            return row;
+        }
         let mut row = row(size, seed);
         if ty == GgufType::Iq1M {
             for (i, block) in row.chunks_exact_mut(size).enumerate() {
@@ -1848,10 +1867,24 @@ mod bench {
             (GgufType::Iq2Xs, GgufType::Iq2Xs.type_size()),
             (GgufType::Iq2S, GgufType::Iq2S.type_size()),
             (GgufType::Iq3Xxs, GgufType::Iq3Xxs.type_size()),
+            (GgufType::Iq2K, GgufType::Iq2K.type_size()),
+            (GgufType::Iq2Ks, GgufType::Iq2Ks.type_size()),
+            (GgufType::Iq2Kl, GgufType::Iq2Kl.type_size()),
+            (GgufType::Iq3K, GgufType::Iq3K.type_size()),
+            (GgufType::Iq3Ks, GgufType::Iq3Ks.type_size()),
+            (GgufType::Iq1Kt, GgufType::Iq1Kt.type_size()),
+            (GgufType::Iq2Kt, GgufType::Iq2Kt.type_size()),
+            (GgufType::Iq3Kt, GgufType::Iq3Kt.type_size()),
         ] {
             let rows = 512;
             let row_bytes = ty.row_scale_bytes() + 8 * size;
-            let bytes = vec![3u8; rows * row_bytes];
+            let mut bytes = vec![3u8; rows * row_bytes];
+            // a byte pattern read as an f32 row scale is denormal once scaled, which would time the FPU's slow path
+            if ty.row_scale_bytes() == 4 {
+                for row in bytes.chunks_exact_mut(row_bytes) {
+                    row[..4].copy_from_slice(&0.01f32.to_le_bytes());
+                }
+            }
             let xs = vec![0.5f32; 8 * QK_K];
             let mut ys = vec![BlockQ8K::zeros(); 8];
             BlockQ8K::from_float(&xs, &mut ys);

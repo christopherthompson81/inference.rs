@@ -66,3 +66,43 @@ sized by the offloaded layers that exist at the first staged prompt, which in a 
 built one type's layer after another's prompt. The test now runs the types largest block first.
 
 Not done: an IQ1_M MMQ kernel (would bring its prompts back onto the staged path); the ik_llama types (step 2).
+
+## Run 5 - 2026-11-13 14:30
+
+#938 step 2: ik_llama's table types IQ2_K, IQ2_KS, IQ2_KL, IQ3_K, IQ3_KS in the same module. The per-type trait now
+gives each type its own scalar and AVX2 decode (grid lookups for ggml's types; one byte shuffle over a 16-entry
+codebook for the 2- and 3-bit table types, two shuffles and a blend over IQ2_KL's 32 pair codes), and the loops read
+the f16 row scale the KS/KL types carry ahead of their blocks. Same bench:
+
+```
+type     1 token   x4
+Iq2K     4.55      9.33
+Iq2Ks    5.48      8.19
+Iq2Kl    3.14      8.44
+Iq3K     3.75      9.98
+Iq3Ks    4.58      11.73
+```
+
+Above the grid types per byte (no table gathers). The grid types did not move (Iq1S 1.95, Iq2Xs 2.03, Iq3Xxs 2.63).
+The offload test runs all eleven low-bit types against the resident GPU kernels (decode and prompt), sorted by row
+size for the shared staging.
+
+## Run 6 - 2026-11-13 15:00
+
+The trellis types IQ1_KT, IQ2_KT, IQ3_KT (f32 row scale, one integer scale per 32 values). A group's eight values are
+eight steps of `state *= 0xCBAC1FED`, each the sum of the state's four 6-bit bytes minus 126 (-126..=126, so a byte);
+in AVX2 one `mullo_epi32` of the start against the step's powers gives all eight states, two multiply-adds sum the
+bytes, and two packs plus a permute put four groups' values in order. IQ3_KT takes the magnitudes and its qh sign bits.
+
+First bench: Iq1Kt 0.49, Iq2Kt 0.66, Iq3Kt 1.25 GB/s for one token. Not the kernels: the bench fills rows with byte 3,
+which as an f32 row scale is 3.9e-37, and times the activation scale that is denormal, the FPU's slow path (the
+results printed ~1e-25). With a 0.01 row scale in the bench:
+
+```
+type     1 token   x4
+Iq1Kt    1.04      3.28
+Iq2Kt    1.72      4.64
+Iq3Kt    2.22      5.96
+```
+
+The offload test passes over all 14 low-bit types. Left in #938: step 3, the writers.
