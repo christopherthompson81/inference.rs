@@ -41,6 +41,7 @@ mod iq_grid_quantize;
 pub mod iq_quantize;
 mod iq_tables;
 mod iqk_dequant;
+mod iqk_quantize;
 pub mod kernel;
 mod kt_dequant;
 pub mod mapped;
