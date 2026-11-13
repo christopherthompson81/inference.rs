@@ -151,3 +151,35 @@ mean |d logprob| 0.00103, top-1 agreement 99.8%
 
 Prefill perplexity cannot see it (m = 512 never takes the GEMV): 1.4134 both ways. The GPU test's int8 case
 (random 512 x 512, mul1, m = 1 and 2) measures 6e-3 of the largest output against 3.4e-4 .. 8e-4 for the f16 kernels.
+
+## Run 7 - 2026-11-14 00:30
+
+MoE experts: Qwen3-30B-A3B-exl3 3.0bpw (turboderp, 3INST; experts stored one linear each,
+`mlp.experts.N.{gate,up,down}_proj.{trellis,suh,svh}`). `Exl3Experts` keeps each expert's trellis on the device
+with a device table of their addresses, and multiplies through exllamav3's `exl3_mgemm_kernel` in indexed mode (slot
+j: its row times expert `indices[j]`); the kernels were already in the library (the comp units instantiate gemm and
+mgemm), only a C launcher was new. Graph-safe: no host reads.
+
+Prefill on that path (one row a slot, so each slot reads its expert whole): 2598 tokens in 32.8 s, 79 tok/s. Fixes,
+2600-token README prompts, fresh each time (the prefix cache survives restarts, so a repeated prompt measures
+nothing; the server's own prompt rate also undercounts chunked prefill, so these are wall clock):
+
+```
+experts at prefill                                         tok/s
+one row a slot (indexed mgemm)                             79
+grouped on the host, one GEMM an expert (128 launches)     ~330
+grouped, one mgemm, every group padded to the largest      ~330 (690 under nsys: 60% mgemm, 17% the row gather)
+grouped, one mgemm, groups of at most 64 rows              1800
+exllamav3 1.6.6                                            2700
+```
+
+Grouping reads the indices on the host, so it runs only outside a capture and past 64 slots; decode keeps the
+indexed kernel.
+
+Decode: ours 100 tok/s, exllamav3 123.5. Per token (nsys, graph nodes): ours 11.2 ms of kernels, exllamav3 ~7.3.
+exllamav3 fuses q/k/v into one mgemm (2 launches a layer, 39 us, against our 4 at 63 us: ~1.2 ms a token), runs the
+experts through fused cooperative MoE kernels (`exl3_moe_coop_a/b`: gate+up+activation, then down with the routing
+weights, 59 us a layer against our 76 us plus the routing glue), and has none of our per-linear bf16/f16/f32 casts
+(~1 ms).
+
+Perplexity (README.md, 512 tokens, second half scored): ours 2.1382, exllamav3 2.1384.

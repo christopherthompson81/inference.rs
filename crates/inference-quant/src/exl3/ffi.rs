@@ -28,5 +28,25 @@ inference_tensor::kernel_library! {
             svh: *const f16,
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
+
+        /// Slot j's C (`m x n`) = A[j] (`m x k`, f16) times expert `indices[j]`, whose trellis, `suh` and `svh` the
+        /// three lists address; `a_had` holds `slots x m x k`. Returns as `launch_exl3_gemm`.
+        pub(crate) fn launch_exl3_mgemm(
+            a: *const f16,
+            b_list: *const u64,
+            c: *mut c_void,
+            size_m: i32,
+            size_k: i32,
+            size_n: i32,
+            tile_u16: i32,
+            cb: i32,
+            c_fp32: bool,
+            suh_list: *const u64,
+            a_had: *mut f16,
+            svh_list: *const u64,
+            indices: *const i64,
+            slots: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
     }
 }

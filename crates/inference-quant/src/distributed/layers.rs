@@ -2196,6 +2196,13 @@ impl PreQuantizedExperts {
             )?;
 
             (fused_gate_proj, fused_up_proj, fused_down_proj)
+        } else if matches!(quantization_config, Some(QuantizedConfig::Exl3 { .. })) {
+            let (h, i, e) = (hidden_size, moe_intermediate_size, num_experts);
+            (
+                crate::exl3::experts_b(e, h, i, "gate_proj", &experts_vb)?,
+                crate::exl3::experts_b(e, h, i, "up_proj", &experts_vb)?,
+                crate::exl3::experts_b(e, i, h, "down_proj", &experts_vb)?,
+            )
         } else if matches!(
             quantization_config,
             Some(QuantizedConfig::ModelOpt { .. } | QuantizedConfig::CompressedTensors { .. })
@@ -2495,7 +2502,7 @@ impl PreQuantizedExperts {
             (fused_gate_proj, fused_up_proj, fused_down_proj)
         } else {
             inference_tensor::bail!(
-                "PreQuantizedExperts loads pre-quantized expert formats only (AFQ, blockwise FP8, NVFP4, MXFP4)."
+                "PreQuantizedExperts loads pre-quantized expert formats only (AFQ, blockwise FP8, NVFP4, MXFP4, EXL3)."
             );
         };
 
