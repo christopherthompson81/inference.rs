@@ -66,3 +66,23 @@ sized by the offloaded layers that exist at the first staged prompt, which in a 
 built one type's layer after another's prompt. The test now runs the types largest block first.
 
 Not done: an IQ1_M MMQ kernel (would bring its prompts back onto the staged path); the ik_llama types (step 2).
+
+## Run 5 - 2026-11-13 14:30
+
+#938 step 2: ik_llama's table types IQ2_K, IQ2_KS, IQ2_KL, IQ3_K, IQ3_KS in the same module. The per-type trait now
+gives each type its own scalar and AVX2 decode (grid lookups for ggml's types; one byte shuffle over a 16-entry
+codebook for the 2- and 3-bit table types, two shuffles and a blend over IQ2_KL's 32 pair codes), and the loops read
+the f16 row scale the KS/KL types carry ahead of their blocks. Same bench:
+
+```
+type     1 token   x4
+Iq2K     4.55      9.33
+Iq2Ks    5.48      8.19
+Iq2Kl    3.14      8.44
+Iq3K     3.75      9.98
+Iq3Ks    4.58      11.73
+```
+
+Above the grid types per byte (no table gathers). The grid types did not move (Iq1S 1.95, Iq2Xs 2.03, Iq3Xxs 2.63).
+The offload test runs all eleven low-bit types against the resident GPU kernels (decode and prompt), sorted by row
+size for the shared staging.

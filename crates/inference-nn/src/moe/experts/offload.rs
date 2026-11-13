@@ -1061,9 +1061,16 @@ mod tests {
             .collect::<Vec<_>>();
         let meta = ty.row_scale_bytes();
         for row in bytes.chunks_exact_mut(row_bytes) {
-            if meta > 0 {
-                row[..meta].copy_from_slice(&(0.002f32 / 64.0).to_le_bytes());
-                continue;
+            match meta {
+                0 => {}
+                2 => {
+                    row[..2].copy_from_slice(&half::f16::from_f32(0.002 / 16.0).to_le_bytes());
+                    continue;
+                }
+                _ => {
+                    row[..meta].copy_from_slice(&(0.002f32 / 64.0).to_le_bytes());
+                    continue;
+                }
             }
             let scale = half::f16::from_f32(0.002);
             for block in row.chunks_exact_mut(ty.type_size()) {
@@ -1303,16 +1310,23 @@ mod tests {
         let device = Device::new_cuda(0)?;
         let cuda = device.as_cuda_device()?;
         use inference_quant::GgufType;
-        // the low-bit grid types run their own CPU kernels; the GPU side is the same mmvq / mmq. Largest blocks first:
-        // the process-wide staging is sized by the layers that exist at the first staged prompt
-        for ty in [
-            GgufType::Iq3Xxs,
-            GgufType::Iq2S,
-            GgufType::Iq2Xs,
+        // the low-bit types run their own CPU kernels; the GPU side is the same mmvq / mmq. Largest rows first: the
+        // process-wide staging is sized by the layers that exist at the first staged prompt
+        let mut types = [
             GgufType::Iq2Xxs,
-            GgufType::Iq1M,
             GgufType::Iq1S,
-        ] {
+            GgufType::Iq1M,
+            GgufType::Iq2Xs,
+            GgufType::Iq2S,
+            GgufType::Iq3Xxs,
+            GgufType::Iq2K,
+            GgufType::Iq2Ks,
+            GgufType::Iq2Kl,
+            GgufType::Iq3K,
+            GgufType::Iq3Ks,
+        ];
+        types.sort_by_key(|ty| std::cmp::Reverse(ty.row_bytes(HIDDEN)));
+        for ty in types {
             let dims = [[EXPERTS, INTER, HIDDEN], [EXPERTS, HIDDEN, INTER]];
             let bytes = [
                 random_blocks(ty, INTER, HIDDEN, 11),
