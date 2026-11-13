@@ -71,6 +71,8 @@ extend-ignore-re = [
 ]
 
 [default.extend-words]
+# EXL3's per-input scale tensor (`<linear>.suh`, beside `svh`)
+"suh" = "suh"
 # Qwen3-TTS's `codec_nothink_id` config key and its `ono_anna` preset voice
 "nothink" = "nothink"
 "ono" = "ono"

@@ -50,6 +50,7 @@ mod fp8_config;
 mod gemv;
 #[cfg(feature = "cuda")]
 pub use gemv::{gemv, should_use_gemv};
+pub mod exl3;
 mod gguf;
 mod gptq;
 mod hqq;
@@ -600,6 +601,10 @@ pub enum QuantizedConfig {
         group_size: usize,
     },
     MXFP4 {},
+    /// ExLlamaV3's trellis quants; `bits` is the model's average (a half-integer bitrate is fine).
+    Exl3 {
+        bits: f64,
+    },
 }
 
 // Common fields for all variants
@@ -647,6 +652,11 @@ impl inference_json::FromJson for QuantizedConfig {
 impl QuantizedConfig {
     // non-generic, so it compiles once here rather than in every crate whose config holds one
     fn from_value(value: serde_json::Value) -> serde_json::Result<Self> {
+        // EXL3's bits are fractional, which the integer `bits` of the others would refuse
+        if value.get("quant_method").and_then(|m| m.as_str()) == Some("exl3") {
+            let bits = value.get("bits").and_then(|b| b.as_f64()).unwrap_or(0.0);
+            return Ok(QuantizedConfig::Exl3 { bits });
+        }
         let raw = RawConfig::deserialize(value.clone())?;
 
         match &raw.quant_method {
@@ -805,6 +815,7 @@ impl QuantizedConfig {
             Self::Bitsandbytes { .. } => "bitsandbytes",
             Self::Afq { .. } => "afq",
             Self::MXFP4 { .. } => "mxfp4",
+            Self::Exl3 { .. } => "exl3",
         }
     }
 
@@ -827,6 +838,7 @@ impl QuantizedConfig {
             } => "8 bits".to_string(),
             Self::Afq { bits, .. } => format!("{bits} bits"),
             Self::MXFP4 {} => format!("{} bits", mxfp4::N_BITS),
+            Self::Exl3 { bits } => format!("{bits} bits"),
         }
     }
 
@@ -852,6 +864,8 @@ impl QuantizedConfig {
             } => 1,
             Self::Afq { bits, group_size } => afq_pack_factor(dtype, *bits, *group_size),
             Self::MXFP4 {} => IsqType::MXFP4.pack_factor(dtype),
+            // reconstructed into dense layers at load
+            Self::Exl3 { .. } => 1,
         }
     }
 }
@@ -3091,6 +3105,7 @@ pub(crate) fn checkpoint_linear(
         QuantizedConfig::MXFP4 {} => {
             MXFP4Layer::linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())
         }
+        QuantizedConfig::Exl3 { .. } => exl3::linear_b(in_dim, out_dim, bias, vb),
     }
 }
 
@@ -3165,6 +3180,17 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    // EXL3's bits are fractional, which the other formats' integer `bits` would refuse
+    #[test]
+    fn an_exl3_config_keeps_its_fractional_bits() {
+        let config: QuantizedConfig = serde_json::from_str(
+            r#"{"quant_method":"exl3","version":"0.0.1","bits":3.5,"head_bits":6}"#,
+        )
+        .unwrap();
+        assert!(matches!(config, QuantizedConfig::Exl3 { bits } if bits == 3.5));
+        assert_eq!(config.name(), "exl3");
+    }
 
     #[test]
     fn cpu_matmul_keeps_the_operand_dtype() -> Result<()> {

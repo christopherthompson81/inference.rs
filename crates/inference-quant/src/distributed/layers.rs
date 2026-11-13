@@ -202,6 +202,7 @@ fn checkpoint_parallel_linear(
             | QuantizedConfig::Bitsandbytes { .. }
             | QuantizedConfig::Afq { .. }
             | QuantizedConfig::MXFP4 {}
+            | QuantizedConfig::Exl3 { .. }
     ) && comm.world_size() != 1
     {
         inference_tensor::bail!(

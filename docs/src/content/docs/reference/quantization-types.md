@@ -238,3 +238,15 @@ inference run --format plain -m <gptq-or-awq-repo>
 inference.rs detects the quantization from the model's config. No `--quant` or `--isq` required.
 
 See the [quantization guide](/guides/quantization/quantize-a-model/) for format selection.
+
+## EXL3
+
+ExLlamaV3's trellis quants (`quant_method: exl3`, any bitrate including half-integer ones, and each of its 3INST,
+mcg and mul1 codebooks) load like GPTQ and AWQ: from the model's config, with no `--quant` or `--isq`.
+
+```bash
+inference run -m <exl3-model-dir>
+```
+
+The weights are reconstructed into dense layers as they load, so a model takes its unquantized size in memory. Add
+`--isq` to quantize the reconstructed layers again.
