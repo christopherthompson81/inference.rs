@@ -1584,6 +1584,14 @@ pub struct PackedLinear {
 pub type PackedColumnParallel = PackedLinear;
 
 impl QuantMethod for ColumnParallelLayer {
+    #[cfg(feature = "cuda")]
+    fn exl3_layer(&self) -> Option<&crate::exl3::Exl3Layer> {
+        self.bias
+            .is_none()
+            .then(|| self.weight.exl3_layer())
+            .flatten()
+    }
+
     fn new(_method: QuantMethodConfig) -> Result<Self>
     where
         Self: Sized,
@@ -2008,6 +2016,11 @@ impl ReplicatedLayer {
 }
 
 impl QuantMethod for ReplicatedLayer {
+    #[cfg(feature = "cuda")]
+    fn exl3_layer(&self) -> Option<&crate::exl3::Exl3Layer> {
+        self.0.exl3_layer()
+    }
+
     fn new(_method: QuantMethodConfig) -> Result<Self>
     where
         Self: Sized,

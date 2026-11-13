@@ -183,3 +183,31 @@ weights, 59 us a layer against our 76 us plus the routing glue), and has none of
 (~1 ms).
 
 Perplexity (README.md, 512 tokens, second half scored): ours 2.1382, exllamav3 2.1384.
+
+## Run 8 - 2026-11-14 03:00
+
+The fused decode paths, Qwen3-30B-A3B-exl3 3.0bpw, decode tok/s (poem prompt, ~150 tokens):
+
+```
+step                                                               ours    exllamav3 1.6.6
+Run 7 (indexed mgemm per projection)                               100     123.5
++ exllamav3's fused MoE (exl3_moe_coop a/b: gate+up+silu, down)    123.5
++ f16 model dtype (no input/output casts around each linear)       ~126 (bf16 kept as the default)
++ q/k/v in one mgemm, per-matrix widths                            124     (35 us a layer against 48 apart)
++ the same, sliced into equal column slices                        142
+```
+
+The fused MoE (`exl3_moe_coop_launch`, vendored without its torch front ends) takes up to 8 tokens; our C ABI fills
+its parameter block from a struct of our own. q/k/v: q, k and v each rotate their input with their own `suh`, so
+their trellises cannot be concatenated into one; exllamav3's mgemm takes the three, in sliced mode (q cut into
+k-wide column slices, each with its trellis and `svh` offset to its first column, the input rotated once per
+source). The per-matrix-width mode left k and v's blocks idle while q ran (35 us); sliced, every slice the same
+width. The output pointers change every call, so a one-thread kernel fills them from the group's device tables
+(built on the first call, a prefill, since the decode graphs capture later and a capture cannot copy tables to the
+device). Two traps on the way: the q/k/v layers arrive wrapped in ColumnParallelLayer, which had to forward the
+EXL3 hook; and a group built only on a fusable (small) call never got its tables, as the first such call was inside
+a capture. mul1 groups at K <= 5 stay unfused (the int8 GEMV alone is faster, exllamav3's own gate); gate/up of a
+dense MLP fuse the same way.
+
+Decode accuracy (teacher-forced, 6 x 96 README tokens through the prefix cache): fused 4.74172, unfused (master)
+4.75968; mean |d logprob| 0.0165, top-1 agreement 99.8%. The 27B (mul1, int8 GEMV) is unchanged at 47 tok/s.

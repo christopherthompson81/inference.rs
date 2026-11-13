@@ -2066,6 +2066,18 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         None
     }
 
+    /// The layer as an EXL3 trellis on a GPU, for fused projection groups.
+    #[cfg(feature = "cuda")]
+    fn exl3_layer(&self) -> Option<&exl3::Exl3Layer> {
+        None
+    }
+
+    /// The layer as EXL3 experts kept as trellises, for the fused MoE decode.
+    #[cfg(feature = "cuda")]
+    fn exl3_experts(&self) -> Option<&exl3::Exl3Experts> {
+        None
+    }
+
     /// The bias-free weight as Vulkan's block kernels read it, for the fused decode matvecs.
     fn vulkan_block_weight(&self) -> Option<inference_tensor::vulkan::BlockWeight> {
         None
