@@ -1324,6 +1324,9 @@ mod tests {
             GgufType::Iq2Kl,
             GgufType::Iq3K,
             GgufType::Iq3Ks,
+            GgufType::Iq1Kt,
+            GgufType::Iq2Kt,
+            GgufType::Iq3Kt,
         ];
         types.sort_by_key(|ty| std::cmp::Reverse(ty.row_bytes(HIDDEN)));
         for ty in types {

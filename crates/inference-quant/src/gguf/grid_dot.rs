@@ -1,5 +1,5 @@
-//! The 1-3 bit i-quants against Q8_K activations: ggml's grid types (IQ1_S, IQ1_M, IQ2_XS, IQ2_S, IQ3_XXS) and
-//! ik_llama's table types (IQ2_K, IQ2_KS, IQ2_KL, IQ3_K, IQ3_KS). Each 32-value sub-block decodes to signed bytes
+//! The 1-3 bit i-quants against Q8_K activations: ggml's grid types (IQ1_S, IQ1_M, IQ2_XS, IQ2_S, IQ3_XXS),
+//! ik_llama's table types (IQ2_K, IQ2_KS, IQ2_KL, IQ3_K, IQ3_KS) and its trellis types (IQ1_KT, IQ2_KT, IQ3_KT). Each 32-value sub-block decodes to signed bytes
 //! under two 16-value integer scales, and each block to one float factor (with the row scale, where the type has one).
 
 use inference_tensor::quantized::k_quants::{BlockQ8K, QK_K};
@@ -25,7 +25,39 @@ const IQ3_XXS_FACTOR: f32 = 0.25;
 // IQ1 values are grid + or - 1/8, held here as 8 grid + or - 1 under an eighth of the scale
 const IQ1_FACTOR: f32 = 0.125;
 const IQ1_GRID_STEP: i8 = 8;
-const ROW_SCALE_BYTES: usize = 2;
+const F16_ROW_SCALE: usize = 2;
+const F32_ROW_SCALE: usize = 4;
+// the trellis: each step multiplies a group's state and sums its four 6-bit bytes, a value in -126..=126
+const TRELLIS_MUL: u32 = 0xCBAC1FED;
+const TRELLIS_MASK: u32 = 0x3f3f3f3f;
+const TRELLIS_BIAS: i32 = 126;
+const TRELLIS_INDEX_OFFSET: u32 = 4096;
+const TRELLIS_GROUP: usize = 8;
+// the state after each of a group's eight steps is its start times these
+const TRELLIS_POWERS: [u32; 8] = trellis_powers();
+// ik's CUDA and CPU-GEMM kernels scale IQ2_KT and IQ3_KT rows by these
+const IQ2_KT_SCALE: f32 = 1.05;
+const IQ3_KT_SCALE: f32 = 1.01;
+const KT_SCALES: usize = 4;
+const IQ1_KT_QL: usize = 8;
+const IQ1_KT_QH: usize = 40;
+const IQ3_KT_QH: usize = 68;
+// the first half of ik's iq4k_values, the trellis types' sub-block scales
+const IQ4K_VALUES: [i8; 16] = [
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+];
+
+const fn trellis_powers() -> [u32; 8] {
+    let mut out = [0u32; 8];
+    let mut power = 1u32;
+    let mut k = 0;
+    while k < 8 {
+        power = power.wrapping_mul(TRELLIS_MUL);
+        out[k] = power;
+        k += 1;
+    }
+    out
+}
 // each byte's eight bits as bytes of -1 (bit set) or +1
 const BYTE_SIGNS: [u64; 256] = byte_signs();
 const IQ2_K_EXTRA: usize = 2;
@@ -96,6 +128,9 @@ pub(super) fn supports(ty: GgufType) -> bool {
             | GgufType::Iq2Kl
             | GgufType::Iq3K
             | GgufType::Iq3Ks
+            | GgufType::Iq1Kt
+            | GgufType::Iq2Kt
+            | GgufType::Iq3Kt
     )
 }
 
@@ -146,8 +181,8 @@ fn iq1_shift(negative: bool) -> u64 {
 /// One type's block layout; the kernels are generic over it so each type's decode inlines into its own loop.
 trait Grid {
     const BYTES: usize;
-    // an f16 scale ahead of the row's blocks
-    const ROW_SCALE: bool = false;
+    // the f16 (2) or f32 (4) scale ahead of the row's blocks
+    const ROW_SCALE: usize = 0;
     /// The float every integer value of the block is multiplied by, given the row's scale (1 without one).
     fn factor(block: &[u8], row: f32) -> f32;
     /// Sub-block `ib`'s 32 values and its two 16-value scales.
@@ -438,7 +473,7 @@ impl Iq3K {
 
 impl Grid for Iq2Ks {
     const BYTES: usize = 70;
-    const ROW_SCALE: bool = true;
+    const ROW_SCALE: usize = F16_ROW_SCALE;
 
     fn factor(_: &[u8], row: f32) -> f32 {
         row
@@ -482,7 +517,7 @@ impl Iq2Ks {
 
 impl Grid for Iq3Ks {
     const BYTES: usize = 102;
-    const ROW_SCALE: bool = true;
+    const ROW_SCALE: usize = F16_ROW_SCALE;
 
     fn factor(_: &[u8], row: f32) -> f32 {
         row
@@ -526,7 +561,7 @@ impl Iq3Ks {
 
 impl Grid for Iq2Kl {
     const BYTES: usize = 86;
-    const ROW_SCALE: bool = true;
+    const ROW_SCALE: usize = F16_ROW_SCALE;
 
     fn factor(_: &[u8], row: f32) -> f32 {
         row
@@ -574,6 +609,140 @@ impl Iq2Kl {
     }
 }
 
+struct Iq1Kt;
+struct Iq2Kt;
+struct Iq3Kt;
+
+// group `g`'s eight trellis values from its start `index`
+#[inline(always)]
+fn trellis(index: u32) -> [i8; TRELLIS_GROUP] {
+    let start = index + TRELLIS_INDEX_OFFSET;
+    std::array::from_fn(|k| {
+        let state = start.wrapping_mul(TRELLIS_POWERS[k]) & TRELLIS_MASK;
+        let sum: i32 = state.to_le_bytes().iter().map(|&b| i32::from(b)).sum();
+        (sum - TRELLIS_BIAS) as i8
+    })
+}
+
+#[inline(always)]
+fn trellis_values(index: impl Fn(usize) -> u32) -> [i8; 32] {
+    let groups: [[i8; TRELLIS_GROUP]; 4] = std::array::from_fn(|l| trellis(index(l)));
+    std::array::from_fn(|j| groups[j / TRELLIS_GROUP][j % TRELLIS_GROUP])
+}
+
+// the scale nibble IQ2_KT and IQ3_KT keep per sub-block in their first four bytes
+#[inline(always)]
+fn kt_nibble(block: &[u8], ib: usize) -> usize {
+    usize::from(block[ib % 4] >> (4 * (ib / 4))) & 0xf
+}
+
+impl Grid for Iq2Kt {
+    const BYTES: usize = 68;
+    const ROW_SCALE: usize = F32_ROW_SCALE;
+
+    fn factor(_: &[u8], row: f32) -> f32 {
+        row * IQ2_KT_SCALE
+    }
+
+    #[inline(always)]
+    fn decode(block: &[u8], ib: usize) -> ([i8; 32], [i16; 2]) {
+        let scale = i16::from(IQ4K_VALUES[kt_nibble(block, ib)]);
+        (trellis_values(|l| Self::index(block, ib, l)), [scale; 2])
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn decode_avx2(block: &[u8], ib: usize) -> (std::arch::x86_64::__m256i, [i16; 2]) {
+        let scale = i16::from(IQ4K_VALUES[kt_nibble(block, ib)]);
+        // SAFETY: the caller runs with AVX2 enabled
+        (
+            unsafe { avx2::trellis_values(|l| Self::index(block, ib, l)) },
+            [scale; 2],
+        )
+    }
+}
+
+impl Iq2Kt {
+    #[inline(always)]
+    fn index(block: &[u8], ib: usize, l: usize) -> u32 {
+        u16_at(block, KT_SCALES + 2 * (4 * ib + l)) as u32
+    }
+}
+
+impl Grid for Iq1Kt {
+    const BYTES: usize = 56;
+    const ROW_SCALE: usize = F32_ROW_SCALE;
+
+    fn factor(_: &[u8], row: f32) -> f32 {
+        row
+    }
+
+    #[inline(always)]
+    fn decode(block: &[u8], ib: usize) -> ([i8; 32], [i16; 2]) {
+        let scale = i16::from(IQ4K_VALUES[usize::from(block[ib] & 0xf)]);
+        (trellis_values(|l| Self::index(block, ib, l)), [scale; 2])
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn decode_avx2(block: &[u8], ib: usize) -> (std::arch::x86_64::__m256i, [i16; 2]) {
+        let scale = i16::from(IQ4K_VALUES[usize::from(block[ib] & 0xf)]);
+        // SAFETY: the caller runs with AVX2 enabled
+        (
+            unsafe { avx2::trellis_values(|l| Self::index(block, ib, l)) },
+            [scale; 2],
+        )
+    }
+}
+
+impl Iq1Kt {
+    // a 13-bit index: a ql byte, a qh nibble, and one bit of the sub-block's scale byte
+    #[inline(always)]
+    fn index(block: &[u8], ib: usize, l: usize) -> u32 {
+        let g = 4 * ib + l;
+        let s = u32::from(block[ib]);
+        u32::from(block[IQ1_KT_QL + g])
+            | ((u32::from(block[IQ1_KT_QH + g % 16]) << (8 - 4 * (g / 16))) & 0xf00)
+            | ((s << (8 - l)) & 0x1000)
+    }
+}
+
+impl Grid for Iq3Kt {
+    const BYTES: usize = 100;
+    const ROW_SCALE: usize = F32_ROW_SCALE;
+
+    fn factor(_: &[u8], row: f32) -> f32 {
+        row * IQ3_KT_SCALE
+    }
+
+    // magnitudes of the trellis values, each value's sign bit `ib` of its qh byte
+    #[inline(always)]
+    fn decode(block: &[u8], ib: usize) -> ([i8; 32], [i16; 2]) {
+        let magnitudes = trellis_values(|l| Iq2Kt::index(block, ib, l));
+        let qh = &block[IQ3_KT_QH..][..32];
+        let values = std::array::from_fn(|j| {
+            let m = magnitudes[j].abs();
+            if bit(usize::from(qh[j]), ib) != 0 {
+                -m
+            } else {
+                m
+            }
+        });
+        (values, [kt_nibble(block, ib) as i16; 2])
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn decode_avx2(block: &[u8], ib: usize) -> (std::arch::x86_64::__m256i, [i16; 2]) {
+        // SAFETY: the caller runs with AVX2 enabled
+        let values = unsafe {
+            let magnitudes = avx2::trellis_values(|l| Iq2Kt::index(block, ib, l));
+            avx2::with_signs(magnitudes, &block[IQ3_KT_QH..], ib)
+        };
+        (values, [kt_nibble(block, ib) as i16; 2])
+    }
+}
+
 // runs `$body` with `$g` naming the grid type of `$ty`
 macro_rules! with_grid {
     ($ty:expr, $g:ident => $body:expr) => {
@@ -618,6 +787,18 @@ macro_rules! with_grid {
                 type $g = Iq3Ks;
                 $body
             }
+            GgufType::Iq1Kt => {
+                type $g = Iq1Kt;
+                $body
+            }
+            GgufType::Iq2Kt => {
+                type $g = Iq2Kt;
+                $body
+            }
+            GgufType::Iq3Kt => {
+                type $g = Iq3Kt;
+                $body
+            }
             other => unreachable!("grid_dot::supports({other:?}) is false"),
         }
     };
@@ -646,11 +827,12 @@ impl Sub {
 // the row's blocks and its scale (1 for a type without one)
 #[inline(always)]
 fn split_row<G: Grid>(row: &[u8]) -> (&[u8], f32) {
-    if G::ROW_SCALE {
-        (&row[ROW_SCALE_BYTES..], f16_at(row, 0))
-    } else {
-        (row, 1.0)
-    }
+    let scale = match G::ROW_SCALE {
+        F16_ROW_SCALE => f16_at(row, 0),
+        F32_ROW_SCALE => f32::from_le_bytes(row[..4].try_into().expect("4 bytes")),
+        _ => 1.0,
+    };
+    (&row[G::ROW_SCALE..], scale)
 }
 
 fn generic<G: Grid>(row: &[u8], ys: &[BlockQ8K]) -> f32 {
@@ -703,8 +885,9 @@ pub(super) mod avx2 {
 
     use super::super::avx2::{hsum, prefetch_ahead, store_scaled};
     use super::{
-        GgufType, Grid, IQ1_GRID_STEP, IQ2KL_FIRST, IQ2KL_SECOND, Iq1M, Iq1S, Iq2K, Iq2Kl, Iq2Ks,
-        Iq2S, Iq2Xs, Iq3K, Iq3Ks, Iq3Xxs, Sub, split_row,
+        GgufType, Grid, IQ1_GRID_STEP, IQ2KL_FIRST, IQ2KL_SECOND, Iq1Kt, Iq1M, Iq1S, Iq2K, Iq2Kl,
+        Iq2Ks, Iq2Kt, Iq2S, Iq2Xs, Iq3K, Iq3Ks, Iq3Kt, Iq3Xxs, Sub, TRELLIS_BIAS,
+        TRELLIS_INDEX_OFFSET, TRELLIS_MASK, TRELLIS_POWERS, split_row,
     };
 
     // The decoders below have no target feature of their own so they always inline into the AVX2 loops (a call
@@ -795,6 +978,42 @@ pub(super) mod avx2 {
         }
     }
 
+    // four groups' trellis values: each group's eight states from one multiply by the step's powers, their masked
+    // bytes summed by two multiply-adds, then packed to bytes in order
+    #[inline(always)]
+    pub(super) unsafe fn trellis_values(index: impl Fn(usize) -> u32) -> __m256i {
+        // SAFETY: the caller runs with AVX2 enabled; the powers hold 8 words
+        unsafe {
+            let powers = _mm256_loadu_si256(TRELLIS_POWERS.as_ptr().cast());
+            let group = |l: usize| {
+                let start = _mm256_set1_epi32((index(l) + TRELLIS_INDEX_OFFSET) as i32);
+                let states = _mm256_and_si256(
+                    _mm256_mullo_epi32(start, powers),
+                    _mm256_set1_epi32(TRELLIS_MASK as i32),
+                );
+                let pairs = _mm256_maddubs_epi16(states, _mm256_set1_epi8(1));
+                let sums = _mm256_madd_epi16(pairs, _mm256_set1_epi16(1));
+                _mm256_sub_epi32(sums, _mm256_set1_epi32(TRELLIS_BIAS))
+            };
+            let low = _mm256_packs_epi32(group(0), group(1));
+            let high = _mm256_packs_epi32(group(2), group(3));
+            // the packs interleave the groups' halves per 128-bit lane; this puts each group's eight together
+            let order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+            _mm256_permutevar8x32_epi32(_mm256_packs_epi16(low, high), order)
+        }
+    }
+
+    // the magnitudes of `values`, negated where bit `at` of each of 32 bytes is set
+    #[inline(always)]
+    pub(super) unsafe fn with_signs(values: __m256i, bytes: &[u8], at: usize) -> __m256i {
+        // SAFETY: the caller runs with AVX2 enabled; bits_at checks the 32 bytes
+        unsafe {
+            let negate = _mm256_cmpeq_epi8(bits_at(bytes, at), _mm256_set1_epi8(1));
+            let magnitudes = _mm256_abs_epi8(values);
+            _mm256_sub_epi8(_mm256_xor_si256(magnitudes, negate), negate)
+        }
+    }
+
     #[target_feature(enable = "avx2,fma")]
     pub(super) fn dot<G: Grid, const N: usize>(row: &[u8], ys: [&[BlockQ8K]; N]) -> [f32; N] {
         let (blocks, row_scale) = split_row::<G>(row);
@@ -826,7 +1045,7 @@ pub(super) mod avx2 {
 
     #[target_feature(enable = "avx2,fma")]
     fn decode_rows<G: Grid>(rows: &[u8], cols: usize, w: &mut [i16], d: &mut [f32]) {
-        let row_bytes = usize::from(G::ROW_SCALE) * super::ROW_SCALE_BYTES + cols / QK_K * G::BYTES;
+        let row_bytes = G::ROW_SCALE + cols / QK_K * G::BYTES;
         let w_blocks = w.as_chunks_mut::<QK_K>().0.chunks_exact_mut(cols / QK_K);
         for ((row, w), d) in rows
             .chunks_exact(row_bytes)
