@@ -41,6 +41,7 @@ pub(crate) struct IsqPlanInputs<'a> {
     pub in_situ_quant: Option<IsqType>,
     pub has_imatrix: bool,
     pub has_calibration: bool,
+    pub has_hessians_out: bool,
     pub write_uqff_types: Option<Vec<IsqType>>,
     pub has_write_uqff: bool,
     pub loading_from_uqff: bool,
@@ -533,8 +534,13 @@ pub(crate) fn resolve_and_install_isq_plan(i: IsqPlanInputs<'_>) -> Result<IsqLo
     if i.has_imatrix && i.has_calibration {
         anyhow::bail!("`imatrix` and `calibration_file` were both specified, this is not allowed.");
     }
+    if i.has_hessians_out && (!i.has_calibration || i.in_situ_quant.is_some() || i.has_write_uqff) {
+        anyhow::bail!(
+            "collecting Hessians (`hessians_out`) needs a calibration file and no ISQ type or UQFF write"
+        );
+    }
     // UQFF writes carry their ISQ types in `write_uqff.types` rather than `in_situ_quant`.
-    if wants_imatrix && i.in_situ_quant.is_none() && !i.has_write_uqff {
+    if wants_imatrix && i.in_situ_quant.is_none() && !i.has_write_uqff && !i.has_hessians_out {
         anyhow::bail!("imatrix quantization requires an ISQ type (e.g. `--isq q4k`).");
     }
     if i.has_write_uqff
@@ -590,8 +596,9 @@ pub(crate) fn resolve_and_install_isq_plan(i: IsqPlanInputs<'_>) -> Result<IsqLo
         i.topology_overrides.clone()
     };
 
-    let allow_immediate_cli =
-        !i.loading_from_uqff && (i.in_situ_quant.is_some() || i.has_write_uqff);
+    // a Hessian collection tracks every layer unquantized, as a UQFF write does
+    let allow_immediate_cli = !i.loading_from_uqff
+        && (i.in_situ_quant.is_some() || i.has_write_uqff || i.has_hessians_out);
     let write_types = if i.has_write_uqff {
         i.write_uqff_types.map(|types| {
             if types.is_empty() {
@@ -646,7 +653,7 @@ pub(crate) fn resolve_and_install_isq_plan(i: IsqPlanInputs<'_>) -> Result<IsqLo
             );
         }
 
-        let capture = capture_mode(i.has_write_uqff, wants_imatrix);
+        let capture = capture_mode(i.has_write_uqff, i.has_hessians_out, wants_imatrix);
         let (executor, num_threads) = inference_quant::create_isq_executor(
             inference_quant::IsqExecutorConfig::new(immediate_ty),
         );
@@ -666,7 +673,7 @@ pub(crate) fn resolve_and_install_isq_plan(i: IsqPlanInputs<'_>) -> Result<IsqLo
             inference_quant::ImmediateIsqConfig::new(
                 immediate_ty,
                 Vec::new(),
-                capture_mode(i.has_write_uqff, wants_imatrix),
+                capture_mode(i.has_write_uqff, i.has_hessians_out, wants_imatrix),
             )
             .with_promoted_predicates(promoted_predicates)
             .with_overrides(topology_overrides.clone()),
@@ -684,6 +691,8 @@ pub(crate) fn resolve_and_install_isq_plan(i: IsqPlanInputs<'_>) -> Result<IsqLo
     // so we load directly to the device.
     let load_device = if i.has_write_uqff {
         Device::Cpu
+    } else if i.has_hessians_out {
+        i.device.clone()
     } else if !loading_isq {
         if use_immediate && !crate::utils::normal::is_integrated_gpu(i.device) {
             Device::Cpu
@@ -697,7 +706,7 @@ pub(crate) fn resolve_and_install_isq_plan(i: IsqPlanInputs<'_>) -> Result<IsqLo
     Ok(IsqLoadPlan {
         wants_imatrix,
         immediate_isq_installed: use_immediate,
-        capture: capture_mode(i.has_write_uqff, wants_imatrix),
+        capture: capture_mode(i.has_write_uqff, i.has_hessians_out, wants_imatrix),
         write_types,
         uqff_quantize_predicates,
         loading_isq,
@@ -707,9 +716,15 @@ pub(crate) fn resolve_and_install_isq_plan(i: IsqPlanInputs<'_>) -> Result<IsqLo
     })
 }
 
-fn capture_mode(has_write_uqff: bool, wants_imatrix: bool) -> inference_quant::IsqCaptureMode {
+fn capture_mode(
+    has_write_uqff: bool,
+    has_hessians_out: bool,
+    wants_imatrix: bool,
+) -> inference_quant::IsqCaptureMode {
     if has_write_uqff {
         inference_quant::IsqCaptureMode::CaptureAll
+    } else if has_hessians_out {
+        inference_quant::IsqCaptureMode::CaptureAllResident
     } else if wants_imatrix {
         inference_quant::IsqCaptureMode::CaptureMatches
     } else {
@@ -833,6 +848,7 @@ mod tests {
             in_situ_quant: None,
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: Some(vec![IsqType::Q4K, IsqType::Q8_0]),
             has_write_uqff: true,
             loading_from_uqff: false,
@@ -868,6 +884,7 @@ mod tests {
             in_situ_quant: None,
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: Some(vec![IsqType::Q4K, IsqType::Q4K]),
             has_write_uqff: true,
             loading_from_uqff: false,
@@ -892,6 +909,7 @@ mod tests {
             in_situ_quant: None,
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: Some(vec![IsqType::Q4K]),
             has_write_uqff: true,
             loading_from_uqff: false,
@@ -912,6 +930,7 @@ mod tests {
             in_situ_quant: Some(IsqType::Q4K),
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: None,
             has_write_uqff: false,
             loading_from_uqff: false,
@@ -931,6 +950,7 @@ mod tests {
             in_situ_quant: None,
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: Some(vec![IsqType::Q4K]),
             has_write_uqff: true,
             loading_from_uqff: false,
@@ -959,6 +979,7 @@ mod tests {
             in_situ_quant: None,
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: Some(vec![IsqType::Q4K]),
             has_write_uqff: true,
             loading_from_uqff: false,
@@ -982,6 +1003,7 @@ mod tests {
             in_situ_quant: None,
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: None,
             has_write_uqff: false,
             loading_from_uqff: false,
@@ -1008,6 +1030,7 @@ mod tests {
             in_situ_quant: Some(IsqType::Q4K),
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: None,
             has_write_uqff: false,
             loading_from_uqff: true,
@@ -1036,6 +1059,7 @@ mod tests {
             in_situ_quant: Some(IsqType::Q4K),
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: None,
             has_write_uqff: false,
             loading_from_uqff: true,
@@ -1081,6 +1105,7 @@ mod tests {
             in_situ_quant: Some(IsqType::Q4K),
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: None,
             has_write_uqff: false,
             loading_from_uqff: false,
@@ -1110,6 +1135,7 @@ mod tests {
             in_situ_quant: None,
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: None,
             has_write_uqff: false,
             loading_from_uqff: false,
@@ -1130,6 +1156,7 @@ mod tests {
             in_situ_quant: Some(IsqType::Q4K),
             has_imatrix: false,
             has_calibration: false,
+            has_hessians_out: false,
             write_uqff_types: None,
             has_write_uqff: false,
             loading_from_uqff: false,
@@ -1180,6 +1207,7 @@ mod tests {
             in_situ_quant: Some(IsqType::Q4K),
             has_imatrix: false,
             has_calibration: true,
+            has_hessians_out: false,
             write_uqff_types: None,
             has_write_uqff: false,
             loading_from_uqff: true,

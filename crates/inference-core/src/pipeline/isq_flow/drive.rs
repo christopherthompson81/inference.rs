@@ -118,6 +118,148 @@ pub(crate) struct CalibrationCtx<'a> {
 }
 
 const CALIBRATION_CHUNK_SIZE: usize = 1024;
+const TIED_EMBEDDING: &str = "embed_tokens";
+const TIED_HEAD: &str = "lm_head";
+// the Hessians one calibration pass collects at once (f32 `[in, in]` per layer); more layers take more passes
+const HESSIAN_PASS_BYTES: usize = 4 << 30;
+
+fn calibration_tokens(calibration_file: &PathBuf, ctx: &CalibrationCtx<'_>) -> Result<Vec<u32>> {
+    let calibration_data = std::fs::read_to_string(calibration_file)?;
+    // Tokenize without bos; it is inserted per chunk
+    Ok(ctx
+        .tokenizer
+        .encode_fast(calibration_data, false)
+        .map_err(anyhow::Error::msg)?
+        .get_ids()
+        .to_vec())
+}
+
+// every chunk of `tokens` through the model once, the cache reset after each
+fn run_calibration(
+    drive: &dyn CalibrationDrive,
+    tokens: &[u32],
+    ctx: &CalibrationCtx<'_>,
+) -> Result<()> {
+    let n_chunks = tokens.len().div_ceil(CALIBRATION_CHUNK_SIZE);
+    let collect_start = std::time::Instant::now();
+    for (i, chunk) in tokens.chunks(CALIBRATION_CHUNK_SIZE).enumerate() {
+        let mut chunk = chunk.to_vec();
+        if let Some(bos_tok_id) = ctx.bos_tok_id {
+            chunk.insert(0, bos_tok_id);
+        }
+        let chunk_len = chunk.len();
+
+        let chunk_start = std::time::Instant::now();
+        let inputs = make_prompt_chunk(
+            0,
+            vec![&chunk],
+            &[0],
+            ctx.load_device,
+            None,
+            false,
+            None,
+            ctx.mapper,
+            None,
+            drive.sliding_window(),
+            false,
+        )?;
+        drive.calibration_forward(&inputs)?;
+        drive.reset_cache()?;
+
+        info!(
+            "Processed chunk {}/{n_chunks} ({chunk_len} tokens), {:.2}s",
+            i + 1,
+            chunk_start.elapsed().as_secs_f32()
+        );
+    }
+    ctx.load_device.synchronize()?;
+    info!(
+        "Finished the calibration pass in {:.2}s",
+        collect_start.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
+/// Each tracked layer's input Hessian (`x^T x` over the calibration file's rows, over their count) written as
+/// `<key>.safetensors` holding `hin` (f32 `[in, in]`) under `dir`: the layout exllamav3's converter takes as
+/// `--hessians`. Layers collect in passes whose Hessians fit `HESSIAN_PASS_BYTES`.
+pub(crate) fn write_hessians(
+    drive: &dyn CalibrationDrive,
+    modules: &[TrackedModule],
+    calibration_file: &PathBuf,
+    dir: &PathBuf,
+    ctx: &CalibrationCtx<'_>,
+) -> Result<()> {
+    let tokens = calibration_tokens(calibration_file, ctx)?;
+    std::fs::create_dir_all(dir)?;
+    let mut sized = Vec::with_capacity(modules.len());
+    for module in modules {
+        let layer = module.ct.resolve()?;
+        let Some((weight, _)) = layer.unquant_weight_bias() else {
+            anyhow::bail!(
+                "`{}` holds no full-precision weight to collect a Hessian for",
+                module.key
+            );
+        };
+        // stacked experts have no single input Hessian
+        if weight.rank() != 2 {
+            continue;
+        }
+        let in_dim = weight.dim(1)?;
+        sized.push((module, in_dim * in_dim * 4));
+    }
+    let mut passes: Vec<Vec<&TrackedModule>> = Vec::new();
+    let mut bytes = 0;
+    for (module, size) in sized {
+        if passes.is_empty() || bytes + size > HESSIAN_PASS_BYTES {
+            passes.push(Vec::new());
+            bytes = 0;
+        }
+        bytes += size;
+        passes.last_mut().unwrap().push(module);
+    }
+    info!(
+        "Collecting Hessians for {} layers from `{}` ({} tokens) in {} pass(es).",
+        passes.iter().map(Vec::len).sum::<usize>(),
+        calibration_file.display(),
+        tokens.len(),
+        passes.len()
+    );
+    for pass in passes {
+        for module in &pass {
+            module.ct.begin_track_hessian()?;
+        }
+        run_calibration(drive, &tokens, ctx)?;
+        for module in pass {
+            // an embedding is read by lookup, never multiplied: no rows, and no Hessian to write
+            if module
+                .ct
+                .stats_snapshot()
+                .is_some_and(|(_, rows)| rows == 0)
+            {
+                let _ = module.ct.end_track_stats();
+                continue;
+            }
+            let hessian = module
+                .ct
+                .end_track_stats()
+                .map_err(|e| anyhow::anyhow!("`{}`: {e}", module.key))?
+                .to_device(&Device::Cpu)?;
+            // an embedding that recorded rows was multiplied as the tied lm_head, which is the key a converter uses
+            let key = if module.key.ends_with(TIED_EMBEDDING) {
+                TIED_HEAD
+            } else {
+                &module.key
+            };
+            let path = dir.join(format!("{key}.safetensors"));
+            inference_tensor::safetensors::save(
+                &HashMap::from([("hin".to_string(), hessian)]),
+                &path,
+            )?;
+        }
+    }
+    Ok(())
+}
 
 /// Produce the per-layer imatrix map: collect via calibration forwards, or load from a file.
 pub(crate) fn resolve_imatrix_map(
@@ -128,62 +270,16 @@ pub(crate) fn resolve_imatrix_map(
     ctx: &CalibrationCtx<'_>,
 ) -> Result<HashMap<String, Vec<f32>>> {
     if let Some(calibration_file) = calibration_file {
-        let calibration_data = std::fs::read_to_string(calibration_file)?;
-        // Tokenize without bos; it is inserted per chunk below
-        let tokens = ctx
-            .tokenizer
-            .encode_fast(calibration_data, false)
-            .map_err(anyhow::Error::msg)?
-            .get_ids()
-            .to_vec();
+        let tokens = calibration_tokens(calibration_file, ctx)?;
         info!(
             "Collecting imatrix from calibration file `{}` of {} tokens.",
             calibration_file.display(),
             tokens.len()
         );
-
         for module in modules {
             module.ct.begin_track_stats()?;
         }
-
-        let n_chunks = tokens.len().div_ceil(CALIBRATION_CHUNK_SIZE);
-        let collect_start = std::time::Instant::now();
-        for (i, chunk) in tokens.chunks(CALIBRATION_CHUNK_SIZE).enumerate() {
-            let mut chunk = chunk.to_vec();
-            if let Some(bos_tok_id) = ctx.bos_tok_id {
-                chunk.insert(0, bos_tok_id);
-            }
-            let chunk_len = chunk.len();
-
-            let chunk_start = std::time::Instant::now();
-            let inputs = make_prompt_chunk(
-                0,
-                vec![&chunk],
-                &[0],
-                ctx.load_device,
-                None,
-                false,
-                None,
-                ctx.mapper,
-                None,
-                drive.sliding_window(),
-                false,
-            )?;
-            drive.calibration_forward(&inputs)?;
-            drive.reset_cache()?;
-
-            info!(
-                "Processed chunk {}/{n_chunks} ({chunk_len} tokens), {:.2}s",
-                i + 1,
-                chunk_start.elapsed().as_secs_f32()
-            );
-        }
-        ctx.load_device.synchronize()?;
-        info!(
-            "Finished collecting imatrix in {:.2}s",
-            collect_start.elapsed().as_secs_f32()
-        );
-
+        run_calibration(drive, &tokens, ctx)?;
         harvest_imatrix(modules)
     } else if let Some(imatrix_path) = imatrix_path {
         load_imatrix_map(imatrix_path, modules)

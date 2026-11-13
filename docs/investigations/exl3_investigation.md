@@ -211,3 +211,47 @@ dense MLP fuse the same way.
 
 Decode accuracy (teacher-forced, 6 x 96 README tokens through the prefix cache): fused 4.74172, unfused (master)
 4.75968; mean |d logprob| 0.0165, top-1 agreement 99.8%. The 27B (mul1, int8 GEMV) is unchanged at 47 tok/s.
+
+## Run 9 - 2026-11-14 05:00
+
+Writing EXL3 (#943 steps 2-3), planned. Holding every layer's Hessian for a whole-model pass does not fit: H is
+`in x in` f32 per input, ~1.2 GB for one 27B down_proj, ~90 GB over its 64 layers. exllamav3's converter goes a
+module at a time: capture that module's Hessians from the current calibration state, quantize it, push the state
+through the quantized module, next. About 4000 lines of Python (`conversion/convert_model.py`, `exl3_lib/
+quantize.py`). In phases:
+
+1. Hessian capture: `x^T x` per linear (f32, over every row, over the count; exllamav3 adds `sigma_reg` x the
+   mean diagonal at quantization, not at capture), collected in passes that fit a budget, written as exllamav3's
+   `--hessians` directory (`<key>.safetensors` holding `hin`), so exllamav3's own converter can check them.
+2. The tensor encoder: rotation (`su`/`sv` signs, 128-wide Hadamard), LDLQ over the Hessian, Viterbi over the
+   bitshift trellis, packing; tensor by tensor against exllamav3's quantizer.
+3. Whole models: the module-at-a-time driver with the state propagated through quantized modules, output in
+   exllamav3's layout, perplexity/KLD against exllamav3's conversion.
+
+Phase 1 done here. `hessians_out` (SDK `with_hessians_out`; the CLI gets the converter in phase 3) asks a load
+for a calibration file's Hessians in place of quantizing: every linear captured unquantized and left on its device
+(`CaptureAllResident`; `CaptureAll`, the UQFF write's, moves captures to the host), one calibration pass per
+4 GiB of Hessians. Traps: the parallel-layer wrappers forward hooks through a `delegate_to!` list that needed the
+new one; an untied embedding records no rows (skipped). A tied one (Qwen3-0.6B) records the lm_head's rows under
+`model.embed_tokens`.
+
+Qwen3-0.6B, README.md (6272 tokens), against transformers' (bf16 both, forward pre-hooks, the same 1024-token
+chunks; `scripts/exl3_hessian_parity.py`): rows equal (6272), relative Frobenius error 1.4e-3 .. 1.1e-2 over
+layers 0, 14 and 27 (larger deeper, as the two engines' bf16 activations drift). Shared inputs (q/k/v, gate/up)
+equal exactly. Collection of 485K tokens (exllamav3's standard calibration text, 350 KB of each part): 45 s.
+
+Our Hessians through exllamav3's own converter (`-hess`, Qwen3-0.6B, 4.0bpw, 3inst), against its own calibration:
+exllamav3 takes them ("Using precomputed Hessians"). A tied embedding's rows are the head's, so they are written as
+`lm_head` (the key the converter reads; without it the head was quantized uncalibrated). Perplexity
+(exllamav3's forward, docs/src/content/docs/reference/*.md, not in the calibration text):
+
+```
+                                   512 tokens (head uncalibrated)   4096 tokens
+bf16                               6.7753                           11.0421
+exllamav3, own calibration         6.8568                           11.4606  (+3.8%)
+exllamav3, our Hessians            6.8099                           11.6339  (+5.4%)
+```
+
+The 512-token reading was noise. Ours are the unquantized model's activations, collected in one pass;
+exllamav3's own are captured module by module from the state after the quantized modules before it, which lets
+each layer's LDLQ see (and compensate) its inputs' quantization error. That state propagation is phase 3.

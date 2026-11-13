@@ -241,6 +241,10 @@ impl QuantMethod for DynamicLoraLinear {
         self.base.has_bias()
     }
 
+    fn begin_track_hessian(&self) -> Result<()> {
+        self.base.begin_track_hessian()
+    }
+
     fn begin_track_stats(&self) -> Result<()> {
         self.base.begin_track_stats()
     }

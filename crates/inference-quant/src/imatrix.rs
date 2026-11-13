@@ -25,6 +25,12 @@ enum ImatrixLayerStats_ {
         counts: Tensor,
         accum: Tensor,
     },
+    /// The input's second moment `x^T x` `[in, in]` over every row, as EXL3's LDLQ weighs rounding errors.
+    Hessian {
+        ncalls: usize,
+        rows: usize,
+        h: Tensor,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +62,16 @@ impl ImatrixLayerStats {
         Ok(())
     }
 
+    /// Start collecting the full input Hessian `[in, in]` (f32) of a dense layer.
+    pub fn enable_hessian(&self, in_dim: usize, device: &Device) -> Result<()> {
+        *self.0.write().unwrap() = Some(ImatrixLayerStats_::Hessian {
+            ncalls: 0,
+            rows: 0,
+            h: Tensor::zeros((in_dim, in_dim), DType::F32, device)?,
+        });
+        Ok(())
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.0.read().unwrap().is_some()
     }
@@ -66,7 +82,8 @@ impl ImatrixLayerStats {
             ImatrixLayerStats_::Dense {
                 ncalls, row_counts, ..
             } => (*ncalls, *row_counts),
-            ImatrixLayerStats_::Routed { ncalls, rows, .. } => (*ncalls, *rows),
+            ImatrixLayerStats_::Routed { ncalls, rows, .. }
+            | ImatrixLayerStats_::Hessian { ncalls, rows, .. } => (*ncalls, *rows),
         })
     }
 
@@ -75,6 +92,15 @@ impl ImatrixLayerStats {
             return Ok(());
         }
         let mut handle = self.0.write().unwrap();
+        if let Some(ImatrixLayerStats_::Hessian { ncalls, rows, h }) = handle.as_mut() {
+            let x = inp
+                .reshape(((), inp.dim(D::Minus1)?))?
+                .to_dtype(DType::F32)?;
+            *ncalls += 1;
+            *rows += x.dim(0)?;
+            *h = (&*h + x.t()?.matmul(&x)?)?;
+            return Ok(());
+        }
         // routed layers are observed by their router; a stray plain forward contributes nothing
         let Some(ImatrixLayerStats_::Dense {
             row_counts,
@@ -134,7 +160,8 @@ impl ImatrixLayerStats {
         Ok(())
     }
 
-    /// Dense: `[in]`. Routed: `[E, in]` with all-zero rows for zero-traffic experts.
+    /// Dense: `[in]`. Routed: `[E, in]` with all-zero rows for zero-traffic experts. Hessian: `x^T x` over the rows
+    /// recorded, divided by their count, `[in, in]`.
     pub fn compute_imatrix(&self) -> Result<Tensor> {
         let handle = self.0.read().unwrap();
         match handle.as_ref().context("Layer stats were deinitialized!")? {
@@ -161,6 +188,12 @@ impl ImatrixLayerStats {
                 // Per-expert mean square; zero-traffic experts divide to zero, not NaN.
                 let safe_counts = counts.maximum(1.0)?.unsqueeze(1)?;
                 accum.broadcast_div(&safe_counts)? * *ncalls as f64
+            }
+            ImatrixLayerStats_::Hessian { rows, h, .. } => {
+                if *rows == 0 {
+                    inference_tensor::bail!("No activations were recorded for this layer.");
+                }
+                h / *rows as f64
             }
         }
     }
@@ -268,6 +301,31 @@ mod tests {
         let expected = manual_imatrix(&rows, 2);
         for (a, b) in imatrix.iter().zip(&expected) {
             assert!((a - b).abs() < 1e-4, "got {a}, expected {b}");
+        }
+        Ok(())
+    }
+
+    // the Hessian is x^T x over every row across calls, over the row count; its diagonal the mean square
+    #[test]
+    fn hessian_is_the_mean_outer_product() -> Result<()> {
+        let device = Device::Cpu;
+        let stats = ImatrixLayerStats::empty();
+        stats.enable_hessian(3, &device)?;
+        let x1 = Tensor::new(&[[1f32, 2., 0.], [0., 1., 3.]], &device)?;
+        let x2 = Tensor::new(&[[[2f32, 0., 1.]]], &device)?;
+        stats.process(&x1)?;
+        stats.process(&x2)?;
+        assert_eq!(stats.snapshot(), Some((2, 3)));
+        let h = stats.compute_imatrix()?.to_vec2::<f32>()?;
+        let rows = [[1f32, 2., 0.], [0., 1., 3.], [2., 0., 1.]];
+        for (i, row) in h.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                let expected = rows.iter().map(|r| r[i] * r[j]).sum::<f32>() / 3.0;
+                assert!(
+                    (v - expected).abs() < 1e-6,
+                    "H[{i}][{j}] {v} against {expected}"
+                );
+            }
         }
         Ok(())
     }

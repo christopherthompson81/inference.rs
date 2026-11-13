@@ -1918,6 +1918,7 @@ class ModelSelectedRun:
     calibration_file: str | None = None
     dtype: ModelDType | None = ModelDType.AUTO
     from_uqff: str | None = None
+    hessians_out: str | None = None
     hf_cache_path: str | None = None
     imatrix: str | None = None
     matformer_config_path: str | None = None
@@ -1944,6 +1945,7 @@ class ModelSelectedPlain:
     calibration_file: str | None = None
     dtype: ModelDType | None = ModelDType.AUTO
     from_uqff: str | None = None
+    hessians_out: str | None = None
     hf_cache_path: str | None = None
     imatrix: str | None = None
     matformer_config_path: str | None = None

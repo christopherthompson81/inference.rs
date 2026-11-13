@@ -56,6 +56,8 @@ fn apply_immediate_isq_inner(
         }) => {
             let device = if params.capture == crate::IsqCaptureMode::CaptureAll {
                 Device::Cpu
+            } else if params.capture == crate::IsqCaptureMode::CaptureAllResident {
+                vb.device().clone()
             } else {
                 device.unwrap_or_else(|| vb.device().clone())
             };

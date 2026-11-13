@@ -286,6 +286,50 @@ async fn an_isq_load_can_calibrate_on_a_text_file_first() -> anyhow::Result<()> 
     Ok(())
 }
 
+// one Hessian per dense layer, square over its input and symmetric; layers reading one input (q, k and v; gate and
+// up) record the same one
+async fn a_hessian_collection_writes_each_layers_input_hessian() -> anyhow::Result<()> {
+    let checkpoint = tiny_llama_checkpoint()?;
+    let calibration = checkpoint.path().join("calibration.txt");
+    std::fs::write(&calibration, CALIBRATION_TEXT)?;
+    let out = tempfile::tempdir()?;
+    cpu_text_builder(checkpoint.path())
+        .with_calibration_file(calibration)
+        .with_hessians_out(out.path().to_path_buf())
+        .build()
+        .await?;
+    let hessian = |key: &str| -> anyhow::Result<Tensor> {
+        let file = out.path().join(format!("model.layers.0.{key}.safetensors"));
+        Ok(inference_tensor::safetensors::load(&file, &Device::Cpu)?["hin"].clone())
+    };
+    let q = hessian("self_attn.q_proj")?;
+    let (rows, cols) = q.dims2()?;
+    anyhow::ensure!(rows == cols, "a {rows} x {cols} Hessian");
+    let asymmetry = (&q - q.t()?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+    anyhow::ensure!(
+        asymmetry < 1e-6,
+        "q_proj's Hessian is not symmetric ({asymmetry})"
+    );
+    for (a, b) in [
+        ("self_attn.q_proj", "self_attn.k_proj"),
+        ("self_attn.q_proj", "self_attn.v_proj"),
+        ("mlp.gate_proj", "mlp.up_proj"),
+    ] {
+        let diff = (hessian(a)? - hessian(b)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        anyhow::ensure!(
+            diff == 0.0,
+            "{a} and {b} read one input yet differ by {diff}"
+        );
+    }
+    for key in ["self_attn.o_proj", "mlp.down_proj"] {
+        anyhow::ensure!(hessian(key)?.dims2()?.0 > 0);
+    }
+    Ok(())
+}
+
 async fn a_lora_adapter_applies_only_when_a_request_selects_it() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let adapter = tempfile::tempdir()?;
@@ -642,6 +686,7 @@ concurrent_cases!(
         a_gpu_isq_load_that_writes_uqff_serves_it: 348,
         writing_uqff_while_loading_from_uqff_is_refused: 0,
         an_isq_load_can_calibrate_on_a_text_file_first: 0,
+        a_hessian_collection_writes_each_layers_input_hessian: 0,
         a_lora_adapter_applies_only_when_a_request_selects_it: 0,
         paged_gpu_decode_through_the_gather_matches_the_cpu: 348,
         a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu: 354,

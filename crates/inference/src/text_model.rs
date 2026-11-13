@@ -20,6 +20,7 @@ pub struct TextModelBuilder {
     pub(crate) from_uqff: Option<Vec<PathBuf>>,
     pub(crate) imatrix: Option<PathBuf>,
     pub(crate) calibration_file: Option<PathBuf>,
+    pub(crate) hessians_out: Option<PathBuf>,
     pub(crate) hf_cache_path: Option<PathBuf>,
     pub(crate) matformer_config_path: Option<PathBuf>,
     pub(crate) matformer_slice_name: Option<String>,
@@ -39,6 +40,7 @@ impl TextModelBuilder {
             from_uqff: None,
             imatrix: None,
             calibration_file: None,
+            hessians_out: None,
             hf_cache_path: None,
             matformer_config_path: None,
             matformer_slice_name: None,
@@ -95,6 +97,13 @@ impl TextModelBuilder {
         self
     }
 
+    /// Collect each layer's input Hessian from the calibration file into `dir` (exllamav3's `--hessians` layout,
+    /// for EXL3 quantization) instead of quantizing; takes no ISQ type.
+    pub fn with_hessians_out(mut self, dir: PathBuf) -> Self {
+        self.hessians_out = Some(dir);
+        self
+    }
+
     pub fn from_hf_cache_path(mut self, path: PathBuf) -> Self {
         self.hf_cache_path = Some(path);
         self
@@ -123,6 +132,7 @@ impl TextModelBuilder {
             from_uqff: uqff_files(self.from_uqff.as_deref()),
             imatrix: self.imatrix.clone(),
             calibration_file: self.calibration_file.clone(),
+            hessians_out: self.hessians_out.clone(),
             max_seq_len: self.options.auto_map.max_seq_len,
             max_batch_size: self.options.auto_map.max_batch_size,
             hf_cache_path: self.hf_cache_path.clone(),

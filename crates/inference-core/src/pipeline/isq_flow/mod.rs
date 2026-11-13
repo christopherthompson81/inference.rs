@@ -9,7 +9,7 @@ mod plan;
 
 pub(crate) use drive::{
     CalibrationCtx, CalibrationDrive, EmbeddingCalibrationDrive, MultimodalCalibrationDrive,
-    NormalCalibrationDrive, resolve_imatrix_map,
+    NormalCalibrationDrive, resolve_imatrix_map, write_hessians,
 };
 pub use online::CalibrationStatus;
 pub(crate) use online::{apply_calibration, begin_calibration, calibration_status};
@@ -42,6 +42,7 @@ pub(crate) struct FinishIsqLoad<'a> {
     pub in_situ_quant: Option<IsqType>,
     pub imatrix: Option<&'a PathBuf>,
     pub calibration_file: Option<&'a PathBuf>,
+    pub hessians_out: Option<&'a PathBuf>,
     pub calibration: CalibrationCtx<'a>,
     pub uqff: Option<UqffArtifact<'a>>,
 }
@@ -55,10 +56,18 @@ pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<Option<Vec<Pa
         in_situ_quant,
         imatrix,
         calibration_file,
+        hessians_out,
         calibration,
         uqff,
     } = inputs;
     plan.validate_tracked_selection(&modules)?;
+    if let (Some(dir), Some(calibration_file)) = (hessians_out, calibration_file) {
+        write_hessians(drive, &modules, calibration_file, dir, &calibration)?;
+        for module in modules {
+            module.ct.resolve()?;
+        }
+        return Ok(None);
+    }
     let imatrix_map = if plan.wants_imatrix {
         Some(resolve_imatrix_map(
             drive,
