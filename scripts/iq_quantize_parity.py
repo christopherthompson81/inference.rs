@@ -36,10 +36,17 @@ TYPES = {
     "iq4_xs": 23,
     "iq1_m": 29,
     "iq4_ks": 144,
+    "iq2_k": 137,
+    "iq3_k": 138,
+    "iq2_ks": 145,
+    "iq3_ks": 156,
+    "iq2_kl": 157,
 }
 DEFAULT_TYPES = ["iq4_nl", "iq4_xs"]
 # ggml_quantize_requires_imatrix: ggml aborts on these without one
 REQUIRES_IMATRIX = {"iq2_xxs", "iq2_xs", "iq1_s"}
+# ik_llama.cpp's quantize passes a zeroed `quantize_user_data`, which picks IQ2_KS's fast path; NULL picks the slow one
+USER_DATA = (ctypes.c_bool * 2)()
 ROWS, COLS = 64, 4096
 SEED = 0
 
@@ -105,7 +112,7 @@ def main():
                     ROWS,
                     COLS,
                     None if w is None else w.ctypes.data,
-                    None,
+                    ctypes.addressof(USER_DATA),
                 )
                 ours_path = os.path.join(tmp, f"{name}.bin")
                 subprocess.run(

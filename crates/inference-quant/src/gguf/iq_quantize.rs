@@ -7,6 +7,7 @@ use inference_tensor::Result;
 use rayon::prelude::*;
 
 use super::iq_grid_quantize as grid;
+use super::iqk_quantize as iqk;
 use super::kernel::GgufType;
 use super::raw::KVALUES_IQ4NL;
 
@@ -467,6 +468,11 @@ pub fn can_quantize(ty: GgufType) -> bool {
             | GgufType::Iq3S
             | GgufType::Iq1S
             | GgufType::Iq1M
+            | GgufType::Iq2K
+            | GgufType::Iq2Ks
+            | GgufType::Iq2Kl
+            | GgufType::Iq3K
+            | GgufType::Iq3Ks
     )
 }
 
@@ -482,7 +488,8 @@ pub fn quantize_rows(
     values: &[f32],
     imatrix: Option<&[f32]>,
 ) -> Result<Vec<u8>> {
-    // IQ4_KS's scales span the row, so it encodes whole rows; the others encode block by block
+    // IQ4_KS's scales span the row, and ik's types reweigh the imatrix per row, so those encode whole rows; the
+    // others encode block by block
     let (block, row_bytes, encode): (usize, usize, Option<BlockEncoder>) = match ty {
         GgufType::Iq4Nl => (
             QK4_NL,
@@ -530,6 +537,23 @@ pub fn quantize_rows(
             cols / QK_K * grid::BLOCK_IQ1_M,
             Some(grid::quantize_iq1_m),
         ),
+        GgufType::Iq2K => (QK_K, cols / QK_K * iqk::BLOCK_IQ2_K, None),
+        GgufType::Iq2Ks => (
+            QK_K,
+            iqk::F16_ROW_SCALE + cols / QK_K * iqk::BLOCK_IQ2_KS,
+            None,
+        ),
+        GgufType::Iq3K => (QK_K, cols / QK_K * iqk::BLOCK_IQ3_K, None),
+        GgufType::Iq3Ks => (
+            QK_K,
+            iqk::F16_ROW_SCALE + cols / QK_K * iqk::BLOCK_IQ3_KS,
+            None,
+        ),
+        GgufType::Iq2Kl => (
+            QK_K,
+            iqk::F16_ROW_SCALE + cols / QK_K * iqk::BLOCK_IQ2_KL,
+            None,
+        ),
         other => inference_tensor::bail!("{other:?} has no quantizer here"),
     };
     if requires_imatrix(ty) && imatrix.is_none() {
@@ -545,7 +569,8 @@ pub fn quantize_rows(
     out.par_chunks_exact_mut(row_bytes)
         .zip(values.par_chunks_exact(cols))
         .for_each(|(row_out, row)| match encode {
-            None => quantize_iq4_ks_row(row, imatrix, row_out),
+            None if ty == GgufType::Iq4Ks => quantize_iq4_ks_row(row, imatrix, row_out),
+            None => iqk::quantize_row(ty, row, imatrix, row_out),
             Some(encode) => {
                 let size = row_out.len() / (cols / block);
                 for (i, (x, o)) in row
@@ -624,7 +649,7 @@ mod tests {
         }
     }
 
-    const LOW_BIT: [GgufType; 7] = [
+    const LOW_BIT: [GgufType; 12] = [
         GgufType::Iq1S,
         GgufType::Iq1M,
         GgufType::Iq2Xxs,
@@ -632,12 +657,19 @@ mod tests {
         GgufType::Iq2S,
         GgufType::Iq3Xxs,
         GgufType::Iq3S,
+        GgufType::Iq2K,
+        GgufType::Iq2Ks,
+        GgufType::Iq2Kl,
+        GgufType::Iq3K,
+        GgufType::Iq3Ks,
     ];
 
     // uniform values have an rms of 0.58; each type's bound sits a little above what it reaches, fewer bits higher
     #[test]
     fn low_bit_rows_round_trip_through_the_dequantizers() {
-        let bounds = [0.27, 0.26, 0.21, 0.18, 0.15, 0.11, 0.08];
+        let bounds = [
+            0.27, 0.26, 0.21, 0.18, 0.15, 0.11, 0.08, 0.15, 0.16, 0.15, 0.075, 0.08,
+        ];
         let cols = 512;
         let x = values(8 * cols, 3);
         let imatrix = vec![1.0f32; cols];

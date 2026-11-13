@@ -139,3 +139,23 @@ Two dead ends on the way:
   imatrix for most types: the test's skew was constant over each sub-block, which scales that sub-block's whole fit
   and changes nothing. With an every-other-column skew (10:1; at 10000:1 ggml's IQ2_XXS loses, as ours does, being
   the same bytes) every low-bit type lowers it.
+
+## Run 9 - 2026-11-13 17:30
+
+ik_llama's table types: IQ2_K, IQ2_KS, IQ2_KL, IQ3_K, IQ3_KS, against `~/Programming/ik_llama.cpp/build_cuda/ggml/src`
+(native build, g++).
+
+- g++ contracts a product into the add (or subtract) that alone uses it in the same block, so the port writes each
+  sum as those FMAs: `s += w*q*x` is `fma(w*q, x, s)`; a chain `a0*v0 + a1*v1 + a2*v2 + a3*v3` is
+  `fma(a3, v3, fma(a2, v2, fma(a0, v0, a1*v1)))`; two products in one statement fuse the first into the second; a
+  product with another use (`id*x` feeding an index lookup too) stays unfused. With that rule IQ2_K matched on the
+  first run.
+- IQ2_KS: ik's quantize passes a `quantize_user_data`, whose default picks `quantize_row_iq2_ks_fast_impl` (AVX2;
+  `--slow-iq2ks` picks the O(n^3) reference, also far too slow for a 27B model). The parity script passed NULL (the
+  slow path); it now passes a zeroed struct (mainline's 7-argument `ggml_quantize_chunk` ignores it). The fast path's
+  eight-lane sums are emulated lane by lane with `hsum_float_8`'s pairing.
+- IQ3_K / IQ3_KS run `find_best_scale_avx2` on an AVX2 build (truncated-index lookup into `k_simple_index_iq3nl`,
+  both signs per lane), ported the same way.
+
+All five, and IQ4_KS, 0 bytes differing, plain and with an imatrix. Round trips on uniform values (rms 0.58): Iq2K
+0.132, Iq2Ks 0.139, Iq2Kl 0.130, Iq3K 0.066, Iq3Ks 0.073. Left: the trellis writers (IQ1_KT, IQ2_KT, IQ3_KT).
