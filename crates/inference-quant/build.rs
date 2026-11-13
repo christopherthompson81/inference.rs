@@ -12,6 +12,9 @@ const CUDA_BUILD_ROOT_ENV: &str = "INFERENCE_RS_CUDA_BUILD_ROOT";
 const KERNEL_LIB: &str = "inferencequant";
 #[cfg(feature = "cuda")]
 const CUDA_KERNEL_DIR: &str = "kernels/cuda";
+/// exllamav3's kernels, which `kernels/cuda/exl3/*_instance_exl3.cu` include.
+#[cfg(feature = "cuda")]
+const EXL3_THIRD_PARTY: &str = "third_party/exllamav3";
 /// `kernels/cuda/<dir>/<kind>_instance_<type>.cu` holds one GGUF type's kernels, linked into `inferencequant_<type>`.
 #[cfg(feature = "cuda")]
 const TYPE_INSTANCE_MARKER: &str = "_instance_";
@@ -149,6 +152,25 @@ fn nvfp4_cutlass_supported_for_build(
     cuda_version == (13, 3) && sm121_listed && cutile && target.contains("linux")
 }
 
+// every `.cu` under `root`, sorted
+#[cfg(feature = "cuda")]
+fn cuda_sources(root: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "cu") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 // the GGUF types with instance files, each of which gets its own kernel library
 #[cfg(feature = "cuda")]
 fn gguf_type_instances() -> Result<std::collections::BTreeSet<String>, String> {
@@ -198,8 +220,12 @@ fn main() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let deepgemm_generator_hash =
             cuda_headers::hash(&deepgemm_headers).map_err(|e| e.to_string())?;
-        let header_files =
+        let mut header_files =
             cuda_headers::find(Path::new("kernels/cuda")).map_err(|e| e.to_string())?;
+        // the EXL3 kernels' vendored headers, and the vendored sources their instance files include
+        header_files
+            .extend(cuda_headers::find(Path::new(EXL3_THIRD_PARTY)).map_err(|e| e.to_string())?);
+        header_files.extend(cuda_sources(Path::new(EXL3_THIRD_PARTY)).map_err(|e| e.to_string())?);
         for header_file in &header_files {
             println!("cargo:rerun-if-changed={}", header_file.display());
         }
@@ -213,7 +239,8 @@ fn main() -> Result<(), String> {
         let kernel_build_dir = cuda_build_dir(&out_dir, "kernels");
         let mut builder = cuda_kernel_builder(&kernel_build_dir)
             .source_glob("kernels/cuda/*/*.cu")
-            .watch(["kernels/cuda"])
+            .watch(["kernels/cuda", EXL3_THIRD_PARTY])
+            .include_path(EXL3_THIRD_PARTY)
             .arg(&header_hash_arg);
 
         // a minimum holds for the lowest listed arch; an arch-specific library builds when its arch is listed

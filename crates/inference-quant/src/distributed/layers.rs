@@ -890,7 +890,8 @@ impl RowParallelLayer {
             vb
         };
 
-        let weight = if let Some(quant_conf) = &config {
+        let implied = crate::exl3::implied_config(config, &vb);
+        let weight = if let Some(quant_conf) = implied.as_ref().or(config.as_ref()) {
             checkpoint_parallel_linear(in_dim, out_dim, quant_conf, shard, comm, &vb)?
         } else {
             if !vb.contains_tensor("weight") {
@@ -1236,7 +1237,8 @@ impl ColumnParallelLayer {
             vb
         };
 
-        let weight = if let Some(quant_conf) = &config {
+        let implied = crate::exl3::implied_config(config, &vb);
+        let weight = if let Some(quant_conf) = implied.as_ref().or(config.as_ref()) {
             checkpoint_parallel_linear(in_dim, out_dim, quant_conf, shard, comm, &vb)?
         } else {
             if !vb.contains_tensor("weight") {
@@ -1766,7 +1768,8 @@ impl ReplicatedLayer {
             vb
         };
 
-        let layer = if let Some(quant_conf) = &config {
+        let implied = crate::exl3::implied_config(config, &vb);
+        let layer = if let Some(quant_conf) = implied.as_ref().or(config.as_ref()) {
             checkpoint_linear(in_dim, out_dim, quant_conf, bias, Shard::default(), &vb)?
         } else {
             if !vb.contains_tensor("weight") {
@@ -1955,7 +1958,8 @@ impl ReplicatedLayer {
             vb
         };
 
-        let layer = if let Some(quant_conf) = &config {
+        let implied = crate::exl3::implied_config(config, &vb);
+        let layer = if let Some(quant_conf) = implied.as_ref().or(config.as_ref()) {
             if kept_layers_indices.is_some() {
                 inference_tensor::bail!(
                     "Cannot load a matformer layer with a pre-quantized model."

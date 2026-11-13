@@ -252,6 +252,10 @@ pub fn conv1d_no_bias(
 }
 
 pub fn linear(in_dim: usize, out_dim: usize, vb: ShardedVarBuilder) -> Result<Linear> {
+    // an EXL3 checkpoint may store it as a trellis (exllamav3 quantizes vision towers too)
+    if let Some((ws, bs)) = inference_quant::exl3::dense_linear_in(&vb, in_dim, out_dim, true)? {
+        return Ok(Linear::new(ws, bs));
+    }
     let ws = vb.get((out_dim, in_dim), "weight")?;
     let bs = vb.get(out_dim, "bias")?;
     Ok(Linear::new(ws, Some(bs)))
@@ -287,6 +291,9 @@ pub fn linear_bias_gelu(linear: &Linear, xs: &Tensor, gelu: bool) -> Result<Tens
 }
 
 pub fn linear_no_bias(in_dim: usize, out_dim: usize, vb: ShardedVarBuilder) -> Result<Linear> {
+    if let Some((ws, _)) = inference_quant::exl3::dense_linear_in(&vb, in_dim, out_dim, false)? {
+        return Ok(Linear::new(ws, None));
+    }
     let ws = vb.get((out_dim, in_dim), "weight")?;
     Ok(Linear::new(ws, None))
 }
