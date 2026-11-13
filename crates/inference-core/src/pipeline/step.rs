@@ -23,7 +23,6 @@ use crate::{
     paged_attention::PagedAttentionMeta,
     pipeline::text_models_inputs_processor::NoncausalMmContext,
     prefix_cacher::PrefixCacheManagerV2,
-    scheduler::modality_signature,
     sequence::{SeqStepType, Sequence, SequenceState, StopReason},
 };
 
@@ -543,7 +542,7 @@ impl dyn Pipeline {
                         seq.prefix_cache_len(),
                         chunk_size,
                         block_align,
-                        prefix_policy.replay_for(modality_signature(seq)),
+                        prefix_policy.replay_for(),
                         seq.mm_features(),
                         seq.checkpoint_hints(),
                     )
@@ -581,7 +580,7 @@ impl dyn Pipeline {
                     tokens.len(),
                     *prefix_len,
                     hybrid_recurrent.then_some(block_size),
-                    prefix_policy.replay_for(modality_signature(seq)),
+                    prefix_policy.replay_for(),
                     seq.mm_features(),
                     seq.checkpoint_hints(),
                 )

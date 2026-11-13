@@ -10,7 +10,7 @@ use crate::{
     prefix_cacher::{PagedPrefixCheckpoint, PrefixCacheManagerV2},
     scheduler::{
         DefaultSchedulerMethod, DefaultSchedulerOutput, PagedPrefixCacheValidation,
-        PagedPrefixCacheValidator, Scheduler, SchedulerOutput, modality_signature,
+        PagedPrefixCacheValidator, Scheduler, SchedulerOutput,
     },
     search::{self, SearchEmbedder},
     sequence::{SeqStepType, Sequence, StopReason},
@@ -489,13 +489,13 @@ impl HybridPagedPrefixValidator {
             let pipeline = get_mut_arcmutex!(self.pipeline);
             pipeline.speculative_prefix_checkpoint_policy()
         };
-        let uses_auxiliary_state = prefix_policy.uses_auxiliary_state(modality_signature(seq));
+        let uses_auxiliary_state = prefix_policy.uses_auxiliary_state();
         if uses_auxiliary_state
             && let Some(boundary) = effective_recurrent_prefix_boundary(
                 cached_tokens,
                 0,
                 block_size,
-                prefix_policy.replay_for(modality_signature(seq)),
+                prefix_policy.replay_for(),
                 seq.mm_features(),
             )
         {
@@ -530,7 +530,7 @@ impl HybridPagedPrefixValidator {
         let replay = if record_auxiliary_miss {
             prefix_policy.fallback_replay()
         } else {
-            prefix_policy.replay_for(modality_signature(seq))
+            prefix_policy.replay_for()
         };
         let Some(cached_tokens) = effective_recurrent_prefix_boundary(
             cached_tokens,

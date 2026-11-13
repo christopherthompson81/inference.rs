@@ -27,7 +27,7 @@ use crate::{
         CacheBackendMetadata, Pipeline, StepLookahead, StepSubmission,
         execution::StepSubmissionKind, prompt_chunks::PromptChunkPlan, start_decoding_prompt_rows,
     },
-    scheduler::{PagedAttentionSchedulerOutput, modality_signature},
+    scheduler::PagedAttentionSchedulerOutput,
     sequence::Sequence,
 };
 
@@ -665,7 +665,7 @@ impl Engine {
         let prefix_policy = pipeline.speculative_prefix_checkpoint_policy();
         for seq in seqs.iter_mut() {
             if matches!(
-                prefix_policy.replay_for(modality_signature(seq)),
+                prefix_policy.replay_for(),
                 crate::speculative::SpeculativePrefixReplay::Full
             ) {
                 continue;

@@ -356,7 +356,7 @@ impl PagedAttentionScheduler {
             seq.num_computed_tokens(),
             chunk_size,
             block_align,
-            self.prefix_policy.replay_for(modality_signature(seq)),
+            self.prefix_policy.replay_for(),
             seq.mm_features(),
             seq.checkpoint_hints(),
         )

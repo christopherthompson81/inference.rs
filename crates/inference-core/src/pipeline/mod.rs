@@ -1583,7 +1583,7 @@ pub trait Pipeline:
         };
         let auxiliary = if self
             .speculative_prefix_checkpoint_policy()
-            .uses_auxiliary_state(crate::scheduler::modality_signature(seq))
+            .uses_auxiliary_state()
         {
             // a full checkpoint pool sheds the oldest cached checkpoint; past that the prefix is cached without one
             let mut captured = self.capture_paged_auxiliary_prefix_state(*seq.id(), cached_tokens);
