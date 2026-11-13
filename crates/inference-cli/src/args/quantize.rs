@@ -35,6 +35,37 @@ pub enum QuantizeCommand {
 
     /// A multimodal checkpoint's towers (vision, audio) as one llama.cpp-style mmproj GGUF
     Mmproj(MmprojOptions),
+
+    /// A text model to EXL3 (exllamav3's layout) from a calibration file, a layer at a time: each layer encoded
+    /// against the inputs the layers before it, already encoded, give it
+    Exl3(Exl3QuantizeOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct Exl3QuantizeOptions {
+    /// Hugging Face model ID or local model directory (full precision)
+    #[arg(short = 'm', long)]
+    pub model_id: String,
+
+    /// Calibration text, a few hundred thousand tokens of the kind the model will see
+    #[arg(long)]
+    pub calibration_file: PathBuf,
+
+    /// Output directory
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// Bits per weight: 1 to 8, or 1.5, 2.5, 3.5 (mul1 codebook)
+    #[arg(long)]
+    pub bits: f64,
+
+    /// Bits per weight of the output head [default: 6]
+    #[arg(long)]
+    pub head_bits: Option<f64>,
+
+    /// Codebook: mul1, mcg or 3inst [default: mul1]
+    #[arg(long)]
+    pub codebook: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -603,7 +634,8 @@ pub fn resolve_quantize_command(
             | QuantizeCommand::Gguf(_)
             | QuantizeCommand::Imatrix(_)
             | QuantizeCommand::NemotronTranscribeAudio(_)
-            | QuantizeCommand::Mmproj(_)),
+            | QuantizeCommand::Mmproj(_)
+            | QuantizeCommand::Exl3(_)),
         ) => {
             return Ok(other);
         }
@@ -670,7 +702,8 @@ mod tests {
             | QuantizeCommand::Gguf(_)
             | QuantizeCommand::Imatrix(_)
             | QuantizeCommand::NemotronTranscribeAudio(_)
-            | QuantizeCommand::Mmproj(_) => {
+            | QuantizeCommand::Mmproj(_)
+            | QuantizeCommand::Exl3(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

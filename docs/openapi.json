@@ -6284,6 +6284,36 @@
         },
         "additionalProperties": false
       },
+      "Exl3WriteConfig": {
+        "type": "object",
+        "description": "An EXL3 model to write from a calibration file, laid out as exllamav3's converter writes one: each linear\nencoded at `bits` (the output head at `head_bits`, default 6) on `codebook` (`3inst`, `mcg` or `mul1`, the\ndefault), the other tensors copied.",
+        "required": [
+          "output",
+          "bits"
+        ],
+        "properties": {
+          "bits": {
+            "type": "number",
+            "format": "double"
+          },
+          "codebook": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "head_bits": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "output": {
+            "type": "string"
+          }
+        }
+      },
       "FileCitation": {
         "type": "object",
         "description": "File citation details",
@@ -9084,6 +9114,17 @@
                     ],
                     "default": "auto"
                   },
+                  "exl3_out": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/Exl3WriteConfig",
+                        "description": "Write an EXL3 model from the calibration file (exllamav3's layout) instead of quantizing."
+                      }
+                    ]
+                  },
                   "from_uqff": {
                     "type": [
                       "string",
@@ -9254,6 +9295,17 @@
                       }
                     ],
                     "default": "auto"
+                  },
+                  "exl3_out": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/Exl3WriteConfig",
+                        "description": "Write an EXL3 model from the calibration file (exllamav3's layout) instead of quantizing."
+                      }
+                    ]
                   },
                   "from_uqff": {
                     "type": [

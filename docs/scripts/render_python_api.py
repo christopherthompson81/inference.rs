@@ -89,6 +89,7 @@ GROUPS = [
                 "IsqOrganization",
                 "UqffWriteSpec",
                 "UqffWriteSpecConfig",
+                "Exl3WriteConfig",
                 "LoraAdapterSpec",
                 "LoraRuntimeConfig",
                 "AgentPermission",

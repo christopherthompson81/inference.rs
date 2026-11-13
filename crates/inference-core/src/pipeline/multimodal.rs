@@ -409,7 +409,7 @@ impl MultimodalLoader {
                     from_uqff: uqff.reads(),
                     has_imatrix: imatrix.is_some(),
                     has_calibration: calibration_file.is_some(),
-                    hessians_out: false,
+                    calibrated_write: false,
                 },
                 paths,
                 device,
@@ -519,6 +519,8 @@ impl MultimodalLoader {
             imatrix,
             calibration_file,
             hessians_out: None,
+            exl3_out: None,
+            exl3_source: None,
             calibration: super::isq_flow::CalibrationCtx {
                 tokenizer: &tokenizer,
                 bos_tok_id: chat_template

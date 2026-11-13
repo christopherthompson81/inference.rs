@@ -108,6 +108,8 @@ pub struct NormalSpecificConfig {
     /// A directory to write each layer's input Hessian to (exllamav3's `--hessians` layout), from the calibration
     /// file, in place of quantizing.
     pub hessians_out: Option<PathBuf>,
+    /// An EXL3 model to write from the calibration file, in place of quantizing.
+    pub exl3_out: Option<super::isq::Exl3WriteConfig>,
     pub hf_cache_path: Option<PathBuf>,
     pub hf_config_overrides: Option<super::HfConfigOverrides>,
     pub max_model_len: Option<usize>,
@@ -272,7 +274,8 @@ impl NormalLoader {
                     from_uqff: uqff.reads(),
                     has_imatrix: imatrix.is_some(),
                     has_calibration: calibration_file.is_some(),
-                    hessians_out: self.config.hessians_out.is_some(),
+                    calibrated_write: self.config.hessians_out.is_some()
+                        || self.config.exl3_out.is_some(),
                 },
                 paths,
                 device,
@@ -351,6 +354,11 @@ impl NormalLoader {
             imatrix,
             calibration_file,
             hessians_out: self.config.hessians_out.as_ref(),
+            exl3_out: self.config.exl3_out.as_ref(),
+            exl3_source: Some(super::isq_flow::Exl3Source {
+                weights: paths.get_weight_filenames(),
+                config: paths.get_config_filename(),
+            }),
             calibration: super::isq_flow::CalibrationCtx {
                 tokenizer: &tokenizer,
                 bos_tok_id: chat_template

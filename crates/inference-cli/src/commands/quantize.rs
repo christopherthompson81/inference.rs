@@ -18,12 +18,12 @@ use inference_api::{
 
 use super::serve::{self, extract_device_settings};
 use crate::args::{
-    AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions,
-    GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions, ImatrixConvertOptions,
-    MatformerSelection, MmprojOptions, ModelSourceOptions, ModelType, MultimodalAdapterOptions,
-    MultimodalOptions, NemotronTranscribeAudioOptions, QuantizationOptions, QuantizeDeviceOptions,
-    QuantizeModelSourceOptions, QuantizeModelType, QuantizeMultimodalOptions,
-    QuantizeQuantizationOptions, WorldgenQuantizeOptions,
+    AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, Exl3QuantizeOptions,
+    FormatOptions, GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions,
+    ImatrixConvertOptions, MatformerSelection, MmprojOptions, ModelSourceOptions, ModelType,
+    MultimodalAdapterOptions, MultimodalOptions, NemotronTranscribeAudioOptions,
+    QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
+    QuantizeMultimodalOptions, QuantizeQuantizationOptions, WorldgenQuantizeOptions,
 };
 
 const MIB: f64 = (1u64 << 20) as f64;
@@ -169,6 +169,56 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
 }
 
 /// Converts a `.cimatrix` to llama.cpp's imatrix under a GGUF's tensor names.
+/// Loading with `exl3_out` set writes the EXL3 model; the engine is shut down once it has.
+pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptions) -> Result<()> {
+    initialize_logging();
+    let model = ModelSelected::Run {
+        model_id: options.model_id,
+        quant: None,
+        tokenizer_json: None,
+        dtype: inference_api::engine::ModelDType::Auto,
+        topology: None,
+        organization: None,
+        write_uqff: None,
+        from_uqff: None,
+        imatrix: None,
+        calibration_file: Some(options.calibration_file),
+        hessians_out: None,
+        exl3_out: Some(inference_api::engine::Exl3WriteConfig {
+            output: options.output_path,
+            bits: options.bits,
+            head_bits: options.head_bits,
+            codebook: options.codebook,
+        }),
+        max_edge: None,
+        max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+        max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+        max_num_images: None,
+        max_image_length: None,
+        hf_cache_path: None,
+        matformer_config_path: None,
+        matformer_slice_name: None,
+    };
+    let model = resolve_model_source(model, &global.token_source, false, QuantPolicy::GgufInput)
+        .await?
+        .model;
+    let spec = EngineSpec {
+        model: Some(model),
+        model_id: None,
+        runtime: RuntimeSpec {
+            max_seqs: Some(1),
+            prefix_cache_n: Some(0),
+            paged_attn: Some(false),
+            token_source: Some(global.token_source.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let engine = Engine::load(spec).await?;
+    engine.shutdown().await.map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
 pub fn run_imatrix_convert(options: ImatrixConvertOptions) -> Result<()> {
     initialize_logging();
     let mapping = gguf_requantize::cimatrix_for_gguf(&options.cimatrix, &options.gguf)?;
@@ -727,7 +777,8 @@ mod tests {
             | QuantizeCommand::Gguf(_)
             | QuantizeCommand::Imatrix(_)
             | QuantizeCommand::NemotronTranscribeAudio(_)
-            | QuantizeCommand::Mmproj(_) => {
+            | QuantizeCommand::Mmproj(_)
+            | QuantizeCommand::Exl3(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

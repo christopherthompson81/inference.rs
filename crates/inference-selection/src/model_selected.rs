@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use inference_core::{
-    AutoDeviceMapParams, DiffusionLoaderType, EmbeddingLoaderType, IsqOrganization,
-    LoraAdapterSpec, LoraRuntimeConfig, ModelDType, MultimodalLoaderType, NormalLoaderType,
-    SpeechGenerationConfig, SpeechLoaderType, TranscriptionLoaderType, UqffWriteConfig,
+    AutoDeviceMapParams, DiffusionLoaderType, EmbeddingLoaderType, Exl3WriteConfig,
+    IsqOrganization, LoraAdapterSpec, LoraRuntimeConfig, ModelDType, MultimodalLoaderType,
+    NormalLoaderType, SpeechGenerationConfig, SpeechLoaderType, TranscriptionLoaderType,
+    UqffWriteConfig,
 };
 
 /// Speech sampling for every generation of the loaded model; an unset field keeps the architecture's default.
@@ -161,6 +162,11 @@ pub enum ModelSelected {
         #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hessians_out: Option<PathBuf>,
 
+        /// Write an EXL3 model from the calibration file (exllamav3's layout) instead of quantizing.
+        #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::Exl3WriteConfig>))]
+        exl3_out: Option<Exl3WriteConfig>,
+
         /// Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.
         /// Only supported on specific multimodal models.
         max_edge: Option<u32>,
@@ -253,6 +259,11 @@ pub enum ModelSelected {
         #[serde(default)]
         #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hessians_out: Option<PathBuf>,
+
+        /// Write an EXL3 model from the calibration file (exllamav3's layout) instead of quantizing.
+        #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::Exl3WriteConfig>))]
+        exl3_out: Option<Exl3WriteConfig>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_seq_len")]

@@ -201,6 +201,7 @@ pub use pipeline::hf::{
     probe_hf_repo_files, read_model_file_range, try_get_model_file,
 };
 // Named only by the ModelSelected schema attributes.
+pub use pipeline::Exl3WriteConfig;
 #[cfg(feature = "utoipa")]
 pub use pipeline::UqffWriteSpec;
 pub use pipeline::{

@@ -19,6 +19,7 @@ pub struct ModelBuilder {
     pub(crate) imatrix: Option<PathBuf>,
     pub(crate) calibration_file: Option<PathBuf>,
     pub(crate) hessians_out: Option<PathBuf>,
+    pub(crate) exl3_out: Option<inference_api::engine::Exl3WriteConfig>,
     pub(crate) max_edge: Option<u32>,
     pub(crate) hf_cache_path: Option<PathBuf>,
     pub(crate) matformer_config_path: Option<PathBuf>,
@@ -40,6 +41,7 @@ impl ModelBuilder {
             imatrix: None,
             calibration_file: None,
             hessians_out: None,
+            exl3_out: None,
             max_edge: None,
             hf_cache_path: None,
             matformer_config_path: None,
@@ -104,6 +106,13 @@ impl ModelBuilder {
         self
     }
 
+    /// Write an EXL3 model from the calibration file, each layer encoded against the Hessian of its inputs as the
+    /// layers before it, already encoded, produce them (exllamav3's converter), instead of quantizing.
+    pub fn with_exl3_out(mut self, config: inference_api::engine::Exl3WriteConfig) -> Self {
+        self.exl3_out = Some(config);
+        self
+    }
+
     /// Resizes images so their longer edge is at most `max_edge` pixels, for a multimodal model.
     pub fn with_max_edge(mut self, max_edge: u32) -> Self {
         self.max_edge = Some(max_edge);
@@ -143,6 +152,7 @@ impl ModelBuilder {
             imatrix: self.imatrix.clone(),
             calibration_file: self.calibration_file.clone(),
             hessians_out: self.hessians_out.clone(),
+            exl3_out: self.exl3_out.clone(),
             max_edge: self.max_edge,
             max_seq_len: self.options.auto_map.max_seq_len,
             max_batch_size: self.options.auto_map.max_batch_size,

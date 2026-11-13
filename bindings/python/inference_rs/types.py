@@ -1231,6 +1231,16 @@ class EngineSpec:
 
 
 @dataclass(kw_only=True)
+class Exl3WriteConfig:
+    """An EXL3 model to write from a calibration file, laid out as exllamav3's converter writes one: each linear encoded at `bits` (the output head at `head_bits`, default 6) on `codebook` (`3inst`, `mcg` or `mul1`, the default), the other tensors copied."""
+
+    bits: float
+    codebook: str | None = None
+    head_bits: float | None = None
+    output: str
+
+
+@dataclass(kw_only=True)
 class FileCitation:
     """File citation details"""
 
@@ -1917,6 +1927,7 @@ class ModelSelectedRun:
 
     calibration_file: str | None = None
     dtype: ModelDType | None = ModelDType.AUTO
+    exl3_out: Exl3WriteConfig | None = None
     from_uqff: str | None = None
     hessians_out: str | None = None
     hf_cache_path: str | None = None
@@ -1944,6 +1955,7 @@ class ModelSelectedPlain:
     arch: NormalLoaderType | None = None
     calibration_file: str | None = None
     dtype: ModelDType | None = ModelDType.AUTO
+    exl3_out: Exl3WriteConfig | None = None
     from_uqff: str | None = None
     hessians_out: str | None = None
     hf_cache_path: str | None = None

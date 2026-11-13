@@ -69,6 +69,7 @@ use crate::{
 };
 
 // The vocabulary of a spec and of the selection that builds one, so a client names it without depending on core.
+pub use inference_core::Exl3WriteConfig;
 pub use inference_core::{
     AgentPermission, AnyMoeSpec, AutoDeviceMapParams, CodeExecutionConfig, CodeExecutionPermission,
     DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES,

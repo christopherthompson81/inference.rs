@@ -123,7 +123,10 @@ const TIED_HEAD: &str = "lm_head";
 // the Hessians one calibration pass collects at once (f32 `[in, in]` per layer); more layers take more passes
 const HESSIAN_PASS_BYTES: usize = 4 << 30;
 
-fn calibration_tokens(calibration_file: &PathBuf, ctx: &CalibrationCtx<'_>) -> Result<Vec<u32>> {
+pub(super) fn calibration_tokens(
+    calibration_file: &PathBuf,
+    ctx: &CalibrationCtx<'_>,
+) -> Result<Vec<u32>> {
     let calibration_data = std::fs::read_to_string(calibration_file)?;
     // Tokenize without bos; it is inserted per chunk
     Ok(ctx
@@ -135,7 +138,7 @@ fn calibration_tokens(calibration_file: &PathBuf, ctx: &CalibrationCtx<'_>) -> R
 }
 
 // every chunk of `tokens` through the model once, the cache reset after each
-fn run_calibration(
+pub(super) fn run_calibration(
     drive: &dyn CalibrationDrive,
     tokens: &[u32],
     ctx: &CalibrationCtx<'_>,
