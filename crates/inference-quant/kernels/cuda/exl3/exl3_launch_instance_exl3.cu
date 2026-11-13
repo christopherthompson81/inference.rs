@@ -306,3 +306,145 @@ extern "C" int launch_exl3_mgemm(
     cuda_check(cudaPeekAtLastError());
     return shape_idx;
 }
+
+// c_ptrs[j] = slice j's first output: its source's block (sources end to end from `base`, each m x its width) at the
+// slice's column; `prefix` holds each slice's source offset in columns (summed widths of the sources before it)
+__global__ void exl3_fill_slice_ptrs(void** c_ptrs, char* base, const int* prefix, const int* col, int slices, int m,
+                                     int elem)
+{
+    int j = threadIdx.x + blockIdx.x * blockDim.x;
+    if (j < slices) c_ptrs[j] = base + ((size_t) m * prefix[j] + col[j]) * elem;
+}
+
+// One input through `num_src` matrices (q, k and v), each with its own rotations, cut into `slices` equal column
+// slices for an even spread: exl3_mgemm_gr's sliced mode. Device tables: B_list and svh_list per slice (pre-offset
+// to the slice's first column), suh_list per source, and the ints [size_n (the slice width), n_stride (its source's
+// width), had_src (its source), col (its first column), prefix (its source's offset)], `slices` apiece. The outputs
+// land end to end from C, each source m x its width; c_ptrs is device scratch for `slices` addresses, filled here.
+// A_had holds num_src x m x k. Returns as launch_exl3_mgemm.
+extern "C" int launch_exl3_mgemm_sliced(
+    const half* A,
+    const uint16_t* const* B_list,
+    const half* const* suh_list,
+    const half* const* svh_list,
+    const int* ints,
+    int num_src,
+    int slices,
+    int slice_width,
+    void* C,
+    void** c_ptrs,
+    int size_m,
+    int size_k,
+    int tile_u16,
+    int cb,
+    bool c_fp32,
+    half* A_had,
+    cudaStream_t stream)
+{
+    if (!slices || !size_m) return 0;
+    const bool half_k = (tile_u16 % 16) != 0;
+    int K = tile_u16 / 16;
+    if ((half_k && (tile_u16 % 16 != 8 || cb != 2)) || K < 1 || K > 8 || !size_k) return -1;
+    const int* size_n_list = ints;
+    const int* n_stride_list = ints + slices;
+    const int* had_src_list = ints + 2 * slices;
+    exl3_fill_slice_ptrs<<<CEIL_DIVIDE(slices, 128), 128, 0, stream>>>(c_ptrs, (char*) C, ints + 4 * slices,
+                                                                      ints + 3 * slices, slices, size_m,
+                                                                      c_fp32 ? 4 : 2);
+    cuda_check(cudaPeekAtLastError());
+
+    int device;
+    cudaGetDevice(&device);
+    int total_sms = DevCtx::instance().get_num_sms(device);
+    int cc = DevCtx::instance().get_cc(device);
+    int* locks = DevCtx::instance().get_locks(device);
+    int smem_max = DevCtx::instance().get_smem_request(device);
+
+    int size_n = slice_width;
+    int bszm_in = 1;
+    int bszm_out = slices;
+    const int64_t* indices = nullptr;
+    half* weights = nullptr;
+    int min_index = -1;
+    int max_index = -1;
+    int num_tokens = 1;
+    void* kernelArgs[] =
+    {
+        (void*)& A,
+        (void*)& B_list,
+        (void*)& C,
+        (void*)& size_m,
+        (void*)& size_k,
+        (void*)& size_n,
+        (void*)& locks,
+        (void*)& suh_list,
+        (void*)& A_had,
+        (void*)& svh_list,
+        (void*)& indices,
+        (void*)& weights,
+        (void*)& bszm_in,
+        (void*)& bszm_out,
+        (void*)& min_index,
+        (void*)& max_index,
+        (void*)& num_tokens,
+        (void*)& size_n_list,
+        (void*)& c_ptrs,
+        (void*)& n_stride_list,
+        (void*)& had_src_list,
+        (void*)& num_src
+    };
+
+    // exl3_gemm.cu keys sliced launches apart from plain ones
+    uint64_t key = mgemm_autotune_hash(size_m, size_k, size_n, K, c_fp32, device, cc, total_sms, cb, bszm_in,
+                                       bszm_out, half_k) ^ 0x9e3779b97f4a7c15ull;
+    CoopAutotuneLaunch tuned;
+    if (CoopKernelAutotuner::launch_locked(key, kernelArgs, smem_max, stream, &tuned))
+    {
+        cuda_check(cudaPeekAtLastError());
+        return tuned.tag;
+    }
+    cudaStreamCaptureStatus capture;
+    cuda_check(cudaStreamIsCapturing(stream, &capture));
+    if (capture == cudaStreamCaptureStatusNone)
+    {
+        std::vector<CoopAutotuneCandidate> candidates;
+        for (int shape = 1; shape <= EXL3_GEMM_NUM_SHAPES; ++shape)
+        {
+            if (!exl3_gemm_shape_compat(shape, size_m, size_k, size_n, K, half_k)) continue;
+            fp_exl3_mgemm_kernel candidate = get_mgemm_kernel_ptr(K, shape, c_fp32, cb, half_k);
+            if (!candidate) continue;
+            int max_slices = MAX(size_k / exl3_gemm_tilesize_k_g[shape] * size_n / exl3_gemm_tilesize_n_g[shape], 1);
+            int max_sms = MAX(MIN(max_slices, total_sms), 1);
+            candidates.push_back({(void*) candidate, exl3_gemm_blockdim_g[shape], max_sms, slices, total_sms, shape});
+        }
+        if (candidates.empty()) return -1;
+        tuned = CoopKernelAutotuner::launch(key, candidates, kernelArgs, smem_max, stream,
+                                            (size_t) size_k * size_n * slices);
+        cuda_check(cudaPeekAtLastError());
+        return tuned.tag;
+    }
+
+    int block_dim;
+    int shape_idx;
+    int num_sms = total_sms;
+    fp_exl3_mgemm_kernel kernel = select_exl3_mgemm_kernel
+    (
+        cc, size_m, size_k, size_n, K, c_fp32,
+        0, &block_dim, &shape_idx,
+        &num_sms, cb, bszm_in, bszm_out, half_k
+    );
+    if (!kernel) return -1;
+    int tiles = MAX(size_k / exl3_gemm_tilesize_k_g[shape_idx] * size_n / exl3_gemm_tilesize_n_g[shape_idx], 1);
+    num_sms = tiles;
+    if (num_sms * slices > total_sms) num_sms = MAX(total_sms / slices, 1);
+    if (num_sms <= total_sms && tiles / num_sms > 48) num_sms = MIN(total_sms, num_sms * 2);
+    int concurrency = MIN(total_sms / num_sms, slices);
+    if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
+    {
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
+        kernel_attr_set[device].insert((void*) kernel);
+    }
+    EXL3_COOP_LAUNCH((void*) kernel, dim3(num_sms, 1, concurrency), block_dim, kernelArgs, smem_max, stream);
+    cuda_check(cudaPeekAtLastError());
+    return shape_idx;
+}

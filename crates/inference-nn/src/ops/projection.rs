@@ -346,6 +346,15 @@ pub fn quantized_ffn(
         return down.forward(&inter);
     }
 
+    #[cfg(feature = "cuda")]
+    if let (Some(g), Some(u)) = (gate.exl3_layer(), up.exl3_layer())
+        && let Some(mut out) = g.fused_group(&[u], xs)?
+    {
+        let rhs = out.pop().unwrap();
+        let lhs = out.pop().unwrap();
+        return down.forward(&mul_and_act(&lhs, &rhs, act)?);
+    }
+
     if xs.device().is_cpu()
         && let Some(mut out) = inference_quant::try_fused_gemv_shared_lhs_cpu(xs, &[gate, up])?
     {
@@ -373,6 +382,19 @@ pub fn qkv_projections(
     #[cfg(feature = "cuda")]
     if let Some(qkv) = inference_quant::try_fused_quantized_qkv(xs, q_proj, k_proj, v_proj)? {
         return Ok(qkv);
+    }
+
+    #[cfg(feature = "cuda")]
+    if let (Some(q), Some(k), Some(v)) = (
+        q_proj.exl3_layer(),
+        k_proj.exl3_layer(),
+        v_proj.exl3_layer(),
+    ) && let Some(mut out) = q.fused_group(&[k, v], xs)?
+    {
+        let v = out.pop().unwrap();
+        let k = out.pop().unwrap();
+        let q = out.pop().unwrap();
+        return Ok((q, k, v));
     }
 
     #[cfg(feature = "metal")]

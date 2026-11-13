@@ -1425,6 +1425,9 @@ impl FastExpertsWeights {
         forward: &MoEForward,
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
+        if let Some(fused) = self.forward_exl3(forward, config)? {
+            return Ok(Some(fused));
+        }
         match Self::select_cuda_fast_path(forward) {
             Some(MoECudaFastPath::Decode) => match self
                 .forward_decode(forward, config)
@@ -1449,6 +1452,35 @@ impl FastExpertsWeights {
                 .map_err(|err| err.context("moe experts fast grouped")),
             None => Ok(None),
         }
+    }
+
+    // EXL3 experts at decode sizes: exllamav3's two fused launches for the whole layer
+    #[cfg(feature = "cuda")]
+    fn forward_exl3(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        let (Some(gate), Some(up), Some(down)) = (
+            self.fused_gate_proj.exl3_experts(),
+            self.fused_up_proj.exl3_experts(),
+            self.fused_down_proj.exl3_experts(),
+        ) else {
+            return Ok(None);
+        };
+        if !matches!(config.act, Activation::Silu) {
+            return Ok(None);
+        }
+        inference_quant::exl3::Exl3Experts::fused_silu_moe(
+            gate,
+            up,
+            down,
+            forward.xs_flat,
+            forward.topk_ids,
+            forward.topk_weights,
+        )?
+        .map(|ys| ys.to_dtype(forward.original_dtype))
+        .transpose()
     }
 
     #[cfg(feature = "cuda")]
