@@ -1235,7 +1235,7 @@ pub(crate) struct LoadSettings<'a> {
     pub from_uqff: bool,
     pub has_imatrix: bool,
     pub has_calibration: bool,
-    pub hessians_out: bool,
+    pub calibrated_write: bool,
 }
 
 pub(crate) type AdjustAutoParams<'a> =
@@ -1439,7 +1439,7 @@ pub(crate) fn open_load_session(
         in_situ_quant,
         has_imatrix: settings.has_imatrix,
         has_calibration: settings.has_calibration,
-        has_hessians_out: settings.hessians_out,
+        has_calibrated_write: settings.calibrated_write,
         write_uqff_types: settings.write_uqff.map(|c| c.types.clone()),
         has_write_uqff: write_uqff,
         loading_from_uqff: settings.from_uqff,

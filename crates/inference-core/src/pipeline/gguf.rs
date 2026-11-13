@@ -1185,6 +1185,7 @@ impl GGUFLoader {
                 imatrix: self.config.imatrix.clone(),
                 calibration_file: self.config.calibration_file.clone(),
                 hessians_out: None,
+                exl3_out: None,
                 hf_cache_path: self.config.hf_cache_path.clone(),
                 matformer_config_path: self.config.matformer_config_path.clone(),
                 matformer_slice_name: self.config.matformer_slice_name.clone(),

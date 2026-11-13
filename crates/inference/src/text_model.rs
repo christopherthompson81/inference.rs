@@ -21,6 +21,7 @@ pub struct TextModelBuilder {
     pub(crate) imatrix: Option<PathBuf>,
     pub(crate) calibration_file: Option<PathBuf>,
     pub(crate) hessians_out: Option<PathBuf>,
+    pub(crate) exl3_out: Option<inference_api::engine::Exl3WriteConfig>,
     pub(crate) hf_cache_path: Option<PathBuf>,
     pub(crate) matformer_config_path: Option<PathBuf>,
     pub(crate) matformer_slice_name: Option<String>,
@@ -41,6 +42,7 @@ impl TextModelBuilder {
             imatrix: None,
             calibration_file: None,
             hessians_out: None,
+            exl3_out: None,
             hf_cache_path: None,
             matformer_config_path: None,
             matformer_slice_name: None,
@@ -104,6 +106,13 @@ impl TextModelBuilder {
         self
     }
 
+    /// Write an EXL3 model from the calibration file, each layer encoded against the Hessian of its inputs as the
+    /// layers before it, already encoded, produce them (exllamav3's converter), instead of quantizing.
+    pub fn with_exl3_out(mut self, config: inference_api::engine::Exl3WriteConfig) -> Self {
+        self.exl3_out = Some(config);
+        self
+    }
+
     pub fn from_hf_cache_path(mut self, path: PathBuf) -> Self {
         self.hf_cache_path = Some(path);
         self
@@ -133,6 +142,7 @@ impl TextModelBuilder {
             imatrix: self.imatrix.clone(),
             calibration_file: self.calibration_file.clone(),
             hessians_out: self.hessians_out.clone(),
+            exl3_out: self.exl3_out.clone(),
             max_seq_len: self.options.auto_map.max_seq_len,
             max_batch_size: self.options.auto_map.max_batch_size,
             hf_cache_path: self.hf_cache_path.clone(),

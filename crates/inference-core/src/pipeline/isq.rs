@@ -526,6 +526,21 @@ pub struct UqffFullSer<'a> {
     pub preprocessor_filename: &'a Option<PathBuf>,
 }
 
+/// An EXL3 model to write from a calibration file, laid out as exllamav3's converter writes one: each linear
+/// encoded at `bits` (the output head at `head_bits`, default 6) on `codebook` (`3inst`, `mcg` or `mul1`, the
+/// default), the other tensors copied.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Clone, Debug, serde::Serialize, inference_json::FromJson)]
+pub struct Exl3WriteConfig {
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    pub output: PathBuf,
+    pub bits: f64,
+    #[serde(default)]
+    pub head_bits: Option<f64>,
+    #[serde(default)]
+    pub codebook: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize, inference_json::FromJson)]
 #[serde(from = "UqffWriteSpec")]
 pub struct UqffWriteConfig {

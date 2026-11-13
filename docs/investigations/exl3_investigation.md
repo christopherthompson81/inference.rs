@@ -289,3 +289,33 @@ matches), output error tr(E H E^T) / tr(W H W^T):
 
 (exllamav3 / ours). q_proj always a little above: within our own seed spread (4.0 3inst over seeds 1-6:
 0.000651 .. 0.000669). Each tensor encodes in under a second.
+
+## Run 11 - 2026-11-14 10:30
+
+Phase 3, the converter (`inference quantize exl3`, SDK `with_exl3_out`, `exl3_convert` example): every linear
+captured unquantized on its device; the modules grouped by layer, and for each layer in order one calibration pass
+collecting its Hessians, each linear encoded (`exl3::encode`) and swapped (`PendingIsqLayer::replace`) for its
+reconstruction, so the next layer's Hessians see the encoded layers before it (exllamav3's state propagation,
+reached by re-running the model instead of streaming one module's state). The head last at 6 bits; a tied
+embedding's rows are the head's, written as `lm_head` (the lookups keep the embedding). Output: each linear's
+trellis/suh/svh/marker in place of its weight, every other source tensor copied (the source's own `lm_head.weight`
+next to a tied embedding dropped: it doubled the output, 932 against 636 MB), the config with its
+`quantization_config`, the tokenizer and side files.
+
+Qwen3-0.6B, 4.0bpw 3inst, exllamav3's standard calibration text (485K tokens, 29 passes): 10.5 min. Perplexity:
+
+```
+                                     exllamav3's forward (4096 tokens)   ours (whole file, 512-token windows)
+bf16                                 11.0421                             10.7283
+exllamav3, own calibration           11.4606  (+3.8%)                    11.3686  (+6.0%)
+exllamav3, our one-pass Hessians     11.6339  (+5.4%)                    11.3570  (+5.9%)
+ours, layer by layer                 11.4159  (+3.4%)                    10.8944  (+1.5%)
+```
+
+Ours is at least exllamav3's own conversion by its own forward, and well ahead by ours (whose Hessians came from
+our forward's activations, the ones it then runs). The CLI path: 3.0bpw mul1 from README.md alone, 2.3 min, our
+PPL 11.3261. A tiny Llama (128 wide, 266-token vocabulary, the head kept dense) writes, loads and decodes.
+
+Not yet: MoE experts (the converter bails on stacked experts), tensors not in 128 blocks (exllamav3 pads them),
+models too large for the device in full precision (needs exllamav3's module streaming), and the L passes (an early
+exit after each pass's own layer would halve them).

@@ -330,6 +330,62 @@ async fn a_hessian_collection_writes_each_layers_input_hessian() -> anyhow::Resu
     Ok(())
 }
 
+// an EXL3 write from a calibration file: every linear in 128-wide blocks replaced by its trellis (the 266-row
+// head stays dense), the rest copied, and the written model loads and decodes
+async fn an_exl3_write_loads_and_decodes() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_llama_checkpoint_with(serde_json::json!({
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_attention_heads": 1,
+        "num_key_value_heads": 1,
+        // calibration chunks run 1024 tokens
+        "max_position_embeddings": 2048,
+    }))?;
+    let calibration = checkpoint.path().join("calibration.txt");
+    std::fs::write(&calibration, CALIBRATION_TEXT.repeat(8))?;
+    let out = tempfile::tempdir()?;
+    TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_calibration_file(calibration)
+        .with_exl3_out(inference::Exl3WriteConfig {
+            output: out.path().to_path_buf(),
+            bits: 4.0,
+            head_bits: None,
+            codebook: Some("3inst".to_string()),
+        })
+        .build()
+        .await?;
+    let index: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+        out.path().join("model.safetensors.index.json"),
+    )?)?;
+    let map = index["weight_map"].as_object().expect("a weight map");
+    for key in [
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.1.mlp.down_proj",
+    ] {
+        anyhow::ensure!(
+            map.contains_key(&format!("{key}.trellis")),
+            "{key} has no trellis"
+        );
+        anyhow::ensure!(
+            !map.contains_key(&format!("{key}.weight")),
+            "{key} kept its weight"
+        );
+    }
+    anyhow::ensure!(
+        map.contains_key("lm_head.weight") && map.contains_key("model.embed_tokens.weight")
+    );
+    let written = TextModelBuilder::new(out.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .build()
+        .await?;
+    greedy_ids(&written).await?;
+    Ok(())
+}
+
 async fn a_lora_adapter_applies_only_when_a_request_selects_it() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let adapter = tempfile::tempdir()?;
@@ -687,6 +743,7 @@ concurrent_cases!(
         writing_uqff_while_loading_from_uqff_is_refused: 0,
         an_isq_load_can_calibrate_on_a_text_file_first: 0,
         a_hessian_collection_writes_each_layers_input_hessian: 0,
+        an_exl3_write_loads_and_decodes: 400,
         a_lora_adapter_applies_only_when_a_request_selects_it: 0,
         paged_gpu_decode_through_the_gather_matches_the_cpu: 348,
         a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu: 354,

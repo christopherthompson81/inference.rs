@@ -70,6 +70,7 @@ use image::DynamicImage;
 pub use inference_nn::loaders::{Modalities, MultimodalPromptPrefixer, SupportedModality};
 use inference_protocol::chat_template::ChatTemplate;
 pub use inputs_processor::InputProcessorOutput;
+pub use isq::Exl3WriteConfig;
 pub(crate) use isq::IsqModelLoader;
 #[cfg(feature = "utoipa")]
 pub use isq::UqffWriteSpec;

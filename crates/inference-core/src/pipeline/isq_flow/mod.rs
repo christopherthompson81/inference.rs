@@ -4,6 +4,7 @@
 //! plus runtime re-ISQ.
 
 mod drive;
+mod exl3_write;
 mod online;
 mod plan;
 
@@ -11,6 +12,7 @@ pub(crate) use drive::{
     CalibrationCtx, CalibrationDrive, EmbeddingCalibrationDrive, MultimodalCalibrationDrive,
     NormalCalibrationDrive, resolve_imatrix_map, write_hessians,
 };
+pub(crate) use exl3_write::Exl3Source;
 pub use online::CalibrationStatus;
 pub(crate) use online::{apply_calibration, begin_calibration, calibration_status};
 pub(crate) use plan::{
@@ -43,6 +45,8 @@ pub(crate) struct FinishIsqLoad<'a> {
     pub imatrix: Option<&'a PathBuf>,
     pub calibration_file: Option<&'a PathBuf>,
     pub hessians_out: Option<&'a PathBuf>,
+    pub exl3_out: Option<&'a super::isq::Exl3WriteConfig>,
+    pub exl3_source: Option<Exl3Source<'a>>,
     pub calibration: CalibrationCtx<'a>,
     pub uqff: Option<UqffArtifact<'a>>,
 }
@@ -57,10 +61,28 @@ pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<Option<Vec<Pa
         imatrix,
         calibration_file,
         hessians_out,
+        exl3_out,
+        exl3_source,
         calibration,
         uqff,
     } = inputs;
     plan.validate_tracked_selection(&modules)?;
+    if let (Some(config), Some(calibration_file), Some(source)) =
+        (exl3_out, calibration_file, &exl3_source)
+    {
+        exl3_write::write_exl3(
+            drive,
+            &modules,
+            calibration_file,
+            config,
+            source,
+            &calibration,
+        )?;
+        for module in modules {
+            module.ct.resolve()?;
+        }
+        return Ok(None);
+    }
     if let (Some(dir), Some(calibration_file)) = (hessians_out, calibration_file) {
         write_hessians(drive, &modules, calibration_file, dir, &calibration)?;
         for module in modules {

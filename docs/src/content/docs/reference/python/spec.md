@@ -157,6 +157,18 @@ What to load and how to run it: the JSON form of the options `inference serve` t
 | `skills` | `SkillsSpec \| None` | optional |
 
 
+## `Exl3WriteConfig`
+
+An EXL3 model to write from a calibration file, laid out as exllamav3's converter writes one: each linear encoded at `bits` (the output head at `head_bits`, default 6) on `codebook` (`3inst`, `mcg` or `mul1`, the default), the other tensors copied.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `bits` | `float` | required |
+| `codebook` | `str \| None` | optional |
+| `head_bits` | `float \| None` | optional |
+| `output` | `str` | required |
+
+
 ## `IsqOrganization`
 
 Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
@@ -455,6 +467,7 @@ Select a plain model, without quantization or adapters
 | `arch` | `NormalLoaderType \| None` | optional |
 | `calibration_file` | `str \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
+| `exl3_out` | `Exl3WriteConfig \| None` | optional |
 | `from_uqff` | `str \| None` | optional |
 | `hessians_out` | `str \| None` | optional |
 | `hf_cache_path` | `str \| None` | optional |
@@ -479,6 +492,7 @@ Select a model for running via auto loader
 | --- | --- | --- |
 | `calibration_file` | `str \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
+| `exl3_out` | `Exl3WriteConfig \| None` | optional |
 | `from_uqff` | `str \| None` | optional |
 | `hessians_out` | `str \| None` | optional |
 | `hf_cache_path` | `str \| None` | optional |

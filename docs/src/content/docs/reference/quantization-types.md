@@ -255,3 +255,16 @@ and cached in `~/.cache/inference-rs/exl3_autotune_v1.bin`.
 
 Elsewhere the weights are reconstructed into dense layers as they load, so a model takes its unquantized size in
 memory. Add `--isq` to quantize the reconstructed layers again.
+
+`inference quantize exl3` writes one (CUDA), in exllamav3's layout, which both engines load:
+
+```bash
+inference quantize exl3 -m <full-precision model> --calibration-file <text> -o <out dir> --bits 4 [--codebook mul1]
+```
+
+It goes a layer at a time as exllamav3's converter does: each layer's input Hessians come from the calibration
+text run through the model with every layer before it already replaced by its encoding, so each encoding
+compensates the error the earlier ones leave. Bits are 1 to 8, or 1.5, 2.5 and 3.5 on mul1; the output head takes
+`--head-bits` (6 by default). Each layer costs one calibration pass, so the model runs in full precision on the
+device. Dense models only so far: MoE experts are not written yet, and a tensor whose sides are not multiples of
+128 stays dense.

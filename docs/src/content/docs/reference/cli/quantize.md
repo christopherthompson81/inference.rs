@@ -278,3 +278,20 @@ inference quantize mmproj [OPTIONS] --model <MODEL> --output <OUTPUT_PATH>
 | `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path |
 | `--matrix-type <MATRIX_TYPE>` |  | The matrices' type (`bf16`, `f16`, `f32`, `q8_0`, ...); the checkpoint's own float type by default. Norms, biases, convolutions and embeddings stay f32 |
 
+## inference quantize exl3
+
+A text model to EXL3 (exllamav3's layout) from a calibration file, a layer at a time: each layer encoded against the inputs the layers before it, already encoded, give it
+
+```
+inference quantize exl3 [OPTIONS] --model-id <MODEL_ID> --calibration-file <CALIBRATION_FILE> --output <OUTPUT_PATH> --bits <BITS>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local model directory (full precision) |
+| `--calibration-file <CALIBRATION_FILE>` | required | Calibration text, a few hundred thousand tokens of the kind the model will see |
+| `-o, --output <OUTPUT_PATH>` | required | Output directory |
+| `--bits <BITS>` | required | Bits per weight: 1 to 8, or 1.5, 2.5, 3.5 (mul1 codebook) |
+| `--head-bits <HEAD_BITS>` |  | Bits per weight of the output head [default: 6] |
+| `--codebook <CODEBOOK>` |  | Codebook: mul1, mcg or 3inst [default: mul1] |
+

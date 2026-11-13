@@ -132,6 +132,10 @@ name = "exl3_hessians"
 path = "quantization/exl3_hessians/main.rs"
 
 [[example]]
+name = "exl3_convert"
+path = "quantization/exl3_convert/main.rs"
+
+[[example]]
 name = "online_calibration"
 path = "quantization/online_calibration/main.rs"
 
