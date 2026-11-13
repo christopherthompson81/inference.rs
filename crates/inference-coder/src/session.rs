@@ -25,6 +25,8 @@ const IMAGE_FILE_PART: &str = "image_file";
 const IMAGE_URL_PART: &str = "image_url";
 // what a request says in place of an image file that is gone by the time the request is built
 const MISSING_IMAGE: &str = "(this image file no longer exists)";
+// beside a session file, the copies of the images its tool calls returned
+const IMAGES_EXT: &str = "images";
 /// The file extensions a read shows the model as an image, with their media types.
 pub const IMAGE_TYPES: [(&str, &str); 6] = [
     ("png", "image/png"),
@@ -308,15 +310,39 @@ impl Session {
         Ok(sessions)
     }
 
-    /// Deletes the session at `path` with the copies it kept of the files it changed.
+    /// Deletes the session at `path` with the copies it kept of the files it changed and of the images it was shown.
     pub fn delete(path: &Path) -> Result<()> {
         std::fs::remove_file(path).with_context(|| format!("deleting {}", path.display()))?;
-        let kept = path.with_extension(crate::changes::CHANGES_EXT);
-        if kept.exists() {
-            std::fs::remove_dir_all(&kept)
-                .with_context(|| format!("deleting {}", kept.display()))?;
+        for kept in [
+            path.with_extension(crate::changes::CHANGES_EXT),
+            path.with_extension(IMAGES_EXT),
+        ] {
+            if kept.exists() {
+                std::fs::remove_dir_all(&kept)
+                    .with_context(|| format!("deleting {}", kept.display()))?;
+            }
         }
         Ok(())
+    }
+
+    /// A copy of the image a tool call returned, kept beside the session as it was when read: a later request shows the
+    /// model the same picture (and its prefix stays cached) though the file is overwritten or deleted.
+    pub fn keep_image(&self, call_id: &str, index: usize, path: &Path) -> Result<PathBuf> {
+        let dir = self.path.with_extension(IMAGES_EXT);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        // call ids are the model's, so only their safe characters name the file
+        let call = call_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect::<String>();
+        let kept = dir.join(format!("{call}-{index}.{ext}"));
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::copy(path, &kept))
+            .with_context(|| format!("keeping {} for the session", path.display()))?;
+        Ok(kept)
     }
 
     /// The newest session for the project at `root`.
@@ -366,7 +392,7 @@ pub fn image_type(path: &Path) -> Option<&'static str> {
         .map(|(_, media)| *media)
 }
 
-/// An image a tool call returned: the call, the file and its name as the model saw it.
+/// An image a tool call returned: the call, the file (the session's copy) and the name the model saw it by.
 pub struct ToolImage {
     pub call_id: String,
     pub path: PathBuf,
@@ -506,8 +532,12 @@ mod tests {
         );
         let kept = session.path.with_extension(crate::changes::CHANGES_EXT);
         std::fs::create_dir_all(&kept).unwrap();
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, b"png").unwrap();
+        let image = session.keep_image("call:1", 0, &shot).unwrap();
+        assert!(image.ends_with("call1-0.png"), "{}", image.display());
         Session::delete(&session.path).unwrap();
-        assert!(!session.path.exists() && !kept.exists());
+        assert!(!session.path.exists() && !kept.exists() && !image.exists());
         assert!(Session::list(dir.path()).unwrap().is_empty());
     }
 

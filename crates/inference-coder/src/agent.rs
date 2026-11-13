@@ -270,11 +270,17 @@ impl Agent {
                 pending.push(
                     json!({"role": "tool", "tool_call_id": call.id, "content": outcome.text}),
                 );
-                images.extend(outcome.images.into_iter().map(|path| ToolImage {
-                    call_id: call.id.clone(),
-                    shown_as: self.ctx.display(&path),
-                    path,
-                }));
+                for (index, path) in outcome.images.into_iter().enumerate() {
+                    images.push(ToolImage {
+                        call_id: call.id.clone(),
+                        shown_as: self.ctx.display(&path),
+                        // without a copy the image is read from where it was, as long as it stays there
+                        path: self
+                            .session
+                            .keep_image(&call.id, index, &path)
+                            .unwrap_or(path),
+                    });
+                }
             }
             // tool results are text, so the images they returned follow as a turn of their own
             if !images.is_empty() {
@@ -826,6 +832,16 @@ mod tests {
         assert!(url.starts_with("data:image/png;base64,"), "{url}");
         let saved = std::fs::read_to_string(&agent.session.path).unwrap();
         assert!(saved.contains("\"image_file\"") && !saved.contains("base64"));
+        drop(requests);
+        // the session shows the picture it read, though the file is overwritten and then deleted
+        std::fs::write(root.join("shot.png"), b"a later picture").unwrap();
+        let resent = agent.request(&[]);
+        std::fs::remove_file(root.join("shot.png")).unwrap();
+        assert_eq!(agent.request(&[]), resent);
+        let url = resent["messages"][4]["content"][1]["image_url"]["url"]
+            .as_str()
+            .unwrap();
+        assert_eq!(url, "data:image/png;base64,cG5nIGJ5dGVz");
     }
 
     #[tokio::test]
