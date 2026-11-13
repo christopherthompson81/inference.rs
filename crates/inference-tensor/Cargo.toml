@@ -23,6 +23,7 @@ cudarc = { version = "0.19.8", features = [
     "cublas",
     "cublaslt",
     "curand",
+    "cusolver",
     "driver",
     "nvrtc",
     "f16",

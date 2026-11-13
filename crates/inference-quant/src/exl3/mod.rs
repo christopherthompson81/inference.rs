@@ -5,7 +5,11 @@
 #[cfg(feature = "cuda")]
 mod cuda;
 #[cfg(feature = "cuda")]
+pub mod encode;
+#[cfg(feature = "cuda")]
 pub(crate) mod ffi;
+#[cfg(feature = "cuda")]
+mod linalg;
 #[cfg(feature = "cuda")]
 pub(crate) mod qffi;
 #[cfg(feature = "cuda")]
