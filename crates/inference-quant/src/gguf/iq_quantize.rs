@@ -6,6 +6,7 @@
 use inference_tensor::Result;
 use rayon::prelude::*;
 
+use super::iq_grid_quantize as grid;
 use super::kernel::GgufType;
 use super::raw::KVALUES_IQ4NL;
 
@@ -63,7 +64,7 @@ const SIMPLE_INDEX_IQ4NL: [u8; 256] = [
 ];
 
 // ggml's: the float added to 1.5 * 2^23 rounds to the nearest integer, ties to even
-fn nearest_int(x: f32) -> i32 {
+pub(super) fn nearest_int(x: f32) -> i32 {
     let v = x + ROUNDING_MAGIC;
     (v.to_bits() & 0x007f_ffff) as i32 - 0x0040_0000
 }
@@ -454,7 +455,24 @@ type BlockEncoder = fn(&[f32], Option<&[f32]>, &mut [u8]);
 
 /// Whether [`quantize_rows`] writes `ty`.
 pub fn can_quantize(ty: GgufType) -> bool {
-    matches!(ty, GgufType::Iq4Nl | GgufType::Iq4Xs | GgufType::Iq4Ks)
+    matches!(
+        ty,
+        GgufType::Iq4Nl
+            | GgufType::Iq4Xs
+            | GgufType::Iq4Ks
+            | GgufType::Iq2Xxs
+            | GgufType::Iq2Xs
+            | GgufType::Iq2S
+            | GgufType::Iq3Xxs
+            | GgufType::Iq3S
+            | GgufType::Iq1S
+            | GgufType::Iq1M
+    )
+}
+
+/// Whether `ty` needs an imatrix to quantize (ggml's `ggml_quantize_requires_imatrix`).
+pub fn requires_imatrix(ty: GgufType) -> bool {
+    matches!(ty, GgufType::Iq2Xxs | GgufType::Iq2Xs | GgufType::Iq1S)
 }
 
 /// Rows of `cols` floats as `ty` blocks, each column weighed by `imatrix` (its `cols` importances) when given.
@@ -477,8 +495,46 @@ pub fn quantize_rows(
             Some(quantize_iq4_xs_block),
         ),
         GgufType::Iq4Ks => (QK_K, IQ4_KS_ROW_HEADER + cols / QK_K * BLOCK_IQ4_KS, None),
+        GgufType::Iq2Xxs => (
+            QK_K,
+            cols / QK_K * grid::BLOCK_IQ2_XXS,
+            Some(|x, w, o| grid::quantize_iq2_xxs(x, w.expect("an imatrix"), o)),
+        ),
+        GgufType::Iq2Xs => (
+            QK_K,
+            cols / QK_K * grid::BLOCK_IQ2_XS,
+            Some(|x, w, o| grid::quantize_iq2_xs(x, w.expect("an imatrix"), o)),
+        ),
+        GgufType::Iq2S => (
+            QK_K,
+            cols / QK_K * grid::BLOCK_IQ2_S,
+            Some(grid::quantize_iq2_s),
+        ),
+        GgufType::Iq3Xxs => (
+            QK_K,
+            cols / QK_K * grid::BLOCK_IQ3_XXS,
+            Some(grid::quantize_iq3_xxs),
+        ),
+        GgufType::Iq3S => (
+            QK_K,
+            cols / QK_K * grid::BLOCK_IQ3_S,
+            Some(grid::quantize_iq3_s),
+        ),
+        GgufType::Iq1S => (
+            QK_K,
+            cols / QK_K * grid::BLOCK_IQ1_S,
+            Some(|x, w, o| grid::quantize_iq1_s(x, w.expect("an imatrix"), o)),
+        ),
+        GgufType::Iq1M => (
+            QK_K,
+            cols / QK_K * grid::BLOCK_IQ1_M,
+            Some(grid::quantize_iq1_m),
+        ),
         other => inference_tensor::bail!("{other:?} has no quantizer here"),
     };
+    if requires_imatrix(ty) && imatrix.is_none() {
+        inference_tensor::bail!("{ty:?} needs an imatrix to quantize");
+    }
     if !cols.is_multiple_of(block) || !values.len().is_multiple_of(cols) {
         inference_tensor::bail!("{ty:?} rows of {cols} values are not whole blocks of {block}");
     }
@@ -568,11 +624,80 @@ mod tests {
         }
     }
 
+    const LOW_BIT: [GgufType; 7] = [
+        GgufType::Iq1S,
+        GgufType::Iq1M,
+        GgufType::Iq2Xxs,
+        GgufType::Iq2Xs,
+        GgufType::Iq2S,
+        GgufType::Iq3Xxs,
+        GgufType::Iq3S,
+    ];
+
+    // uniform values have an rms of 0.58; each type's bound sits a little above what it reaches, fewer bits higher
+    #[test]
+    fn low_bit_rows_round_trip_through_the_dequantizers() {
+        let bounds = [0.27, 0.26, 0.21, 0.18, 0.15, 0.11, 0.08];
+        let cols = 512;
+        let x = values(8 * cols, 3);
+        let imatrix = vec![1.0f32; cols];
+        for (ty, bound) in LOW_BIT.into_iter().zip(bounds) {
+            let (err, _) = rms_error(ty, cols, &x, Some(&imatrix));
+            assert!(err < bound, "{ty:?} round trip error {err}");
+        }
+    }
+
+    // a skewed imatrix against an even one: the error it weighs falls
+    #[test]
+    fn a_low_bit_imatrix_lowers_the_error_where_it_weighs() {
+        let cols = 256;
+        let x = values(64 * cols, 11);
+        // every other column: a weight that is constant over a sub-block scales its whole fit and changes nothing
+        let skewed = (0..cols)
+            .map(|c| if c % 2 == 0 { 10.0 } else { 1.0 })
+            .collect::<Vec<_>>();
+        let even = vec![1.0f32; cols];
+        let weighted_error = |back: &[f32]| {
+            x.chunks(cols)
+                .zip(back.chunks(cols))
+                .map(|(a, b)| {
+                    (0..cols)
+                        .map(|c| skewed[c] * (a[c] - b[c]).powi(2))
+                        .sum::<f32>()
+                })
+                .sum::<f32>()
+        };
+        for ty in LOW_BIT {
+            let (_, plain) = rms_error(ty, cols, &x, Some(&even));
+            let (_, weighted) = rms_error(ty, cols, &x, Some(&skewed));
+            assert!(
+                weighted_error(&weighted) < weighted_error(&plain),
+                "{ty:?}: the imatrix did not lower the weighted error"
+            );
+        }
+    }
+
+    #[test]
+    fn the_imatrix_types_refuse_to_quantize_without_one() {
+        let x = values(256, 5);
+        for ty in LOW_BIT {
+            assert_eq!(
+                quantize_rows(ty, 256, &x, None).is_err(),
+                requires_imatrix(ty),
+                "{ty:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_zero_row_stays_zero() {
         let x = vec![0f32; 256];
-        for ty in [GgufType::Iq4Nl, GgufType::Iq4Xs, GgufType::Iq4Ks] {
-            let (_, back) = rms_error(ty, 256, &x, None);
+        let imatrix = vec![1.0f32; 256];
+        for ty in [GgufType::Iq4Nl, GgufType::Iq4Xs, GgufType::Iq4Ks]
+            .into_iter()
+            .chain(LOW_BIT)
+        {
+            let (_, back) = rms_error(ty, 256, &x, Some(&imatrix));
             assert!(back.iter().all(|v| *v == 0.0), "{ty:?}");
         }
     }
