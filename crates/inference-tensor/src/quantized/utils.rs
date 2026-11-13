@@ -441,16 +441,13 @@ pub(super) fn make_qkx3_quants(
 }
 
 // https://github.com/ggerganov/llama.cpp/blob/678d7994f4da0af3d29046be99950ac999ee9762/ggml/src/ggml-quants.c#L827
-pub(super) fn make_qp_quants(
-    n: usize,
-    nmax: u8,
-    x: &[f32],
-    l: &mut [u8],
-    quant_weights: &[f32],
-) -> f32 {
+// A negative `x` (IQ2_XXS passes one) gets ggml's mix of types: a level is an int where it is computed and summed,
+// and wraps to its uint8_t when stored in and read back from `l`.
+pub fn make_qp_quants(n: usize, nmax: u8, x: &[f32], l: &mut [u8], quant_weights: &[f32]) -> f32 {
     assert_eq!(x.len(), n);
     assert_eq!(l.len(), n);
     assert_eq!(quant_weights.len(), n);
+    let nmax_i = i32::from(nmax);
 
     let max = x.iter().copied().fold(0.0, f32::max);
     if max < GROUP_MAX_EPS {
@@ -485,8 +482,7 @@ pub(super) fn make_qp_quants(
             .iter()
             .zip(quant_weights.iter())
             .map(|(&xi, &w)| {
-                let mut li = nearest_int(iscale_is * xi) as u8;
-                li = li.min(nmax);
+                let li = nearest_int(iscale_is * xi).min(nmax_i);
                 let diff = xi - scale_is * li as f32;
                 w * diff * diff
             })
@@ -501,9 +497,8 @@ pub(super) fn make_qp_quants(
     let mut sumlx = 0.0;
     let mut suml2 = 0.0;
     for ((xi, li), &w) in x.iter().zip(l.iter_mut()).zip(quant_weights.iter()) {
-        let mut li_new = nearest_int(iscale * xi) as u8;
-        li_new = li_new.min(nmax);
-        *li = li_new;
+        let li_new = nearest_int(iscale * xi).min(nmax_i);
+        *li = li_new as u8;
         sumlx += w * xi * li_new as f32;
         suml2 += w * li_new as f32 * li_new as f32;
     }
@@ -514,12 +509,12 @@ pub(super) fn make_qp_quants(
             let mut slx = sumlx - w * xi * *li as f32;
             let mut sl2 = suml2 - w * *li as f32 * *li as f32;
             if slx > 0.0 && sl2 > 0.0 {
-                let new_li = (nearest_int(xi * sl2 / slx) as u8).min(nmax);
-                if new_li != *li {
+                let new_li = nearest_int(xi * sl2 / slx).min(nmax_i);
+                if new_li != i32::from(*li) {
                     slx += w * xi * new_li as f32;
                     sl2 += w * new_li as f32 * new_li as f32;
                     if slx.powi(2) * suml2 > sumlx.powi(2) * sl2 {
-                        *li = new_li;
+                        *li = new_li as u8;
                         sumlx = slx;
                         suml2 = sl2;
                         n_changed += 1;

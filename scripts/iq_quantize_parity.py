@@ -26,11 +26,20 @@ TYPES = {
     "q4_k": 12,
     "q5_k": 13,
     "q6_k": 14,
+    "iq2_xxs": 16,
+    "iq2_xs": 17,
+    "iq3_xxs": 18,
+    "iq1_s": 19,
     "iq4_nl": 20,
+    "iq3_s": 21,
+    "iq2_s": 22,
     "iq4_xs": 23,
+    "iq1_m": 29,
     "iq4_ks": 144,
 }
 DEFAULT_TYPES = ["iq4_nl", "iq4_xs"]
+# ggml_quantize_requires_imatrix: ggml aborts on these without one
+REQUIRES_IMATRIX = {"iq2_xxs", "iq2_xs", "iq1_s"}
 ROWS, COLS = 64, 4096
 SEED = 0
 
@@ -85,6 +94,8 @@ def main():
         for name in types:
             ty = TYPES[name]
             for label, w in (("plain", None), ("imatrix", imatrix)):
+                if w is None and name in REQUIRES_IMATRIX:
+                    continue
                 out = np.zeros(lib.ggml_row_size(ty, COLS) * ROWS, dtype=np.uint8)
                 lib.ggml_quantize_chunk(
                     ty,

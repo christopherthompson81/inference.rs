@@ -106,3 +106,36 @@ Iq3Kt    2.22      5.96
 ```
 
 The offload test passes over all 14 low-bit types. Left in #938: step 3, the writers.
+
+## Run 7 - 2026-11-13 16:00
+
+#938 step 3, writers. `scripts/iq_quantize_parity.py ~/Programming/llama.cpp/build_cuda/bin iq2_xxs iq2_xs iq2_s`
+(64 rows of 4096, skewed values and imatrix, ggml's `ggml_quantize_chunk` against ours, byte for byte; ggml requires
+an imatrix for IQ2_XXS / IQ2_XS / IQ1_S, so those run only with one).
+
+ggml's `iq2xs_init_impl` tables (`kgrid_2bit_256/512/1024`, `kgrid_1bit_2048`) are the dequant grids' levels: each
+coordinate's rank among the grid's values (8 < 25 < 43, or -1 < 0 < 1). Derived from our `iq_tables` grids they equal
+ggml's four tables exactly (checked by parsing ggml-quants.c), so the writers build the maps from those.
+
+First run: IQ2_XS and IQ2_S 0 bytes differing, IQ2_XXS 3266 of 67584 (544 of 1024 blocks; grid indices and scales,
+never signs). Cause: IQ2_XXS's even-parity flip leaves one magnitude negative, and it goes through `make_qp_quants`,
+where ggml keeps a negative level as an int in the sums but wraps it to uint8_t in `L`; our port wrapped then clamped
+(255 min 4 = 4 where ggml has -1). Q2_K never passes a negative value, which is why its parity held. With the C
+types mirrored: IQ2_XXS, IQ2_XS, IQ2_S and Q2_K all 0 bytes differing.
+
+## Run 8 - 2026-11-13 16:40
+
+IQ3_XXS / IQ3_S (`iq3xs_init_impl`: 4 coordinates of 3-bit levels, a 4096-entry map; its `kgrid_256` / `kgrid_512`
+also equal our grids' levels) and IQ1_S / IQ1_M (the exhaustive 3-level split over the sorted values, the fit-scored
+neighbour search, IQ1_M's final refit of `d` over every sub-block, empty ones included): all 0 bytes differing on the
+first run. The full parity set, `iq1_s iq1_m iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s q2_k iq4_nl iq4_xs`, plain and with
+an imatrix: 0 bytes differing throughout.
+
+Two dead ends on the way:
+- the unit test hung at 0% CPU: the grid tables were built with rayon inside a `OnceLock`, and the first quantizing
+  worker to need them builds them while the rest of the rayon pool waits on the lock, so the build's own work items
+  had no thread to run on (the parity example got through by scheduling luck). The build now runs on scoped threads.
+- "an imatrix lowers the weighted error" first failed for IQ1_S, then gave identical errors with and without the
+  imatrix for most types: the test's skew was constant over each sub-block, which scales that sub-block's whole fit
+  and changes nothing. With an every-other-column skew (10:1; at 10000:1 ggml's IQ2_XXS loses, as ours does, being
+  the same bytes) every low-bit type lowers it.
