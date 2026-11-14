@@ -137,7 +137,8 @@ impl Encoder {
             .narrow(0, 0, rows)?
             .narrow(1, 0, cols)?
             .to_dtype(weight.dtype())?
-            .contiguous()?;
+            .contiguous()?
+            .to_device(weight.device())?;
         tensors.insert(
             format!("{name}.trellis"),
             encoding.trellis.to_device(&Device::Cpu)?,

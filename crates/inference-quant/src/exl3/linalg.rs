@@ -3,6 +3,10 @@
 //! factorization there leaves L (`a = L L^T`) in the lower triangle as we read it. The other triangle keeps its
 //! input values, so a caller reads the lower one only.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use inference_tensor::cuda_backend::DeviceId;
 use inference_tensor::cuda_backend::cudarc::cusolver::sys as cs;
 use inference_tensor::{DType, Device, Result, Storage, Tensor};
 
@@ -10,14 +14,28 @@ use crate::utils::slice_ptr;
 
 struct Handle(cs::cusolverDnHandle_t);
 
+thread_local! {
+    // one handle a device, kept: creating one takes device memory that a pool holding a failed attempt's blocks
+    // will not give back
+    static HANDLES: RefCell<Vec<(DeviceId, Rc<Handle>)>> = const { RefCell::new(Vec::new()) };
+}
+
 impl Handle {
-    fn new(dev: &inference_tensor::CudaDevice) -> Result<Self> {
-        let mut handle = std::ptr::null_mut();
-        // a handle's creation and destruction reach the whole context, which no other thread's capture may see
-        let _scope = inference_tensor::cuda_backend::context_wide_scope();
-        // SAFETY: an out pointer for the new handle
-        check(unsafe { cs::cusolverDnCreate(&mut handle) }, "create")?;
-        let handle = Self(handle);
+    // this thread's handle for `dev`, on its stream
+    fn get(dev: &inference_tensor::CudaDevice) -> Result<Rc<Handle>> {
+        let handle = HANDLES.with_borrow(|h| {
+            h.iter()
+                .find(|(id, _)| *id == dev.id())
+                .map(|(_, h)| h.clone())
+        });
+        let handle = match handle {
+            Some(handle) => handle,
+            None => {
+                let handle = Rc::new(Self::new()?);
+                HANDLES.with_borrow_mut(|h| h.push((dev.id(), handle.clone())));
+                handle
+            }
+        };
         // SAFETY: a live handle and this device's stream
         check(
             unsafe {
@@ -26,6 +44,15 @@ impl Handle {
             "set its stream",
         )?;
         Ok(handle)
+    }
+
+    fn new() -> Result<Self> {
+        let mut handle = std::ptr::null_mut();
+        // a handle's creation and destruction reach the whole context, which no other thread's capture may see
+        let _scope = inference_tensor::cuda_backend::context_wide_scope();
+        // SAFETY: an out pointer for the new handle
+        check(unsafe { cs::cusolverDnCreate(&mut handle) }, "create")?;
+        Ok(Self(handle))
     }
 }
 
@@ -58,7 +85,7 @@ pub(crate) fn cholesky(a: &Tensor) -> Result<Option<Tensor>> {
     let n = a.dim(0)?;
     let factor = a.to_dtype(DType::F32)?.contiguous()?.copy()?;
     let dev_info = Tensor::zeros(1, DType::I32, a.device())?;
-    let handle = Handle::new(dev)?;
+    let handle = Handle::get(dev)?;
     {
         let (f_s, f_l) = factor.storage_and_layout();
         let (i_s, i_l) = dev_info.storage_and_layout();
@@ -118,7 +145,7 @@ pub(crate) fn solve_spd(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
     };
     let x = b.to_dtype(DType::F32)?.contiguous()?.copy()?;
     let dev_info = Tensor::zeros(1, DType::I32, a.device())?;
-    let handle = Handle::new(dev)?;
+    let handle = Handle::get(dev)?;
     {
         let (f_s, f_l) = factor.storage_and_layout();
         let (x_s, x_l) = x.storage_and_layout();

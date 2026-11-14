@@ -600,7 +600,7 @@ impl MultimodalLoader {
             kind: self.kind.clone(),
             model_id: self.model_id.clone(),
             modalities,
-            loaded_for_uqff_write: uqff.write().is_some(),
+            loaded_only_to_write: uqff.write().is_some(),
             tracked_modules,
             source_weight_files,
             source_weight_source: weight_source,

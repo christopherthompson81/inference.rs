@@ -1216,7 +1216,7 @@ impl TranscriptionPipeline {
                     input: vec![SupportedModality::Audio],
                     output,
                 },
-                loaded_for_uqff_write: false,
+                loaded_only_to_write: false,
                 label_decision: None,
                 audio_transcriber: None,
                 prompt_activation_bytes_per_token: None,

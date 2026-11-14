@@ -823,8 +823,8 @@ pub struct GeneralMetadata {
     pub cache_engine: Option<CacheEngine>,
     pub model_metadata: Option<Arc<dyn ModelConfigLike + Send + Sync>>,
     pub modalities: Modalities,
-    // a UQFF-writing load kept on the host (artifact-only, or a CPU load) skips the warm-up run
-    pub loaded_for_uqff_write: bool,
+    // a load that only wrote a file (UQFF kept on the host, an EXL3 conversion streamed) skips the warm-up run
+    pub loaded_only_to_write: bool,
     /// How the model answers decision questions by label logits, from its GGUF.
     pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
     /// How an audio-in decoder serves transcription requests.

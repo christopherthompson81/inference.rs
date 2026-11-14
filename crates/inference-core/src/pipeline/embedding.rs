@@ -472,7 +472,7 @@ impl EmbeddingLoader {
                         input: vec![SupportedModality::Text],
                         output: vec![SupportedModality::Embedding],
                     },
-                    loaded_for_uqff_write: uqff.write().is_some(),
+                    loaded_only_to_write: uqff.write().is_some(),
                     label_decision: prepared.and_then(|source| source.label_decision.clone()),
                     audio_transcriber: None,
                     prompt_activation_bytes_per_token: None,
