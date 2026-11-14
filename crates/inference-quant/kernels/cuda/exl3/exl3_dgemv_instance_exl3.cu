@@ -64,6 +64,141 @@ __device__ __forceinline__ void mma_row0(half2 a0, half2 a2, const FragB& b, flo
     );
 }
 
+// every trellis word of a warp's tile column over one k-split, issued at once (lanes past the tile's words idle)
+template <int bits, int KR>
+__device__ __forceinline__ void load_tiles(uint32_t (&w)[KR / 16], const uint32_t* B, int ntiles, int tile, int kz,
+                                           int lane)
+{
+    constexpr int TWORDS = 8 * bits;
+    const uint32_t* bp = B + ((size_t) kz * (KR / 16) * ntiles + tile) * TWORDS + lane;
+    #pragma unroll
+    for (int s = 0; s < KR / 16; ++s)
+        w[s] = lane < TWORDS ? __ldcs(bp + (size_t) s * ntiles * TWORDS) : 0;
+}
+
+// one row (sx: the split's KR rotated f16 values) times the warp's loaded tiles: its 16 columns into red[0..15]
+template <int bits, int cb, int KR>
+__device__ __forceinline__ void dot_tiles(const uint32_t (&w)[KR / 16], const half2* sx, int lane, float* red)
+{
+    // per-lane window sources (exl3_gemv_kernel's)
+    [[maybe_unused]] int src_a = 0, src_b = 0, s2 = 0;
+    if constexpr (bits == 2)
+    {
+        src_b = lane >> 1;
+        src_a = (src_b + 15) & 15;
+    }
+    else if constexpr (bits == 3)
+    {
+        int b1 = ((lane << 3) + 257) * 3;
+        int b2 = b1 + 21;
+        int i2 = (b2 - 1) / 32;
+        s2 = (i2 + 1) * 32 - b2;
+        src_a = ((b1 - 16) / 32) % 24;
+        src_b = i2 % 24;
+    }
+
+    float c0[4] = {}, c1[4] = {};
+    const half2 hz = __half2half2(__ushort_as_half(0));
+    #pragma unroll
+    for (int s = 0; s < KR / 16; ++s)
+    {
+        FragB f0, f1;
+        if constexpr (bits == 4)
+        {
+            uint32_t aw = __shfl_sync(0xffffffffu, w[s], (lane + 31) & 31);
+            exl3_gemv_ns::dq8_regs_4bits<cb>(aw, w[s], f0, f1);
+        }
+        else if constexpr (bits == 2)
+        {
+            uint32_t bw = __shfl_sync(0xffffffffu, w[s], src_b);
+            uint32_t aw = __shfl_sync(0xffffffffu, w[s], src_a);
+            exl3_gemv_ns::dq8_regs_2bits<cb>(aw, bw, lane << 3, f0, f1);
+        }
+        else
+        {
+            uint32_t aw = __shfl_sync(0xffffffffu, w[s], src_a);
+            uint32_t bw = __shfl_sync(0xffffffffu, w[s], src_b);
+            exl3_gemv_ns::dq8_regs_3bits<cb>(aw, bw, s2, f0, f1);
+        }
+        // A row 0: k pairs (2 (lane % 4), +1) and (+8, +9) of this slice
+        half2 a0 = lane < 4 ? sx[s * 8 + lane] : hz;
+        half2 a2 = lane < 4 ? sx[s * 8 + lane + 4] : hz;
+        mma_row0(a0, a2, f0, c0);
+        mma_row0(a0, a2, f1, c1);
+    }
+
+    // lanes 0..3 hold row 0: columns 2 (lane % 4) (+1) of each n8 half
+    if (lane < 4)
+    {
+        red[2 * lane] = c0[0];
+        red[2 * lane + 1] = c0[1];
+        red[8 + 2 * lane] = c1[0];
+        red[8 + 2 * lane + 1] = c1[1];
+    }
+}
+
+// x[k0 .. k0 + 4) of one lane * suh, then the warp's 128 values rotated into sx (f16)
+__device__ __forceinline__ void rotate_in(const void* x, bool x_bf16, const half* suh, int k0, half2* sx, int lane)
+{
+    float v0, v1, v2, v3;
+    load4(x, x_bf16, k0, v0, v1, v2, v3);
+    uint2 su = *((const uint2*) (suh + k0));
+    float2 s01 = __half22float2(*reinterpret_cast<half2*>(&su.x));
+    float2 s23 = __half22float2(*reinterpret_cast<half2*>(&su.y));
+    v0 *= s01.x; v1 *= s01.y; v2 *= s23.x; v3 *= s23.y;
+    had128(v0, v1, v2, v3, lane);
+    sx[lane * 2] = __floats2half2_rn(v0, v1);
+    sx[lane * 2 + 1] = __floats2half2_rn(v2, v3);
+}
+
+// the 128 values of v (shared) rotated out (Hadamard, * svh[0..128)) by one warp: lane's 4 into o
+__device__ __forceinline__ void rotate_out(const float* v, const half* svh, int lane, float (&o)[4])
+{
+    float v0 = v[lane * 4], v1 = v[lane * 4 + 1], v2 = v[lane * 4 + 2], v3 = v[lane * 4 + 3];
+    had128(v0, v1, v2, v3, lane);
+    uint2 sv = *((const uint2*) (svh + lane * 4));
+    float2 s01 = __half22float2(*reinterpret_cast<half2*>(&sv.x));
+    float2 s23 = __half22float2(*reinterpret_cast<half2*>(&sv.y));
+    o[0] = v0 * s01.x; o[1] = v1 * s01.y; o[2] = v2 * s23.x; o[3] = v3 * s23.y;
+}
+
+__device__ __forceinline__ void store4(void* out, int out_kind, size_t i, const float (&o)[4])
+{
+    if (out_kind == OUT_F32)
+        *((float4*) ((float*) out + i)) = make_float4(o[0], o[1], o[2], o[3]);
+    else if (out_kind == OUT_BF16)
+    {
+        __nv_bfloat162 a = __floats2bfloat162_rn(o[0], o[1]), b = __floats2bfloat162_rn(o[2], o[3]);
+        uint2 u;
+        u.x = *reinterpret_cast<uint32_t*>(&a);
+        u.y = *reinterpret_cast<uint32_t*>(&b);
+        *((uint2*) ((__nv_bfloat16*) out + i)) = u;
+    }
+    else
+    {
+        half2 a = __floats2half2_rn(o[0], o[1]), b = __floats2half2_rn(o[2], o[3]);
+        uint2 u;
+        u.x = *reinterpret_cast<uint32_t*>(&a);
+        u.y = *reinterpret_cast<uint32_t*>(&b);
+        *((uint2*) ((half*) out + i)) = u;
+    }
+}
+
+// the block's last arrival for its counter, after publishing its stores; resets the counter when it is
+__device__ __forceinline__ bool arrive_last(int* counter, int arrivals, bool* flag)
+{
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0)
+    {
+        *flag = atomicAdd(counter, 1) == arrivals - 1;
+        if (*flag) *counter = 0;
+    }
+    __syncthreads();
+    if (*flag) __threadfence();
+    return *flag;
+}
+
 // up to MAX_JOBS matrices of one k in a launch (q, k and v: one x, each its own rotations and width), their column
 // groups end to end
 constexpr int MAX_JOBS = 4;
@@ -98,8 +233,6 @@ template <int bits, int cb, int KR>
 __global__ __launch_bounds__(THREADS)
 void dgemv_kernel(const __grid_constant__ Params p)
 {
-    constexpr int TWORDS = 8 * bits;    // uint32 a 16x16 tile
-    constexpr int SLICES = KR / 16;     // 16-row k-slices a warp
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
     const int g = blockIdx.x % p.groups;
@@ -110,159 +243,226 @@ void dgemv_kernel(const __grid_constant__ Params p)
         if (i < p.jobs && g >= p.job[i].group0) j = i;
     const Job& job = p.job[j];
     const int group = g - job.group0;
-    const int size_n = job.n;
     const int splits = p.splits;
-    const int ntiles = size_n / 16;
+    const int ntiles = job.n / 16;
     const int tile = group * WARPS + warp;
-    const int ks0 = kz * SLICES;
 
-    // every trellis word of this warp's tile column in flight first
-    uint32_t w[SLICES];
-    const uint32_t* bp = job.B + ((size_t) ks0 * ntiles + tile) * TWORDS + lane;
-    #pragma unroll
-    for (int s = 0; s < SLICES; ++s)
-        w[s] = lane < TWORDS ? __ldcs(bp + (size_t) s * ntiles * TWORDS) : 0;
+    uint32_t w[KR / 16];
+    load_tiles<bits, KR>(w, job.B, ntiles, tile, kz, lane);
 
-    // this block's rows of x, * suh and rotated, as f16
     __shared__ half2 sx[KR / 2];
     __shared__ float red[GROUP_COLS];
-    __shared__ float sh_out[GROUP_COLS];
     __shared__ bool last;
     for (int wc = warp; wc < KR / 128; wc += WARPS)
-    {
-        const int k0 = kz * KR + wc * 128 + lane * 4;
-        float v0, v1, v2, v3;
-        load4(p.x, p.x_bf16, k0, v0, v1, v2, v3);
-        uint2 su = *((const uint2*) (job.suh + k0));
-        float2 s01 = __half22float2(*reinterpret_cast<half2*>(&su.x));
-        float2 s23 = __half22float2(*reinterpret_cast<half2*>(&su.y));
-        v0 *= s01.x; v1 *= s01.y; v2 *= s23.x; v3 *= s23.y;
-        had128(v0, v1, v2, v3, lane);
-        sx[(wc * 128 + lane * 4) / 2] = __floats2half2_rn(v0, v1);
-        sx[(wc * 128 + lane * 4) / 2 + 1] = __floats2half2_rn(v2, v3);
-    }
+        rotate_in(p.x, p.x_bf16, job.suh, kz * KR + wc * 128 + lane * 4, sx + wc * 64, lane);
+    __syncthreads();
+    dot_tiles<bits, cb, KR>(w, sx, lane, red + warp * 16);
     __syncthreads();
 
-    // per-lane window sources (exl3_gemv_kernel's)
-    [[maybe_unused]] int src_a = 0, src_b = 0, s2 = 0;
-    if constexpr (bits == 2)
-    {
-        src_b = lane >> 1;
-        src_a = (src_b + 15) & 15;
-    }
-    else if constexpr (bits == 3)
-    {
-        int b1 = ((lane << 3) + 257) * 3;
-        int b2 = b1 + 21;
-        int i2 = (b2 - 1) / 32;
-        s2 = (i2 + 1) * 32 - b2;
-        src_a = ((b1 - 16) / 32) % 24;
-        src_b = i2 % 24;
-    }
-
-    float c0[4] = {}, c1[4] = {};
-    const half2 hz = __half2half2(__ushort_as_half(0));
-    #pragma unroll
-    for (int s = 0; s < SLICES; ++s)
-    {
-        FragB f0, f1;
-        if constexpr (bits == 4)
-        {
-            uint32_t aw = __shfl_sync(0xffffffffu, w[s], (lane + 31) & 31);
-            exl3_gemv_ns::dq8_regs_4bits<cb>(aw, w[s], f0, f1);
-        }
-        else if constexpr (bits == 2)
-        {
-            uint32_t bw = __shfl_sync(0xffffffffu, w[s], src_b);
-            uint32_t aw = __shfl_sync(0xffffffffu, w[s], src_a);
-            exl3_gemv_ns::dq8_regs_2bits<cb>(aw, bw, lane << 3, f0, f1);
-        }
-        else
-        {
-            uint32_t aw = __shfl_sync(0xffffffffu, w[s], src_a);
-            uint32_t bw = __shfl_sync(0xffffffffu, w[s], src_b);
-            exl3_gemv_ns::dq8_regs_3bits<cb>(aw, bw, s2, f0, f1);
-        }
-        // A row 0: k pairs (2 (lane % 4), +1) and (+8, +9) of this slice
-        half2 a0 = lane < 4 ? sx[s * 8 + lane] : hz;
-        half2 a2 = lane < 4 ? sx[s * 8 + lane + 4] : hz;
-        mma_row0(a0, a2, f0, c0);
-        mma_row0(a0, a2, f1, c1);
-    }
-
-    // lanes 0..3 hold row 0: columns 2 (lane % 4) (+1) of each n8 half
-    if (lane < 4)
-    {
-        red[warp * 16 + 2 * lane] = c0[0];
-        red[warp * 16 + 2 * lane + 1] = c0[1];
-        red[warp * 16 + 8 + 2 * lane] = c1[0];
-        red[warp * 16 + 8 + 2 * lane + 1] = c1[1];
-    }
-    __syncthreads();
     const int col0 = group * GROUP_COLS;
-    if (splits == 1)
-    {
-        if (threadIdx.x < GROUP_COLS) sh_out[threadIdx.x] = red[threadIdx.x];
-    }
-    else
+    if (splits > 1)
     {
         // a row of partials per split, summed in split order by the last to arrive: the same sum every run
         float* part = p.partial + job.col0 + col0 + threadIdx.x;
         if (threadIdx.x < GROUP_COLS) __stcg(part + (size_t) kz * p.total_n, red[threadIdx.x]);
-        __threadfence();
-        __syncthreads();
-        if (threadIdx.x == 0) last = atomicAdd(p.counters + g, 1) == splits - 1;
-        __syncthreads();
-        if (!last) return;
-        __threadfence();
+        if (!arrive_last(p.counters + g, splits, &last)) return;
         if (threadIdx.x < GROUP_COLS)
         {
             float sum = 0.0f;
             for (int z = 0; z < splits; ++z) sum += __ldcg(part + (size_t) z * p.total_n);
-            sh_out[threadIdx.x] = sum;
+            red[threadIdx.x] = sum;
         }
-        if (threadIdx.x == 0) p.counters[g] = 0;
+        __syncthreads();
     }
-    __syncthreads();
-
-    // output rotation, 128 columns a warp, * svh
     if (warp == 0)
     {
-        float v0 = sh_out[lane * 4], v1 = sh_out[lane * 4 + 1], v2 = sh_out[lane * 4 + 2], v3 = sh_out[lane * 4 + 3];
-        had128(v0, v1, v2, v3, lane);
-        const int c = col0 + lane * 4;
-        const int out_kind = p.out_kind;
-        void* out = job.out;
-        uint2 sv = *((const uint2*) (job.svh + c));
-        float2 s01 = __half22float2(*reinterpret_cast<half2*>(&sv.x));
-        float2 s23 = __half22float2(*reinterpret_cast<half2*>(&sv.y));
-        v0 *= s01.x; v1 *= s01.y; v2 *= s23.x; v3 *= s23.y;
-        if (out_kind == OUT_F32)
-            *((float4*) ((float*) out + c)) = make_float4(v0, v1, v2, v3);
-        else if (out_kind == OUT_BF16)
-        {
-            __nv_bfloat162 a = __floats2bfloat162_rn(v0, v1), b = __floats2bfloat162_rn(v2, v3);
-            uint2 u;
-            u.x = *reinterpret_cast<uint32_t*>(&a);
-            u.y = *reinterpret_cast<uint32_t*>(&b);
-            *((uint2*) ((__nv_bfloat16*) out + c)) = u;
-        }
-        else
-        {
-            half2 a = __floats2half2_rn(v0, v1), b = __floats2half2_rn(v2, v3);
-            uint2 u;
-            u.x = *reinterpret_cast<uint32_t*>(&a);
-            u.y = *reinterpret_cast<uint32_t*>(&b);
-            *((uint2*) ((half*) out + c)) = u;
-        }
+        float o[4];
+        rotate_out(red, job.svh + col0, lane, o);
+        store4(job.out, p.out_kind, col0 + lane * 4, o);
     }
 }
+
+// A MoE layer's routed experts for one token: gate and up (kernel A, whose last block of each slot's column group
+// rotates both out, applies silu(gate) * up and rotates that into the down projection's input), then down (kernel B,
+// whose last block of a slot's column group rotates out and weights it, and whose last slot of a column group sums
+// the slots in order into the token's row)
+struct MoeParams
+{
+    const void* x;          // H, f16 or bf16 (x_bf16)
+    const void* sel;        // topk, int64 or uint32 (sel_u32)
+    const void* rw;         // topk, f16 or f32 (rw_f32)
+    bool x_bf16;
+    bool sel_u32;
+    bool rw_f32;
+    int out_kind;
+    const int64_t* gate;    // each projection's table: experts trellis, then suh, then svh addresses
+    const int64_t* up;
+    const int64_t* down;
+    int experts;
+    int topk;
+    int H;
+    int I;
+    int splits_a;
+    int splits_b;
+    float* part_a;          // splits_a x topk x 2 x I
+    half* act;              // topk x I, the down projection's rotated input
+    float* part_b;          // splits_b x topk x H
+    float* slot_out;        // topk x H, each slot's weighted output
+    int* ctr_a;             // topk x I / 128
+    int* ctr_b;             // topk x H / 128
+    int* ctr_t;             // H / 128
+    void* out;              // H
+};
+
+__device__ __forceinline__ int moe_expert(const MoeParams& p, int slot)
+{
+    return p.sel_u32 ? (int) ((const uint32_t*) p.sel)[slot] : (int) ((const int64_t*) p.sel)[slot];
+}
+
+template <int bits, int cb, int KR>
+__global__ __launch_bounds__(THREADS)
+void moe_a_kernel(const __grid_constant__ MoeParams p)
+{
+    const int warp = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int ig = p.I / GROUP_COLS;
+    const int groups = p.topk * 2 * ig;
+    const int g = blockIdx.x % groups;
+    const int kz = blockIdx.x / groups;
+    const int slot = g / (2 * ig);
+    const int proj = g / ig % 2;
+    const int group = g % ig;
+    const int e = moe_expert(p, slot);
+    const int64_t* table = proj ? p.up : p.gate;
+
+    uint32_t w[KR / 16];
+    load_tiles<bits, KR>(w, (const uint32_t*) table[e], p.I / 16, group * WARPS + warp, kz, lane);
+
+    __shared__ half2 sx[KR / 2];
+    __shared__ float red[2][GROUP_COLS];
+    __shared__ bool last;
+    for (int wc = warp; wc < KR / 128; wc += WARPS)
+        rotate_in(p.x, p.x_bf16, (const half*) table[p.experts + e], kz * KR + wc * 128 + lane * 4, sx + wc * 64, lane);
+    __syncthreads();
+    dot_tiles<bits, cb, KR>(w, sx, lane, red[0] + warp * 16);
+    __syncthreads();
+
+    const int stride = p.topk * 2 * p.I;
+    const int col0 = group * GROUP_COLS;
+    float* part = p.part_a + (size_t) (slot * 2 + proj) * p.I + col0 + threadIdx.x;
+    if (threadIdx.x < GROUP_COLS) __stcg(part + (size_t) kz * stride, red[0][threadIdx.x]);
+    if (!arrive_last(p.ctr_a + slot * ig + group, 2 * p.splits_a, &last)) return;
+    if (threadIdx.x < 2 * GROUP_COLS)
+    {
+        // gate's columns in red[0], up's in red[1]
+        const int q = threadIdx.x / GROUP_COLS;
+        const int c = threadIdx.x % GROUP_COLS;
+        const float* src = p.part_a + (size_t) (slot * 2 + q) * p.I + col0 + c;
+        float sum = 0.0f;
+        for (int z = 0; z < p.splits_a; ++z) sum += __ldcg(src + (size_t) z * stride);
+        red[q][c] = sum;
+    }
+    __syncthreads();
+    if (warp == 0)
+    {
+        float og[4], ou[4];
+        rotate_out(red[0], (const half*) p.gate[2 * p.experts + e] + col0, lane, og);
+        rotate_out(red[1], (const half*) p.up[2 * p.experts + e] + col0, lane, ou);
+        float v[4];
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) v[i] = og[i] / (1.0f + __expf(-og[i])) * ou[i];
+        // into the down projection's input: * its suh, rotated, as f16
+        const int c = col0 + lane * 4;
+        uint2 su = *((const uint2*) ((const half*) p.down[p.experts + e] + c));
+        float2 s01 = __half22float2(*reinterpret_cast<half2*>(&su.x));
+        float2 s23 = __half22float2(*reinterpret_cast<half2*>(&su.y));
+        v[0] *= s01.x; v[1] *= s01.y; v[2] *= s23.x; v[3] *= s23.y;
+        had128(v[0], v[1], v[2], v[3], lane);
+        half2* dst = (half2*) (p.act + (size_t) slot * p.I + c);
+        dst[0] = __floats2half2_rn(v[0], v[1]);
+        dst[1] = __floats2half2_rn(v[2], v[3]);
+    }
+}
+
+template <int bits, int cb, int KR>
+__global__ __launch_bounds__(THREADS)
+void moe_b_kernel(const __grid_constant__ MoeParams p)
+{
+    const int warp = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int hg = p.H / GROUP_COLS;
+    const int groups = p.topk * hg;
+    const int g = blockIdx.x % groups;
+    const int kz = blockIdx.x / groups;
+    const int slot = g / hg;
+    const int group = g % hg;
+    const int e = moe_expert(p, slot);
+
+    uint32_t w[KR / 16];
+    load_tiles<bits, KR>(w, (const uint32_t*) p.down[e], p.H / 16, group * WARPS + warp, kz, lane);
+
+    __shared__ half2 sx[KR / 2];
+    __shared__ float red[GROUP_COLS];
+    __shared__ bool last;
+    const half2* act = (const half2*) (p.act + (size_t) slot * p.I + kz * KR);
+    for (int i = threadIdx.x; i < KR / 2; i += THREADS) sx[i] = act[i];
+    __syncthreads();
+    dot_tiles<bits, cb, KR>(w, sx, lane, red + warp * 16);
+    __syncthreads();
+
+    const int stride = p.topk * p.H;
+    const int col0 = group * GROUP_COLS;
+    float* part = p.part_b + (size_t) slot * p.H + col0 + threadIdx.x;
+    if (threadIdx.x < GROUP_COLS) __stcg(part + (size_t) kz * stride, red[threadIdx.x]);
+    if (!arrive_last(p.ctr_b + slot * hg + group, p.splits_b, &last)) return;
+    if (threadIdx.x < GROUP_COLS)
+    {
+        float sum = 0.0f;
+        for (int z = 0; z < p.splits_b; ++z) sum += __ldcg(part + (size_t) z * stride);
+        red[threadIdx.x] = sum;
+    }
+    __syncthreads();
+    if (warp == 0)
+    {
+        float o[4];
+        rotate_out(red, (const half*) p.down[2 * p.experts + e] + col0, lane, o);
+        const float rw = p.rw_f32 ? ((const float*) p.rw)[slot] : __half2float(((const half*) p.rw)[slot]);
+        float* dst = p.slot_out + (size_t) slot * p.H + col0 + lane * 4;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) __stcg(dst + i, rw * o[i]);
+    }
+    if (!arrive_last(p.ctr_t + group, p.topk, &last)) return;
+    if (warp == 0)
+    {
+        // the slots in order: the same sum every run
+        float o[4] = {};
+        for (int j = 0; j < p.topk; ++j)
+        {
+            const float* src = p.slot_out + (size_t) j * p.H + col0 + lane * 4;
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) o[i] += __ldcg(src + i);
+        }
+        store4(p.out, p.out_kind, col0 + lane * 4, o);
+    }
+}
+
+typedef void (*moe_fn)(const MoeParams);
 
 typedef void (*dgemv_fn)(const Params);
 
 static dgemv_fn select(int bits, int cb, int kr)
 {
     #define SEL(b_, c_, k_) if (bits == b_ && cb == c_ && kr == k_) return dgemv_kernel<b_, c_, k_>;
+    #define SEL_K(b_, c_) SEL(b_, c_, 128) SEL(b_, c_, 256)
+    SEL_K(2, 0) SEL_K(2, 1) SEL_K(2, 2) SEL_K(3, 0) SEL_K(3, 1) SEL_K(3, 2) SEL_K(4, 0) SEL_K(4, 1) SEL_K(4, 2)
+    #undef SEL_K
+    #undef SEL
+    return nullptr;
+}
+
+static moe_fn select_moe(bool a, int bits, int cb, int kr)
+{
+    #define SEL(b_, c_, k_) if (bits == b_ && cb == c_ && kr == k_) return a ? moe_a_kernel<b_, c_, k_> : moe_b_kernel<b_, c_, k_>;
     #define SEL_K(b_, c_) SEL(b_, c_, 128) SEL(b_, c_, 256)
     SEL_K(2, 0) SEL_K(2, 1) SEL_K(2, 2) SEL_K(3, 0) SEL_K(3, 1) SEL_K(3, 2) SEL_K(4, 0) SEL_K(4, 1) SEL_K(4, 2)
     #undef SEL_K
@@ -318,6 +518,65 @@ extern "C" int launch_exl3_dgemv(const void* x, bool x_bf16, int jobs, const uin
     p.counters = (int*) ws;
     p.partial = ws + DGEMV_COUNTERS;
     kernel<<<p.groups * p.splits, THREADS, 0, stream>>>(p);
+    cuda_check(cudaPeekAtLastError());
+    return 0;
+}
+
+// rows a block for `groups` column groups over k: 128, or 256 past KR_256_BLOCKS_PER_SM blocks a multiprocessor
+static int pick_kr(int groups, int size_k, int sms)
+{
+    return groups * (size_k / 128) > exl3_dgemv::KR_256_BLOCKS_PER_SM * sms && size_k % 256 == 0 ? 256 : 128;
+}
+
+// One token's routed experts (sel, rw: topk) through gate, up (silu) and down into out (H, of out_kind). Each table
+// holds `experts` trellis, then suh, then svh addresses. ws as launch_exl3_dgemv's. Returns 0 when launched, -1 for
+// shapes, rates or a workspace it does not take.
+extern "C" int launch_exl3_dmoe(const void* x, bool x_bf16, const void* sel, bool sel_u32, const void* rw, bool rw_f32,
+                                const int64_t* gate, const int64_t* up, const int64_t* down, int experts, int topk,
+                                int hidden, int inter, int gu_tile_u16, int d_tile_u16, int cb, float* ws,
+                                int64_t ws_floats, void* out, int out_kind, cudaStream_t stream)
+{
+    using namespace exl3_dgemv;
+    if (gu_tile_u16 % 16 || d_tile_u16 % 16 || hidden % 128 || inter % 128 || topk < 1) return -1;
+    int device;
+    cudaGetDevice(&device);
+    const int sms = DevCtx::instance().get_num_sms(device);
+    const int ig = inter / GROUP_COLS, hg = hidden / GROUP_COLS;
+    const int kr_a = pick_kr(topk * 2 * ig, hidden, sms);
+    const int kr_b = pick_kr(topk * hg, inter, sms);
+    if (hidden % kr_a || inter % kr_b) return -1;
+    moe_fn ka = select_moe(true, gu_tile_u16 / 16, cb, kr_a);
+    moe_fn kb = select_moe(false, d_tile_u16 / 16, cb, kr_b);
+    if (!ka || !kb) return -1;
+    MoeParams p = {};
+    p.x = x; p.x_bf16 = x_bf16;
+    p.sel = sel; p.sel_u32 = sel_u32;
+    p.rw = rw; p.rw_f32 = rw_f32;
+    p.out_kind = out_kind;
+    p.gate = gate; p.up = up; p.down = down;
+    p.experts = experts; p.topk = topk; p.H = hidden; p.I = inter;
+    p.splits_a = hidden / kr_a;
+    p.splits_b = inter / kr_b;
+    // counters: three regions of the workspace's leading words
+    constexpr int CTR_REGION = DGEMV_COUNTERS / 4;
+    if (topk * ig > CTR_REGION || topk * hg > CTR_REGION || hg > CTR_REGION) return -1;
+    p.ctr_a = (int*) ws;
+    p.ctr_b = p.ctr_a + CTR_REGION;
+    p.ctr_t = p.ctr_b + CTR_REGION;
+    float* f = ws + DGEMV_COUNTERS;
+    p.part_a = f;
+    f += (size_t) p.splits_a * topk * 2 * inter;
+    p.act = (half*) f;
+    f += (size_t) topk * inter / 2;
+    p.part_b = f;
+    f += (size_t) p.splits_b * topk * hidden;
+    p.slot_out = f;
+    f += (size_t) topk * hidden;
+    if (f - ws > ws_floats) return -1;
+    p.out = out;
+    ka<<<topk * 2 * ig * p.splits_a, THREADS, 0, stream>>>(p);
+    cuda_check(cudaPeekAtLastError());
+    kb<<<topk * hg * p.splits_b, THREADS, 0, stream>>>(p);
     cuda_check(cudaPeekAtLastError());
     return 0;
 }

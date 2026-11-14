@@ -803,3 +803,25 @@ accuracy (teacher-forced): 4.74874 (Run 24's GEMV 4.75072, the mgemm/gemm 4.7418
 
 Next: the MoE experts the same way (stand-ins of their weight volume: 2048 x 12288 in 24.3 us against coop_a's 41,
 768 x 16384 in 14.6 against coop_b's 20.7).
+
+## Run 26 - 2026-11-14 16:00
+
+The MoE experts for one token on the same blocks (`moe_a_kernel`, `moe_b_kernel`): A over (slot, gate/up, column
+group, k-split), its last block of each slot's column group summing both projections' partials, rotating them out,
+applying silu(gate) * up and rotating that (* down's suh, Hadamard) into the down projection's f16 input; B over
+(slot, column group, k-split), its last block of a slot's group rotating out and weighting by the routing weight, the
+last slot of a column group summing the slots in order into the token's row. Experts come from `sel` and the
+projections' address tables on the device, so decode graphs capture it. More than one token keeps exllamav3's coop
+kernels. The fused-MoE tests' one-token cases run these kernels (checked under nsys), the five-token ones coop.
+
+```
+Qwen3-30B-A3B 3.0bpw       tok/s (pairs)                      gate/up     down      step (nsys)
+exllamav3 coop             179.3 195.0 200.9 | 195.3 180.0 200.0   40.0 us     18.2 us   6.01 ms
+ours                       218.1 213.2 216.8 | 225.6 215.5 208.6   27.3 us     15.8 us   5.16 ms
+```
+
+Readings spread more now (clocks 1875-1920 MHz at the same ~352 W; the faster kernels draw more of the cap). Decode
+accuracy (teacher-forced) 4.74964 (Run 25: 4.74874).
+
+Per token now: gate/up 1.31 ms, q/k/v + o_proj 1.13, down 0.76, attention 0.64, the 6 bpw head (exllamav3's GEMM,
+233 MB at ~525 GB/s) 0.44, glue ~0.8.

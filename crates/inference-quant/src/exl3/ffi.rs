@@ -66,6 +66,34 @@ inference_tensor::kernel_library! {
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
 
+        /// One token's routed experts through the decode kernels: gate, up (silu) and down, each slot weighted by
+        /// `rw` and summed in order into `out` (`hidden`, of `out_kind`); `x` f16 or bf16, `sel` i64 or u32, `rw` f16
+        /// or f32. Each table holds `experts` trellis, then suh, then svh addresses. `ws` as for launch_exl3_dgemv.
+        /// 0 when launched, -1 for shapes, rates or a workspace it does not take.
+        pub(crate) fn launch_exl3_dmoe(
+            x: *const c_void,
+            x_bf16: bool,
+            sel: *const c_void,
+            sel_u32: bool,
+            rw: *const c_void,
+            rw_f32: bool,
+            gate: *const i64,
+            up: *const i64,
+            down: *const i64,
+            experts: i32,
+            topk: i32,
+            hidden: i32,
+            inter: i32,
+            gu_tile_u16: i32,
+            d_tile_u16: i32,
+            cb: i32,
+            ws: *mut f32,
+            ws_floats: i64,
+            out: *mut c_void,
+            out_kind: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
         /// C (`m x n`, f16 or with `c_fp32` f32) = A (`m x k`, f16) times the trellis (`k/16 x n/16 x tile_u16`), A
         /// rotated by `suh` and the Hadamard into `a_had` (A's size) on the way in, C by the Hadamard and `svh` on the
         /// way out. Returns the kernel that ran, 0 for nothing to do, -1 when no kernel fits.

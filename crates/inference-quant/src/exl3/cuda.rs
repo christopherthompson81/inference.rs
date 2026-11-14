@@ -778,6 +778,8 @@ pub struct Exl3Experts {
     tuned: AtomicU8,
     // the m buckets the grouped path has launched outside a capture
     grouped_tuned: AtomicU8,
+    // the decode kernels' workspace, its stream's
+    dgemv_ws: Option<Tensor>,
 }
 
 // past this many slots (outside a capture) each expert multiplies its tokens' rows together, in groups of at most
@@ -831,6 +833,7 @@ impl Exl3Experts {
             dtype,
             tuned: AtomicU8::new(0),
             grouped_tuned: AtomicU8::new(0),
+            dgemv_ws: dgemv_workspace(&device)?,
         })
     }
 
@@ -893,6 +896,12 @@ impl Exl3Experts {
             weights.to_dtype(DType::F16)?
         }
         .contiguous()?;
+        if tokens == 1
+            && std::env::var("TMP_NO_DMOE").is_err()
+            && let Some(ys) = Self::dmoe(gate, up, down, &x, &sel, &rw)?
+        {
+            return Ok(Some(ys));
+        }
         // SAFETY: ffi takes plain sizes
         let ctr_len = unsafe {
             ffi::exl3_moe_ctr_len(slots_max as i32, tokens as i32, inter as i32, hidden as i32)
@@ -1026,6 +1035,102 @@ impl Exl3Experts {
         Ok(Some(Tensor::from((
             Storage::Cuda(storage),
             Shape::from((tokens, hidden)),
+        ))))
+    }
+
+    // one token's experts through the decode kernels: `x` (hidden, f16 or bf16), `sel` (topk, u32 or i64), `rw`
+    // (topk, f32 or f16), out `(1, hidden)` bf16 for bf16 `x`, else f32; None where they do not run
+    fn dmoe(
+        gate: &Self,
+        up: &Self,
+        down: &Self,
+        x: &Tensor,
+        sel: &Tensor,
+        rw: &Tensor,
+    ) -> Result<Option<Tensor>> {
+        let (Device::Cuda(dev), Some(ws)) = (x.device(), &gate.dgemv_ws) else {
+            return Ok(None);
+        };
+        let ((hidden, inter, gu_words), (_, _, d_words)) = (gate.dims(), down.dims());
+        let topk = sel.elem_count();
+        let x_bf16 = x.dtype() == DType::BF16;
+        let out = if x_bf16 { DType::BF16 } else { DType::F32 };
+        let (x_s, x_l) = x.storage_and_layout();
+        let (s_s, s_l) = sel.storage_and_layout();
+        let (r_s, r_l) = rw.storage_and_layout();
+        let (g_s, g_l) = gate.tables.storage_and_layout();
+        let (u_s, u_l) = up.tables.storage_and_layout();
+        let (d_s, d_l) = down.tables.storage_and_layout();
+        let (w_s, w_l) = ws.storage_and_layout();
+        let (
+            Storage::Cuda(x_c),
+            Storage::Cuda(s_c),
+            Storage::Cuda(r_c),
+            Storage::Cuda(g_c),
+            Storage::Cuda(u_c),
+            Storage::Cuda(d_c),
+            Storage::Cuda(w_c),
+        ) = (&*x_s, &*s_s, &*r_s, &*g_s, &*u_s, &*d_s, &*w_s)
+        else {
+            inference_tensor::bail!("EXL3 experts' tensors live on CUDA");
+        };
+        let (xp, _x) = if x_bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset())
+        };
+        let sel_u32 = sel.dtype() == DType::U32;
+        let (sp, _s) = if sel_u32 {
+            slice_ptr(s_c.as_cuda_slice::<u32>()?, s_l.start_offset())
+        } else {
+            slice_ptr(s_c.as_cuda_slice::<i64>()?, s_l.start_offset())
+        };
+        let rw_f32 = rw.dtype() == DType::F32;
+        let (rp, _r) = if rw_f32 {
+            slice_ptr(r_c.as_cuda_slice::<f32>()?, r_l.start_offset())
+        } else {
+            slice_ptr(r_c.as_cuda_slice::<f16>()?, r_l.start_offset())
+        };
+        let (gp, _g) = slice_ptr(g_c.as_cuda_slice::<i64>()?, g_l.start_offset());
+        let (up_, _u) = slice_ptr(u_c.as_cuda_slice::<i64>()?, u_l.start_offset());
+        let (dp, _d) = slice_ptr(d_c.as_cuda_slice::<i64>()?, d_l.start_offset());
+        let (wp, _w) = slice_ptr(w_c.as_cuda_slice::<f32>()?, w_l.start_offset());
+        // SAFETY: the kernels write every output
+        let (y, yp) = unsafe { dgemv_output(dev, out, hidden)? };
+        // SAFETY: the pointers are the live device buffers above (x hidden, sel and rw topk, the tables 3 x experts
+        // addresses of the layers' own tensors, the stream's workspace, out hidden), all on this device's stream
+        let ran = unsafe {
+            ffi::launch_exl3_dmoe(
+                xp as *const c_void,
+                x_bf16,
+                sp as *const c_void,
+                sel_u32,
+                rp as *const c_void,
+                rw_f32,
+                gp as *const i64,
+                up_ as *const i64,
+                dp as *const i64,
+                gate.trellis.len() as i32,
+                topk as i32,
+                hidden as i32,
+                inter as i32,
+                gu_words as i32,
+                d_words as i32,
+                gate.codebook as i32,
+                wp as *mut f32,
+                DGEMV_WS_FLOATS as i64,
+                yp as *mut c_void,
+                dgemv_out_kind(out),
+                dev.cuda_stream().cu_stream(),
+            )
+        };
+        drop((_x, _s, _r, _g, _u, _d, _w));
+        if ran < 0 {
+            return Ok(None);
+        }
+        Ok(Some(Tensor::from((
+            Storage::Cuda(y),
+            Shape::from((1, hidden)),
         ))))
     }
 
