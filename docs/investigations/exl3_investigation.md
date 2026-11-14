@@ -875,3 +875,66 @@ Result, 200 KB calibration slice, teacher-forced decode (README): BF16 5.50146, 
 tower copied unquantized) loads and decodes through our engine. `--resident` fails on hybrid models ("Hybrid
 recurrent metadata is required"): the resident calibration drive never carried recurrent state, so hybrids convert
 streamed only.
+
+## Run 29 - 2026-11-14 14:55
+
+exllamav3 1.6.6's conversion of Qwen3.6-35B-A3B at `-b 4.0` (defaults: head 6 bpw, mul1 codebook): 2h 15m, 18.07
+GiB of tensors. Of that, routed experts 15.15 GiB, embeddings 0.95, attention/GDN/shared experts 0.71, head 0.36,
+MTP 0.40, vision tower 0.52 (6 bpw); text without vision or MTP 17.16 GiB (the IQ4_KSS recipe file is 18.15 GiB
+with its MTP block).
+
+Loads and decodes through our engine as is: the multimodal pipeline, vision tower dequantized to dense at load (81
+linears through `dense_linear_in`), routed experts through our MoE kernels.
+
+KLD against the recipe's BF16 base (`perplexity --kld-base bf16-wiki-c512-ch40.kld`, wikitext-2, 40 x 512):
+
+| | PPL (base 5.8237) | KLD mean | KLD p99 | same top-1 |
+|---|---|---|---|---|
+| exllamav3 EXL3 4.0 | 5.8694 | 0.02146 | 0.198 | 93.81% |
+| IQ4_KSS recipe (ik, from the recipe log) | | 0.0216 | | |
+
+Speed, `inference bench` 512-token prompt / 128-token decode, alternating in one session:
+
+| | prefill tok/s | decode tok/s |
+|---|---|---|
+| EXL3 4.0 | 1618, 1618 | 147.3, 147.4 |
+| IQ4_KSS GGUF | 4234, 4216 | 164.4, 163.3 |
+
+A first request after the conversion took 64 s and the first KLD chunk 51.7 s. Neither came back: a rerun of the
+server answered in 0.39 s, and a KLD rerun's first chunk took 1.4 s. The KLD run had been reading its 5 GB base file
+cold. Profiling also showed the dense vision-tower dequantize runs at load, not in the first pass.
+
+So EXL3 matches the GGUF recipe's quality in 1 GiB less memory, but decodes 10% slower and prefills 2.6x slower.
+Next: profile decode per kernel against the GGUF run.
+
+## Run 30 - 2026-11-14 15:05
+
+Where Run 29's decode loses, nsys over a 100-token request (kernel time a token, 7.05 ms in all):
+`exl3_gemv_int8_sq_kernel` 2.78 ms in 247 launches (11.3 us each), and the casts around it (`cast_f32_bf16`,
+`cast_bf16_f16`, ~250 apiece) 0.65 ms. Every GDN, attention and shared-expert linear is mul1 at 4 bpw, and mul1
+at <= 5 bpw still kept exllamav3's int8 GEMV. That gate predates our decode GEMV (Run 25), which decodes mul1 too;
+Qwen3-30B-A3B is 3INST, so it never met the gate.
+
+A/B with the gate overridden (temporary env, `inference bench` 512 / 128, alternating):
+
+```
+                       decode tok/s       teacher-forced decode PPL (README, 576 tokens)
+int8 GEMV (as was)     147.6 147.4        3.39687
+our GEMV               189.5 188.7        3.40265
+```
+
+The PPL moves by +0.17%, about what Run 24 saw between kernels on this short text. Our GEMV keeps f16
+activations where the int8 one quantized them. Now one row always takes our GEMV (fused q/k/v included); the int8
+gate holds only for 2-16 rows. The GPU test's int8 bound covers only m = 2.
+
+The GDN's `in_proj_qkv` and `in_proj_z` share an input but ran as two launches: they now go through `fused_group`
+(one two-job GEMV at one row) as gate/up and q/k/v do: 188.4 -> 192.6 tok/s. Kernel time a token is now 5.52 ms
+(before the qkv/z fusion): our GEMV 1.83 ms (188 launches), moe_a 0.76, moe_b 0.50, the head 0.49.
+
+Decode, then: EXL3 4.0 192.6 tok/s against IQ4_KSS's 164 (both without MTP), at KLD 0.0215 against 0.0216.
+
+Prefill is the gap now (1628 against 4234 tok/s). One 512-token forward under nsys: a 520 ms span with 340 ms of
+kernels. The MoE expert `exl3_mgemm` takes 126 ms (120 launches, 1.05 ms each), the dense `exl3_gemm` 77 ms (251,
+305 us), index selects 53 ms (`is_u32_f16` 120 x 352 us, `is_u32_f32` 150 x 71 us: the expert grouping's row
+gathers), copies and casts ~40 ms. The other ~180 ms is idle, while the host reads the router's picks to group rows
+by expert.

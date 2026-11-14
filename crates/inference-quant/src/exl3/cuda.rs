@@ -51,8 +51,8 @@ struct GroupTables {
 
 // a fused projection group takes up to this many rows (decode, small batches); larger ones run layer by layer
 const GROUP_MAX_ROWS: usize = 16;
-// mul1 tensors up to this rate (a half-integer one counting as the next whole) take the int8 GEMV alone, faster
-// than any fused launch
+// past one row, mul1 tensors up to this rate (a half-integer one counting as the next whole) take the int8 GEMV
+// alone, faster than any fused launch
 const INT8_MAX_K: usize = 5;
 // the decode GEMV's output kinds (exl3_dgemv_instance_exl3.cu) and workspace words (16 MB)
 const DGEMV_WS_FLOATS: usize = 4 << 20;
@@ -167,10 +167,7 @@ impl Exl3Layer {
             return Ok(None);
         };
         let (k, _, words) = first.dims();
-        // mul1 at low rates keeps the int8 GEMV, faster than f16 MMA
-        let int8 = first.codebook == Exl3Codebook::Mul1 && words.div_ceil(16) <= INT8_MAX_K;
         if layers.len() > DGEMV_MAX_JOBS
-            || int8
             || layers.iter().any(|l| {
                 let (lk, _, lw) = l.dims();
                 l.padded() || lk != k || lw != words || l.codebook != first.codebook
@@ -300,7 +297,8 @@ impl Exl3Layer {
             .collect::<Vec<_>>();
         let (k, _, words) = self.dims();
         let rows = xs.elem_count() / k;
-        let int8 = self.codebook == Exl3Codebook::Mul1 && words.div_ceil(16) <= INT8_MAX_K;
+        let int8 =
+            rows > 1 && self.codebook == Exl3Codebook::Mul1 && words.div_ceil(16) <= INT8_MAX_K;
         if int8
             || layers.iter().any(|l| l.padded())
             || layers.iter().any(|l| {
@@ -1389,7 +1387,7 @@ mod tests {
     use crate::QuantMethod;
     use crate::exl3::{Exl3Codebook, dense_weight};
 
-    // of the largest output: f16 accumulation measures 3.4e-4 .. 8e-4, int8 activations (mul1 at m <= 2) 6e-3
+    // of the largest output: f16 accumulation measures 3.4e-4 .. 8e-4, int8 activations (mul1 at m = 2) 6e-3
     const F16_BOUND: f32 = 2e-3;
     const INT8_BOUND: f32 = 1.5e-2;
     const BF16_BOUND: f32 = 6e-3;
@@ -1443,7 +1441,7 @@ mod tests {
     }
 
     // the kernels against the CPU reconstruction: random trellises (every codebook, a half-integer rate), random
-    // signed scales, one and two rows (the GEMVs; mul1's quantize activations to int8) and 32 (the GEMM)
+    // signed scales, one and two rows (the GEMVs; mul1's two-row one quantizes activations to int8) and 32 (the GEMM)
     #[test]
     fn the_kernels_match_the_reconstructed_weight() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
@@ -1475,7 +1473,7 @@ mod tests {
                 let actual = layer.forward_raw(&x.to_dtype(DType::F16)?.to_device(&device)?)?;
                 let ratio = relative_error(&actual, &expected)?;
                 ratios.push(format!("{codebook:?} {words} m {m}: {ratio}"));
-                let int8 = codebook == Exl3Codebook::Mul1 && m <= 2;
+                let int8 = codebook == Exl3Codebook::Mul1 && m == 2;
                 failed |= ratio > if int8 { INT8_BOUND } else { F16_BOUND };
             }
         }

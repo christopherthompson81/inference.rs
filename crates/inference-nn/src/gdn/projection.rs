@@ -265,6 +265,13 @@ fn shared_qkv_z(
     qkv: &Arc<dyn QuantMethod>,
     z: &Arc<dyn QuantMethod>,
 ) -> Result<(Tensor, Tensor)> {
+    #[cfg(feature = "cuda")]
+    if let (Some(q), Some(zl)) = (qkv.exl3_layer(), z.exl3_layer())
+        && let Some(mut out) = q.fused_group(&[zl], x)?
+    {
+        let z = out.pop().unwrap();
+        return Ok((out.pop().unwrap(), z));
+    }
     match inference_quant::try_forward_with_shared_quantized_activation(
         x,
         &[qkv.as_ref(), z.as_ref()],
