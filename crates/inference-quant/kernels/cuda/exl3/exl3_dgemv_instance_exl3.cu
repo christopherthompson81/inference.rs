@@ -64,22 +64,41 @@ __device__ __forceinline__ void mma_row0(half2 a0, half2 a2, const FragB& b, flo
     );
 }
 
+// uint32 loads a lane makes for one 16x16 tile: a tile is 8 x bits words
+__host__ __device__ constexpr int tile_loads(int bits) { return (8 * bits + 31) / 32; }
+
 // every trellis word of a warp's tile column over one k-split, issued at once (lanes past the tile's words idle)
 template <int bits, int KR>
-__device__ __forceinline__ void load_tiles(uint32_t (&w)[KR / 16], const uint32_t* B, int ntiles, int tile, int kz,
-                                           int lane)
+__device__ __forceinline__ void load_tiles(uint32_t (&w)[KR / 16 * tile_loads(bits)], const uint32_t* B, int ntiles,
+                                           int tile, int kz, int lane)
 {
-    constexpr int TWORDS = 8 * bits;
-    const uint32_t* bp = B + ((size_t) kz * (KR / 16) * ntiles + tile) * TWORDS + lane;
+    constexpr int TILE_WORDS = 8 * bits;
+    constexpr int L = tile_loads(bits);
+    const uint32_t* bp = B + ((size_t) kz * (KR / 16) * ntiles + tile) * TILE_WORDS + lane;
     #pragma unroll
     for (int s = 0; s < KR / 16; ++s)
-        w[s] = lane < TWORDS ? __ldcs(bp + (size_t) s * ntiles * TWORDS) : 0;
+        #pragma unroll
+        for (int l = 0; l < L; ++l)
+            w[s * L + l] = lane + 32 * l < TILE_WORDS ? __ldcs(bp + (size_t) s * ntiles * TILE_WORDS + 32 * l) : 0;
 }
 
 // one row (sx: the split's KR rotated f16 values) times the warp's loaded tiles: its 16 columns into red[0..15]
+// past 4 bpw the words go through `stage` (the warp's KR / 16 tiles of shared memory) to exllamav3's generic decode
 template <int bits, int cb, int KR>
-__device__ __forceinline__ void dot_tiles(const uint32_t (&w)[KR / 16], const half2* sx, int lane, float* red)
+__device__ __forceinline__ void dot_tiles(const uint32_t (&w)[KR / 16 * tile_loads(bits)], const half2* sx, int lane,
+                                          float* red, uint32_t* stage)
 {
+    constexpr int TILE_WORDS = 8 * bits;
+    constexpr int L = tile_loads(bits);
+    if constexpr (bits > 4)
+    {
+        #pragma unroll
+        for (int s = 0; s < KR / 16; ++s)
+            #pragma unroll
+            for (int l = 0; l < L; ++l)
+                if (lane + 32 * l < TILE_WORDS) stage[s * TILE_WORDS + lane + 32 * l] = w[s * L + l];
+        __syncwarp();
+    }
     // per-lane window sources (exl3_gemv_kernel's)
     [[maybe_unused]] int src_a = 0, src_b = 0, s2 = 0;
     if constexpr (bits == 2)
@@ -103,7 +122,9 @@ __device__ __forceinline__ void dot_tiles(const uint32_t (&w)[KR / 16], const ha
     for (int s = 0; s < KR / 16; ++s)
     {
         FragB f0, f1;
-        if constexpr (bits == 4)
+        if constexpr (bits > 4)
+            dq_dispatch<bits, cb>(stage + s * TILE_WORDS, lane << 3, f0, f1);
+        else if constexpr (bits == 4)
         {
             uint32_t aw = __shfl_sync(0xffffffffu, w[s], (lane + 31) & 31);
             exl3_gemv_ns::dq8_regs_4bits<cb>(aw, w[s], f0, f1);
@@ -247,7 +268,7 @@ void dgemv_kernel(const __grid_constant__ Params p)
     const int ntiles = job.n / 16;
     const int tile = group * WARPS + warp;
 
-    uint32_t w[KR / 16];
+    uint32_t w[KR / 16 * tile_loads(bits)];
     load_tiles<bits, KR>(w, job.B, ntiles, tile, kz, lane);
 
     __shared__ half2 sx[KR / 2];
@@ -256,7 +277,8 @@ void dgemv_kernel(const __grid_constant__ Params p)
     for (int wc = warp; wc < KR / 128; wc += WARPS)
         rotate_in(p.x, p.x_bf16, job.suh, kz * KR + wc * 128 + lane * 4, sx + wc * 64, lane);
     __syncthreads();
-    dot_tiles<bits, cb, KR>(w, sx, lane, red + warp * 16);
+    __shared__ uint32_t stage[bits > 4 ? WARPS * KR / 16 * 8 * bits : 1];
+    dot_tiles<bits, cb, KR>(w, sx, lane, red + warp * 16, stage + (bits > 4 ? warp * KR / 16 * 8 * bits : 0));
     __syncthreads();
 
     const int col0 = group * GROUP_COLS;
@@ -335,7 +357,7 @@ void moe_a_kernel(const __grid_constant__ MoeParams p)
     const int e = moe_expert(p, slot);
     const int64_t* table = proj ? p.up : p.gate;
 
-    uint32_t w[KR / 16];
+    uint32_t w[KR / 16 * tile_loads(bits)];
     load_tiles<bits, KR>(w, (const uint32_t*) table[e], p.I / 16, group * WARPS + warp, kz, lane);
 
     __shared__ half2 sx[KR / 2];
@@ -344,7 +366,7 @@ void moe_a_kernel(const __grid_constant__ MoeParams p)
     for (int wc = warp; wc < KR / 128; wc += WARPS)
         rotate_in(p.x, p.x_bf16, (const half*) table[p.experts + e], kz * KR + wc * 128 + lane * 4, sx + wc * 64, lane);
     __syncthreads();
-    dot_tiles<bits, cb, KR>(w, sx, lane, red[0] + warp * 16);
+    dot_tiles<bits, cb, KR>(w, sx, lane, red[0] + warp * 16, nullptr);
     __syncthreads();
 
     const int stride = p.topk * 2 * p.I;
@@ -398,7 +420,7 @@ void moe_b_kernel(const __grid_constant__ MoeParams p)
     const int group = g % hg;
     const int e = moe_expert(p, slot);
 
-    uint32_t w[KR / 16];
+    uint32_t w[KR / 16 * tile_loads(bits)];
     load_tiles<bits, KR>(w, (const uint32_t*) p.down[e], p.H / 16, group * WARPS + warp, kz, lane);
 
     __shared__ half2 sx[KR / 2];
@@ -407,7 +429,7 @@ void moe_b_kernel(const __grid_constant__ MoeParams p)
     const half2* act = (const half2*) (p.act + (size_t) slot * p.I + kz * KR);
     for (int i = threadIdx.x; i < KR / 2; i += THREADS) sx[i] = act[i];
     __syncthreads();
-    dot_tiles<bits, cb, KR>(w, sx, lane, red + warp * 16);
+    dot_tiles<bits, cb, KR>(w, sx, lane, red + warp * 16, nullptr);
     __syncthreads();
 
     const int stride = p.topk * p.H;
@@ -455,6 +477,9 @@ static dgemv_fn select(int bits, int cb, int kr)
     #define SEL(b_, c_, k_) if (bits == b_ && cb == c_ && kr == k_) return dgemv_kernel<b_, c_, k_>;
     #define SEL_K(b_, c_) SEL(b_, c_, 128) SEL(b_, c_, 256)
     SEL_K(2, 0) SEL_K(2, 1) SEL_K(2, 2) SEL_K(3, 0) SEL_K(3, 1) SEL_K(3, 2) SEL_K(4, 0) SEL_K(4, 1) SEL_K(4, 2)
+    // past 4 bpw (heads, mostly): 128 rows only
+    SEL(5, 0, 128) SEL(5, 1, 128) SEL(5, 2, 128) SEL(6, 0, 128) SEL(6, 1, 128) SEL(6, 2, 128)
+    SEL(8, 0, 128) SEL(8, 1, 128) SEL(8, 2, 128)
     #undef SEL_K
     #undef SEL
     return nullptr;
@@ -510,6 +535,7 @@ extern "C" int launch_exl3_dgemv(const void* x, bool x_bf16, int jobs, const uin
         forced = env ? atoi(env) : 0;
     }
     int kr = forced ? forced : p.groups * (size_k / 128) > KR_256_BLOCKS_PER_SM * sms && size_k % 256 == 0 ? 256 : 128;
+    if (tile_u16 / 16 > 4) kr = 128;
     if (size_k % kr) return -1;
     dgemv_fn kernel = select(tile_u16 / 16, cb, kr);
     if (!kernel) return -1;

@@ -825,3 +825,22 @@ accuracy (teacher-forced) 4.74964 (Run 25: 4.74874).
 
 Per token now: gate/up 1.31 ms, q/k/v + o_proj 1.13, down 0.76, attention 0.64, the 6 bpw head (exllamav3's GEMM,
 233 MB at ~525 GB/s) 0.44, glue ~0.8.
+
+## Run 27 - 2026-11-14 16:45
+
+Past 4 bpw (heads, mostly) a tile is more words than a warp has lanes: the decode GEMV now loads them in two passes
+and decodes through shared memory with exllamav3's generic `dq_dispatch` (5, 6 and 8 bpw, 128 rows a block, the single
+GEMV only). The 30B's 6 bpw head (2048 x 151936, 233 MB): exllamav3's GEMM 470.5 us, ours 325.5 us (716 GB/s). Step
+under nsys 5.16 -> 5.03 ms. Decode accuracy (teacher-forced) 4.75024.
+
+Decode in this session read 247-249 tok/s, but sessions drift (Run 26's pairs read ~216 for the same kernels bar the
+head): nsys step times are the comparable measure here. Another `inference` process (a server from the user's
+serve.toml, idle) shared the GPU from 10:22.
+
+Qwen3-0.6B-exl3 4.0bpw (every linear on the new kernels at decode), teacher-forced decode: exllamav3's kernels 6.96042,
+ours 6.96547; mean |d logprob| 0.0049, top-1 agreement 99.7%.
+
+Since Run 22 (30B-A3B, step under nsys): 7.68 -> 5.03 ms.
+
+Size: the EXL3 kernel library 7.71 -> 8.01 MiB (the decode GEMV at 2-8 bpw and the two MoE kernels at 2-4 bpw, each
+codebook); baseline updated.

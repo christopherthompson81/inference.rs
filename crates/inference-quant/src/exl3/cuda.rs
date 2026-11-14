@@ -171,7 +171,6 @@ impl Exl3Layer {
         let int8 = first.codebook == Exl3Codebook::Mul1 && words.div_ceil(16) <= INT8_MAX_K;
         if layers.len() > DGEMV_MAX_JOBS
             || int8
-            || std::env::var("TMP_NO_DGEMV").is_ok()
             || layers.iter().any(|l| {
                 let (lk, _, lw) = l.dims();
                 l.padded() || lk != k || lw != words || l.codebook != first.codebook
@@ -897,7 +896,6 @@ impl Exl3Experts {
         }
         .contiguous()?;
         if tokens == 1
-            && std::env::var("TMP_NO_DMOE").is_err()
             && let Some(ys) = Self::dmoe(gate, up, down, &x, &sel, &rw)?
         {
             return Ok(Some(ys));
@@ -1617,7 +1615,7 @@ mod tests {
         Ok(())
     }
 
-    // one bf16 row through the decode GEMV at 2, 3 and 4 bpw (k split eight ways, three column groups) against the
+    // one bf16 row through the decode GEMV at 2 to 8 bpw (k split eight ways, three column groups) against the
     // reconstructed weight, and the same bits on a second run
     #[test]
     fn the_decode_gemv_matches_the_reconstructed_weight_and_repeats() -> Result<()> {
@@ -1634,6 +1632,9 @@ mod tests {
             (48, Exl3Codebook::Mcg, 44),
             (32, Exl3Codebook::Mcg, 45),
             (96, Exl3Codebook::Mul1, 46),
+            (80, Exl3Codebook::ThreeInst, 47),
+            (96, Exl3Codebook::ThreeInst, 48),
+            (128, Exl3Codebook::Mcg, 49),
         ] {
             let (trellis, suh, svh) = random_linear(k, n, words, seed)?;
             let weight = dense_weight(&trellis, &suh, &svh, codebook, DType::F32, &Device::Cpu)?;
@@ -1675,16 +1676,17 @@ mod tests {
             return Ok(());
         };
         const REPS: usize = 200;
-        for (k, n) in [
-            (2048, 512),
-            (2048, 1536),
-            (4096, 2048),
-            (4096, 8192),
-            (8192, 8192),
-            (2048, 12288),
-            (768, 16384),
+        for (k, n, words) in [
+            (2048, 512, 48),
+            (2048, 1536, 48),
+            (4096, 2048, 48),
+            (4096, 8192, 48),
+            (8192, 8192, 48),
+            (2048, 12288, 48),
+            (768, 16384, 48),
+            (2048, 151936, 96),
         ] {
-            let (t, u, v) = random_linear(k, n, 48, 7)?;
+            let (t, u, v) = random_linear(k, n, words, 7)?;
             let layer = Exl3Layer::new_on_device(
                 t.to_device(&device)?,
                 u.to_device(&device)?,
@@ -1704,7 +1706,7 @@ mod tests {
             }
             device.synchronize()?;
             let us = start.elapsed().as_secs_f64() * 1e6 / REPS as f64;
-            let mb = (k * n * 3 / 8) as f64 / 1e6;
+            let mb = (k * n * words / 128) as f64 / 1e6;
             eprintln!(
                 "{k} x {n}: {us:.1} us a call, {mb:.1} MB, {:.0} GB/s",
                 mb * 1e3 / us
