@@ -320,33 +320,53 @@ pub fn linear_b(
     bias: bool,
     vb: &ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
-    let bias = bias.then(|| vb.get((out_dim,), "bias")).transpose()?;
-    let weight = if vb.contains_tensor("trellis") {
-        let trellis = vb.get_unchecked_dtype("trellis", DType::I16)?;
-        if trellis.dims().len() != 3 || trellis.dims()[..2] != [in_dim / TILE, out_dim / TILE] {
-            inference_tensor::bail!(
-                "{}: an EXL3 trellis of {:?} for a {in_dim} -> {out_dim} linear",
-                vb.prefix(),
-                trellis.dims()
-            );
-        }
-        let suh = vb.get_unchecked_dtype("suh", DType::F32)?;
-        let svh = vb.get_unchecked_dtype("svh", DType::F32)?;
-        let codebook =
-            Exl3Codebook::from_markers(vb.contains_tensor("mcg"), vb.contains_tensor("mul1"));
-        // on a GPU the trellis stays as it is, multiplied by exllamav3's kernels
-        #[cfg(feature = "cuda")]
-        if vb.device().is_cuda() {
-            let layer = Exl3Layer::new_on_device(trellis, suh, svh, codebook, bias, vb.dtype())?;
-            return Ok(Arc::new(layer));
-        }
-        dense_weight(&trellis, &suh, &svh, codebook, vb.dtype(), vb.device())?
-    } else {
-        vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?
+    let dense = |weight: Tensor, bias: Option<Tensor>| -> Result<Arc<dyn QuantMethod>> {
+        Ok(Arc::new(UnquantLinear::new(
+            QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, bias)),
+        )?))
     };
-    Ok(Arc::new(UnquantLinear::new(
-        QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, bias)),
-    )?))
+    if !vb.contains_tensor("trellis") {
+        let weight = vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?;
+        return dense(
+            weight,
+            bias.then(|| vb.get((out_dim,), "bias")).transpose()?,
+        );
+    }
+    // exllamav3 pads both sides to whole Hadamard blocks, the bias with them
+    let bias = bias
+        .then(|| {
+            vb.get_unchecked_dtype("bias", vb.dtype())?
+                .narrow(0, 0, out_dim)
+        })
+        .transpose()?;
+    let trellis = vb.get_unchecked_dtype("trellis", DType::I16)?;
+    let padded = [
+        in_dim.next_multiple_of(HAD) / TILE,
+        out_dim.next_multiple_of(HAD) / TILE,
+    ];
+    if trellis.dims().len() != 3 || trellis.dims()[..2] != padded {
+        inference_tensor::bail!(
+            "{}: an EXL3 trellis of {:?} for a {in_dim} -> {out_dim} linear",
+            vb.prefix(),
+            trellis.dims()
+        );
+    }
+    let suh = vb.get_unchecked_dtype("suh", DType::F32)?;
+    let svh = vb.get_unchecked_dtype("svh", DType::F32)?;
+    let codebook =
+        Exl3Codebook::from_markers(vb.contains_tensor("mcg"), vb.contains_tensor("mul1"));
+    // on a GPU the trellis stays as it is, multiplied by exllamav3's kernels
+    #[cfg(feature = "cuda")]
+    if vb.device().is_cuda() {
+        let layer = Exl3Layer::new_on_device(trellis, suh, svh, codebook, bias, vb.dtype())?
+            .with_features(in_dim, out_dim)?;
+        return Ok(Arc::new(layer));
+    }
+    let weight = dense_weight(&trellis, &suh, &svh, codebook, vb.dtype(), vb.device())?
+        .narrow(0, 0, out_dim)?
+        .narrow(1, 0, in_dim)?
+        .contiguous()?;
+    dense(weight, bias)
 }
 
 /// One projection of every expert, each stored as its own trellis under `experts_vb.pp(e).pp(proj)`, as one gather

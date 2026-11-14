@@ -166,7 +166,13 @@ pub(super) fn run_calibration(
             drive.sliding_window(),
             false,
         )?;
-        drive.calibration_forward(&inputs)?;
+        match drive.calibration_forward(&inputs) {
+            // a pass that stops after its layer has collected what it ran for
+            Err(e)
+                if e.to_string()
+                    .contains(inference_nn::decoder::CALIBRATION_STOPPED) => {}
+            other => other?,
+        }
         drive.reset_cache()?;
 
         info!(

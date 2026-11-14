@@ -23,6 +23,8 @@ pub struct Exl3Layer {
     bias: Option<Tensor>,
     // the model's dtype, which a dense reconstruction takes
     dtype: DType,
+    // the layer's own widths, when the trellis pads them to 128 blocks: the input is zero-padded, the output cut
+    features: (usize, usize),
     // the m buckets whose first launch (which may time the kernel shapes) has run outside a capture
     tuned: AtomicU8,
     // as the first of a fused projection group (q of q, k, v): the group's device tables, built on first use
@@ -68,6 +70,8 @@ impl Exl3Layer {
         dtype: DType,
     ) -> Result<Self> {
         ffi::ensure_loaded().map_err(inference_tensor::Error::msg)?;
+        let d = trellis.dims();
+        let features = (d[0] * 16, d[1] * 16);
         Ok(Self {
             trellis: trellis.to_dtype(DType::I16)?.contiguous()?,
             suh: suh.to_dtype(DType::F16)?.contiguous()?,
@@ -75,6 +79,7 @@ impl Exl3Layer {
             codebook,
             bias,
             dtype,
+            features,
             tuned: AtomicU8::new(0),
             group: std::sync::Mutex::new(None),
             group_tuned: AtomicU8::new(0),
@@ -84,6 +89,30 @@ impl Exl3Layer {
     fn dims(&self) -> (usize, usize, usize) {
         let d = self.trellis.dims();
         (d[0] * 16, d[1] * 16, d[2])
+    }
+
+    /// This layer as an `in_features -> out_features` linear whose trellis pads both sides to 128-wide blocks
+    /// (exllamav3's layout for other widths); a bias of the padded width is cut too.
+    pub fn with_features(mut self, in_features: usize, out_features: usize) -> Result<Self> {
+        let (k, n, _) = self.dims();
+        if in_features > k || out_features > n || k - in_features >= 128 || n - out_features >= 128
+        {
+            inference_tensor::bail!(
+                "a {k} -> {n} trellis does not pad a {in_features} -> {out_features} linear"
+            );
+        }
+        if let Some(bias) = &self.bias
+            && bias.dim(0)? != out_features
+        {
+            self.bias = Some(bias.narrow(0, 0, out_features)?);
+        }
+        self.features = (in_features, out_features);
+        Ok(self)
+    }
+
+    fn padded(&self) -> bool {
+        let (k, n, _) = self.dims();
+        self.features != (k, n)
     }
 
     /// `xs` through this layer and `others` in one launch (q, k and v: one input, their own rotations and widths),
@@ -99,6 +128,7 @@ impl Exl3Layer {
         let rows = xs.elem_count() / k;
         let int8 = self.codebook == Exl3Codebook::Mul1 && words.div_ceil(16) <= INT8_MAX_K;
         if int8
+            || layers.iter().any(|l| l.padded())
             || layers.iter().any(|l| {
                 let (lk, _, lw) = l.dims();
                 lk != k || lw != words || l.codebook != self.codebook || l.dtype != self.dtype
@@ -350,6 +380,7 @@ impl Exl3Layer {
     }
 
     fn dense(&self, device: &Device) -> Result<Tensor> {
+        let (in_features, out_features) = self.features;
         dense_weight(
             &self.trellis,
             &self.suh,
@@ -357,7 +388,9 @@ impl Exl3Layer {
             self.codebook,
             self.dtype,
             device,
-        )
+        )?
+        .narrow(0, 0, out_features)?
+        .narrow(1, 0, in_features)
     }
 }
 
@@ -378,10 +411,19 @@ impl QuantMethod for Exl3Layer {
 
     fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
         let dims = x.dims().to_vec();
-        let (k, n, _) = self.dims();
-        let rows = x.elem_count() / k;
-        let x16 = x.reshape((rows, k))?.to_dtype(DType::F16)?.contiguous()?;
-        let mut y = self.matmul(&x16)?.to_dtype(x.dtype())?;
+        let (k, _, _) = self.dims();
+        let (in_features, n) = self.features;
+        let rows = x.elem_count() / in_features;
+        let x16 = x
+            .reshape((rows, in_features))?
+            .to_dtype(DType::F16)?
+            .pad_with_zeros(1, 0, k - in_features)?
+            .contiguous()?;
+        let mut y = self.matmul(&x16)?;
+        if self.padded() {
+            y = y.narrow(1, 0, n)?;
+        }
+        let mut y = y.to_dtype(x.dtype())?;
         if let Some(bias) = &self.bias {
             y = y.broadcast_add(&bias.to_dtype(x.dtype())?)?;
         }
@@ -407,7 +449,7 @@ impl QuantMethod for Exl3Layer {
     }
 
     fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
-        let (k, n, _) = self.dims();
+        let (k, n) = self.features;
         Ok(plan_weight_isq(
             self.dtype,
             self.trellis.device().clone(),
@@ -431,14 +473,17 @@ impl QuantMethod for Exl3Layer {
                 .as_ref()
                 .map(|b| b.to_device(&device))
                 .transpose()?;
-            return Ok(Arc::new(Self::new_on_device(
-                self.trellis.to_device(&device)?,
-                self.suh.to_device(&device)?,
-                self.svh.to_device(&device)?,
-                self.codebook,
-                bias,
-                self.dtype,
-            )?));
+            return Ok(Arc::new(
+                Self::new_on_device(
+                    self.trellis.to_device(&device)?,
+                    self.suh.to_device(&device)?,
+                    self.svh.to_device(&device)?,
+                    self.codebook,
+                    bias,
+                    self.dtype,
+                )?
+                .with_features(self.features.0, self.features.1)?,
+            ));
         }
         let weight = self.dense(&Device::Cpu)?;
         let bias = self

@@ -392,8 +392,8 @@ fn output_error(w: &Tensor, q: &Tensor, h: &Tensor) -> Result<f64> {
 }
 
 /// `weight` `(out, in)` on a CUDA device encoded at `bits` on `codebook` against the input Hessian `hessian`
-/// `(in, in)` (x^T x over the calibration rows, over their count); `seed` fixes the sign flips. Both dimensions are
-/// multiples of 128.
+/// `(in, in)` (x^T x over the calibration rows, over their count); `seed` fixes the sign flips. A side not in 128-wide
+/// blocks is zero-padded to them, as exllamav3 stores such a linear: the trellis, `suh` and `svh` at the padded sizes.
 pub fn encode(
     weight: &Tensor,
     hessian: &Tensor,
@@ -403,11 +403,19 @@ pub fn encode(
 ) -> Result<Exl3Encoding> {
     let device = weight.device().clone();
     let (n, k) = weight.dims2()?;
-    if !k.is_multiple_of(HAD) || !n.is_multiple_of(HAD) || k < SPAN_ROWS {
-        inference_tensor::bail!(
-            "an EXL3 encoding needs both sides in multiples of {HAD}, not {n} x {k}"
-        );
-    }
+    // zero rows and columns are inert: padded inputs are zero, padded outputs get zero scales
+    let (n, k, pad_n, pad_k) = (
+        n.next_multiple_of(HAD),
+        k.next_multiple_of(HAD),
+        n.next_multiple_of(HAD) - n,
+        k.next_multiple_of(HAD) - k,
+    );
+    let weight = weight
+        .pad_with_zeros(0, 0, pad_n)?
+        .pad_with_zeros(1, 0, pad_k)?;
+    let hessian = hessian
+        .pad_with_zeros(0, 0, pad_k)?
+        .pad_with_zeros(1, 0, pad_k)?;
     let had = hadamard_matrix(&device)?;
     let w_orig = weight.to_dtype(DType::F32)?.t()?.contiguous()?;
     let h = hessian
@@ -563,6 +571,63 @@ mod tests {
         assert!(
             errors[2].1 < errors[1].1 && errors[1].1 < errors[0].1,
             "{errors:?}"
+        );
+        Ok(())
+    }
+
+    // a linear in other widths pads to 128 blocks: its cropped decode carries the reported error, and the kernels
+    // layer built at its own widths (input padded, output cut) multiplies as that decode does
+    #[test]
+    fn padded_linears_encode_and_multiply_at_their_own_widths() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (n, k, rows) = (200, 176, 1024);
+        let w = Tensor::randn(0f32, 0.02f32, (n, k), &device)?;
+        let x = Tensor::randn(0f32, 1f32, (rows, k), &device)?;
+        let h = (x.t()?.matmul(&x)? / rows as f64)?;
+        let e = encode(&w, &h, Exl3Bits::Whole(4), Exl3Codebook::Mcg, 3)?;
+        assert_eq!(e.trellis.dims()[..2], [16, 16]);
+        let decoded = dense_weight(
+            &e.trellis,
+            &e.suh,
+            &e.svh,
+            Exl3Codebook::Mcg,
+            DType::F32,
+            &device,
+        )?
+        .narrow(0, 0, n)?
+        .narrow(1, 0, k)?
+        .contiguous()?;
+        let measured = output_error(&w.t()?.contiguous()?, &decoded.t()?.contiguous()?, &h)?;
+        assert!(
+            (measured - e.proxy_error).abs() < 0.05 * e.proxy_error + 1e-6,
+            "reported {} measured {measured}",
+            e.proxy_error
+        );
+        let layer = crate::exl3::Exl3Layer::new_on_device(
+            e.trellis.to_device(&device)?,
+            e.suh.clone(),
+            e.svh.clone(),
+            Exl3Codebook::Mcg,
+            None,
+            DType::F32,
+        )?
+        .with_features(k, n)?;
+        let xs = x.narrow(0, 0, 4)?;
+        let actual = crate::QuantMethod::forward(&layer, &xs)?;
+        let expected = xs.matmul(&decoded.t()?)?;
+        let err = (&actual - &expected)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let norm = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert_eq!(actual.dims(), [4, n]);
+        assert!(
+            err / norm < 2e-3,
+            "the padded layer is off its decode by {}",
+            err / norm
         );
         Ok(())
     }

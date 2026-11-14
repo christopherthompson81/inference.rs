@@ -17,8 +17,6 @@ use super::drive::{CalibrationCtx, CalibrationDrive, calibration_tokens, run_cal
 use crate::pipeline::isq::Exl3WriteConfig;
 
 const DEFAULT_HEAD_BITS: f64 = 6.0;
-// the encoder rotates both sides in blocks this wide; a tensor in other sizes stays dense (the loader reads either)
-const HAD_BLOCK: usize = 128;
 const DEFAULT_CODEBOOK: &str = "mul1";
 const HEAD: &str = "lm_head";
 const TIED_EMBEDDING: &str = "embed_tokens";
@@ -119,7 +117,7 @@ pub(crate) fn write_exl3(
     }
     info!(
         "Writing EXL3 at {} bits (head {head_rate}, {codebook_name}) from `{}` ({} tokens): {} groups of layers, one \
-         calibration pass each.",
+         calibration pass each, run up to its layer.",
         config.bits,
         calibration_file.display(),
         tokens.len(),
@@ -127,10 +125,12 @@ pub(crate) fn write_exl3(
     );
     let mut weight_map = BTreeMap::new();
     let mut replaced = std::collections::HashSet::new();
-    for (shard, group) in groups.values().enumerate() {
+    for (shard, (&(rest, layer), group)) in groups.iter().enumerate() {
         for module in group {
             module.ct.begin_track_hessian()?;
         }
+        // a layer's pass needs the model only up to it (on the shared decoder stack; other models run whole)
+        let _stop = (!rest).then(|| inference_nn::decoder::stop_after_layer(layer));
         run_calibration(drive, &tokens, ctx)?;
         let mut tensors = HashMap::new();
         for module in group {
@@ -151,13 +151,6 @@ pub(crate) fn write_exl3(
                 .unquant_weight_bias()
                 .with_context(|| format!("`{}` holds no full-precision weight", module.key))?;
             let (rows, cols) = weight.dims2()?;
-            if rows % HAD_BLOCK != 0 || cols % HAD_BLOCK != 0 {
-                info!(
-                    "{}: {rows} x {cols} is not in {HAD_BLOCK}-wide blocks, kept dense",
-                    module.key
-                );
-                continue;
-            }
             // a tied embedding that recorded rows was multiplied as the head; the lookups keep the embedding
             let tied = module.key.ends_with(TIED_EMBEDDING);
             let name = if tied { HEAD } else { module.key.as_str() };
@@ -172,7 +165,11 @@ pub(crate) fn write_exl3(
                     codebook,
                     weight.dtype(),
                     weight.device(),
-                )?;
+                )?
+                // a side not in 128 blocks was padded for the encoding
+                .narrow(0, 0, rows)?
+                .narrow(1, 0, cols)?
+                .contiguous()?;
                 module
                     .ct
                     .replace(Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(

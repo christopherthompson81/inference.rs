@@ -330,8 +330,8 @@ async fn a_hessian_collection_writes_each_layers_input_hessian() -> anyhow::Resu
     Ok(())
 }
 
-// an EXL3 write from a calibration file: every linear in 128-wide blocks replaced by its trellis (the 266-row
-// head stays dense), the rest copied, and the written model loads and decodes
+// an EXL3 write from a calibration file: every linear replaced by its trellis (the 266-row head padded to 384),
+// the rest copied, and the written model loads and decodes
 async fn an_exl3_write_loads_and_decodes() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -375,9 +375,8 @@ async fn an_exl3_write_loads_and_decodes() -> anyhow::Result<()> {
             "{key} kept its weight"
         );
     }
-    anyhow::ensure!(
-        map.contains_key("lm_head.weight") && map.contains_key("model.embed_tokens.weight")
-    );
+    anyhow::ensure!(map.contains_key("lm_head.trellis") && !map.contains_key("lm_head.weight"));
+    anyhow::ensure!(map.contains_key("model.embed_tokens.weight"));
     let written = TextModelBuilder::new(out.path().to_string_lossy())
         .with_dtype(ModelDType::F32)
         .build()

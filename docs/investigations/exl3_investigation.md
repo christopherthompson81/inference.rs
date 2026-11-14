@@ -319,3 +319,25 @@ PPL 11.3261. A tiny Llama (128 wide, 266-token vocabulary, the head kept dense) 
 Not yet: MoE experts (the converter bails on stacked experts), tensors not in 128 blocks (exllamav3 pads them),
 models too large for the device in full precision (needs exllamav3's module streaming), and the L passes (an early
 exit after each pass's own layer would halve them).
+
+## Run 12 - 2026-11-14 11:30
+
+Converter gap 1, widths not in 128 blocks. exllamav3 zero-pads such a linear on both sides (`Linear.pad_out`; the
+padded inputs are zero, so H has zero rows there and the damping keeps it definite; the padded outputs get zero
+scales), stores the trellis, `suh` and `svh` at the padded sizes, and pads the bias at load. Ours now does the same
+in `encode`, and the loader takes a trellis up to one block wider than the linear: `Exl3Layer::with_features`
+zero-pads the input and cuts the output (a padded fused group runs layer by layer); the CPU reconstruction is cut.
+
+A 200 x 176 linear (padded to 256 x 256, 4.0 mcg): its cut decode carries the reported output error, and the kernels
+layer at 176 -> 200 multiplies as that decode does (2e-3). The tiny Llama's 266-row head now writes as a 384-row
+trellis, loads and decodes.
+
+## Run 13 - 2026-11-14 12:00
+
+Converter gap 2, the passes. A layer's Hessians need the model only up to it, so its pass now stops there:
+`inference_nn::decoder::stop_after_layer` (thread-local, so another model's forward in the process runs whole) makes
+the shared decoder stack's forward fail with `CALIBRATION_STOPPED` after that layer, and the calibration loop takes
+that as a finished chunk. Models outside the shared stack run their whole forward, as before.
+
+Qwen3-0.6B, 4.0 3inst, the same 485K tokens: 363 s against 625 s, and the written trellises are bit-identical to the
+whole-pass run's (q_proj of layer 0, down_proj of 13, up_proj of 27, the head).
