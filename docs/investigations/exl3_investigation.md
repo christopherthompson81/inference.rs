@@ -548,3 +548,47 @@ warm-up request on a model whose layers were dropped. A streamed EXL3 load now s
 
 Not covered: an allocation failure outside the encoder (building a layer on the device, its Hessians' x^T x, its
 forward) still ends the run. A layer that does not fit at all would need its forward on the host.
+
+## Run 20 - 2026-11-14 03:45
+
+How often an encode outgrows the device. Per streamed layer the device holds the layer in bf16, its Hessians in
+f32, and one encode. From the configs: dense up to 14B fits (measured); 70B-class (Llama 3 70B, Qwen2.5-72B, Mistral
+Large: 28-29K MLP widths, a down_proj Hessian of 3.3 GB) was the open question; 405B-class (53248, 11.3 GB a Hessian)
+and the 256-384-expert MoEs (DeepSeek V3, Kimi K2, Llama 4 Maverick: 22-34 GB a layer in bf16) cannot fit as built.
+
+An ignored test encodes a 70B down_proj (8192 x 28672, bf16, full-rank Hessian). On an otherwise empty 3090 it ran
+out of device memory 5.6 s in, the Run 19 fallback included: that only parks the k x n tensors, and this linear is
+k x k bound. Counting from the code, about eight k x k were alive at once: the Hessian and its damped copy, the
+rotation's steps (shadowed `let`s and chained temporaries live to the end of their statement; `had_left` copied the
+transpose twice), cuSOLVER's copy, the block LDL's three chained copies; and later the refit's H, H damped, q q^T and
+its product.
+
+Changes, each measured by the pool's live high-water mark (CU_MEMPOOL_ATTR_USED_MEM_HIGH, reset per phase; nvidia-smi
+shows reservations only), GiB:
+
+```
+                     rotate  factor  scale  LDLQ   refit
+first fit             10.51   11.38  10.08  12.28  14.44
+in-place products     10.51    8.75  10.08  12.28  11.81
+H on host after LDL   10.51    8.75  10.08   9.22   8.75
+H dropped for rotate   7.45    5.69   7.01   9.22   8.75
+```
+
+- "first fit": H damped rebuilt from H where used (not kept); the rotation as reassignments; `had_left` as one batched
+  product over the 128-row blocks; cuSOLVER factoring the rotation in its own buffer; a retry re-rotates from H with
+  the extra damping (same values as damping the previous try); q q^T as one product where q is on the device.
+- "in-place products": the block LDL and (q q^T) o H damped rewrite their rows in place (`slice_set`), 4096 at a time.
+- "H on host after LDL": H waits on the host from the factorization to the refit (LDLQ needs only L); the streamed
+  writer holds a layer's Hessians on the host too, each moved to the device for its own linears.
+- "H dropped for rotate": the device copy of H goes once the damped copy exists; a retry uploads it again.
+
+The down_proj now encodes in 30.4 s at 9.22 GiB live (10.56 reserved), proxy error 0.0025393977923281012 at every
+step (the changes kept it bit-identical). The test asserts under 12 GiB: beside a 70B layer (1.7 GB bf16) and its
+activations, that fits a 24 GB device.
+
+Qwen3-0.6B 4.0 mul1 against Run 19's: 900 of 902 tensors bit-identical; lm_head's suh and svh differ in 0.1% of
+values (q q^T is one product now where the chunked sum was), its trellis identical. Wiki PPL 25.469 (was 25.470),
+136.7 s (was 135.3).
+
+Still not covered: 405B-class dense (one Hessian is half the device; the factorization needs two) and layers too large
+to build on the device (the big MoEs).

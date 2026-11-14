@@ -21,6 +21,8 @@ const CODEBOOK_SCALE: f64 = 1.24371088;
 const SPAN_ROWS: usize = 128;
 // the columns a full-size pass over a linear takes at once (a multiple of the 128-wide rotation)
 const COLUMN_CHUNK: usize = 8192;
+// the rows of a k x k product rewritten in place at a time
+const LDL_ROWS: usize = 4096;
 // the device memory a batch of experts' LDLQs may hold at once
 const EXPERT_BATCH_BYTES: usize = 2 << 30;
 // how allocation failures read: the driver's, and cuBLAS's or cuSOLVER's for their workspaces
@@ -104,9 +106,11 @@ fn had_right(x: &Tensor, had: &Tensor) -> Result<Tensor> {
         .reshape((r, c))
 }
 
-// x's rows rotated in 128-high blocks (diag(H, H, ...) @ x); the Hadamard is symmetric
+// x's rows rotated in 128-high blocks (diag(H, H, ...) @ x), each block one product of a batch
 fn had_left(x: &Tensor, had: &Tensor) -> Result<Tensor> {
-    had_right(&x.t()?, had)?.t()?.contiguous()
+    let (r, c) = x.dims2()?;
+    had.broadcast_matmul(&x.contiguous()?.reshape((r / HAD, HAD, c))?)?
+        .reshape((r, c))
 }
 
 fn diagonal_indices(n: usize, device: &Device) -> Result<Tensor> {
@@ -133,7 +137,7 @@ fn diagonal_mean(h: &Tensor) -> Result<f64> {
 
 // L with each 16-column block multiplied by the inverse of its diagonal block (exllamav3's block LDL: unit
 // diagonal blocks, which LDLQ never reads)
-fn block_ldl(factor: &Tensor) -> Result<Tensor> {
+fn block_ldl(factor: Tensor) -> Result<Tensor> {
     let k = factor.dim(0)?;
     let m = k / TILE;
     // the diagonal blocks, gathered whole and inverted on the host (lower triangular, so by substitution)
@@ -171,24 +175,53 @@ fn block_ldl(factor: &Tensor) -> Result<Tensor> {
         }
     }
     let inverses = Tensor::from_vec(inverses, (m, TILE, TILE), factor.device())?;
-    factor
-        .reshape((k, m, TILE))?
-        .transpose(0, 1)?
-        .contiguous()?
-        .matmul(&inverses)?
-        .transpose(0, 1)?
-        .contiguous()?
-        .reshape((k, k))
+    // a chunk of rows at a time, each written back over the rows it was made from
+    for r0 in (0..k).step_by(LDL_ROWS) {
+        let len = LDL_ROWS.min(k - r0);
+        let rows = factor
+            .narrow(0, r0, len)?
+            .reshape((len, m, TILE))?
+            .transpose(0, 1)?
+            .contiguous()?
+            .matmul(&inverses)?
+            .transpose(0, 1)?
+            .contiguous()?
+            .reshape((len, k))?;
+        factor.slice_set(&rows, 0, r0)?;
+    }
+    Ok(factor)
 }
 
-// the rotated Hessian's block LDL factor, damping its diagonal further until the factorization succeeds
-fn factor(h_rot: &Tensor) -> Result<Tensor> {
-    let mut h = h_rot.clone();
+// `h` damped by `damp` and rotated as the inputs will be, P (S (H + damp I) S) P^T, with each step's input dropped
+fn rotated(h: Tensor, damp: f64, su_sign: &Tensor, had: &Tensor) -> Result<Tensor> {
+    let mut x = add_diagonal(&h, damp)?;
+    drop(h);
+    x = x.broadcast_mul(&su_sign.unsqueeze(0)?)?;
+    x = had_right(&x, had)?;
+    x = x.broadcast_mul(&su_sign.unsqueeze(1)?)?;
+    had_left(&x, had)
+}
+
+// the rotated Hessian's block LDL factor, damping its diagonal further until the factorization succeeds; each try
+// factors a fresh rotation in place, so no copy of the rotation is kept for the next. The first takes `first`, H on
+// the device; a retry uploads `h` again
+fn factor(first: Tensor, h: &Tensor, damp: f64, su_sign: &Tensor, had: &Tensor) -> Result<Tensor> {
+    let mut first = Some(first);
+    let mut extra = 0.0;
     for _ in 0..=FACTOR_RETRIES {
-        if let Some(factor) = cholesky(&h)? {
-            return block_ldl(&factor);
+        let on_device = match first.take() {
+            Some(first) => first,
+            None => h.to_device(su_sign.device())?,
+        };
+        let mut x = rotated(on_device, damp, su_sign, had)?;
+        if extra > 0.0 {
+            x = add_diagonal(&x, extra)?;
         }
-        h = add_diagonal(&h, 2.0 * SIGMA_REG * diagonal_mean(&h)?)?;
+        let mean = diagonal_mean(&x)?;
+        if let Some(factor) = cholesky(x)? {
+            return block_ldl(factor);
+        }
+        extra += 2.0 * SIGMA_REG * mean;
     }
     inference_tensor::bail!("the Hessian stays indefinite after {FACTOR_RETRIES} rounds of damping")
 }
@@ -471,7 +504,7 @@ fn output_error(w: &Tensor, q: &Tensor, h: &Tensor) -> Result<f64> {
 }
 
 // one linear up to its LDLQ (padded, its Hessian damped and factored), and its weight regularized and scaled. Its
-// full-size tensors live on `park`: the device that encodes it (`work`), or the host when they do not fit there
+// weights live on `park`: the device that encodes it (`work`), or the host when they do not fit there; H on the host
 struct Prepared {
     n: usize,
     k: usize,
@@ -479,7 +512,7 @@ struct Prepared {
     had: Tensor,
     w_orig: Tensor,
     h: Tensor,
-    h_damped: Tensor,
+    damp: f64,
     su: Vec<f32>,
     sv: Vec<f32>,
 }
@@ -515,16 +548,13 @@ fn prepare(
         .to_dtype(DType::F32)?
         .to_device(&device)?
         .contiguous()?;
-    let h_mean = diagonal_mean(&h)?;
-    let h_damped = add_diagonal(&h, SIGMA_REG * h_mean)?;
+    let damp = SIGMA_REG * diagonal_mean(&h)?;
     let su_sign = signs(k, seed, &device)?;
     let sv_sign = signs(n, seed ^ 0x5bd1e995, &device)?;
-
-    // H rotated as the inputs will be: P (S H S) P^T
-    let h_rot = h_damped.broadcast_mul(&su_sign.unsqueeze(0)?)?;
-    let h_rot = had_right(&h_rot, &had)?.broadcast_mul(&su_sign.unsqueeze(1)?)?;
-    let l = factor(&had_left(&h_rot, &had)?)?;
-    drop(h_rot);
+    // H waits on the host until the refit: the rotation takes a damped copy, and LDLQ needs only L
+    let h_host = h.to_device(&Device::Cpu)?;
+    let l = factor(h, &h_host, damp, &su_sign, &had)?;
+    let h = h_host;
 
     // output scales: each column's rms over their mean (zero columns stay zero)
     let mut out_scales = rms(&w_orig, 0)?
@@ -577,14 +607,28 @@ fn prepare(
             work: device,
             had: had_park,
             w_orig,
-            h: h.to_device(park)?,
-            h_damped: h_damped.to_device(park)?,
+            h,
+            damp,
             su,
             sv,
         },
         w,
         l,
     ))
+}
+
+// q q^T on `work` for q (k, n): one product where q is there, else a chunk of columns at a time
+fn gram(q: &Tensor, work: &Device) -> Result<Tensor> {
+    if q.device().same_device(work) {
+        return q.matmul(&q.t()?);
+    }
+    let k = q.dim(0)?;
+    let mut a = Tensor::zeros((k, k), DType::F32, work)?;
+    for (c0, len) in column_chunks(q.dim(1)?) {
+        let q_c = q.narrow(1, c0, len)?.contiguous()?.to_device(work)?;
+        a = (a + q_c.matmul(&q_c.t()?)?)?;
+    }
+    Ok(a)
 }
 
 // the column ranges a full-size pass takes at a time, so no `(k, n)` temporary beyond the weights is ever held
@@ -603,12 +647,11 @@ fn finish(p: Prepared, q_reg: Tensor, states: &[i16], bits: Exl3Bits) -> Result<
         had,
         w_orig,
         h,
-        h_damped,
+        damp,
         su,
         sv,
     } = p;
     let device = q_reg.device().clone();
-    let h_damped = h_damped.to_device(&work)?;
     let on_work =
         |t: &Tensor, c0: usize, len: usize| t.narrow(1, c0, len)?.contiguous()?.to_device(&work);
     let cpu = |t: Tensor| t.to_device(&Device::Cpu)?.to_vec1::<f32>();
@@ -621,6 +664,8 @@ fn finish(p: Prepared, q_reg: Tensor, states: &[i16], bits: Exl3Bits) -> Result<
     let (mut su_t, mut sv_t) = (su0, sv0);
     // the stored scales refit to the encoding, output columns in closed form and input rows by a solve, alternated
     for _ in 0..REFIT_ROUNDS {
+        // H damped, on the device for this round only
+        let h_damped = add_diagonal(&h.to_device(&work)?, damp)?;
         let mut c = Vec::with_capacity(n);
         for (c0, len) in column_chunks(n) {
             let q_c = on_work(&q, c0, len)?;
@@ -636,17 +681,22 @@ fn finish(p: Prepared, q_reg: Tensor, states: &[i16], bits: Exl3Bits) -> Result<
         let c = Tensor::from_vec(c, (1, n), &device)?;
         q = q.broadcast_mul(&c)?;
         sv_t = sv_t.broadcast_mul(&c)?;
-        let mut a = Tensor::zeros((k, k), DType::F32, &work)?;
         let mut b = Tensor::zeros(k, DType::F32, &work)?;
         for (c0, len) in column_chunks(n) {
             let q_c = on_work(&q, c0, len)?;
             let hw_c = h_damped.matmul(&on_work(&w_orig, c0, len)?)?;
-            a = (a + q_c.matmul(&q_c.t()?)?)?;
             b = (b + (&q_c * &hw_c)?.sum(1)?)?;
         }
-        let a = (a * &h_damped)?;
+        let a = gram(&q, &work)?;
+        // (q q^T) o H damped, a block of rows at a time over q q^T's own buffer
+        for r0 in (0..k).step_by(LDL_ROWS) {
+            let len = LDL_ROWS.min(k - r0);
+            let rows = (a.narrow(0, r0, len)? * h_damped.narrow(0, r0, len)?)?;
+            a.slice_set(&rows, 0, r0)?;
+        }
+        drop(h_damped);
         let a = add_diagonal(&a, 1e-6 * diagonal_mean(&a)?)?;
-        if let Some(r) = solve_spd(&a, &b)? {
+        if let Some(r) = solve_spd(a, &b)? {
             let r = cpu(r)?
                 .iter()
                 .map(|&v| if v.is_finite() && v > 0.0 { v } else { 1.0 })
@@ -656,7 +706,6 @@ fn finish(p: Prepared, q_reg: Tensor, states: &[i16], bits: Exl3Bits) -> Result<
             su_t = su_t.broadcast_mul(&r)?;
         }
     }
-    drop(h_damped);
     let proxy_error = output_error(&w_orig, &q, &h.to_device(&work)?)?;
     drop(w_orig);
 
@@ -805,8 +854,8 @@ mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{
-        COLUMN_CHUNK, encode, encode_batch, encode_experts, factor, is_out_of_memory, ldlq,
-        ldlq_columns, output_error,
+        COLUMN_CHUNK, encode, encode_batch, encode_experts, factor, hadamard_matrix,
+        is_out_of_memory, ldlq, ldlq_columns, output_error,
     };
     use crate::exl3::{Exl3Bits, Exl3Codebook, dense_weight};
 
@@ -819,9 +868,9 @@ mod tests {
         };
         let (k, n, rows) = (256, COLUMN_CHUNK + 256, 1024);
         let x = Tensor::randn(0f32, 1f32, (rows, k), &device)?;
-        let l =
-            factor(&((x.t()?.matmul(&x)? / rows as f64)? + Tensor::eye(k, DType::F32, &device)?)?)?
-                .unsqueeze(0)?;
+        let h = (x.t()?.matmul(&x)? / rows as f64)?;
+        let signs = Tensor::ones(k, DType::F32, &device)?;
+        let l = factor(h.clone(), &h, 1.0, &signs, &hadamard_matrix(&device)?)?.unsqueeze(0)?;
         let w = Tensor::randn(0f32, 1f32, (1, k, n), &device)?;
         let (q, states) = ldlq(&w, &l, Exl3Bits::Whole(3), Exl3Codebook::Mcg)?;
         let (q_c, states_c) = ldlq_columns(w, &l, Exl3Bits::Whole(3), Exl3Codebook::Mcg)?;
@@ -985,6 +1034,69 @@ mod tests {
             encoding.proxy_error < 0.05,
             "proxy error {}",
             encoding.proxy_error
+        );
+        Ok(())
+    }
+
+    // a 70B-class down_proj (28672 in, 8192 out) in bf16 against a full-rank Hessian encodes on a 24 GB device beside
+    // its layer: what one encode of a wide input takes of the device
+    #[test]
+    #[ignore = "a measurement: several GB of device memory, read by a sampler beside it"]
+    fn a_wide_down_proj_encodes_on_the_device() -> Result<()> {
+        // what a 24 GB device has beside a 70B layer in bf16, its activations and other processes
+        const ENCODE_BUDGET_GIB: f64 = 12.0;
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (n, k, rows) = (8192, 28672, 32768);
+        let w = Tensor::randn(0f32, 0.02f32, (n, k), &device)?.to_dtype(DType::BF16)?;
+        let x = Tensor::randn(0f32, 1f32, (rows, k), &device)?;
+        // the streamed converter holds a layer's Hessians on the host
+        let h = (x.t()?.matmul(&x)? / rows as f64)?.to_device(&Device::Cpu)?;
+        drop(x);
+        device.synchronize()?;
+        use inference_tensor::cuda_backend::cudarc::driver::sys;
+        let Device::Cuda(cuda) = &device else {
+            unreachable!()
+        };
+        let mut pool = std::ptr::null_mut();
+        let high = |pool, attr| {
+            let mut v = 0u64;
+            // SAFETY: a pool attribute read into a u64
+            unsafe { sys::cuMemPoolGetAttribute(pool, attr, (&mut v as *mut u64).cast()) };
+            v as f64 / f64::from(1u32 << 30)
+        };
+        // SAFETY: the device's default pool, its high-water marks reset (the driver takes only zero)
+        unsafe {
+            sys::cuDeviceGetMemPool(&mut pool, cuda.cuda_stream().context().cu_device());
+            for attr in [
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+            ] {
+                let mut zero = 0u64;
+                sys::cuMemPoolSetAttribute(pool, attr, (&mut zero as *mut u64).cast());
+            }
+        }
+        let start = std::time::Instant::now();
+        let encoding = encode(&w, &h, Exl3Bits::Whole(4), Exl3Codebook::Mul1, 5)?;
+        let used = high(
+            pool,
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+        );
+        eprintln!(
+            "{:.1}s, proxy error {}, used high {used:.2} GiB, reserved high {:.2} GiB",
+            start.elapsed().as_secs_f32(),
+            encoding.proxy_error,
+            high(
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH
+            ),
+        );
+        assert!(used < ENCODE_BUDGET_GIB, "the encode used {used:.2} GiB");
+        assert!(
+            !encoding.decoded.device().is_cpu(),
+            "the encode fell back to host memory"
         );
         Ok(())
     }

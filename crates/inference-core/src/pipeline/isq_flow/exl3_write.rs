@@ -454,7 +454,10 @@ fn write_streamed(
         let mut hessians = vec![None; group.len()];
         for (i, module) in group.iter().enumerate() {
             if sources[i] == i {
-                hessians[i] = take_hessian(module)?;
+                // held on the host while the layer encodes, each moved to the device for its own linears
+                hessians[i] = take_hessian(module)?
+                    .map(|h| h.to_device(&Device::Cpu))
+                    .transpose()?;
             }
         }
         let mut tensors = HashMap::new();

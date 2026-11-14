@@ -77,13 +77,18 @@ fn info(dev_info: &Tensor) -> Result<i32> {
 }
 
 /// The Cholesky factor of the symmetric positive definite `a` `(n, n)`: L in the lower triangle (the upper one
-/// holds `a`'s values), or None when `a` is not positive definite.
-pub(crate) fn cholesky(a: &Tensor) -> Result<Option<Tensor>> {
+/// holds `a`'s values), or None when `a` is not positive definite. A contiguous f32 `a` is factored in its own
+/// buffer, so a caller hands over a tensor nothing else holds.
+pub(crate) fn cholesky(a: Tensor) -> Result<Option<Tensor>> {
     let Device::Cuda(dev) = a.device() else {
         inference_tensor::bail!("the EXL3 encoder factors on CUDA");
     };
     let n = a.dim(0)?;
-    let factor = a.to_dtype(DType::F32)?.contiguous()?.copy()?;
+    let factor = if a.dtype() == DType::F32 && a.is_contiguous() {
+        a.clone()
+    } else {
+        a.to_dtype(DType::F32)?.contiguous()?.copy()?
+    };
     let dev_info = Tensor::zeros(1, DType::I32, a.device())?;
     let handle = Handle::get(dev)?;
     {
@@ -96,7 +101,7 @@ pub(crate) fn cholesky(a: &Tensor) -> Result<Option<Tensor>> {
         let (info_ptr, _i) = slice_ptr(i_c.as_cuda_slice::<i32>()?, i_l.start_offset());
         let mut lwork = 0;
         let upper = cs::cublasFillMode_t::CUBLAS_FILL_MODE_UPPER;
-        // SAFETY: `factor` is this call's own n x n copy, factored in place, and `dev_info` its own info word
+        // SAFETY: `factor` is the n x n buffer handed to this call (or its own copy), factored in place, and `dev_info` its own info word
         check(
             unsafe {
                 cs::cusolverDnSpotrf_bufferSize(
@@ -135,8 +140,9 @@ pub(crate) fn cholesky(a: &Tensor) -> Result<Option<Tensor>> {
 
 /// `x` with `a x = b` for the symmetric positive definite `a` `(n, n)` and `b` `(n)`, or None when `a` is not
 /// positive definite.
-pub(crate) fn solve_spd(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
-    let Device::Cuda(dev) = a.device() else {
+pub(crate) fn solve_spd(a: Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    let device = a.device().clone();
+    let Device::Cuda(dev) = &device else {
         inference_tensor::bail!("the EXL3 encoder solves on CUDA");
     };
     let n = a.dim(0)?;
@@ -144,7 +150,7 @@ pub(crate) fn solve_spd(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
         return Ok(None);
     };
     let x = b.to_dtype(DType::F32)?.contiguous()?.copy()?;
-    let dev_info = Tensor::zeros(1, DType::I32, a.device())?;
+    let dev_info = Tensor::zeros(1, DType::I32, &device)?;
     let handle = Handle::get(dev)?;
     {
         let (f_s, f_l) = factor.storage_and_layout();
@@ -194,7 +200,7 @@ mod tests {
         let n = 48;
         let m = Tensor::randn(0f32, 1f32, (n, n), &Device::Cpu)?;
         let a = (m.matmul(&m.t()?)? + (Tensor::eye(n, DType::F32, &Device::Cpu)? * n as f64)?)?;
-        let factor = cholesky(&a.to_device(&device)?)?.expect("positive definite");
+        let factor = cholesky(a.to_device(&device)?)?.expect("positive definite");
         let f = factor.to_device(&Device::Cpu)?.to_vec2::<f32>()?;
         let lower = (0..n)
             .map(|r| {
@@ -209,14 +215,14 @@ mod tests {
         assert!(err < 1e-3, "L L^T off by {err}");
         let b = Tensor::randn(0f32, 1f32, n, &Device::Cpu)?;
         let x =
-            solve_spd(&a.to_device(&device)?, &b.to_device(&device)?)?.expect("positive definite");
+            solve_spd(a.to_device(&device)?, &b.to_device(&device)?)?.expect("positive definite");
         let ax = a
             .matmul(&x.to_device(&Device::Cpu)?.unsqueeze(1)?)?
             .squeeze(1)?;
         let err = (&ax - &b)?.abs()?.max_all()?.to_scalar::<f32>()?;
         assert!(err < 1e-3, "a x off b by {err}");
         let not_pd = (Tensor::eye(n, DType::F32, &Device::Cpu)? * -1.0)?;
-        assert!(cholesky(&not_pd.to_device(&device)?)?.is_none());
+        assert!(cholesky(not_pd.to_device(&device)?)?.is_none());
         Ok(())
     }
 }
