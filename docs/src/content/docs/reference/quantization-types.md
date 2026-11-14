@@ -276,5 +276,7 @@ run over the states once more and dropped. A model may be far larger than the GP
 full precision and its Hessians; host memory holds the model and the states (hidden size x calibration tokens in
 bf16). A linear whose encoding runs out of GPU memory (a large vocabulary's head, or a batch of experts) is retried:
 a batch of experts in halves, and a linear alone with its full-size working tensors in host memory, moved to the GPU
-a chunk of columns at a time. Models outside the shared decoder stack don't stream: `--resident` loads one on the GPU instead, where each
+a chunk of columns at a time. An encode holds at most about three input-width-squared f32 matrices on the GPU (the
+Hessian waits in host memory while LDLQ runs), so a 70B-class down_proj (28672 inputs) takes about 9 GiB. Models
+outside the shared decoder stack don't stream: `--resident` loads one on the GPU instead, where each
 layer costs a calibration pass through the model up to it.
