@@ -274,5 +274,7 @@ The model loads on the host in bf16 and streams through the GPU: the calibration
 memory, and each layer is built on the GPU from the checkpoint, its Hessians collected over those states, encoded,
 run over the states once more and dropped. A model may be far larger than the GPU, which holds only one layer in
 full precision and its Hessians; host memory holds the model and the states (hidden size x calibration tokens in
-bf16). Models outside the shared decoder stack don't stream: `--resident` loads one on the GPU instead, where each
+bf16). A linear whose encoding runs out of GPU memory (a large vocabulary's head, or a batch of experts) is retried:
+a batch of experts in halves, and a linear alone with its full-size working tensors in host memory, moved to the GPU
+a chunk of columns at a time. Models outside the shared decoder stack don't stream: `--resident` loads one on the GPU instead, where each
 layer costs a calibration pass through the model up to it.

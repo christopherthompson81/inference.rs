@@ -297,8 +297,8 @@ impl NormalLoader {
         )?;
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
         // an EXL3 write from the host streams the layers through the GPU, so the host load builds none
-        let _stream = (self.config.exl3_out.is_some() && device.is_cpu())
-            .then(inference_nn::decoder::stream_layers);
+        let streamed = self.config.exl3_out.is_some() && device.is_cpu();
+        let _stream = streamed.then(inference_nn::decoder::stream_layers);
         let (model, tracker, dynamic_lora, switch_adapters) = super::loading::load_model(
             &*self.inner,
             &session,
@@ -443,7 +443,7 @@ impl NormalLoader {
                 input: vec![SupportedModality::Text],
                 output: vec![SupportedModality::Text],
             },
-            loaded_for_uqff_write: uqff.write().is_some(),
+            loaded_only_to_write: uqff.write().is_some() || streamed,
             tracked_modules,
             source_weight_files,
             source_weight_source: weight_source,

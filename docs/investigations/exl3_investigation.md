@@ -511,3 +511,40 @@ Left open: the Hessian x^T x accumulation (~13 s of a 14B layer); the copy of un
 (host RSS reached 42 GB); and a host-memory fallback for a layer or head whose encode does not fit the device (14B's
 are not the largest a model will have): today device OOM ends the run, where it could retry the linear with smaller
 column chunks or with its large intermediates (Hessian, LDLQ feedback, refit products) kept in system RAM.
+
+## Run 19 - 2026-11-14 02:55
+
+A host-memory fallback for encodes that do not fit the device. Where an encode's memory goes: the k x k tensors
+(H, H damped, L, the factor's temporaries) and the k x n ones (the weight as given, its regularized copy, LDLQ's values,
+the rotated-back `q`, the decode). A head grows the second kind (n = vocabulary), a wide MLP's down_proj the first.
+The k x n work was already column-separable (LDLQ given L, the refit's sums, the output error), so the fallback parks
+it on the host: the weight's regularization and the rotations run on the CPU (128-wide Hadamards are cheap there), H
+and H damped wait on the host while L is used, and LDLQ, the refit and the output error take a chunk of 8192 columns
+to the device at a time. L stays on the device. The encoder tries the device first; on an allocation failure a batch
+of experts splits in half, and a linear alone retries parked.
+
+First run, Qwen3-0.6B 4.0 mul1 with a second process holding all but 2.5 GiB of the 3090: the layers fit, the head
+(151936 x 1024) ran out, retried, and then failed with `cuSOLVER could not create: CUSOLVER_STATUS_INTERNAL_ERROR`.
+The encoder made a cuSOLVER handle a call; creating one allocates outside the memory pool, and the pool kept the
+failed attempt's blocks. Each thread now keeps one handle a device.
+
+Rerun, and the same conversion without the other process:
+
+```
+                       head         head proxy error   wiki PPL (200 KB)
+on the device          20.7 s       0.000237           25.470
+from host memory       24.4 s*      0.000237           25.497
+* including the failed attempt on the device
+```
+
+All 899 layer tensors are bit-identical between the two; the head's differ (svh 6% equal, trellis 56%): the host's
+rounding of the scales moves the quantizer's choices, not the error. A unit test pins a parked encode against one on
+the device (proxy error within 0.1%, decodes within 5% of the weights' scale); an ignored one fills the device and
+encodes a 32768 x 4096 linear that no longer fits (17.7 s, passes).
+
+Also: every streamed run since #954 ended with `prompt step - Model failed ... holds none to run`, the engine's
+warm-up request on a model whose layers were dropped. A streamed EXL3 load now skips it as a UQFF write does
+(`loaded_only_to_write`).
+
+Not covered: an allocation failure outside the encoder (building a layer on the device, its Hessians' x^T x, its
+forward) still ends the run. A layer that does not fit at all would need its forward on the host.
