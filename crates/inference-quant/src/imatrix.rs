@@ -42,6 +42,90 @@ enum ImatrixLayerStats_ {
     },
 }
 
+// `h` (zero when None) plus x^T x for `x` (rows, in), in f32
+fn add_gram(h: Option<Tensor>, x: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    let h = {
+        let in_dim = x.dim(1)?;
+        let h = match h {
+            Some(h) => h,
+            None => Tensor::zeros((in_dim, in_dim), DType::F32, x.device())?,
+        };
+        if add_gram_half(&h, x)? {
+            return Ok(h);
+        }
+        Some(h)
+    };
+    let x = x.to_dtype(DType::F32)?;
+    let add = x.t()?.matmul(&x)?;
+    match h {
+        Some(h) => h + add,
+        None => Ok(add),
+    }
+}
+
+// `h += x^T x` for `x` (rows, in) in bf16 or f16 on CUDA, one GEMM accumulating in f32 over the half inputs:
+// their products are exact in f32, so this is the f32 product but for the order of its sums, at the tensor cores'
+// rate and without a temporary. False where `x` is another dtype or device
+#[cfg(feature = "cuda")]
+fn add_gram_half(h: &Tensor, x: &Tensor) -> Result<bool> {
+    use inference_tensor::Storage;
+    use inference_tensor::cuda_backend::cudarc::cublas::{result, sys};
+
+    let half = match x.dtype() {
+        DType::BF16 => sys::cudaDataType_t::CUDA_R_16BF,
+        DType::F16 => sys::cudaDataType_t::CUDA_R_16F,
+        _ => return Ok(false),
+    };
+    let (Device::Cuda(dev), true) = (x.device(), h.dtype() == DType::F32 && h.is_contiguous())
+    else {
+        return Ok(false);
+    };
+    let x = x.contiguous()?;
+    let (rows, k) = x.dims2()?;
+    let (h_s, h_l) = h.storage_and_layout();
+    let (x_s, x_l) = x.storage_and_layout();
+    let (Storage::Cuda(h_c), Storage::Cuda(x_c)) = (&*h_s, &*x_s) else {
+        return Ok(false);
+    };
+    let (h_ptr, _h) = crate::utils::slice_ptr(h_c.as_cuda_slice::<f32>()?, h_l.start_offset());
+    let (x_ptr, _x) = match x.dtype() {
+        DType::BF16 => {
+            crate::utils::slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        }
+        _ => crate::utils::slice_ptr(x_c.as_cuda_slice::<half::f16>()?, x_l.start_offset()),
+    };
+    let (alpha, beta) = (1.0f32, 1.0f32);
+    let (k, rows) = (k as i32, rows as i32);
+    // column-major, row-major x is x^T (k, rows): x^T (x^T)^T is x^T x, symmetric, so h's layout is either
+    // SAFETY: both pointers span their tensors, `h` is f32 (k, k) and written in place on the blas handle's stream
+    unsafe {
+        result::gemm_ex(
+            *dev.cublas_handle().handle(),
+            sys::cublasOperation_t::CUBLAS_OP_N,
+            sys::cublasOperation_t::CUBLAS_OP_T,
+            k,
+            k,
+            rows,
+            (&raw const alpha).cast(),
+            x_ptr as *const _,
+            half,
+            k,
+            x_ptr as *const _,
+            half,
+            k,
+            (&raw const beta).cast(),
+            h_ptr as *mut _,
+            sys::cudaDataType_t::CUDA_R_32F,
+            k,
+            sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+        )
+    }
+    .map_err(|e| inference_tensor::Error::Cuda(Box::new(e)))?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone)]
 pub struct ImatrixLayerStats(Arc<RwLock<Option<ImatrixLayerStats_>>>);
 
@@ -115,12 +199,10 @@ impl ImatrixLayerStats {
         }
         let mut handle = self.0.write().unwrap();
         if let Some(ImatrixLayerStats_::Hessian { ncalls, rows, h }) = handle.as_mut() {
-            let x = inp
-                .reshape(((), inp.dim(D::Minus1)?))?
-                .to_dtype(DType::F32)?;
+            let x = inp.reshape(((), inp.dim(D::Minus1)?))?;
             *ncalls += 1;
             *rows += x.dim(0)?;
-            *h = (&*h + x.t()?.matmul(&x)?)?;
+            *h = add_gram(Some(h.clone()), &x)?;
             return Ok(());
         }
         // routed layers are observed by their router; a stray plain forward contributes nothing
@@ -164,15 +246,11 @@ impl ImatrixLayerStats {
                 let row = if x.dims().len() == 2 { j / k } else { j };
                 slots[e as usize].push(row as u32);
             }
-            let x = x.reshape(((), *in_dim))?.to_dtype(DType::F32)?;
+            let x = x.reshape(((), *in_dim))?;
             for (e, rows_e) in slots.into_iter().enumerate().filter(|(_, r)| !r.is_empty()) {
                 let count = rows_e.len();
                 let xe = x.index_select(&Tensor::from_vec(rows_e, count, x.device())?, 0)?;
-                let add = xe.t()?.matmul(&xe)?;
-                h[e] = Some(match h[e].take() {
-                    Some(acc) => (acc + add)?,
-                    None => add,
-                });
+                h[e] = Some(add_gram(h[e].take(), &xe)?);
                 counts[e] += count;
             }
             *rows += n * k;
@@ -378,6 +456,31 @@ mod tests {
         for (a, b) in imatrix.iter().zip(&expected) {
             assert!((a - b).abs() < 1e-4, "got {a}, expected {b}");
         }
+        Ok(())
+    }
+
+    // bf16 rows on CUDA accumulate by the half-precision GEMM to what their f32 values' products sum to
+    #[test]
+    fn bf16_rows_accumulate_as_their_f32_values_do() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (k, rows) = (384, 1000);
+        let stats = ImatrixLayerStats::empty();
+        stats.enable_hessian(k, &device)?;
+        let mut reference = Tensor::zeros((k, k), DType::F32, &device)?;
+        for _ in 0..3 {
+            let x = Tensor::randn(0f32, 1f32, (rows, k), &device)?.to_dtype(DType::BF16)?;
+            stats.process(&x)?;
+            let x = x.to_dtype(DType::F32)?;
+            reference = (reference + x.t()?.matmul(&x)?)?;
+        }
+        let h = stats.compute_imatrix()?;
+        let reference = (reference / (3 * rows) as f64)?;
+        let off = (h - &reference)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        let scale = reference.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(off < 1e-5 * scale, "{off} off at a scale of {scale}");
         Ok(())
     }
 
