@@ -1,4 +1,5 @@
 #pragma once
+// Modified for inference.rs: bf16 x and out, u32 sel and f32 rw (MoeCoopParams flags)
 
 // Fused decode-shaped MoE kernels (bsz 1..MAX_BSZN), two ordinary launches per layer:
 //
@@ -209,8 +210,8 @@ __device__ __forceinline__ SlotInfo slot_info(const MoeCoopParams& p, int s)
 {
     SlotInfo si;
     si.row = s / p.topk;
-    int64_t e = p.sel[s];
-    si.w = __half2float(p.rw[s]);
+    int64_t e = p.sel_u32 ? (int64_t) ((const uint32_t*) p.sel)[s] : p.sel[s];
+    si.w = p.rw_f32 ? ((const float*) p.rw)[s] : __half2float(p.rw[s]);
     bool ok = si.w != 0.0f;
     if (p.min_expert >= 0)
     {
@@ -567,6 +568,41 @@ __device__ __forceinline__ int token_active_slots(const MoeCoopParams& p, int ro
     return n;
 }
 
+// One 4-wide chunk of an output row, trimmed to H_out, as float or bf16
+__device__ __forceinline__ void store_out4(const MoeCoopParams& p, int row, int col, float o0, float o1, float o2,
+                                           float o3)
+{
+    if (p.out_bf16)
+    {
+        __nv_bfloat16* dst = p.out_bf16 + (size_t) row * p.out_stride + col;
+        if (col + 3 < p.H_out)
+        {
+            __nv_bfloat162 a = __floats2bfloat162_rn(o0, o1);
+            __nv_bfloat162 b = __floats2bfloat162_rn(o2, o3);
+            uint2 u;
+            u.x = *reinterpret_cast<uint32_t*>(&a);
+            u.y = *reinterpret_cast<uint32_t*>(&b);
+            *((uint2*) dst) = u;
+        }
+        else
+        {
+            if (col + 0 < p.H_out) dst[0] = __float2bfloat16_rn(o0);
+            if (col + 1 < p.H_out) dst[1] = __float2bfloat16_rn(o1);
+            if (col + 2 < p.H_out) dst[2] = __float2bfloat16_rn(o2);
+        }
+        return;
+    }
+    float* dst = p.out + (size_t) row * p.out_stride + col;
+    if (col + 3 < p.H_out)
+        *((float4*) dst) = make_float4(o0, o1, o2, o3);
+    else
+    {
+        if (col + 0 < p.H_out) dst[0] = o0;
+        if (col + 1 < p.H_out) dst[1] = o1;
+        if (col + 2 < p.H_out) dst[2] = o2;
+    }
+}
+
 // A token with no active slot on this rank (expert-parallel sharding: every pick lives elsewhere)
 // gets no arrival in the down stage, so nobody would write its output row. Writes one 128-chunk of
 // that row: the shared-expert term when there is one, else zeros. Warp-level
@@ -598,15 +634,7 @@ __device__ __forceinline__ void write_empty_row_chunk(const MoeCoopParams& p, in
         if (col + 2 < p.H) o2 = gv * sh[2];
         if (col + 3 < p.H) o3 = gv * sh[3];
     }
-    float* dst = p.out + (size_t) row * p.out_stride + col;
-    if (col + 3 < p.H_out)
-        *((float4*) dst) = make_float4(o0, o1, o2, o3);
-    else
-    {
-        if (col + 0 < p.H_out) dst[0] = o0;
-        if (col + 1 < p.H_out) dst[1] = o1;
-        if (col + 2 < p.H_out) dst[2] = o2;
-    }
+    store_out4(p, row, col, o0, o1, o2, o3);
 }
 
 // Input rotation of one 128-chunk of a slot's x row: zero-padded from H to Hi, * suh, Hadamard
@@ -615,7 +643,17 @@ __device__ __forceinline__ void rotate_chunk(const MoeCoopParams& p, int row, co
     const int col = c * 128 + lane * 4;
     const half* xr = p.x + (size_t) row * p.x_stride;
     float v0 = 0.0f, v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
-    if (col + 3 < p.H)
+    if (p.x_bf16)
+    {
+        // rounded through f16 as a separate cast would, so both inputs rotate alike
+        const __nv_bfloat16* xb = (const __nv_bfloat16*) xr;
+        auto rd = [&] (int i) { return __half2float(__float2half_rn(__bfloat162float(xb[col + i]))); };
+        if (col + 0 < p.H) v0 = rd(0);
+        if (col + 1 < p.H) v1 = rd(1);
+        if (col + 2 < p.H) v2 = rd(2);
+        if (col + 3 < p.H) v3 = rd(3);
+    }
+    else if (col + 3 < p.H)
         load_h4(xr + col, v0, v1, v2, v3);
     else
     {
@@ -944,15 +982,7 @@ void exl3_moe_coop_b_kernel(const MoeCoopParams p)
                 if (col + 3 < p.H) o3 += gv * sh[3];
             }
 
-            float* dst = p.out + (size_t) row * p.out_stride + col;
-            if (col + 3 < p.H_out)
-                *((float4*) dst) = make_float4(o0, o1, o2, o3);
-            else
-            {
-                if (col + 0 < p.H_out) dst[0] = o0;
-                if (col + 1 < p.H_out) dst[1] = o1;
-                if (col + 2 < p.H_out) dst[2] = o2;
-            }
+            store_out4(p, row, col, o0, o1, o2, o3);
         }
         __syncthreads();
     }
