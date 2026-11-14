@@ -266,5 +266,5 @@ It goes a layer at a time as exllamav3's converter does: each layer's input Hess
 text run through the model with every layer before it already replaced by its encoding, so each encoding
 compensates the error the earlier ones leave. Bits are 1 to 8, or 1.5, 2.5 and 3.5 on mul1; the output head takes
 `--head-bits` (6 by default). Each layer costs one calibration pass, run through the model as far as that layer, so
-the model runs in full precision on the device. A tensor whose sides are not multiples of 128 is zero-padded to them, as exllamav3 stores one. Dense models only
-so far: MoE experts are not written yet.
+the model runs in full precision on the device. A tensor whose sides are not multiples of 128 is zero-padded to them, as exllamav3 stores one. MoE experts are encoded each against the
+rows its router sent it; routers stay in full precision.

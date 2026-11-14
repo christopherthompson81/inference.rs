@@ -214,8 +214,8 @@ impl ImatrixLayerStats {
     }
 
     /// Dense: `[in]`. Routed: `[E, in]` with all-zero rows for zero-traffic experts. Hessian: `x^T x` over the rows
-    /// recorded, divided by their count, `[in, in]`; routed, one per expert `[E, in, in]` (unit for an expert no row
-    /// reached).
+    /// recorded, divided by their count, `[in, in]`; routed, one per expert `[E, in, in]` on the host (unit for an expert
+    /// no row reached).
     pub fn compute_imatrix(&self) -> Result<Tensor> {
         let handle = self.0.read().unwrap();
         match handle.as_ref().context("Layer stats were deinitialized!")? {
@@ -259,19 +259,14 @@ impl ImatrixLayerStats {
                 if *rows == 0 {
                     inference_tensor::bail!("No activations were recorded for this layer.");
                 }
-                let device = h
-                    .iter()
-                    .flatten()
-                    .next()
-                    .map(|t| t.device().clone())
-                    .unwrap_or(Device::Cpu);
+                // stacked on the host: one device allocation of every expert's Hessian would be the layer's largest
                 // an expert no row reached is encoded uncalibrated (exllamav3's fallback): a unit Hessian
                 let per_expert = h
                     .iter()
                     .zip(counts)
                     .map(|(he, &count)| match he {
-                        Some(he) => he / count as f64,
-                        None => Tensor::eye(*in_dim, DType::F32, &device),
+                        Some(he) => (he / count as f64)?.to_device(&Device::Cpu),
+                        None => Tensor::eye(*in_dim, DType::F32, &Device::Cpu),
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Tensor::stack(&per_expert, 0)

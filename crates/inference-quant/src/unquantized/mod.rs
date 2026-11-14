@@ -83,6 +83,76 @@ impl UnquantLinear {
     }
 }
 
+// past this many slots each expert multiplies its rows at once, instead of every slot reading a copy of its
+// expert's weight (8192 slots of a 1024-token prefill at top-8 would copy the experts 128 times over)
+const GROUPED_GATHER_MIN_SLOTS: usize = 64;
+
+impl UnquantLinear {
+    // `a` (tokens, 1 or k, in) through the experts `indices` (tokens, k) names, the rows grouped by expert: one matmul
+    // each. Reads the indices on the host, so not inside a capture; None for shapes or batches it leaves alone.
+    fn grouped_gather(&self, a: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        let (Ok((tokens, rows_per, in_dim)), Ok((itokens, k))) = (a.dims3(), indices.dims2())
+        else {
+            return Ok(None);
+        };
+        if self.w.rank() != 3 || itokens != tokens || (rows_per != 1 && rows_per != k) {
+            return Ok(None);
+        }
+        let slots = tokens * k;
+        if slots <= GROUPED_GATHER_MIN_SLOTS || capturing(a.device())? {
+            return Ok(None);
+        }
+        let ids = indices
+            .to_dtype(DType::U32)?
+            .flatten_all()?
+            .to_vec1::<u32>()?;
+        let mut groups = std::collections::BTreeMap::<u32, Vec<u32>>::new();
+        for (j, &e) in ids.iter().enumerate() {
+            groups.entry(e).or_default().push(j as u32);
+        }
+        let x = a.reshape((tokens * rows_per, in_dim))?;
+        let (mut outputs, mut order) = (
+            Vec::with_capacity(groups.len()),
+            Vec::<u32>::with_capacity(slots),
+        );
+        for (&e, members) in &groups {
+            let rows = members
+                .iter()
+                .map(|&j| if rows_per == 1 { j / k as u32 } else { j })
+                .collect::<Vec<_>>();
+            let count = rows.len();
+            let xe = x.index_select(&Tensor::from_vec(rows, count, a.device())?, 0)?;
+            outputs.push(xe.matmul(&self.w.get(e as usize)?.t()?)?);
+            order.extend(members);
+        }
+        let mut place = vec![0u32; slots];
+        for (i, &j) in order.iter().enumerate() {
+            place[j as usize] = i as u32;
+        }
+        let out_dim = self.w.dim(1)?;
+        Ok(Some(
+            Tensor::cat(&outputs, 0)?
+                .index_select(&Tensor::from_vec(place, slots, a.device())?, 0)?
+                .reshape((tokens, k, out_dim))?,
+        ))
+    }
+}
+
+// whether `device`'s stream is capturing a graph, when a host read would break the capture
+fn capturing(device: &Device) -> Result<bool> {
+    #[cfg(feature = "cuda")]
+    if let Device::Cuda(dev) = device {
+        let status = dev
+            .cuda_stream()
+            .capture_status()
+            .map_err(inference_tensor::Error::wrap)?;
+        return Ok(status
+            != inference_tensor::cuda::cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE);
+    }
+    let _ = device;
+    Ok(false)
+}
+
 impl QuantMethod for UnquantLinear {
     fn new(method: QuantMethodConfig) -> inference_tensor::Result<Self>
     where
@@ -212,6 +282,9 @@ impl QuantMethod for UnquantLinear {
     }
 
     fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        if let Some(y) = self.grouped_gather(a, indices)? {
+            return self.add_gather_bias(y, indices);
+        }
         // Weights are [num_experts, out_features, in_features]
         // For Metal path:
         //   - a: (b_size, seq_len, 1, 1, hidden_dim) - 5D
@@ -693,6 +766,37 @@ pub(crate) fn assert_requantizes_its_dequantized_weight(layer: Arc<dyn QuantMeth
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // past the slot threshold the rows go to their experts in groups, as the per-slot path multiplies them: one
+    // row per token (gate, up) and one per slot (down)
+    #[test]
+    fn grouped_gathers_match_each_slot_through_its_expert() -> Result<()> {
+        let device = Device::Cpu;
+        let (experts, out, inp, tokens, k) = (4, 6, 5, 40, 2);
+        let w = Tensor::randn(0f32, 1f32, (experts, out, inp), &device)?;
+        let layer =
+            UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(w.clone(), None)))?;
+        let ids = (0..tokens * k)
+            .map(|j| ((j * 7 + j / 3) % experts) as u32)
+            .collect::<Vec<_>>();
+        let indices = Tensor::from_vec(ids.clone(), (tokens, k), &device)?;
+        for rows_per in [1, k] {
+            let a = Tensor::randn(0f32, 1f32, (tokens, rows_per, inp), &device)?;
+            let actual = layer.gather_forward_raw(&a, &indices)?;
+            let rows = a.reshape((tokens * rows_per, inp))?;
+            let expected = (0..tokens * k)
+                .map(|j| {
+                    let row = if rows_per == 1 { j / k } else { j };
+                    rows.narrow(0, row, 1)?
+                        .matmul(&w.get(ids[j] as usize)?.t()?)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let expected = Tensor::cat(&expected, 0)?.reshape((tokens, k, out))?;
+            let err = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(err < 1e-5, "rows per token {rows_per}: off by {err}");
+        }
+        Ok(())
+    }
 
     fn test_layer(device: &Device) -> Result<UnquantLinear> {
         test_layer_with_bias(device, None)

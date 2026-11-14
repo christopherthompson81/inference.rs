@@ -341,3 +341,30 @@ that as a finished chunk. Models outside the shared stack run their whole forwar
 
 Qwen3-0.6B, 4.0 3inst, the same 485K tokens: 363 s against 625 s, and the written trellises are bit-identical to the
 whole-pass run's (q_proj of layer 0, down_proj of 13, up_proj of 27, the head).
+
+## Run 14 - 2026-11-14 13:30
+
+Converter gap 3, MoE experts. A routed Hessian mode collects, per expert of a stacked `[E, out, in]` projection,
+x^T x over the rows its router sent it, over their count (a unit Hessian for an expert no row reached: encoded
+uncalibrated, exllamav3's fallback); the stack is stacked on the host when read, since one device allocation of
+every expert's Hessian was the layer's largest. The converter encodes each expert as `<experts>.<e>.<proj>`, swaps
+the stack for the reconstructions, copies none of the source's expert tensors, and keeps routers in full precision.
+
+Two failures on the way. A tiny OLMoE panicked in CUDA `index_add` on one matrix of a stack: the backend copies the
+destination contiguous from 0 but then sliced the copy with the source's offset; fixed (and covered). OLMoE-1B-7B ran
+out of device memory in the experts' forward: collecting stats forces the gather path, where each slot read a
+copy of its expert's weight (8192 slots of a 1024-token chunk at top-8, 4 MB each); `UnquantLinear` now groups the
+rows by expert past 64 slots, outside a capture: one matmul an expert.
+
+OLMoE-1B-7B-0125-Instruct (64 experts, top-8, 16 layers; 13.8 GB in bf16) at 4.0 mul1, 485K calibration tokens:
+2408 s, 3.5 GB written, device memory peaking at 23.8 of 24 GB. exllamav3 has no OLMoE, so only our engine scores it
+(512-token windows):
+
+```
+text                          f32       bf16      EXL3 4.0
+docs reference pages          13.2266   13.4252   13.0388
+README.md                     1.6408    1.6491    1.6612  (+0.7% on bf16)
+pipeline/isq_flow/plan.rs     5.5253    5.4942    5.6502  (+2.8%)
+```
+
+The first text's reading below bf16 (and f32) is that text's luck; the other two put the encoding where 4 bits sit.
