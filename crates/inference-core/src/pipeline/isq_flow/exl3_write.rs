@@ -19,6 +19,8 @@ use crate::pipeline::isq::Exl3WriteConfig;
 const DEFAULT_HEAD_BITS: f64 = 6.0;
 const DEFAULT_CODEBOOK: &str = "mul1";
 const HEAD: &str = "lm_head";
+// a MoE layer's router, kept in full precision as exllamav3 keeps it
+const ROUTER: &str = ".gate";
 const TIED_EMBEDDING: &str = "embed_tokens";
 const LAYERS: &str = ".layers.";
 const INDEX_FILE: &str = "model.safetensors.index.json";
@@ -125,8 +127,46 @@ pub(crate) fn write_exl3(
     );
     let mut weight_map = BTreeMap::new();
     let mut replaced = std::collections::HashSet::new();
+    let mut replaced_prefixes = std::collections::HashSet::new();
+    // one linear encoded into `tensors` under `name`, and its reconstruction at its own size for the swap
+    let encode_one = |name: &str,
+                      weight: &Tensor,
+                      hessian: &Tensor,
+                      rate: inference_quant::exl3::Exl3Bits,
+                      tensors: &mut HashMap<String, Tensor>|
+     -> Result<Tensor> {
+        let (rows, cols) = weight.dims2()?;
+        let encoding = encode(weight, hessian, rate, codebook, fnv(name))?;
+        info!("{name}: {rate:?}, proxy error {:.6}", encoding.proxy_error);
+        // a side not in 128 blocks was padded for the encoding
+        let dense = dense_weight(
+            &encoding.trellis,
+            &encoding.suh,
+            &encoding.svh,
+            codebook,
+            weight.dtype(),
+            weight.device(),
+        )?
+        .narrow(0, 0, rows)?
+        .narrow(1, 0, cols)?
+        .contiguous()?;
+        tensors.insert(format!("{name}.trellis"), encoding.trellis);
+        tensors.insert(format!("{name}.suh"), encoding.suh.to_device(&Device::Cpu)?);
+        tensors.insert(format!("{name}.svh"), encoding.svh.to_device(&Device::Cpu)?);
+        if let Some((marker, mult)) = marker {
+            tensors.insert(
+                format!("{name}.{marker}"),
+                Tensor::new(&[mult as i32], &Device::Cpu)?,
+            );
+        }
+        Ok(dense)
+    };
     for (shard, (&(rest, layer), group)) in groups.iter().enumerate() {
-        for module in group {
+        let group = group
+            .iter()
+            .filter(|m| !m.key.ends_with(ROUTER))
+            .collect::<Vec<_>>();
+        for module in &group {
             module.ct.begin_track_hessian()?;
         }
         // a layer's pass needs the model only up to it (on the shared decoder stack; other models run whole)
@@ -150,26 +190,33 @@ pub(crate) fn write_exl3(
             let (weight, bias) = layer
                 .unquant_weight_bias()
                 .with_context(|| format!("`{}` holds no full-precision weight", module.key))?;
-            let (rows, cols) = weight.dims2()?;
+            // a 2D weight is a linear; a 3D one a projection of every expert of a MoE layer, stacked
+            if weight.rank() == 3 {
+                let (experts, proj) = module
+                    .key
+                    .rsplit_once('.')
+                    .with_context(|| format!("`{}` names no expert projection", module.key))?;
+                let mut denses = Vec::with_capacity(weight.dim(0)?);
+                for e in 0..weight.dim(0)? {
+                    let name = format!("{experts}.{e}.{proj}");
+                    let dense =
+                        encode_one(&name, &weight.get(e)?, &hessian.get(e)?, bits, &mut tensors)?;
+                    denses.push(dense);
+                }
+                module
+                    .ct
+                    .replace(Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+                        inference_tensor::nn::Linear::new(Tensor::stack(&denses, 0)?, bias),
+                    ))?) as Arc<dyn QuantMethod>);
+                replaced_prefixes.insert(format!("{experts}."));
+                continue;
+            }
             // a tied embedding that recorded rows was multiplied as the head; the lookups keep the embedding
             let tied = module.key.ends_with(TIED_EMBEDDING);
             let name = if tied { HEAD } else { module.key.as_str() };
             let rate = if name == HEAD { head_bits } else { bits };
-            let encoding = encode(&weight, &hessian, rate, codebook, fnv(name))?;
-            info!("{name}: {rate:?}, proxy error {:.6}", encoding.proxy_error);
+            let dense = encode_one(name, &weight, &hessian, rate, &mut tensors)?;
             if !tied {
-                let dense = dense_weight(
-                    &encoding.trellis,
-                    &encoding.suh,
-                    &encoding.svh,
-                    codebook,
-                    weight.dtype(),
-                    weight.device(),
-                )?
-                // a side not in 128 blocks was padded for the encoding
-                .narrow(0, 0, rows)?
-                .narrow(1, 0, cols)?
-                .contiguous()?;
                 module
                     .ct
                     .replace(Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
@@ -178,15 +225,6 @@ pub(crate) fn write_exl3(
             }
             // a checkpoint may store a tied head's weight as well; the encoding replaces it either way
             replaced.insert(format!("{name}.weight"));
-            tensors.insert(format!("{name}.trellis"), encoding.trellis);
-            tensors.insert(format!("{name}.suh"), encoding.suh.to_device(&Device::Cpu)?);
-            tensors.insert(format!("{name}.svh"), encoding.svh.to_device(&Device::Cpu)?);
-            if let Some((marker, mult)) = marker {
-                tensors.insert(
-                    format!("{name}.{marker}"),
-                    Tensor::new(&[mult as i32], &Device::Cpu)?,
-                );
-            }
         }
         write_shard(
             out,
@@ -195,7 +233,7 @@ pub(crate) fn write_exl3(
             &mut weight_map,
         )?;
     }
-    copy_unquantized(source, out, &replaced, &mut weight_map)?;
+    copy_unquantized(source, out, &replaced, &replaced_prefixes, &mut weight_map)?;
     std::fs::write(
         out.join(INDEX_FILE),
         serde_json::to_string_pretty(
@@ -238,17 +276,21 @@ fn write_shard(
     Ok(())
 }
 
-// every source tensor but the replaced weights, a shard for each source file
+// every source tensor but the replaced weights (and every tensor of the replaced experts), a shard for each source
+// file
 fn copy_unquantized(
     source: &Exl3Source<'_>,
     out: &Path,
     replaced: &std::collections::HashSet<String>,
+    replaced_prefixes: &std::collections::HashSet<String>,
     weight_map: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     for (i, file) in source.weights.iter().enumerate() {
         let tensors = inference_tensor::safetensors::load(file, &Device::Cpu)?
             .into_iter()
-            .filter(|(name, _)| !replaced.contains(name))
+            .filter(|(name, _)| {
+                !replaced.contains(name) && !replaced_prefixes.iter().any(|p| name.starts_with(p))
+            })
             .collect::<HashMap<_, _>>();
         write_shard(
             out,

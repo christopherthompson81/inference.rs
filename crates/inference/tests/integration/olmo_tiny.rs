@@ -158,3 +158,92 @@ async fn every_olmo_class_loads_and_generates() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// an OLMoE written as EXL3 from a calibration file: each expert's projections encoded against the rows its router
+// sent it (`experts.<e>.<proj>`, none of the source's expert weights copied), the router kept dense, the attention
+// padded (64-wide k and v), and the written model loads and generates on the GPU
+#[tokio::test]
+async fn an_olmoe_written_as_exl3_loads_and_generates() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    // the expert kernels take 128-wide projections; the calibration chunks run 1024 tokens
+    const WIDE: usize = 128;
+    let mut config = common("OlmoeForCausalLM", "olmoe");
+    config["hidden_size"] = WIDE.into();
+    config["intermediate_size"] = WIDE.into();
+    config["max_position_embeddings"] = 2048.into();
+    config["rms_norm_eps"] = 1e-5.into();
+    config["num_experts"] = EXPERTS.into();
+    config["num_experts_per_tok"] = 2.into();
+    let spec = serde_json::from_value::<inference_models_other::olmo::OlmoeConfig>(config.clone())?
+        .decoder_spec();
+    let shapes = (0..LAYERS)
+        .flat_map(|layer| {
+            (0..EXPERTS).flat_map(move |expert| {
+                let p = format!("model.layers.{layer}.mlp.experts.{expert}");
+                ["gate_proj", "up_proj", "down_proj"]
+                    .map(|proj| (format!("{p}.{proj}.weight"), vec![WIDE, WIDE]))
+            })
+        })
+        .collect();
+    let dir = checkpoint(config, spec, shapes)?;
+    let calibration = dir.path().join("calibration.txt");
+    std::fs::write(
+        &calibration,
+        "hello there, how are you today? the quick brown fox. ".repeat(16),
+    )?;
+    let out = tempfile::tempdir()?;
+    TextModelBuilder::new(dir.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_calibration_file(calibration)
+        .with_exl3_out(inference::Exl3WriteConfig {
+            output: out.path().to_path_buf(),
+            bits: 4.0,
+            head_bits: None,
+            codebook: Some("mcg".to_string()),
+        })
+        .build()
+        .await?;
+    let index: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+        out.path().join("model.safetensors.index.json"),
+    )?)?;
+    let map = index["weight_map"].as_object().expect("a weight map");
+    for layer in 0..LAYERS {
+        for expert in 0..EXPERTS {
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
+                let p = format!("model.layers.{layer}.mlp.experts.{expert}.{proj}");
+                anyhow::ensure!(
+                    map.contains_key(&format!("{p}.trellis")),
+                    "{p} has no trellis"
+                );
+                anyhow::ensure!(
+                    !map.contains_key(&format!("{p}.weight")),
+                    "{p} kept its weight"
+                );
+            }
+        }
+        anyhow::ensure!(
+            map.contains_key(&format!("model.layers.{layer}.mlp.gate.weight")),
+            "no router"
+        );
+        anyhow::ensure!(
+            map.contains_key(&format!("model.layers.{layer}.self_attn.k_proj.trellis"))
+        );
+    }
+    let model = TextModelBuilder::new(out.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .build()
+        .await?;
+    let request = RequestBuilder::from(
+        TextMessages::new().add_message(TextMessageRole::User, "hello there, how are you today"),
+    )
+    .set_sampler_max_len(MAX_LEN)
+    .set_sampler_topk(1);
+    let response = model.send_chat_request(request).await?;
+    anyhow::ensure!(
+        response.usage.completion_tokens > 0,
+        "the written model generated nothing"
+    );
+    Ok(())
+}

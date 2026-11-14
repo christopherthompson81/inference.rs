@@ -31,6 +31,15 @@ enum ImatrixLayerStats_ {
         rows: usize,
         h: Tensor,
     },
+    /// Per expert of a routed (stacked) layer, the second moment over the rows routed to it, with their counts;
+    /// an expert's is allocated when its first row arrives.
+    RoutedHessian {
+        ncalls: usize,
+        rows: usize,
+        in_dim: usize,
+        counts: Vec<usize>,
+        h: Vec<Option<Tensor>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +81,18 @@ impl ImatrixLayerStats {
         Ok(())
     }
 
+    /// Start collecting each expert's input Hessian `[in, in]` (f32) for a routed (stacked `[E, out, in]`) layer.
+    pub fn enable_routed_hessian(&self, num_experts: usize, in_dim: usize) -> Result<()> {
+        *self.0.write().unwrap() = Some(ImatrixLayerStats_::RoutedHessian {
+            ncalls: 0,
+            rows: 0,
+            in_dim,
+            counts: vec![0; num_experts],
+            h: vec![None; num_experts],
+        });
+        Ok(())
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.0.read().unwrap().is_some()
     }
@@ -83,7 +104,8 @@ impl ImatrixLayerStats {
                 ncalls, row_counts, ..
             } => (*ncalls, *row_counts),
             ImatrixLayerStats_::Routed { ncalls, rows, .. }
-            | ImatrixLayerStats_::Hessian { ncalls, rows, .. } => (*ncalls, *rows),
+            | ImatrixLayerStats_::Hessian { ncalls, rows, .. }
+            | ImatrixLayerStats_::RoutedHessian { ncalls, rows, .. } => (*ncalls, *rows),
         })
     }
 
@@ -126,6 +148,37 @@ impl ImatrixLayerStats {
             return Ok(());
         }
         let mut handle = self.0.write().unwrap();
+        if let Some(ImatrixLayerStats_::RoutedHessian {
+            ncalls,
+            rows,
+            in_dim,
+            counts,
+            h,
+        }) = handle.as_mut()
+        {
+            let (n, k) = ids.dims2()?;
+            let experts = ids.to_dtype(DType::U32)?.flatten_all()?.to_vec1::<u32>()?;
+            let mut slots = vec![Vec::new(); counts.len()];
+            for (j, &e) in experts.iter().enumerate() {
+                // a row per token feeds all its experts; a row per slot only its own
+                let row = if x.dims().len() == 2 { j / k } else { j };
+                slots[e as usize].push(row as u32);
+            }
+            let x = x.reshape(((), *in_dim))?.to_dtype(DType::F32)?;
+            for (e, rows_e) in slots.into_iter().enumerate().filter(|(_, r)| !r.is_empty()) {
+                let count = rows_e.len();
+                let xe = x.index_select(&Tensor::from_vec(rows_e, count, x.device())?, 0)?;
+                let add = xe.t()?.matmul(&xe)?;
+                h[e] = Some(match h[e].take() {
+                    Some(acc) => (acc + add)?,
+                    None => add,
+                });
+                counts[e] += count;
+            }
+            *rows += n * k;
+            *ncalls += 1;
+            return Ok(());
+        }
         let Some(ImatrixLayerStats_::Routed {
             ncalls,
             rows,
@@ -161,7 +214,8 @@ impl ImatrixLayerStats {
     }
 
     /// Dense: `[in]`. Routed: `[E, in]` with all-zero rows for zero-traffic experts. Hessian: `x^T x` over the rows
-    /// recorded, divided by their count, `[in, in]`.
+    /// recorded, divided by their count, `[in, in]`; routed, one per expert `[E, in, in]` on the host (unit for an expert
+    /// no row reached).
     pub fn compute_imatrix(&self) -> Result<Tensor> {
         let handle = self.0.read().unwrap();
         match handle.as_ref().context("Layer stats were deinitialized!")? {
@@ -194,6 +248,28 @@ impl ImatrixLayerStats {
                     inference_tensor::bail!("No activations were recorded for this layer.");
                 }
                 h / *rows as f64
+            }
+            ImatrixLayerStats_::RoutedHessian {
+                rows,
+                in_dim,
+                counts,
+                h,
+                ..
+            } => {
+                if *rows == 0 {
+                    inference_tensor::bail!("No activations were recorded for this layer.");
+                }
+                // stacked on the host: one device allocation of every expert's Hessian would be the layer's largest
+                // an expert no row reached is encoded uncalibrated (exllamav3's fallback): a unit Hessian
+                let per_expert = h
+                    .iter()
+                    .zip(counts)
+                    .map(|(he, &count)| match he {
+                        Some(he) => (he / count as f64)?.to_device(&Device::Cpu),
+                        None => Tensor::eye(*in_dim, DType::F32, &Device::Cpu),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Tensor::stack(&per_expert, 0)
             }
         }
     }
@@ -327,6 +403,33 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    // each expert's Hessian over the rows routed to it, over their count: a token row feeds every expert it is
+    // routed to, a slot row only its own; an expert no row reached gets a unit Hessian
+    #[test]
+    fn routed_hessians_are_per_expert() -> Result<()> {
+        let device = Device::Cpu;
+        let stats = ImatrixLayerStats::empty();
+        stats.enable_routed_hessian(3, 2)?;
+        // token 0 -> experts {0, 1}, token 1 -> {1, 1}
+        let x = Tensor::new(&[[1f32, 2.], [3., 0.]], &device)?;
+        let ids = Tensor::new(&[[0u32, 1], [1, 1]], &device)?;
+        stats.process_routed(&x, &ids)?;
+        let h = stats.compute_imatrix()?.to_vec3::<f32>()?;
+        assert_eq!(h[0], [[1., 2.], [2., 4.]]);
+        // expert 1: token 0 once, token 1 twice, over 3 rows
+        assert_eq!(h[1], [[(1. + 18.) / 3., 2. / 3.], [2. / 3., 4. / 3.]]);
+        assert_eq!(h[2], [[1., 0.], [0., 1.]]);
+
+        let stats = ImatrixLayerStats::empty();
+        stats.enable_routed_hessian(2, 2)?;
+        let slots = Tensor::new(&[[[1f32, 0.], [0., 2.]]], &device)?;
+        stats.process_routed(&slots, &Tensor::new(&[[0u32, 1]], &device)?)?;
+        let h = stats.compute_imatrix()?.to_vec3::<f32>()?;
+        assert_eq!(h[0], [[1., 0.], [0., 0.]]);
+        assert_eq!(h[1], [[0., 0.], [0., 4.]]);
         Ok(())
     }
 

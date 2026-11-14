@@ -2313,7 +2313,14 @@ impl BackendStorage for CudaStorage {
         let device = self.device().clone();
         let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
         self.copy_strided_src(&mut acc, 0, l)?;
-        IndexAdd(ids, ids_l, dim).map(&mut acc.slice, l, &src.slice, src_l, &device)?;
+        // the copy is contiguous from 0, whatever offset `l` starts at
+        IndexAdd(ids, ids_l, dim).map(
+            &mut acc.slice,
+            &Layout::contiguous(l.shape()),
+            &src.slice,
+            src_l,
+            &device,
+        )?;
         Ok(acc)
     }
 
