@@ -1,4 +1,4 @@
-// Modified for inference.rs: torch includes and the at::Tensor `exl3_gemv` wrapper dropped
+// Modified for inference.rs: torch includes and the at::Tensor `exl3_gemv` wrapper dropped; 3INST at 3 bpw admitted
 #include <cuda_fp16.h>
 #include "exl3_gemv.cuh"
 
@@ -46,7 +46,7 @@ static int exl3_gemv_cfg(int cc, int size_m, int size_k, int size_n, int K, int 
 {
     if (mode == 0) return -1;
     if (K < 2 || K > 4) return -1;
-    if (K != 4 && cb == 0) return -1;
+    if (K != 4 && K != 3 && cb == 0) return -1;
     if (size_m > EXL3_GEMV_MAX_M) return -1;
     if (size_k % 128 || size_n % 128) return -1;
     //if (cc != CC_AMPERE) return -1;  // measured win on Ampere; Ada/Blackwell are memory-bound here
@@ -80,7 +80,7 @@ static void* exl3_gemv_select_kernel(int bits, int cb, bool c_fp32, int mmode, i
         SEL(bits_, cb_, false, 1, 0, sm_) SEL(bits_, cb_, false, 1, 1, sm_) \
         SEL(bits_, cb_, true,  0, 0, sm_) SEL(bits_, cb_, true,  0, 1, sm_) \
         SEL(bits_, cb_, true,  1, 0, sm_) SEL(bits_, cb_, true,  1, 1, sm_)
-    SEL_GRID(4, 0, false) SEL_GRID(4, 1, false) SEL_GRID(4, 2, false)
+    SEL_GRID(4, 0, false) SEL_GRID(3, 0, false) SEL_GRID(4, 1, false) SEL_GRID(4, 2, false)
     SEL_GRID(2, 1, false) SEL_GRID(2, 2, false) SEL_GRID(2, 1, true) SEL_GRID(2, 2, true)
     SEL_GRID(3, 1, false) SEL_GRID(3, 2, false) SEL_GRID(3, 1, true) SEL_GRID(3, 2, true)
     #undef SEL_GRID
@@ -115,7 +115,7 @@ bool exl3_gemv_try_launch
     else
     {
         if (K < 2 || K > 4) return false;
-        if (K != 4 && cb == 0) return false;
+        if (K != 4 && K != 3 && cb == 0) return false;
     }
     if (size_m > EXL3_GEMV_MAX_M) return false;
     if (size_k % 128 || size_n % 128) return false;
