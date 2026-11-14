@@ -592,3 +592,46 @@ values (q q^T is one product now where the chunked sum was), its trellis identic
 
 Still not covered: 405B-class dense (one Hessian is half the device; the factorization needs two) and layers too large
 to build on the device (the big MoEs).
+
+## Run 21 - 2026-11-14 05:10
+
+The two left-over costs from Run 18: Hessian accumulation (~13 s of a 14B layer) and the host memory of a streamed
+run (42 GB peak RSS on 14B).
+
+Hessians: each 1024-row chunk added `x^T x` as an f32 matmul of the bf16 activations cast up, then an add over the
+k x k sum. bf16 products are exact in f32, so one cuBLAS GemmEx over the bf16 rows (CUBLAS_COMPUTE_32F, f32 output,
+beta = 1 into the running sum) is the same product but for the order of its sums, on the tensor cores and with no
+temporary. Bench at 14B's down_proj width (17408, 1024 rows): 28.62 ms a chunk before, 9.69 after (~64 TFLOPS, near
+the 3090's 71 for bf16 with f32 accumulation); 474 chunks 13.6 s -> 4.6 s; after 100 chunks the two sums differ by
+6.5e-6 of the diagonal. Routed (expert) Hessians take the same path.
+
+Qwen3-0.6B, 4.0 mul1: layers 4.0 -> 3.4 s, 137 -> 121 s. Its perplexity moved 25.470 -> 26.034, so noise was
+measured: the same conversion with only the summation order changed (each chunk's product in two halves), once each
+way:
+
+```
+Hessian path                   wiki PPL
+f32 (as before)                25.470
+f32, sums split in two         25.321
+bf16 GEMM                      26.034
+bf16 GEMM, chunks split        25.540
+```
+
+Equally good encodings of the 0.6B spread ~3% at 4 bits (every linear's trellis choices move with its Hessian's
+rounding); per-linear proxy errors are unchanged (ratio 0.998 mean, 0.969-1.025). A probe in the run itself put the
+two Hessians within 1e-5 of their scale. So 26.03 is a draw, not a defect; the 14B decides.
+
+Unquantized copy: `copy_unquantized` loaded every shard whole (the encoded weights are most of it) and kept the few
+others; it now maps the shard and reads only those.
+
+Qwen3-14B 4.0 mul1, the same 485K tokens:
+
+```
+                  total     a layer       peak RSS (anon / file-backed)   wiki PPL
+Run 18            2518 s    59.5-60.7 s   42.1 GB (not split)             10.0635
+now               2108 s    49.9-50.7 s   41.0 GB (11.7 / 29.4)           10.0405   (Q8_0 10.0032)
+```
+
+The RSS was mostly the mapped checkpoint (29.4 GB file-backed: the whole 29.5 GB model, touched as each layer is
+built), which the kernel reclaims under pressure; the process's own memory peaks at 11.7 GB (the calibration states
+are 5 GB of it). Not a problem to chase.

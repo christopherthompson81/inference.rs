@@ -541,12 +541,18 @@ fn copy_unquantized(
     weight_map: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     for (i, file) in source.weights.iter().enumerate() {
-        let tensors = inference_tensor::safetensors::load(file, &Device::Cpu)?
+        // mapped, so only the kept tensors are read: the encoded weights are most of a shard
+        // SAFETY: the source checkpoint is not written while the converter reads it
+        let mapped = unsafe { inference_tensor::safetensors::MmapedSafetensors::new(file)? };
+        let tensors = mapped
+            .tensors()
             .into_iter()
-            .filter(|(name, _)| {
+            .map(|(name, _)| name)
+            .filter(|name| {
                 !replaced.contains(name) && !replaced_prefixes.iter().any(|p| name.starts_with(p))
             })
-            .collect::<HashMap<_, _>>();
+            .map(|name| Ok((name.clone(), mapped.load(&name, &Device::Cpu)?)))
+            .collect::<Result<HashMap<_, _>>>()?;
         write_shard(
             out,
             &format!("model-u{i:05}.safetensors"),
