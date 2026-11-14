@@ -720,3 +720,40 @@ Size: the EXL3 kernel library grows 7.29 -> 7.71 MiB (every mgemm instance carri
 output stage); baseline updated.
 
 Next: the matmul kernels themselves (Run 22's first item).
+
+## Run 24 - 2026-11-14 11:30
+
+exllamav3's small-m GEMV (`exl3_gemv_kernel`, QTIP-style: warps split k with no block barriers, B streamed to
+registers) runs only 4 bpw for the 3INST codebook (`K != 4 && cb == 0` refuses the rest, and there is no 3-bit
+3INST instance); its comment says 3 bpw was measured only for mcg and mul1. Admitted 3INST at 3 bpw (one instance
+grid, the same shape heuristic as mcg's 3 bpw: the narrow config when its grid is one co-resident wave). On the
+30B-A3B that takes o_proj (4096 -> 2048) at decode; q/k/v stay in the sliced mgemm, the head (6 bpw) in the GEMM.
+
+```
+o_proj at m = 1                 18.5 us (exl3_gemm) -> 14.3 us (exl3_gemv)
+decode tok/s, pairs             EXL3_GEMV=0: 145.0 145.4    default: 153.3 153.5     (+5.8%)
+```
+
+q/k/v as three GEMVs in place of the one sliced mgemm (a temporary toggle): 142 against 155 (fused). The mgemm
+stays.
+
+Decode accuracy (teacher-forced): EXL3_GEMV=0 4.74186, GEMV 4.75072 (+0.19%); mean |d logprob| 0.0077, top-1
+agreement 99.8%: the GEMV accumulates in f16 and folds to f32 on a cadence, a different rounding order, within the
+spread earlier kernel swaps showed (Run 8: 0.4%). The kernel test's 3INST 48-word case at m = 1 and 2 now runs the
+GEMV, inside its f16 bound.
+
+Readings drift: the fused-q/k/v runs read 155 then 164 in one sitting (throttle 0x404, power and thermal); only
+alternating pairs are comparable.
+
+The fused MoE's own geometry knobs, alternating with the default (tok/s, 3 requests each):
+
+```
+default                      163.0 165.2 165.0 | 166.3 165.1 160.3 | 164.2 163.5 162.9 | 165.2 166.1 166.3
+EXL3_MOE_COOP_WIDE=0         160.3 164.9 165.3   (32-column tiles: 384 blocks a launch in place of 96)
+EXL3_MOE_COOP_KSPLIT=2       164.4 166.0 154.9
+EXL3_MOE_COOP_KSPLIT=4       155.4 155.9 158.0
+```
+
+None beats the default (wide tiles, no split, exllamav3's choice below Blackwell): more blocks do not buy
+throughput there, so the coop kernels' 24-26% of DRAM bandwidth is their inner loop (3INST decode plus the m16 MMA
+at one real row), not the grid. What remains in the matmuls needs a kernel of our own.
