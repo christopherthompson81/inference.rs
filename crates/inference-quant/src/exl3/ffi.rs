@@ -44,6 +44,28 @@ inference_tensor::kernel_library! {
     path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT_EXL3").unwrap_or("");
     id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT_EXL3").unwrap_or("");
     unsafe extern "C" {
+        /// One row `x` (f16, or bf16 with `x_bf16`) through `jobs` trellises of one k (`b`, `suh`, `svh`, `out`, `n`
+        /// apiece) into each `out` (f32, f16 or bf16 by `out_kind`), rotated by its `suh`/`svh` and the Hadamards
+        /// inside; `ws` is the stream's zeroed workspace of `ws_floats` words, its counters left zeroed. 0 when
+        /// launched, -1 for a shape, rate or workspace it does not take.
+        pub(crate) fn launch_exl3_dgemv(
+            x: *const c_void,
+            x_bf16: bool,
+            jobs: i32,
+            b: *const *const u16,
+            suh: *const *const f16,
+            svh: *const *const f16,
+            out: *const *mut c_void,
+            n: *const i32,
+            size_k: i32,
+            tile_u16: i32,
+            cb: i32,
+            ws: *mut f32,
+            ws_floats: i64,
+            out_kind: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
         /// C (`m x n`, f16 or with `c_fp32` f32) = A (`m x k`, f16) times the trellis (`k/16 x n/16 x tile_u16`), A
         /// rotated by `suh` and the Hadamard into `a_had` (A's size) on the way in, C by the Hadamard and `svh` on the
         /// way out. Returns the kernel that ran, 0 for nothing to do, -1 when no kernel fits.

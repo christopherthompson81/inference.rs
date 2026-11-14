@@ -757,3 +757,49 @@ EXL3_MOE_COOP_KSPLIT=4       155.4 155.9 158.0
 None beats the default (wide tiles, no split, exllamav3's choice below Blackwell): more blocks do not buy
 throughput there, so the coop kernels' 24-26% of DRAM bandwidth is their inner loop (3INST decode plus the m16 MMA
 at one real row), not the grid. What remains in the matmuls needs a kernel of our own.
+
+## Run 25 - 2026-11-14 14:30
+
+A decode GEMV of our own (`exl3_dgemv_instance_exl3.cu`). Why: `decode_matmul_times_by_shape` (an ignored
+benchmark, kernel times from nsys) showed exllamav3's GEMV paying a fixed ~8.5 us a launch (2048 x 512, 0.4 MB:
+9.0 us; 2048 x 1536: 9.5 us; 4096 x 2048: 15.0 us): a cooperative launch, two grid syncs around the input and output
+Hadamards, and a serial k loop per warp.
+
+Design: no grid sync. A block per (128-column group, k-split); each warp one 16-column tile, its 8 or 16 trellis
+words a lane issued before anything else while the block rotates its rows of x (`* suh`, Hadamard) into shared
+memory; exllamav3's register window extraction and codebook decode (`dq8_regs_{2,3,4}bits`), one m16n8k16 MMA pair a
+slice with f32 accumulation (exllamav3's GEMV accumulates in f16). Partials go to a row per split in a per-stream
+workspace (16 MB, made with the first layer on the stream, outside any capture); the last block of a column group sums
+them in split order, so the result is the same every run (an atomicAdd version was ~0.3 us faster at small shapes and
+not reproducible), then rotates them out and resets its counter. Up to four matrices of one k in a launch (q, k, v),
+2/3/4 bpw, every codebook; mul1 at <= 5 bpw keeps the int8 GEMV.
+
+Rows a block: 128 below 16 blocks an SM, else 256 (512 never won):
+
+```
+k x n           MB     exllamav3          ours (KR 128 / 256 / 512)
+2048 x 512      0.4    8.9  (gemv)        4.2 / 5.2 / 7.2
+2048 x 1536     1.2    9.5  (gemv)        6.2 / 7.2 / 7.6
+4096 x 2048     3.1    14.9 (gemv)        10.7 / 11.5 / 13.1
+4096 x 8192     12.6   ~58  (gemm)        30.7 / 30.1 / 31.4
+8192 x 8192     25.2   ~58  (gemm)        58.1 / 54.7 / 54.5
+```
+
+ncu at 8192 x 8192: DRAM 51%, issue slots 73% busy, stalls mostly math-pipe throttle and not-selected: the trellis
+decode's instruction count is the limit there now, not latency.
+
+In the model (Qwen3-30B-A3B 3.0bpw): o_proj alone moved decode 165.5 -> 166.4 (pairs; clocks fell 1942 -> 1920 MHz
+at the same ~348 W, the 370 W cap's SwPowerCap active). With q/k/v as one three-job launch in place of the sliced
+mgemm:
+
+```
+                         tok/s (pairs)       step under nsys    kernels a step
+exllamav3 kernels        166.5 166.1          7.13 ms            776
+ours (q/k/v, o_proj)     198.8 198.6          6.01 ms            632
+```
+
+q/k/v + o_proj: 1.67 -> 1.07 ms a token; the fill-pointers kernel and the casts around them are gone too. Decode
+accuracy (teacher-forced): 4.74874 (Run 24's GEMV 4.75072, the mgemm/gemm 4.74186). Greedy output reads as before.
+
+Next: the MoE experts the same way (stand-ins of their weight volume: 2048 x 12288 in 24.3 us against coop_a's 41,
+768 x 16384 in 14.6 against coop_b's 20.7).
