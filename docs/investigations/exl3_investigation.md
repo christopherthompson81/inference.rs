@@ -938,3 +938,30 @@ kernels. The MoE expert `exl3_mgemm` takes 126 ms (120 launches, 1.05 ms each), 
 305 us), index selects 53 ms (`is_u32_f16` 120 x 352 us, `is_u32_f32` 150 x 71 us: the expert grouping's row
 gathers), copies and casts ~40 ms. The other ~180 ms is idle, while the host reads the router's picks to group rows
 by expert.
+
+## Run 31 - 2026-11-14 17:10
+
+Our streamed converter on Qwen3.6-35B-A3B, exllamav3's settings (`inference quantize exl3 --bits 4.0`, head 6, mul1,
+exllamav3's standard calibration text, 485K tokens in 473 chunks). A first try encoded the GDN's `in_proj_b` and
+`in_proj_a` (2048 -> 32, padded to 128). exllamav3 keeps them in BF16 (`qmap = None` for the GDN's b/a, split or
+fused), and a padded layer misses our decode GEMV. They now stay in full precision by name, as the router does. A
+width rule (narrower than 128 kept) broke the tiny OLMoE test, whose 64-wide k/v are meant to encode padded.
+
+1 h 50 min (158-163 s a layer), against exllamav3's 2 h 15 min. Text weights 17.155 GiB, the same as exllamav3's to
+the MiB. Ours copies the MTP block (1.57 GiB) and the vision tower (0.83) in BF16, where exllamav3 encodes them at
+the head rate (0.40, 0.52).
+
+```
+wikitext-2 40 x 512 against the BF16 base   PPL (base 5.8237)   KLD mean   KLD p99   same top-1
+exllamav3 4.0                               5.8694              0.02146    0.198     93.81%
+ours 4.0                                    5.8707              0.02210    0.217     93.57%
+IQ4_KSS (recipe)                                                0.0216
+
+inference bench 512 / 128, alternating      prefill tok/s       decode tok/s
+exllamav3 4.0                               1646, 1645          197.1, 197.0
+ours 4.0                                    1648, 1642          196.3, 196.4
+```
+
+Ours is 3% behind exllamav3 on KLD and level on speed. The 3% is not chased here: the calibration chunking
+differs (exllamav3 runs its rows at its own lengths), and Run 9 measured the same order of gap on Qwen3-0.6B.
+Not done: MTP and the vision tower are left in BF16 rather than encoded.
