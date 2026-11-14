@@ -712,9 +712,18 @@ fn finish(p: Prepared, q_reg: Tensor, states: &[i16], bits: Exl3Bits) -> Result<
     // the weight as the stored tensors decode: the refit scales commute with the rotations, so only their f16
     // rounding separates it from `q`
     let (suh, svh) = (su_t.to_dtype(DType::F16)?, sv_t.to_dtype(DType::F16)?);
+    // a zero channel's scale stays zero, and so does its column
+    let rounding = |stored: &Tensor, exact: &Tensor| -> Result<Tensor> {
+        let ratio = cpu(stored.to_dtype(DType::F32)?.flatten_all()?)?
+            .iter()
+            .zip(cpu(exact.flatten_all()?)?)
+            .map(|(&s, e)| if e == 0.0 { 0.0 } else { s / e })
+            .collect::<Vec<_>>();
+        Tensor::from_vec(ratio, exact.shape(), exact.device())
+    };
     let decoded = q
-        .broadcast_mul(&(suh.to_dtype(DType::F32)? / &su_t)?)?
-        .broadcast_mul(&(svh.to_dtype(DType::F32)? / &sv_t)?)?;
+        .broadcast_mul(&rounding(&suh, &su_t)?)?
+        .broadcast_mul(&rounding(&svh, &sv_t)?)?;
     drop(q);
     let decoded = decoded.t()?.contiguous()?;
 
@@ -1102,6 +1111,32 @@ mod tests {
     }
 
     // a linear in other widths pads to 128 blocks: its cropped decode carries the reported error, and the kernels
+    // dead output channels (a checkpoint's rows of the smallest normal f32, whose rms underflows, or exact zeros)
+    // encode with a zero scale, and their reconstruction stays zero, not 0 / 0
+    #[test]
+    fn dead_channels_reconstruct_as_zeros() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        const DEAD: [usize; 3] = [3, 77, 130];
+        let (n, k, rows) = (256, 256, 1024);
+        let mut w = Tensor::randn(0f32, 0.02f32, (n, k), &Device::Cpu)?.to_vec2::<f32>()?;
+        for (i, &r) in DEAD.iter().enumerate() {
+            w[r].fill(if i == 2 { 0.0 } else { f32::MIN_POSITIVE });
+        }
+        let w = Tensor::new(w, &device)?;
+        let x = Tensor::randn(0f32, 1f32, (rows, k), &device)?;
+        let h = (x.t()?.matmul(&x)? / rows as f64)?;
+        let e = encode(&w, &h, Exl3Bits::Whole(4), Exl3Codebook::Mcg, 5)?;
+        let decoded = e.decoded.to_device(&Device::Cpu)?.to_vec2::<f32>()?;
+        assert!(decoded.iter().flatten().all(|v| v.is_finite()));
+        for r in DEAD {
+            assert!(decoded[r].iter().all(|&v| v == 0.0), "row {r}");
+        }
+        Ok(())
+    }
+
     // layer built at its own widths (input padded, output cut) multiplies as that decode does
     #[test]
     fn padded_linears_encode_and_multiply_at_their_own_widths() -> Result<()> {

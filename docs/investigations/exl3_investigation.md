@@ -844,3 +844,34 @@ Since Run 22 (30B-A3B, step under nsys): 7.68 -> 5.03 ms.
 
 Size: the EXL3 kernel library 7.71 -> 8.01 MiB (the decode GEMV at 2-8 bpw and the two MoE kernels at 2-4 bpw, each
 codebook); baseline updated.
+
+## Run 28 - 2026-11-14 12:30
+
+Qwen3.6-35B-A3B next (the user's model; BF16 safetensors, `Qwen/Qwen3.6-35B-A3B`, 72 GB, downloading). Our converter
+streamed only the shared decoder: Qwen3.6 is the bespoke Qwen3.5 stack (Gated DeltaNet + attention + MoE, loaded as
+`Qwen3_5MoeForConditionalGeneration`), and the multimodal pipeline takes no EXL3 write. The user chose both routes:
+exllamav3's converter first (it has `qwen3_5` and `qwen3_5_mtp`), ours alongside.
+
+Ours:
+- the Qwen3.5 stack builds a layer through one `LayerBuild` (the constructor's loop and a rebuild on any device
+  share it) and implements `LayerStream` for plain stacks (RMS norms, no PLE, no QSA); a host load under
+  `stream_layers` builds no layers. A streamed attention layer runs on paged attention from its prompt mask (the
+  plain path needs a KV cache); a GDN layer from a fresh `GdnLayerCache` as a prefill.
+- an EXL3 write of a multimodal checkpoint loads its text model through the text loader named by
+  `text_config.model_type`, and the text loader reads a nested `text_config`.
+
+Qwen3.5-0.8B (dense hybrid) streamed at 4 bpw: every proxy error NaN past layer 0. Bisected by skipping swaps: only
+`linear_attn.in_proj_qkv`'s reconstruction broke the layer, with 14 NaN rows of 1024. Those rows are dead channels
+(every value 1.18e-37, the same rows of q and k): their rms underflows, so the encoder gives them a zero output
+scale, and the reconstruction's f16-rounding ratio `svh / sv` was 0 / 0. The stored trellis and scales were right
+(svh 0 decodes to 0); only the reconstruction the converter swaps in for the next layer's inputs was poisoned, so
+any model with dead channels was affected, streamed or not. The ratio is now 0 there (`dead_channels_reconstruct_as_zeros`).
+
+Also: a streamed (layerless) Qwen3.5 model panicked at serving setup reserving GDN deferred state (indexing empty
+layers); a layerless model reserves none.
+
+Result, 200 KB calibration slice, teacher-forced decode (README): BF16 5.50146, our streamed EXL3 4.0 5.72816
+(+4.1%; exllamav3's own Qwen3-0.6B 4.0 was +3.8% in Run 9). The output (multimodal config, EXL3 text weights, vision
+tower copied unquantized) loads and decodes through our engine. `--resident` fails on hybrid models ("Hybrid
+recurrent metadata is required"): the resident calibration drive never carried recurrent state, so hybrids convert
+streamed only.

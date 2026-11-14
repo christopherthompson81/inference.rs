@@ -41,6 +41,8 @@ pub struct AutoLoader {
     hf_config_overrides: Option<super::HfConfigOverrides>,
     max_model_len: Option<usize>,
     dynamic_lora_enabled: bool,
+    // the load writes EXL3, which takes a multimodal checkpoint's text model alone
+    writes_exl3: bool,
 }
 
 pub struct AutoLoaderBuilder {
@@ -139,6 +141,7 @@ impl AutoLoaderBuilder {
             .clone()
             .or(multimodal_cfg.hf_config_overrides.clone());
         let max_model_len = normal_cfg.max_model_len.or(multimodal_cfg.max_model_len);
+        let writes_exl3 = normal_cfg.exl3_out.is_some();
         let mut normal_builder = NormalLoaderBuilder::new(
             normal_cfg,
             chat_template.clone(),
@@ -181,6 +184,7 @@ impl AutoLoaderBuilder {
         }
 
         Box::new(AutoLoader {
+            writes_exl3,
             model_id,
             normal_builder: Mutex::new(Some(normal_builder)),
             multimodal_builder: Mutex::new(Some(multimodal_builder)),
@@ -379,6 +383,25 @@ impl AutoLoader {
                 false
             }
         }
+    }
+
+    // an EXL3 write takes a multimodal checkpoint's text model alone (only text stacks write EXL3)
+    fn detect_for_load(&self, config: &ConfigArtifacts) -> Result<Detected> {
+        let detected = detect(&self.model_id, config)?;
+        if !matches!(detected, Detected::Multimodal(_)) || !self.writes_exl3 {
+            return Ok(detected);
+        }
+        let text = config
+            .contents
+            .as_deref()
+            .and_then(text_loader_of_multimodal);
+        Ok(match text {
+            Some(tp) => {
+                info!("Writing EXL3 of the checkpoint's text model, loaded as `{tp}`.");
+                Detected::Normal(tp)
+            }
+            None => detected,
+        })
     }
 
     fn ensure_loader(&self, detected: Detected) -> Result<()> {
@@ -676,6 +699,12 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
     Ok(Detected::Normal(tp))
 }
 
+// the text loader for a multimodal config's `text_config`, by its `model_type`
+fn text_loader_of_multimodal(config: &str) -> Option<NormalLoaderType> {
+    let config: serde_json::Value = serde_json::from_str(config).ok()?;
+    NormalLoaderType::from_model_type(config["text_config"]["model_type"].as_str()?)
+}
+
 // A local model's config and file listing as detection reads them; `config_path` need not exist.
 fn local_config_artifacts(
     model_root: &Path,
@@ -829,7 +858,7 @@ impl Loader for AutoLoader {
         let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let config = self.read_config_from_hf(revision.clone(), &token_source, silent)?;
-        let detected = detect(&self.model_id, &config)?;
+        let detected = self.detect_for_load(&config)?;
         let options = LoadOptions {
             mapper: device_map_for_detected(options.mapper, &detected),
             ..options
@@ -850,7 +879,7 @@ impl Loader for AutoLoader {
     ) -> Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(options.silent);
         let config = self.read_config_from_path(paths)?;
-        let detected = detect(&self.model_id, &config)?;
+        let detected = self.detect_for_load(&config)?;
         let options = LoadOptions {
             mapper: device_map_for_detected(options.mapper, &detected),
             ..options
@@ -981,6 +1010,18 @@ mod tests {
             detected,
             Detected::Multimodal(MultimodalLoaderType::Qwen3_5Moe)
         ));
+    }
+
+    // an EXL3 write of Qwen3.6 loads its text model through the text loader
+    #[test]
+    fn a_multimodal_config_names_its_text_loader() {
+        let config = r#"{"architectures":["Qwen3_5MoeForConditionalGeneration"],
+            "text_config":{"model_type":"qwen3_5_moe_text"}}"#;
+        assert_eq!(
+            text_loader_of_multimodal(config),
+            Some(NormalLoaderType::Qwen3_5Moe)
+        );
+        assert_eq!(text_loader_of_multimodal(r#"{"model_type":"llama"}"#), None);
     }
 
     #[test]

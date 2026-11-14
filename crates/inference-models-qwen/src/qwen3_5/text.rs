@@ -1473,6 +1473,285 @@ pub struct Qwen3_5TextModel {
         Mutex<std::collections::HashMap<usize, super::speculative::PendingPromptTail>>,
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     pub(super) mtp_graphs: crate::speculative::mtp_graph::MtpGraphs,
+    // a plain stack's layers one at a time on any device, for a converter streaming the model
+    rebuild: Option<LayerRebuild>,
+}
+
+// the MRoPE embedding on `device` (rot_dim wide, not head_dim)
+fn rotary_on(
+    cfg: &TextConfig,
+    yarn: Option<&YarnRopeConfig>,
+    device: &Device,
+) -> Result<Qwen3VLRotaryEmbedding> {
+    match yarn {
+        Some(yarn) => Qwen3VLRotaryEmbedding::new_yarn(yarn, device, cfg.mrope_section().to_vec()),
+        None => Qwen3VLRotaryEmbedding::new(
+            cfg.rope_theta() as f32,
+            cfg.rot_dim(),
+            device,
+            cfg.mrope_section().to_vec(),
+        ),
+    }
+}
+
+// what rebuilds one layer of a plain stack (RMS norms, no PLE, no QSA) on any device, for a converter streaming it
+pub(super) struct LayerRebuild {
+    cfg: TextConfig,
+    vb_l: ShardedVarBuilder,
+    layer_types: Vec<LayerType>,
+    mtp: bool,
+    yarn: Option<YarnRopeConfig>,
+}
+
+impl LayerRebuild {
+    // layer `layer_idx` on `device`, with the modules it added to the load's tracker taken back out of it
+    fn layer(&self, layer_idx: usize, device: &Device) -> Result<StreamedQwenLayer> {
+        let mapper = crate::device_map::DummyDeviceMapper::new(device.clone());
+        let vb_l = self.vb_l.clone().set_device(device.clone());
+        let ropes = HashMap::from([(
+            device.location(),
+            Arc::new(rotary_on(&self.cfg, self.yarn.as_ref(), device)?),
+        )]);
+        let before = vb_l.tracker().get().len();
+        let layer = LayerBuild {
+            cfg: &self.cfg,
+            vb_l: &vb_l,
+            mapper: &mapper,
+            real_device: device,
+            loading_isq: false,
+            ropes: &ropes,
+            layer_types: &self.layer_types,
+            // paged attention runs a lone prompt from its mask, where the plain path needs a KV cache
+            paged: true,
+            mtp: self.mtp,
+            ple: None,
+        }
+        .layer(layer_idx)?;
+        let modules = vb_l.tracker().get().split_off(before);
+        Ok(StreamedQwenLayer {
+            layer,
+            cfg: self.cfg.clone(),
+            modules,
+        })
+    }
+}
+
+struct StreamedQwenLayer {
+    layer: DecoderLayer,
+    cfg: TextConfig,
+    modules: Vec<inference_quant::TrackedModule>,
+}
+
+impl crate::model::StreamedLayer for StreamedQwenLayer {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let tokens = xs.dim(1)?;
+        match &self.layer.layer_impl {
+            LayerImpl::FullAttention(attn) => {
+                let positions =
+                    Tensor::arange(0u32, tokens as u32, xs.device())?.reshape((1, tokens))?;
+                let cos_sin = attn
+                    .rotary_emb
+                    .compute_text_cos_sin(&positions, xs.dtype())?;
+                let ids = Tensor::zeros((1, tokens), DType::U32, xs.device())?;
+                let mask = CausalMasker.make_causal_mask(
+                    &ids,
+                    &crate::layers::masker::NotACache,
+                    xs.dtype(),
+                    &CausalMaskConfig::default(),
+                )?;
+                let flash = FlashParams::empty(true);
+                self.layer
+                    .forward_attention_output(xs, None, &mask, &cos_sin, None, None, &flash, None)?
+                    .add()
+            }
+            LayerImpl::LinearAttention(_) => {
+                let mut cache =
+                    GdnLayerCache::new(&self.cfg as &dyn GdnConfig, xs.dtype(), xs.device())?;
+                self.layer
+                    .forward_linear_with_stash(LinearForwardContext {
+                        x: xs,
+                        normalized_x: None,
+                        cache: &mut cache,
+                        batch_kind: RecurrentBatchKind::Prefill,
+                        checkpoint_lanes: 1,
+                        transition_checkpoints: false,
+                        packed_layout: None,
+                        stash_out: None,
+                    })?
+                    .add()
+            }
+        }
+    }
+
+    fn modules(&self) -> &[inference_quant::TrackedModule] {
+        &self.modules
+    }
+}
+
+impl crate::model::LayerStream for Qwen3_5TextModel {
+    fn num_layers(&self) -> usize {
+        self.layer_types.len()
+    }
+
+    fn embed(&self, ids: &Tensor) -> Result<Tensor> {
+        self.embed_tokens(ids)
+    }
+
+    fn build_layer(
+        &self,
+        layer: usize,
+        device: &Device,
+    ) -> Result<Box<dyn crate::model::StreamedLayer>> {
+        let Some(rebuild) = &self.rebuild else {
+            inference_tensor::bail!("this Qwen3.5 stack does not rebuild its layers");
+        };
+        Ok(Box::new(rebuild.layer(layer, device)?))
+    }
+
+    fn final_norm(&self, xs: &Tensor) -> Result<Tensor> {
+        self.norm.forward(&xs.to_device(&self.device)?)
+    }
+
+    fn head(&self) -> Arc<dyn QuantMethod> {
+        self.lm_head.clone()
+    }
+}
+
+// what builds one decoder layer: the constructor's loop, and a converter rebuilding a layer on its own device
+struct LayerBuild<'a> {
+    cfg: &'a TextConfig,
+    vb_l: &'a ShardedVarBuilder,
+    mapper: &'a (dyn DeviceMapper + Send + Sync),
+    real_device: &'a Device,
+    loading_isq: bool,
+    ropes: &'a HashMap<inference_tensor::DeviceLocation, Arc<Qwen3VLRotaryEmbedding>>,
+    layer_types: &'a [LayerType],
+    paged: bool,
+    mtp: bool,
+    ple: Option<&'a (super::config::PleConfig, PleHash)>,
+}
+
+impl LayerBuild<'_> {
+    fn layer(&self, layer_idx: usize) -> Result<DecoderLayer> {
+        let comm = self.mapper.get_comm_for(layer_idx)?;
+
+        let layer_impl = match self.layer_types[layer_idx] {
+            LayerType::FullAttention => {
+                let device = self
+                    .mapper
+                    .device_for(layer_idx, false)
+                    .unwrap_or(self.real_device);
+                let rotary_emb = self
+                    .ropes
+                    .get(&device.location())
+                    .expect("No RoPE for device location!")
+                    .clone();
+                LayerImpl::FullAttention(FullAttention::load(
+                    self.vb_l.pp(layer_idx),
+                    self.cfg,
+                    self.mapper,
+                    layer_idx,
+                    self.loading_isq,
+                    rotary_emb,
+                    self.paged,
+                    self.cfg.qsa_cache_layer(layer_idx, self.mtp),
+                    &comm,
+                )?)
+            }
+            LayerType::LinearAttention => LayerImpl::LinearAttention(GatedDeltaNet::load(
+                self.vb_l.pp(layer_idx),
+                self.cfg as &dyn GdnConfig,
+                self.mapper,
+                layer_idx,
+                self.loading_isq,
+                &comm,
+                GdnInputProjectionKind::Split,
+            )?),
+        };
+
+        let norms = match self.cfg.hyper_connections() {
+            Some(hc) => {
+                let load = |name: &str| {
+                    GatedResidual::load(
+                        self.cfg,
+                        hc,
+                        self.mapper.set_device(
+                            layer_idx,
+                            self.vb_l.pp(layer_idx).pp(name),
+                            self.loading_isq,
+                        ),
+                        self.mapper
+                            .set_device(layer_idx, self.vb_l.pp(layer_idx).pp(name), false),
+                        true,
+                    )
+                };
+                LayerNorms::Hyper {
+                    attention: load("attn_hyper_connection")?,
+                    mlp: load("mlp_hyper_connection")?,
+                }
+            }
+            None => LayerNorms::Rms {
+                input: GemmaRmsNorm::new(
+                    self.cfg.hidden_size,
+                    self.cfg.rms_norm_eps,
+                    self.mapper.set_device(
+                        layer_idx,
+                        self.vb_l.pp(layer_idx).pp("input_layernorm"),
+                        false,
+                    ),
+                )?,
+                post_attention: GemmaRmsNorm::new(
+                    self.cfg.hidden_size,
+                    self.cfg.rms_norm_eps,
+                    self.mapper.set_device(
+                        layer_idx,
+                        self.vb_l.pp(layer_idx).pp("post_attention_layernorm"),
+                        false,
+                    ),
+                )?,
+            },
+        };
+
+        let mlp = FeedForward::load(
+            self.cfg,
+            self.mapper.set_device(
+                layer_idx,
+                self.vb_l.pp(layer_idx).pp("mlp"),
+                self.loading_isq,
+            ),
+            self.mapper
+                .device_for(layer_idx, false)
+                .cloned()
+                .unwrap_or_else(|| self.real_device.clone()),
+            self.loading_isq,
+            &comm,
+        )?;
+
+        let ple = match (self.ple, self.cfg.hyper_connections()) {
+            (Some((ple, hash)), Some(hc)) if ple.layer == layer_idx => Some(PleLayer::load(
+                self.cfg,
+                *ple,
+                hash.clone(),
+                hc.streams,
+                self.mapper.set_device(
+                    layer_idx,
+                    self.vb_l.pp(layer_idx).pp("ple"),
+                    self.loading_isq,
+                ),
+                self.mapper
+                    .set_device(layer_idx, self.vb_l.pp(layer_idx).pp("ple"), false),
+                self.vb_l.pp(layer_idx).pp("ple").set_device(Device::Cpu),
+            )?),
+            _ => None,
+        };
+
+        Ok(DecoderLayer {
+            layer_impl,
+            norms,
+            mlp,
+            ple,
+        })
+    }
 }
 
 impl Qwen3_5TextModel {
@@ -1537,7 +1816,6 @@ impl Qwen3_5TextModel {
         let layer_types = cfg.layer_types();
 
         // Create MRoPE embeddings (one per device, using rot_dim not head_dim)
-        let rot_dim = cfg.rot_dim();
         let mut ropes = HashMap::new();
         for (layer_idx, layer_type) in layer_types.iter().enumerate() {
             if *layer_type != LayerType::FullAttention {
@@ -1548,20 +1826,8 @@ impl Qwen3_5TextModel {
                 .unwrap_or(&normal_loading_metadata.real_device);
             ropes.entry(device.location()).or_insert_with(|| {
                 Arc::new(
-                    match yarn_rope_config.as_ref() {
-                        Some(yarn) => Qwen3VLRotaryEmbedding::new_yarn(
-                            yarn,
-                            device,
-                            cfg.mrope_section().to_vec(),
-                        ),
-                        None => Qwen3VLRotaryEmbedding::new(
-                            cfg.rope_theta() as f32,
-                            rot_dim,
-                            device,
-                            cfg.mrope_section().to_vec(),
-                        ),
-                    }
-                    .expect("Failed to create rotary embedding"),
+                    rotary_on(cfg, yarn_rope_config.as_ref(), device)
+                        .expect("Failed to create rotary embedding"),
                 )
             });
         }
@@ -1588,127 +1854,40 @@ impl Qwen3_5TextModel {
             );
         }
         let vb_l = vb_m.pp("layers");
-        let layers = NiceProgressBar::<_, 'b'>(
-            0..cfg.num_hidden_layers,
-            "Loading repeating layers",
-            &normal_loading_metadata.multi_progress,
-        )
-        .par_iter_if_isq(|layer_idx| {
-            let comm = mapper.get_comm_for(layer_idx)?;
-
-            let layer_impl = match layer_types[layer_idx] {
-                LayerType::FullAttention => {
-                    let device = mapper
-                        .device_for(layer_idx, false)
-                        .unwrap_or(&normal_loading_metadata.real_device);
-                    let rotary_emb = ropes
-                        .get(&device.location())
-                        .expect("No RoPE for device location!")
-                        .clone();
-                    LayerImpl::FullAttention(FullAttention::load(
-                        vb_l.pp(layer_idx),
-                        cfg,
-                        &*mapper,
-                        layer_idx,
-                        normal_loading_metadata.loading_isq,
-                        rotary_emb,
-                        matches!(attention_mechanism, AttentionImplementation::PagedAttention),
-                        cfg.qsa_cache_layer(layer_idx, mtp.is_some()),
-                        &comm,
-                    )?)
+        let build = LayerBuild {
+            cfg,
+            vb_l: &vb_l,
+            mapper: &*mapper,
+            real_device: &normal_loading_metadata.real_device,
+            loading_isq: normal_loading_metadata.loading_isq,
+            ropes: &ropes,
+            layer_types: &layer_types,
+            paged: matches!(attention_mechanism, AttentionImplementation::PagedAttention),
+            mtp: mtp.is_some(),
+            ple,
+        };
+        let rebuild =
+            (cfg.hyper_connections().is_none() && ple.is_none() && qsa.is_none()).then(|| {
+                LayerRebuild {
+                    cfg: cfg.clone(),
+                    vb_l: vb_l.clone(),
+                    layer_types: layer_types.clone(),
+                    mtp: mtp.is_some(),
+                    yarn: yarn_rope_config.clone(),
                 }
-                LayerType::LinearAttention => LayerImpl::LinearAttention(GatedDeltaNet::load(
-                    vb_l.pp(layer_idx),
-                    cfg as &dyn GdnConfig,
-                    &*mapper,
-                    layer_idx,
-                    normal_loading_metadata.loading_isq,
-                    &comm,
-                    GdnInputProjectionKind::Split,
-                )?),
-            };
-
-            let norms = match cfg.hyper_connections() {
-                Some(hc) => {
-                    let load = |name: &str| {
-                        GatedResidual::load(
-                            cfg,
-                            hc,
-                            mapper.set_device(
-                                layer_idx,
-                                vb_l.pp(layer_idx).pp(name),
-                                normal_loading_metadata.loading_isq,
-                            ),
-                            mapper.set_device(layer_idx, vb_l.pp(layer_idx).pp(name), false),
-                            true,
-                        )
-                    };
-                    LayerNorms::Hyper {
-                        attention: load("attn_hyper_connection")?,
-                        mlp: load("mlp_hyper_connection")?,
-                    }
-                }
-                None => LayerNorms::Rms {
-                    input: GemmaRmsNorm::new(
-                        cfg.hidden_size,
-                        cfg.rms_norm_eps,
-                        mapper.set_device(
-                            layer_idx,
-                            vb_l.pp(layer_idx).pp("input_layernorm"),
-                            false,
-                        ),
-                    )?,
-                    post_attention: GemmaRmsNorm::new(
-                        cfg.hidden_size,
-                        cfg.rms_norm_eps,
-                        mapper.set_device(
-                            layer_idx,
-                            vb_l.pp(layer_idx).pp("post_attention_layernorm"),
-                            false,
-                        ),
-                    )?,
-                },
-            };
-
-            let mlp = FeedForward::load(
-                cfg,
-                mapper.set_device(
-                    layer_idx,
-                    vb_l.pp(layer_idx).pp("mlp"),
-                    normal_loading_metadata.loading_isq,
-                ),
-                mapper
-                    .device_for(layer_idx, false)
-                    .cloned()
-                    .unwrap_or_else(|| normal_loading_metadata.real_device.clone()),
-                normal_loading_metadata.loading_isq,
-                &comm,
-            )?;
-
-            let ple = match (ple, cfg.hyper_connections()) {
-                (Some((ple, hash)), Some(hc)) if ple.layer == layer_idx => Some(PleLayer::load(
-                    cfg,
-                    *ple,
-                    hash.clone(),
-                    hc.streams,
-                    mapper.set_device(
-                        layer_idx,
-                        vb_l.pp(layer_idx).pp("ple"),
-                        normal_loading_metadata.loading_isq,
-                    ),
-                    mapper.set_device(layer_idx, vb_l.pp(layer_idx).pp("ple"), false),
-                    vb_l.pp(layer_idx).pp("ple").set_device(Device::Cpu),
-                )?),
-                _ => None,
-            };
-
-            Ok(DecoderLayer {
-                layer_impl,
-                norms,
-                mlp,
-                ple,
-            })
-        })?;
+            });
+        // a converter streaming the model rebuilds each layer on its device, so the host load builds none
+        let streamed = rebuild.is_some() && inference_nn::decoder::layers_streamed();
+        let layers = if streamed {
+            Vec::new()
+        } else {
+            NiceProgressBar::<_, 'b'>(
+                0..cfg.num_hidden_layers,
+                "Loading repeating layers",
+                &normal_loading_metadata.multi_progress,
+            )
+            .par_iter_if_isq(|layer_idx| build.layer(layer_idx))?
+        };
 
         let norm = match cfg.hyper_connections() {
             Some(hc) => OutputNorm::Mixer(GatedResidual::load(
@@ -1857,6 +2036,7 @@ impl Qwen3_5TextModel {
             gdn_replay_stash: Mutex::new(None),
             ple_stash: Mutex::new(None),
             dflash_tap_layers: Mutex::new(Vec::new()),
+            rebuild,
             yarn_rope_config,
         })
     }
@@ -1914,6 +2094,10 @@ impl Qwen3_5TextModel {
     pub(super) fn gdn_deferred_state_spec(
         &self,
     ) -> Result<Option<crate::kv_cache::GdnDeferredStateSpec>> {
+        // a stack loaded to stream its layers holds none, and never decodes
+        if self.layers.is_empty() {
+            return Ok(None);
+        }
         let cache = self.cache.hybrid();
         let mut spec = None;
         for (layer_idx, layer_type) in self.layer_types.iter().enumerate() {
@@ -3418,6 +3602,12 @@ impl NormalModel for Qwen3_5TextModel {
 
     fn cache(&self) -> &EitherCache {
         &self.cache
+    }
+
+    fn layer_stream(&self) -> Option<&dyn crate::model::LayerStream> {
+        self.rebuild
+            .as_ref()
+            .map(|_| self as &dyn crate::model::LayerStream)
     }
 
     fn max_seq_len(&self) -> usize {

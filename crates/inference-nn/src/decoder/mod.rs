@@ -1307,6 +1307,11 @@ pub fn stream_layers() -> StreamLayers {
     StreamLayers(STREAM_LAYERS.with(|stream| stream.replace(true)))
 }
 
+/// Whether a [`stream_layers`] scope is open on this thread: a stack loaded now builds none of its layers.
+pub fn layers_streamed() -> bool {
+    STREAM_LAYERS.get()
+}
+
 /// Ends a [`stop_after_layer`] scope.
 pub struct CalibrationStop(usize);
 
