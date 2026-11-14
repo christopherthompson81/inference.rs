@@ -25,6 +25,11 @@ pub(crate) trait CalibrationDrive {
     fn sliding_window(&self) -> Option<usize> {
         None
     }
+    // a model whose layers rebuild one at a time, for a write that streams it through a device
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    fn layer_stream(&self) -> Option<&dyn inference_nn::model::LayerStream> {
+        None
+    }
 }
 
 pub(crate) struct NormalCalibrationDrive<'a>(pub &'a dyn NormalModel);
@@ -49,6 +54,10 @@ impl CalibrationDrive for NormalCalibrationDrive<'_> {
 
     fn sliding_window(&self) -> Option<usize> {
         self.0.config().sliding_window
+    }
+
+    fn layer_stream(&self) -> Option<&dyn inference_nn::model::LayerStream> {
+        self.0.layer_stream()
     }
 }
 
@@ -117,7 +126,7 @@ pub(crate) struct CalibrationCtx<'a> {
     pub mapper: Option<&'a dyn crate::device_map::DeviceMapper>,
 }
 
-const CALIBRATION_CHUNK_SIZE: usize = 1024;
+pub(super) const CALIBRATION_CHUNK_SIZE: usize = 1024;
 const TIED_EMBEDDING: &str = "embed_tokens";
 const TIED_HEAD: &str = "lm_head";
 // the Hessians one calibration pass collects at once (f32 `[in, in]` per layer); more layers take more passes

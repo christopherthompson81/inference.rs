@@ -193,18 +193,56 @@ async fn an_olmoe_written_as_exl3_loads_and_generates() -> anyhow::Result<()> {
         &calibration,
         "hello there, how are you today? the quick brown fox. ".repeat(16),
     )?;
-    let out = tempfile::tempdir()?;
-    TextModelBuilder::new(dir.path().to_string_lossy())
-        .with_dtype(ModelDType::F32)
-        .with_calibration_file(calibration)
-        .with_exl3_out(inference::Exl3WriteConfig {
-            output: out.path().to_path_buf(),
-            bits: 4.0,
-            head_bits: None,
-            codebook: Some("mcg".to_string()),
-        })
-        .build()
-        .await?;
+    // loaded on the host, the model streams through the GPU a layer at a time
+    let write = |on_host: bool| {
+        let (dir, calibration) = (dir.path().to_owned(), calibration.clone());
+        async move {
+            let out = tempfile::tempdir()?;
+            let builder = TextModelBuilder::new(dir.to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_calibration_file(calibration)
+                .with_exl3_out(inference::Exl3WriteConfig {
+                    output: out.path().to_path_buf(),
+                    bits: 4.0,
+                    head_bits: None,
+                    codebook: Some("mcg".to_string()),
+                });
+            if on_host {
+                builder.with_force_cpu().build().await?;
+            } else {
+                builder.build().await?;
+            }
+            anyhow::Ok(out)
+        }
+    };
+    let out = write(false).await?;
+    // each expert's gate and up share the Hessian of the rows routed to it, collected once when streamed; the head
+    // takes every row's there
+    let streamed = write(true).await?;
+    let tensors =
+        |dir: &std::path::Path| -> anyhow::Result<std::collections::BTreeMap<String, Vec<f32>>> {
+            let mut tensors = std::collections::BTreeMap::new();
+            for entry in std::fs::read_dir(dir)? {
+                let path = entry?.path();
+                if path.extension().is_some_and(|e| e == "safetensors") {
+                    for (name, t) in
+                        inference_tensor::safetensors::load(&path, &inference_tensor::Device::Cpu)?
+                    {
+                        let t = t.to_dtype(inference_tensor::DType::F32)?.flatten_all()?;
+                        tensors.insert(name, t.to_vec1::<f32>()?);
+                    }
+                }
+            }
+            Ok(tensors)
+        };
+    let (a, b) = (tensors(out.path())?, tensors(streamed.path())?);
+    anyhow::ensure!(a.keys().eq(b.keys()), "the writes hold different tensors");
+    for (name, tensor) in &a {
+        anyhow::ensure!(
+            name.starts_with("lm_head.") || *tensor == b[name],
+            "{name} differs"
+        );
+    }
     let index: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
         out.path().join("model.safetensors.index.json"),
     )?)?;

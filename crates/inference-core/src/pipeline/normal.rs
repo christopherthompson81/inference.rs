@@ -296,6 +296,9 @@ impl NormalLoader {
             &mut paged_attn_config,
         )?;
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
+        // an EXL3 write from the host streams the layers through the GPU, so the host load builds none
+        let _stream = (self.config.exl3_out.is_some() && device.is_cpu())
+            .then(inference_nn::decoder::stream_layers);
         let (model, tracker, dynamic_lora, switch_adapters) = super::loading::load_model(
             &*self.inner,
             &session,

@@ -330,13 +330,9 @@ async fn a_hessian_collection_writes_each_layers_input_hessian() -> anyhow::Resu
     Ok(())
 }
 
-// an EXL3 write from a calibration file: every linear replaced by its trellis (the 266-row head padded to 384),
-// the rest copied, and the written model loads and decodes
-async fn an_exl3_write_loads_and_decodes() -> anyhow::Result<()> {
-    if !cfg!(feature = "cuda") {
-        return Ok(());
-    }
+fn exl3_checkpoint(tied: bool) -> anyhow::Result<tempfile::TempDir> {
     let checkpoint = tiny_llama_checkpoint_with(serde_json::json!({
+        "tie_word_embeddings": tied,
         "hidden_size": 128,
         "intermediate_size": 256,
         "num_attention_heads": 1,
@@ -344,20 +340,41 @@ async fn an_exl3_write_loads_and_decodes() -> anyhow::Result<()> {
         // calibration chunks run 1024 tokens
         "max_position_embeddings": 2048,
     }))?;
-    let calibration = checkpoint.path().join("calibration.txt");
-    std::fs::write(&calibration, CALIBRATION_TEXT.repeat(8))?;
+    std::fs::write(
+        checkpoint.path().join("calibration.txt"),
+        CALIBRATION_TEXT.repeat(8),
+    )?;
+    Ok(checkpoint)
+}
+
+// the checkpoint written as EXL3 at 4.0 3inst, loaded on the host (and so streamed a layer at a time) or the GPU
+async fn write_exl3(checkpoint: &Path, on_host: bool) -> anyhow::Result<tempfile::TempDir> {
     let out = tempfile::tempdir()?;
-    TextModelBuilder::new(checkpoint.path().to_string_lossy())
+    let builder = TextModelBuilder::new(checkpoint.to_string_lossy())
         .with_dtype(ModelDType::F32)
-        .with_calibration_file(calibration)
+        .with_calibration_file(checkpoint.join("calibration.txt"))
         .with_exl3_out(inference::Exl3WriteConfig {
             output: out.path().to_path_buf(),
             bits: 4.0,
             head_bits: None,
             codebook: Some("3inst".to_string()),
-        })
-        .build()
-        .await?;
+        });
+    if on_host {
+        builder.with_force_cpu().build().await?;
+    } else {
+        builder.build().await?;
+    }
+    Ok(out)
+}
+
+// an EXL3 write from a calibration file: every linear replaced by its trellis (the 266-row head padded to 384),
+// the rest copied, and the written model loads and decodes
+async fn an_exl3_write_loads_and_decodes() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = exl3_checkpoint(false)?;
+    let out = write_exl3(checkpoint.path(), false).await?;
     let index: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
         out.path().join("model.safetensors.index.json"),
     )?)?;
@@ -378,6 +395,46 @@ async fn an_exl3_write_loads_and_decodes() -> anyhow::Result<()> {
     anyhow::ensure!(map.contains_key("lm_head.trellis") && !map.contains_key("lm_head.weight"));
     anyhow::ensure!(map.contains_key("model.embed_tokens.weight"));
     let written = TextModelBuilder::new(out.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .build()
+        .await?;
+    greedy_ids(&written).await?;
+    Ok(())
+}
+
+// a model loaded on the host streams through the GPU a layer at a time, each layer's Hessians over the states the
+// encoded layers before it give, as the resident write's passes collect them: the same layers written. The head
+// differs: streamed, its Hessian takes every row, where the resident forward hands it each chunk's last. Tied, the
+// written head loads in place of the embedding
+async fn a_streamed_exl3_write_writes_the_resident_ones_layers() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = exl3_checkpoint(true)?;
+    let resident = write_exl3(checkpoint.path(), false).await?;
+    let streamed = write_exl3(checkpoint.path(), true).await?;
+    let read = |dir: &Path| -> anyhow::Result<std::collections::BTreeMap<String, Vec<f32>>> {
+        let mut tensors = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|e| e == "safetensors") {
+                for (name, t) in inference_tensor::safetensors::load(&path, &Device::Cpu)? {
+                    let t = t.to_dtype(inference_tensor::DType::F32)?.flatten_all()?;
+                    tensors.insert(name, t.to_vec1::<f32>()?);
+                }
+            }
+        }
+        Ok(tensors)
+    };
+    let (a, b) = (read(resident.path())?, read(streamed.path())?);
+    anyhow::ensure!(a.keys().eq(b.keys()), "the writes hold different tensors");
+    for (name, tensor) in &a {
+        anyhow::ensure!(
+            name.starts_with("lm_head.") || *tensor == b[name],
+            "{name} differs"
+        );
+    }
+    let written = TextModelBuilder::new(streamed.path().to_string_lossy())
         .with_dtype(ModelDType::F32)
         .build()
         .await?;
@@ -743,6 +800,7 @@ concurrent_cases!(
         an_isq_load_can_calibrate_on_a_text_file_first: 0,
         a_hessian_collection_writes_each_layers_input_hessian: 0,
         an_exl3_write_loads_and_decodes: 400,
+        a_streamed_exl3_write_writes_the_resident_ones_layers: 400,
         a_lora_adapter_applies_only_when_a_request_selects_it: 0,
         paged_gpu_decode_through_the_gather_matches_the_cpu: 348,
         a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu: 354,

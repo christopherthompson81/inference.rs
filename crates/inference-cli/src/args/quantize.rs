@@ -66,6 +66,11 @@ pub struct Exl3QuantizeOptions {
     /// Codebook: mul1, mcg or 3inst [default: mul1]
     #[arg(long)]
     pub codebook: Option<String>,
+
+    /// Load the model on the GPU and run it whole per layer, for models whose layers don't stream (the default
+    /// loads it on the host and streams one layer at a time through the GPU, so the model may exceed its memory)
+    #[arg(long)]
+    pub resident: bool,
 }
 
 #[derive(Args, Clone)]

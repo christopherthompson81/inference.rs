@@ -265,6 +265,14 @@ inference quantize exl3 -m <full-precision model> --calibration-file <text> -o <
 It goes a layer at a time as exllamav3's converter does: each layer's input Hessians come from the calibration
 text run through the model with every layer before it already replaced by its encoding, so each encoding
 compensates the error the earlier ones leave. Bits are 1 to 8, or 1.5, 2.5 and 3.5 on mul1; the output head takes
-`--head-bits` (6 by default). Each layer costs one calibration pass, run through the model as far as that layer, so
-the model runs in full precision on the device. A tensor whose sides are not multiples of 128 is zero-padded to them, as exllamav3 stores one. MoE experts are encoded each against the
-rows its router sent it; routers stay in full precision.
+`--head-bits` (6 by default), its Hessian over every calibration row. A tensor whose sides are not multiples of 128
+is zero-padded to them, as exllamav3 stores one. MoE experts are encoded each against the rows its router sent it;
+routers stay in full precision. A tied model's head is written as its own `lm_head`, which loads in place of the
+embedding.
+
+The model loads on the host in bf16 and streams through the GPU: the calibration text's hidden states stay in host
+memory, and each layer is built on the GPU from the checkpoint, its Hessians collected over those states, encoded,
+run over the states once more and dropped. A model may be far larger than the GPU, which holds only one layer in
+full precision and its Hessians; host memory holds the model and the states (hidden size x calibration tokens in
+bf16). Models outside the shared decoder stack don't stream: `--resident` loads one on the GPU instead, where each
+layer costs a calibration pass through the model up to it.

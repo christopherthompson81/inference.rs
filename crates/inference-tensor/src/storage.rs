@@ -50,6 +50,44 @@ impl Storage {
         }
     }
 
+    // the elements a storage of a typed dtype holds; `None` where it is not known (raw-byte dtypes, other backends)
+    pub(crate) fn elem_count(&self) -> Option<usize> {
+        use crate::CpuStorage as C;
+        match self {
+            Self::Cpu(storage) => match storage {
+                C::U8(v) => Some(v.len()),
+                C::U32(v) => Some(v.len()),
+                C::I16(v) => Some(v.len()),
+                C::I32(v) => Some(v.len()),
+                C::I64(v) => Some(v.len()),
+                C::BF16(v) => Some(v.len()),
+                C::F16(v) => Some(v.len()),
+                C::F32(v) => Some(v.len()),
+                C::F64(v) => Some(v.len()),
+                C::F8E4M3(v) => Some(v.len()),
+                C::F6E2M3(_) | C::F6E3M2(_) | C::F4(_) | C::F8E8M0(_) => None,
+            },
+            #[cfg(feature = "cuda")]
+            Self::Cuda(storage) => {
+                use crate::cuda_backend::CudaStorageSlice as S;
+                match &storage.slice {
+                    S::U8(v) => Some(v.len()),
+                    S::U32(v) => Some(v.len()),
+                    S::I16(v) => Some(v.len()),
+                    S::I32(v) => Some(v.len()),
+                    S::I64(v) => Some(v.len()),
+                    S::BF16(v) => Some(v.len()),
+                    S::F16(v) => Some(v.len()),
+                    S::F32(v) => Some(v.len()),
+                    S::F64(v) => Some(v.len()),
+                    S::F8E4M3(v) => Some(v.len()),
+                    S::F6E2M3(_) | S::F6E3M2(_) | S::F4(_) | S::F8E8M0(_) => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub fn dtype(&self) -> DType {
         match self {
             Self::Cpu(storage) => storage.dtype(),

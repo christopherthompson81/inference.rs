@@ -27,6 +27,8 @@ use crate::args::{
 };
 
 const MIB: f64 = (1u64 << 20) as f64;
+// a streamed EXL3 write holds the model on the host, its layers built on the GPU one at a time
+const HOST_DEVICE: &str = "cpu";
 
 /// Extract ISQ values from the QuantizeModelType
 fn get_isq_values(model_type: &QuantizeModelType) -> &[String] {
@@ -176,7 +178,12 @@ pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptio
         model_id: options.model_id,
         quant: None,
         tokenizer_json: None,
-        dtype: inference_api::engine::ModelDType::Auto,
+        // the host's auto dtype is f32, twice what a streamed model holds in RAM
+        dtype: if options.resident {
+            inference_api::engine::ModelDType::Auto
+        } else {
+            inference_api::engine::ModelDType::BF16
+        },
         topology: None,
         organization: None,
         write_uqff: None,
@@ -210,6 +217,7 @@ pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptio
             prefix_cache_n: Some(0),
             paged_attn: Some(false),
             token_source: Some(global.token_source.to_string()),
+            device: (!options.resident).then(|| HOST_DEVICE.to_string()),
             ..Default::default()
         },
         ..Default::default()

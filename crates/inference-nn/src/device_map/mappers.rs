@@ -174,7 +174,7 @@ pub struct DummyDeviceMapper {
 }
 
 impl DummyDeviceMapper {
-    pub(super) fn new(nm_device: Device) -> Self {
+    pub(crate) fn new(nm_device: Device) -> Self {
         Self { nm_device }
     }
 }

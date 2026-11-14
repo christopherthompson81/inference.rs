@@ -17,6 +17,32 @@ use crate::{
     speculative::SpeculativeTargetMixin,
 };
 
+/// A decoder a converter runs a layer at a time (writing EXL3 for a model larger than the device): each layer built
+/// alone, on a device of the caller's choosing, from the checkpoint.
+pub trait LayerStream {
+    fn num_layers(&self) -> usize;
+    /// The token embeddings of `ids` `(1, tokens)`, on the model's own device.
+    fn embed(&self, ids: &Tensor) -> inference_tensor::Result<Tensor>;
+    /// Layer `layer` built on `device`, its linears tracked as the load tracks them.
+    fn build_layer(
+        &self,
+        layer: usize,
+        device: &Device,
+    ) -> inference_tensor::Result<Box<dyn StreamedLayer>>;
+    /// The final norm of hidden states `(1, tokens, hidden)`.
+    fn final_norm(&self, xs: &Tensor) -> inference_tensor::Result<Tensor>;
+    /// The output head.
+    fn head(&self) -> Arc<dyn inference_quant::QuantMethod>;
+}
+
+/// One layer a [`LayerStream`] built.
+pub trait StreamedLayer {
+    /// The layer over one sequence `(1, tokens, hidden)` on its device, alone (causal, no cache).
+    fn forward(&self, xs: &Tensor) -> inference_tensor::Result<Tensor>;
+    /// Its linears, captured unquantized under their checkpoint keys.
+    fn modules(&self) -> &[inference_quant::TrackedModule];
+}
+
 pub trait IsqModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)>;
 
@@ -33,6 +59,10 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
     ) -> inference_tensor::Result<Tensor>;
     fn device(&self) -> &Device;
     fn cache(&self) -> &EitherCache;
+    /// The model as layers a converter can build one at a time, where it supports that.
+    fn layer_stream(&self) -> Option<&dyn LayerStream> {
+        None
+    }
     fn max_seq_len(&self) -> usize;
     fn config(&self) -> &ModelConfigMetadata;
     /// How many tokens before each chunk the forward reads from `ModelForwardContext::token_window`; `None` when it

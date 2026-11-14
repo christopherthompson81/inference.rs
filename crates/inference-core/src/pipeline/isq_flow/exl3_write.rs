@@ -9,11 +9,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use inference_quant::TrackedModule;
+use inference_quant::{QuantMethod, TrackedModule};
 use inference_tensor::{Device, Tensor};
 use tracing::info;
 
-use super::drive::{CalibrationCtx, CalibrationDrive, calibration_tokens, run_calibration};
+use super::drive::{
+    CALIBRATION_CHUNK_SIZE, CalibrationCtx, CalibrationDrive, calibration_tokens, run_calibration,
+};
 use crate::pipeline::isq::Exl3WriteConfig;
 
 const DEFAULT_HEAD_BITS: f64 = 6.0;
@@ -23,6 +25,10 @@ const HEAD: &str = "lm_head";
 const ROUTER: &str = ".gate";
 const TIED_EMBEDDING: &str = "embed_tokens";
 const LAYERS: &str = ".layers.";
+const SHARED_INPUTS: &[(&str, &[&str])] = &[
+    ("qkv", &["q_proj", "k_proj", "v_proj"]),
+    ("gate_up", &["gate_proj", "up_proj"]),
+];
 const INDEX_FILE: &str = "model.safetensors.index.json";
 const CONFIG_FILE: &str = "config.json";
 // exllamav3's version the layout follows
@@ -88,7 +94,183 @@ pub(crate) fn write_exl3(
     anyhow::bail!("writing EXL3 runs on CUDA")
 }
 
-/// The EXL3 model `config` names, from `modules` (every linear, captured unquantized) and the calibration file.
+#[cfg(feature = "cuda")]
+struct Encoder {
+    bits: inference_quant::exl3::Exl3Bits,
+    head_bits: inference_quant::exl3::Exl3Bits,
+    codebook: inference_quant::exl3::Exl3Codebook,
+    marker: Option<(&'static str, u32)>,
+    replaced: std::collections::HashSet<String>,
+    replaced_prefixes: std::collections::HashSet<String>,
+}
+
+#[cfg(feature = "cuda")]
+impl Encoder {
+    // one linear encoded into `tensors` under `name`, and its reconstruction at its own size for the swap
+    fn linear(
+        &self,
+        name: &str,
+        weight: &Tensor,
+        hessian: &Tensor,
+        rate: inference_quant::exl3::Exl3Bits,
+        tensors: &mut HashMap<String, Tensor>,
+    ) -> Result<Tensor> {
+        let encoding =
+            inference_quant::exl3::encode::encode(weight, hessian, rate, self.codebook, fnv(name))?;
+        self.store(name, weight, encoding, rate, tensors)
+    }
+
+    // `encoding` of `weight` stored under `name`, and its reconstruction at the weight's own size
+    fn store(
+        &self,
+        name: &str,
+        weight: &Tensor,
+        encoding: inference_quant::exl3::encode::Exl3Encoding,
+        rate: inference_quant::exl3::Exl3Bits,
+        tensors: &mut HashMap<String, Tensor>,
+    ) -> Result<Tensor> {
+        let (rows, cols) = weight.dims2()?;
+        info!("{name}: {rate:?}, proxy error {:.6}", encoding.proxy_error);
+        // a side not in 128 blocks was padded for the encoding
+        let dense = encoding
+            .decoded
+            .narrow(0, 0, rows)?
+            .narrow(1, 0, cols)?
+            .to_dtype(weight.dtype())?
+            .contiguous()?;
+        tensors.insert(
+            format!("{name}.trellis"),
+            encoding.trellis.to_device(&Device::Cpu)?,
+        );
+        tensors.insert(format!("{name}.suh"), encoding.suh.to_device(&Device::Cpu)?);
+        tensors.insert(format!("{name}.svh"), encoding.svh.to_device(&Device::Cpu)?);
+        if let Some((marker, mult)) = self.marker {
+            tensors.insert(
+                format!("{name}.{marker}"),
+                Tensor::new(&[mult as i32], &Device::Cpu)?,
+            );
+        }
+        Ok(dense)
+    }
+
+    // every module of `group` (tracking Hessians since its pass began) encoded and swapped for its reconstruction
+    fn modules(
+        &mut self,
+        group: &[&TrackedModule],
+        tensors: &mut HashMap<String, Tensor>,
+    ) -> Result<()> {
+        for module in group {
+            if let Some(hessian) = take_hessian(module)? {
+                self.module(module, &hessian, tensors)?;
+            }
+        }
+        Ok(())
+    }
+
+    // `module` encoded against `hessian` and swapped for its reconstruction
+    fn module(
+        &mut self,
+        module: &TrackedModule,
+        hessian: &Tensor,
+        tensors: &mut HashMap<String, Tensor>,
+    ) -> Result<()> {
+        use std::sync::Arc;
+
+        use inference_quant::{QuantMethodConfig, UnquantLinear};
+
+        let swap = |weight: Tensor, bias: Option<Tensor>| -> Result<()> {
+            module
+                .ct
+                .replace(Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+                    inference_tensor::nn::Linear::new(weight, bias),
+                ))?) as Arc<dyn QuantMethod>);
+            Ok(())
+        };
+        let layer = module.ct.resolve()?;
+        let (weight, bias) = layer
+            .unquant_weight_bias()
+            .with_context(|| format!("`{}` holds no full-precision weight", module.key))?;
+        // a 2D weight is a linear; a 3D one a projection of every expert of a MoE layer, stacked
+        if weight.rank() == 3 {
+            let (experts, proj) = module
+                .key
+                .rsplit_once('.')
+                .with_context(|| format!("`{}` names no expert projection", module.key))?;
+            // the experts encoded together, a row of tiles of each per quantizer launch
+            let count = weight.dim(0)?;
+            let names = (0..count)
+                .map(|e| format!("{experts}.{e}.{proj}"))
+                .collect::<Vec<_>>();
+            let weights = (0..count)
+                .map(|e| weight.get(e))
+                .collect::<inference_tensor::Result<Vec<_>>>()?;
+            // routed Hessians stay on the host; each moves to the device as its batch encodes
+            let hessians = (0..count)
+                .map(|e| hessian.get(e))
+                .collect::<inference_tensor::Result<Vec<_>>>()?;
+            let linears = (0..count)
+                .map(|e| (&weights[e], &hessians[e], fnv(&names[e])))
+                .collect::<Vec<_>>();
+            let encodings =
+                inference_quant::exl3::encode::encode_experts(&linears, self.bits, self.codebook)?;
+            let mut denses = Vec::with_capacity(count);
+            for ((name, weight), encoding) in names.iter().zip(&weights).zip(encodings) {
+                denses.push(self.store(name, weight, encoding, self.bits, tensors)?);
+            }
+            swap(Tensor::stack(&denses, 0)?, bias)?;
+            self.replaced_prefixes.insert(format!("{experts}."));
+            return Ok(());
+        }
+        // a tied embedding that recorded rows was multiplied as the head; the lookups keep the embedding
+        let tied = module.key.ends_with(TIED_EMBEDDING);
+        let name = if tied { HEAD } else { module.key.as_str() };
+        let rate = if name == HEAD {
+            self.head_bits
+        } else {
+            self.bits
+        };
+        let dense = self.linear(name, &weight, hessian, rate, tensors)?;
+        if !tied {
+            swap(dense, bias)?;
+        }
+        // a checkpoint may store a tied head's weight as well; the encoding replaces it either way
+        self.replaced.insert(format!("{name}.weight"));
+        Ok(())
+    }
+}
+
+// the Hessian `module` collected, or `None` when no row reached it (an embedding read only by lookup)
+#[cfg(feature = "cuda")]
+fn take_hessian(module: &TrackedModule) -> Result<Option<Tensor>> {
+    if module
+        .ct
+        .stats_snapshot()
+        .is_some_and(|(_, rows)| rows == 0)
+    {
+        let _ = module.ct.end_track_stats();
+        return Ok(None);
+    }
+    Ok(Some(
+        module
+            .ct
+            .end_track_stats()
+            .map_err(|e| anyhow::anyhow!("`{}`: {e}", module.key))?,
+    ))
+}
+
+// the linears of a standard decoder layer that read one input, so collect one Hessian: q/k/v, and gate/up (of the
+// dense MLP, the shared expert and the stacked experts alike, whose rows route the same)
+fn shared_input(key: &str) -> Option<String> {
+    let (parent, proj) = key.rsplit_once('.')?;
+    let group = SHARED_INPUTS
+        .iter()
+        .find(|(_, projs)| projs.contains(&proj))?
+        .0;
+    Some(format!("{parent}.{group}"))
+}
+
+/// The EXL3 model `config` names, from `modules` (every linear, captured unquantized) and the calibration file. A
+/// model loaded on the host whose layers rebuild streams through the GPU a layer at a time; any other runs resident.
 #[cfg(feature = "cuda")]
 pub(crate) fn write_exl3(
     drive: &dyn CalibrationDrive,
@@ -98,142 +280,53 @@ pub(crate) fn write_exl3(
     source: &Exl3Source<'_>,
     ctx: &CalibrationCtx<'_>,
 ) -> Result<()> {
-    use std::sync::Arc;
-
-    use inference_quant::exl3::{dense_weight, encode::encode};
-    use inference_quant::{QuantMethod, QuantMethodConfig, UnquantLinear};
-
-    let bits = bits_of(config.bits)?;
     let head_rate = config.head_bits.unwrap_or(DEFAULT_HEAD_BITS);
-    let head_bits = bits_of(head_rate)?;
     let codebook_name = config.codebook.as_deref().unwrap_or(DEFAULT_CODEBOOK);
     let (codebook, marker) = codebook_of(codebook_name)?;
+    let mut encoder = Encoder {
+        bits: bits_of(config.bits)?,
+        head_bits: bits_of(head_rate)?,
+        codebook,
+        marker,
+        replaced: Default::default(),
+        replaced_prefixes: Default::default(),
+    };
     let tokens = calibration_tokens(calibration_file, ctx)?;
     let out = &config.output;
     std::fs::create_dir_all(out)?;
-
-    let mut groups: BTreeMap<(bool, usize), Vec<&TrackedModule>> = BTreeMap::new();
-    for module in modules {
-        let order = layer_of(&module.key).map_or((true, 0), |l| (false, l));
-        groups.entry(order).or_default().push(module);
-    }
     info!(
-        "Writing EXL3 at {} bits (head {head_rate}, {codebook_name}) from `{}` ({} tokens): {} groups of layers, one \
-         calibration pass each, run up to its layer.",
+        "Writing EXL3 at {} bits (head {head_rate}, {codebook_name}) from `{}` ({} tokens).",
         config.bits,
         calibration_file.display(),
         tokens.len(),
-        groups.len()
     );
     let mut weight_map = BTreeMap::new();
-    let mut replaced = std::collections::HashSet::new();
-    let mut replaced_prefixes = std::collections::HashSet::new();
-    // one linear encoded into `tensors` under `name`, and its reconstruction at its own size for the swap
-    let encode_one = |name: &str,
-                      weight: &Tensor,
-                      hessian: &Tensor,
-                      rate: inference_quant::exl3::Exl3Bits,
-                      tensors: &mut HashMap<String, Tensor>|
-     -> Result<Tensor> {
-        let (rows, cols) = weight.dims2()?;
-        let encoding = encode(weight, hessian, rate, codebook, fnv(name))?;
-        info!("{name}: {rate:?}, proxy error {:.6}", encoding.proxy_error);
-        // a side not in 128 blocks was padded for the encoding
-        let dense = dense_weight(
-            &encoding.trellis,
-            &encoding.suh,
-            &encoding.svh,
-            codebook,
-            weight.dtype(),
-            weight.device(),
-        )?
-        .narrow(0, 0, rows)?
-        .narrow(1, 0, cols)?
-        .contiguous()?;
-        tensors.insert(format!("{name}.trellis"), encoding.trellis);
-        tensors.insert(format!("{name}.suh"), encoding.suh.to_device(&Device::Cpu)?);
-        tensors.insert(format!("{name}.svh"), encoding.svh.to_device(&Device::Cpu)?);
-        if let Some((marker, mult)) = marker {
-            tensors.insert(
-                format!("{name}.{marker}"),
-                Tensor::new(&[mult as i32], &Device::Cpu)?,
-            );
+    match drive.layer_stream() {
+        Some(stream) if ctx.load_device.is_cpu() => {
+            write_streamed(stream, &tokens, ctx, &mut encoder, out, &mut weight_map)?
         }
-        Ok(dense)
-    };
-    for (shard, (&(rest, layer), group)) in groups.iter().enumerate() {
-        let group = group
-            .iter()
-            .filter(|m| !m.key.ends_with(ROUTER))
-            .collect::<Vec<_>>();
-        for module in &group {
-            module.ct.begin_track_hessian()?;
+        _ if ctx.load_device.is_cpu() => {
+            anyhow::bail!(
+                "this model does not rebuild its layers to stream them; load it on the GPU to write EXL3"
+            )
         }
-        // a layer's pass needs the model only up to it (on the shared decoder stack; other models run whole)
-        let _stop = (!rest).then(|| inference_nn::decoder::stop_after_layer(layer));
-        run_calibration(drive, &tokens, ctx)?;
-        let mut tensors = HashMap::new();
-        for module in group {
-            if module
-                .ct
-                .stats_snapshot()
-                .is_some_and(|(_, rows)| rows == 0)
-            {
-                let _ = module.ct.end_track_stats();
-                continue;
-            }
-            let hessian = module
-                .ct
-                .end_track_stats()
-                .map_err(|e| anyhow::anyhow!("`{}`: {e}", module.key))?;
-            let layer = module.ct.resolve()?;
-            let (weight, bias) = layer
-                .unquant_weight_bias()
-                .with_context(|| format!("`{}` holds no full-precision weight", module.key))?;
-            // a 2D weight is a linear; a 3D one a projection of every expert of a MoE layer, stacked
-            if weight.rank() == 3 {
-                let (experts, proj) = module
-                    .key
-                    .rsplit_once('.')
-                    .with_context(|| format!("`{}` names no expert projection", module.key))?;
-                let mut denses = Vec::with_capacity(weight.dim(0)?);
-                for e in 0..weight.dim(0)? {
-                    let name = format!("{experts}.{e}.{proj}");
-                    let dense =
-                        encode_one(&name, &weight.get(e)?, &hessian.get(e)?, bits, &mut tensors)?;
-                    denses.push(dense);
-                }
-                module
-                    .ct
-                    .replace(Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
-                        inference_tensor::nn::Linear::new(Tensor::stack(&denses, 0)?, bias),
-                    ))?) as Arc<dyn QuantMethod>);
-                replaced_prefixes.insert(format!("{experts}."));
-                continue;
-            }
-            // a tied embedding that recorded rows was multiplied as the head; the lookups keep the embedding
-            let tied = module.key.ends_with(TIED_EMBEDDING);
-            let name = if tied { HEAD } else { module.key.as_str() };
-            let rate = if name == HEAD { head_bits } else { bits };
-            let dense = encode_one(name, &weight, &hessian, rate, &mut tensors)?;
-            if !tied {
-                module
-                    .ct
-                    .replace(Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
-                        inference_tensor::nn::Linear::new(dense, bias),
-                    ))?) as Arc<dyn QuantMethod>);
-            }
-            // a checkpoint may store a tied head's weight as well; the encoding replaces it either way
-            replaced.insert(format!("{name}.weight"));
-        }
-        write_shard(
+        _ => write_resident(
+            drive,
+            modules,
+            &tokens,
+            ctx,
+            &mut encoder,
             out,
-            &format!("model-q{shard:05}.safetensors"),
-            tensors,
             &mut weight_map,
-        )?;
+        )?,
     }
-    copy_unquantized(source, out, &replaced, &replaced_prefixes, &mut weight_map)?;
+    copy_unquantized(
+        source,
+        out,
+        &encoder.replaced,
+        &encoder.replaced_prefixes,
+        &mut weight_map,
+    )?;
     std::fs::write(
         out.join(INDEX_FILE),
         serde_json::to_string_pretty(
@@ -257,6 +350,164 @@ pub(crate) fn write_exl3(
     )?;
     copy_side_files(source.config, out)?;
     info!("Wrote the EXL3 model to `{}`.", out.display());
+    Ok(())
+}
+
+// the model resident on its devices: one calibration pass per layer, run up to it, its layers before it encoded
+#[cfg(feature = "cuda")]
+fn write_resident(
+    drive: &dyn CalibrationDrive,
+    modules: &[TrackedModule],
+    tokens: &[u32],
+    ctx: &CalibrationCtx<'_>,
+    encoder: &mut Encoder,
+    out: &Path,
+    weight_map: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let mut groups: BTreeMap<(bool, usize), Vec<&TrackedModule>> = BTreeMap::new();
+    for module in modules {
+        let order = layer_of(&module.key).map_or((true, 0), |l| (false, l));
+        groups.entry(order).or_default().push(module);
+    }
+    info!(
+        "{} groups of layers, one calibration pass each.",
+        groups.len()
+    );
+    for (shard, (&(rest, layer), group)) in groups.iter().enumerate() {
+        let group = group
+            .iter()
+            .filter(|m| !m.key.ends_with(ROUTER))
+            .copied()
+            .collect::<Vec<_>>();
+        for module in &group {
+            module.ct.begin_track_hessian()?;
+        }
+        // a layer's pass needs the model only up to it (on the shared decoder stack; other models run whole)
+        let _stop = (!rest).then(|| inference_nn::decoder::stop_after_layer(layer));
+        run_calibration(drive, tokens, ctx)?;
+        let mut tensors = HashMap::new();
+        encoder.modules(&group, &mut tensors)?;
+        write_shard(
+            out,
+            &format!("model-q{shard:05}.safetensors"),
+            tensors,
+            weight_map,
+        )?;
+    }
+    Ok(())
+}
+
+// the model on the host, its hidden states over the calibration chunks kept there: each layer built on the GPU,
+// its Hessians collected over the states, encoded, the states run on through the encoded layer, the layer dropped;
+// then the head over the normed states
+#[cfg(feature = "cuda")]
+fn write_streamed(
+    stream: &dyn inference_nn::model::LayerStream,
+    tokens: &[u32],
+    ctx: &CalibrationCtx<'_>,
+    encoder: &mut Encoder,
+    out: &Path,
+    weight_map: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let gpu = Device::new_cuda(0)?;
+    let mut states = Vec::new();
+    for chunk in tokens.chunks(CALIBRATION_CHUNK_SIZE) {
+        let ids = ctx
+            .bos_tok_id
+            .into_iter()
+            .chain(chunk.iter().copied())
+            .collect::<Vec<_>>();
+        states.push(stream.embed(&Tensor::new(ids, &Device::Cpu)?.unsqueeze(0)?)?);
+    }
+    let layers = stream.num_layers();
+    info!(
+        "Streaming {layers} layers through {gpu:?}, {} chunks of hidden states on the host.",
+        states.len()
+    );
+    for layer_idx in 0..layers {
+        let start = std::time::Instant::now();
+        let layer = stream.build_layer(layer_idx, &gpu)?;
+        let group = layer
+            .modules()
+            .iter()
+            .filter(|m| !m.key.ends_with(ROUTER))
+            .collect::<Vec<_>>();
+        // each module's Hessian source: itself, or the first module reading the same input
+        let mut first = HashMap::new();
+        let sources = group
+            .iter()
+            .enumerate()
+            .map(|(i, m)| match shared_input(&m.key) {
+                Some(input) => *first.entry(input).or_insert(i),
+                None => i,
+            })
+            .collect::<Vec<_>>();
+        for (i, module) in group.iter().enumerate() {
+            if sources[i] == i {
+                module.ct.begin_track_hessian()?;
+            }
+        }
+        for state in &states {
+            layer.forward(&state.to_device(&gpu)?)?;
+        }
+        let mut hessians = vec![None; group.len()];
+        for (i, module) in group.iter().enumerate() {
+            if sources[i] == i {
+                hessians[i] = take_hessian(module)?;
+            }
+        }
+        let mut tensors = HashMap::new();
+        for (i, module) in group.iter().enumerate() {
+            if let Some(hessian) = &hessians[sources[i]] {
+                encoder.module(module, hessian, &mut tensors)?;
+            }
+        }
+        for state in &mut states {
+            *state = layer
+                .forward(&state.to_device(&gpu)?)?
+                .to_device(&Device::Cpu)?;
+        }
+        drop(group);
+        drop(layer);
+        write_shard(
+            out,
+            &format!("model-q{layer_idx:05}.safetensors"),
+            tensors,
+            weight_map,
+        )?;
+        info!(
+            "Layer {}/{layers} in {:.1}s.",
+            layer_idx + 1,
+            start.elapsed().as_secs_f32()
+        );
+    }
+    let head = stream.head();
+    let (weight, _) = head
+        .unquant_weight_bias()
+        .context("the head holds no full-precision weight")?;
+    let weight = weight.to_device(&gpu)?;
+    let in_dim = weight.dim(1)?;
+    let mut hessian = Tensor::zeros((in_dim, in_dim), inference_tensor::DType::F32, &gpu)?;
+    let mut rows = 0;
+    for state in &states {
+        let xs = stream
+            .final_norm(state)?
+            .to_device(&gpu)?
+            .to_dtype(inference_tensor::DType::F32)?
+            .reshape(((), in_dim))?;
+        rows += xs.dim(0)?;
+        hessian = (hessian + xs.t()?.matmul(&xs)?)?;
+    }
+    let hessian = (hessian / f64::from(u32::try_from(rows)?))?;
+    let mut tensors = HashMap::new();
+    encoder.linear(HEAD, &weight, &hessian, encoder.head_bits, &mut tensors)?;
+    encoder.replaced.insert(format!("{HEAD}.weight"));
+    write_shard(
+        out,
+        &format!("model-q{layers:05}.safetensors"),
+        tensors,
+        weight_map,
+    )?;
     Ok(())
 }
 
