@@ -1,7 +1,8 @@
 #pragma once
-// Modified for inference.rs: the torch front ends dropped
+// Modified for inference.rs: the torch front ends dropped; bf16 x/out, u32 sel and f32 rw read and written in place
 
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
 
@@ -34,6 +35,9 @@ struct MoeCoopParams
     int H_out;                  // output width (<= Ho)
     int min_expert;             // -1: no expert-range filtering; else sel in [min, max) is local
     int max_expert;
+    bool x_bf16;                // x holds bf16 (no shared-expert gate then)
+    bool sel_u32;               // sel holds uint32
+    bool rw_f32;                // rw holds float
 
     // Per-expert pointer tables (int64 device arrays indexed by local expert)
     const int64_t* g_trellis;   const int64_t* g_suh;   const int64_t* g_svh;
@@ -70,6 +74,7 @@ struct MoeCoopParams
 
     // Output
     float* out;                 // (bsz, H_out), row stride out_stride
+    __nv_bfloat16* out_bf16;    // nullable: the output stored here as bf16 in place of out
     int out_stride;
 
     // Shared expert (nullable): out += gate * sh_out, gate = sigmoid(x . sh_gate_w) or 1

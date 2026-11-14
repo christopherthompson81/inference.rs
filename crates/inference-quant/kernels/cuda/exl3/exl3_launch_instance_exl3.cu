@@ -227,6 +227,8 @@ extern "C" int launch_exl3_mgemm(
     const int* n_stride_list = nullptr;
     const int* had_src_list = nullptr;
     int num_had_src = 0;
+    int a_bf16 = 0;
+    void** c_bf_list = nullptr;
     void* kernelArgs[] =
     {
         (void*)& A,
@@ -250,7 +252,9 @@ extern "C" int launch_exl3_mgemm(
         (void*)& c_list,
         (void*)& n_stride_list,
         (void*)& had_src_list,
-        (void*)& num_had_src
+        (void*)& num_had_src,
+        (void*)& a_bf16,
+        (void*)& c_bf_list
     };
 
     uint64_t key = mgemm_autotune_hash(size_m, size_k, size_n, K, c_fp32, device, cc, total_sms, cb, bszm_in,
@@ -308,20 +312,25 @@ extern "C" int launch_exl3_mgemm(
 }
 
 // c_ptrs[j] = slice j's first output: its source's block (sources end to end from `base`, each m x its width) at the
-// slice's column; `prefix` holds each slice's source offset in columns (summed widths of the sources before it)
-__global__ void exl3_fill_slice_ptrs(void** c_ptrs, char* base, const int* prefix, const int* col, int slices, int m,
-                                     int elem)
+// slice's column; `prefix` holds each slice's source offset in columns (summed widths of the sources before it). With
+// base_bf, c_ptrs[slices + j] is the same element of the bf16 outputs
+__global__ void exl3_fill_slice_ptrs(void** c_ptrs, char* base, char* base_bf, const int* prefix, const int* col,
+                                     int slices, int m, int elem)
 {
     int j = threadIdx.x + blockIdx.x * blockDim.x;
-    if (j < slices) c_ptrs[j] = base + ((size_t) m * prefix[j] + col[j]) * elem;
+    if (j >= slices) return;
+    size_t at = (size_t) m * prefix[j] + col[j];
+    c_ptrs[j] = base + at * elem;
+    if (base_bf) c_ptrs[slices + j] = base_bf + at * 2;
 }
 
 // One input through `num_src` matrices (q, k and v), each with its own rotations, cut into `slices` equal column
 // slices for an even spread: exl3_mgemm_gr's sliced mode. Device tables: B_list and svh_list per slice (pre-offset
 // to the slice's first column), suh_list per source, and the ints [size_n (the slice width), n_stride (its source's
 // width), had_src (its source), col (its first column), prefix (its source's offset)], `slices` apiece. The outputs
-// land end to end from C, each source m x its width; c_ptrs is device scratch for `slices` addresses, filled here.
-// A_had holds num_src x m x k. Returns as launch_exl3_mgemm.
+// land end to end from C, each source m x its width; c_ptrs is device scratch for `slices` addresses (2 x slices
+// with C_bf), filled here. A is bf16 when a_bf16; with C_bf the outputs land there as bf16, C (f32) then only the
+// kernels' scratch. A_had holds num_src x m x k. Returns as launch_exl3_mgemm.
 extern "C" int launch_exl3_mgemm_sliced(
     const half* A,
     const uint16_t* const* B_list,
@@ -339,19 +348,24 @@ extern "C" int launch_exl3_mgemm_sliced(
     int cb,
     bool c_fp32,
     half* A_had,
+    bool a_bf16_in,
+    void* C_bf,
     cudaStream_t stream)
 {
     if (!slices || !size_m) return 0;
+    if (C_bf && !c_fp32) return -1;
     const bool half_k = (tile_u16 % 16) != 0;
     int K = tile_u16 / 16;
     if ((half_k && (tile_u16 % 16 != 8 || cb != 2)) || K < 1 || K > 8 || !size_k) return -1;
     const int* size_n_list = ints;
     const int* n_stride_list = ints + slices;
     const int* had_src_list = ints + 2 * slices;
-    exl3_fill_slice_ptrs<<<CEIL_DIVIDE(slices, 128), 128, 0, stream>>>(c_ptrs, (char*) C, ints + 4 * slices,
-                                                                      ints + 3 * slices, slices, size_m,
-                                                                      c_fp32 ? 4 : 2);
+    exl3_fill_slice_ptrs<<<CEIL_DIVIDE(slices, 128), 128, 0, stream>>>(c_ptrs, (char*) C, (char*) C_bf,
+                                                                      ints + 4 * slices, ints + 3 * slices, slices,
+                                                                      size_m, c_fp32 ? 4 : 2);
     cuda_check(cudaPeekAtLastError());
+    void** c_bf_list = C_bf ? c_ptrs + slices : nullptr;
+    int a_bf16 = a_bf16_in ? 1 : 0;
 
     int device;
     cudaGetDevice(&device);
@@ -391,7 +405,9 @@ extern "C" int launch_exl3_mgemm_sliced(
         (void*)& c_ptrs,
         (void*)& n_stride_list,
         (void*)& had_src_list,
-        (void*)& num_src
+        (void*)& num_src,
+        (void*)& a_bf16,
+        (void*)& c_bf_list
     };
 
     // exl3_gemm.cu keys sliced launches apart from plain ones

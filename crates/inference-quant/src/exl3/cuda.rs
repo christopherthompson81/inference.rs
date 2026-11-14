@@ -1,5 +1,6 @@
 //! An EXL3 linear kept as its trellis on a CUDA device, multiplied by exllamav3's kernels.
 
+use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -194,11 +195,19 @@ impl Exl3Layer {
             return Ok(None);
         }
         let group = group.as_ref().unwrap();
-        let x = xs.reshape((rows, k))?.to_dtype(DType::F16)?.contiguous()?;
-        let outs = if self.dtype == DType::F16 {
+        // bf16 activations go in and come out as they are; the kernels round them through f16 and f32 alike
+        let native = xs.dtype() == DType::BF16 && self.dtype != DType::F16;
+        let x = xs.reshape((rows, k))?;
+        let x = if native { x } else { x.to_dtype(DType::F16)? }.contiguous()?;
+        let out = match (native, self.dtype) {
+            (true, _) => DType::BF16,
+            (false, DType::F16) => DType::F16,
+            _ => DType::F32,
+        };
+        let outs = if out == DType::F16 {
             self.group_matmul::<f16>(group, &x, rows, false)?
         } else {
-            self.group_matmul::<f32>(group, &x, rows, true)?
+            self.group_matmul::<f32>(group, &x, rows, out == DType::BF16)?
         };
         let lead = &xs.dims()[..xs.rank() - 1];
         let mut start = 0;
@@ -218,13 +227,14 @@ impl Exl3Layer {
         Ok(Some(shaped))
     }
 
-    // the group's outputs end to end (each `rows x width`), in `T`
+    // the group's outputs end to end (each `rows x width`), in `T` (f16 or f32), or in bf16 from a bf16 `x` when
+    // `bf16` (`T` f32, the kernels' scratch then)
     fn group_matmul<T>(
         &self,
         group: &GroupTables,
         x: &Tensor,
         rows: usize,
-        c_fp32: bool,
+        bf16: bool,
     ) -> Result<Tensor>
     where
         T: inference_tensor::cuda_backend::CudaDType
@@ -245,18 +255,26 @@ impl Exl3Layer {
         };
         // SAFETY: the kernels write each layer's rotated input before reading it, every output, and every address
         let a_had = unsafe { dev.alloc::<f16>(sources * rows * k)? };
+        let c_fp32 = size_of::<T>() == size_of::<f32>();
         // SAFETY: as above
-        let out = unsafe { dev.alloc::<T>(rows * total)? };
+        let c = unsafe { dev.alloc::<T>(rows * total)? };
         // SAFETY: as above
-        let c_ptrs = unsafe { dev.alloc::<u64>(slices)? };
-        let (a, _a) = slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset());
+        let c_bf = unsafe { dev.alloc::<half::bf16>(if bf16 { rows * total } else { 0 })? };
+        // SAFETY: as above
+        let c_ptrs = unsafe { dev.alloc::<u64>(slices * if bf16 { 2 } else { 1 })? };
+        let (a, _a) = if bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset())
+        };
         let tables = t_c.as_cuda_slice::<i64>()?;
         let (b_list, _b) = slice_ptr(tables, t_l.start_offset());
         let (suh_list, _u) = slice_ptr(tables, t_l.start_offset() + slices);
         let (svh_list, _v) = slice_ptr(tables, t_l.start_offset() + slices + sources);
         let (ints, _i) = slice_ptr(i_c.as_cuda_slice::<i32>()?, i_l.start_offset());
         let (had, _h) = slice_ptr(&a_had, 0);
-        let (c, _c) = slice_ptr(&out, 0);
+        let (c_p, _c) = slice_ptr(&c, 0);
+        let (c_bf_p, _cb) = slice_ptr(&c_bf, 0);
         let (ptrs, _p) = slice_ptr(&c_ptrs, 0);
         let bucket = 1u8 << tune_bucket(rows);
         // a first launch may time candidates (synchronizing, allocating), which no other thread's capture may see
@@ -264,11 +282,11 @@ impl Exl3Layer {
             .then(inference_tensor::cuda_backend::context_wide_scope)
             .flatten();
         // SAFETY: the pointers are the live device buffers above (A rows x k, the tables 2 x slices + sources, the
-        // ints 5 x slices, the scratch sources x rows x k, C rows x total, c_ptrs slices), and the tables address
-        // the group's own tensors
+        // ints 5 x slices, the scratch sources x rows x k, C (and C_bf) rows x total, c_ptrs a list per output), and
+        // the tables address the group's own tensors
         let ran = unsafe {
             ffi::launch_exl3_mgemm_sliced(
-                a as *const f16,
+                a as *const c_void,
                 b_list as *const u64,
                 suh_list as *const u64,
                 svh_list as *const u64,
@@ -276,7 +294,7 @@ impl Exl3Layer {
                 sources as i32,
                 slices as i32,
                 group.slice_width as i32,
-                c as *mut std::ffi::c_void,
+                c_p as *mut c_void,
                 ptrs as *mut u64,
                 rows as i32,
                 k as i32,
@@ -284,6 +302,12 @@ impl Exl3Layer {
                 self.codebook as i32,
                 c_fp32,
                 had as *mut f16,
+                bf16,
+                if bf16 {
+                    c_bf_p as *mut c_void
+                } else {
+                    std::ptr::null_mut()
+                },
                 dev.cuda_stream().cu_stream(),
             )
         };
@@ -295,9 +319,14 @@ impl Exl3Layer {
         if scope.is_some() {
             self.group_tuned.fetch_or(bucket, Ordering::Relaxed);
         }
-        drop((scope, _a, _b, _u, _v, _i, _h, _c, _p));
+        drop((scope, _a, _b, _u, _v, _i, _h, _c, _cb, _p));
+        let storage = if bf16 {
+            CudaStorage::wrap_cuda_slice(c_bf, dev.clone())
+        } else {
+            CudaStorage::wrap_cuda_slice(c, dev.clone())
+        };
         Ok(Tensor::from((
-            Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+            Storage::Cuda(storage),
             Shape::from(rows * total),
         )))
     }
@@ -582,8 +611,8 @@ impl Exl3Experts {
     }
 
     /// A gated SiLU MoE layer's routed experts for a few tokens in exllamav3's two fused launches: `xs` `(tokens,
-    /// hidden)`, `ids` and `weights` `(tokens, k)`; the routing-weighted sum per token, f32 `(tokens, hidden)`. None
-    /// for shapes the kernels do not take.
+    /// hidden)`, `ids` and `weights` `(tokens, k)`; the routing-weighted sum per token `(tokens, hidden)`, bf16 for
+    /// bf16 `xs`, else f32. None for shapes the kernels do not take.
     pub fn fused_silu_moe(
         gate: &Self,
         up: &Self,
@@ -611,9 +640,30 @@ impl Exl3Experts {
         if tokens * topk > slots_max {
             return Ok(None);
         }
-        let x = xs.to_dtype(DType::F16)?.contiguous()?;
-        let sel = ids.to_dtype(DType::I64)?.contiguous()?;
-        let rw = weights.to_dtype(DType::F16)?.contiguous()?;
+        // bf16 x, u32 ids and f32 weights are read as they are
+        let (x_bf16, sel_u32, rw_f32) = (
+            xs.dtype() == DType::BF16,
+            ids.dtype() == DType::U32,
+            weights.dtype() == DType::F32,
+        );
+        let x = if x_bf16 {
+            xs.clone()
+        } else {
+            xs.to_dtype(DType::F16)?
+        }
+        .contiguous()?;
+        let sel = if sel_u32 {
+            ids.clone()
+        } else {
+            ids.to_dtype(DType::I64)?
+        }
+        .contiguous()?;
+        let rw = if rw_f32 {
+            weights.clone()
+        } else {
+            weights.to_dtype(DType::F16)?
+        }
+        .contiguous()?;
         // SAFETY: ffi takes plain sizes
         let ctr_len = unsafe {
             ffi::exl3_moe_ctr_len(slots_max as i32, tokens as i32, inter as i32, hidden as i32)
@@ -641,8 +691,13 @@ impl Exl3Experts {
                 dev.alloc::<f32>(slots_max * hidden)?,
             )
         };
-        // SAFETY: as above
-        let out = unsafe { dev.alloc::<f32>(tokens * hidden)? };
+        // SAFETY: as above; one of the two holds the output
+        let (out, out_bf) = unsafe {
+            (
+                dev.alloc::<f32>(if x_bf16 { 0 } else { tokens * hidden })?,
+                dev.alloc::<half::bf16>(if x_bf16 { tokens * hidden } else { 0 })?,
+            )
+        };
         let (x_s, x_l) = x.storage_and_layout();
         let x_o = x_l.start_offset();
         let (s_s, s_l) = sel.storage_and_layout();
@@ -666,9 +721,21 @@ impl Exl3Experts {
         else {
             inference_tensor::bail!("EXL3 experts' tensors live on CUDA");
         };
-        let (x_p, _x) = slice_ptr(x_c.as_cuda_slice::<f16>()?, x_o);
-        let (sel_p, _s) = slice_ptr(s_c.as_cuda_slice::<i64>()?, s_o);
-        let (rw_p, _r) = slice_ptr(r_c.as_cuda_slice::<f16>()?, r_o);
+        let (x_p, _x) = if x_bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_o)
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_o)
+        };
+        let (sel_p, _s) = if sel_u32 {
+            slice_ptr(s_c.as_cuda_slice::<u32>()?, s_o)
+        } else {
+            slice_ptr(s_c.as_cuda_slice::<i64>()?, s_o)
+        };
+        let (rw_p, _r) = if rw_f32 {
+            slice_ptr(r_c.as_cuda_slice::<f32>()?, r_o)
+        } else {
+            slice_ptr(r_c.as_cuda_slice::<f16>()?, r_o)
+        };
         let (g_p, _g) = slice_ptr(g_c.as_cuda_slice::<i64>()?, g_o);
         let (u_p, _u) = slice_ptr(u_c.as_cuda_slice::<i64>()?, u_o);
         let (d_p, _d) = slice_ptr(d_c.as_cuda_slice::<i64>()?, d_o);
@@ -679,11 +746,15 @@ impl Exl3Experts {
         let (act_p, _a) = slice_ptr(&act_out, 0);
         let (down_p, _do) = slice_ptr(&down_out, 0);
         let (ctr_p, _c) = slice_ptr(&ctr, 0);
-        let (out_p, _o) = slice_ptr(&out, 0);
+        let (out_p, _o) = if x_bf16 {
+            slice_ptr(&out_bf, 0)
+        } else {
+            slice_ptr(&out, 0)
+        };
         let args = ffi::Exl3MoeArgs {
-            x: x_p as *const f16,
-            sel: sel_p as *const i64,
-            rw: rw_p as *const f16,
+            x: x_p as *const c_void,
+            sel: sel_p as *const c_void,
+            rw: rw_p as *const c_void,
             gate_tables: g_p as *const i64,
             up_tables: u_p as *const i64,
             down_tables: d_p as *const i64,
@@ -694,7 +765,7 @@ impl Exl3Experts {
             act_out: act_p as *mut f16,
             d_out: down_p as *mut f32,
             ctr: ctr_p as *mut i32,
-            out: out_p as *mut f32,
+            out: out_p as *mut c_void,
             bsz: tokens as i32,
             topk: topk as i32,
             hidden: hidden as i32,
@@ -705,6 +776,10 @@ impl Exl3Experts {
             down_words: d_words as i32,
             cb: gate.codebook as i32,
             slots_max: slots_max as i32,
+            x_bf16,
+            sel_u32,
+            rw_f32,
+            out_bf16: x_bf16,
         };
         // SAFETY: every pointer is a live device buffer above, sized as the kernels read them, and the tables
         // address the three layers' own tensors
@@ -714,8 +789,13 @@ impl Exl3Experts {
         if ran < 0 {
             return Ok(None);
         }
+        let storage = if x_bf16 {
+            CudaStorage::wrap_cuda_slice(out_bf, dev.clone())
+        } else {
+            CudaStorage::wrap_cuda_slice(out, dev.clone())
+        };
         Ok(Some(Tensor::from((
-            Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+            Storage::Cuda(storage),
             Shape::from((tokens, hidden)),
         ))))
     }
@@ -1199,6 +1279,117 @@ mod tests {
             ratios.push((tokens, relative_error(&actual, &expected)?));
         }
         assert!(ratios.iter().all(|r| r.1 < F16_BOUND), "{ratios:?}");
+        Ok(())
+    }
+
+    // bf16 activations, u32 picks and f32 weights read in place come out as the cast route's f32 result rounded to bf16
+    #[test]
+    fn the_fused_moe_reads_and_writes_bf16_as_the_cast_route_does() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (experts, topk, hidden, inter) = (6, 2, 256, 384);
+        let projection = |k: usize, n: usize, words: usize, seed: u32| -> Result<Exl3Experts> {
+            Exl3Experts::new_on_device(
+                (0..experts)
+                    .map(|e| {
+                        let (t, u, v) = random_linear(k, n, words, seed + 7 * e as u32)?;
+                        Ok((
+                            t.to_device(&device)?,
+                            u.to_device(&device)?,
+                            v.to_device(&device)?,
+                            Exl3Codebook::ThreeInst,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                DType::BF16,
+            )
+        };
+        let (gate, up, down) = (
+            projection(hidden, inter, 48, 200)?,
+            projection(hidden, inter, 48, 300)?,
+            projection(inter, hidden, 64, 400)?,
+        );
+        for tokens in [1, 5] {
+            let xs = random_rows(tokens, hidden, 9)?
+                .to_dtype(DType::BF16)?
+                .to_device(&device)?;
+            let ids = (0..tokens * topk)
+                .map(|j| ((j * 5 + 1) % experts) as u32)
+                .collect::<Vec<_>>();
+            // f16-exact weights, so the cast route's f16 copy holds the same values
+            let weights = (0..tokens * topk)
+                .map(|j| 0.25 + 0.5 * (j % topk) as f32)
+                .collect::<Vec<_>>();
+            let ids = Tensor::from_vec(ids, (tokens, topk), &device)?;
+            let weights = Tensor::from_vec(weights, (tokens, topk), &device)?;
+            let native = Exl3Experts::fused_silu_moe(&gate, &up, &down, &xs, &ids, &weights)?
+                .expect("the fused kernels take these shapes");
+            let cast = Exl3Experts::fused_silu_moe(
+                &gate,
+                &up,
+                &down,
+                &xs.to_dtype(DType::F16)?,
+                &ids.to_dtype(DType::I64)?,
+                &weights.to_dtype(DType::F16)?,
+            )?
+            .expect("the fused kernels take these shapes");
+            assert_eq!(native.dtype(), DType::BF16);
+            let (native, cast) = (
+                native.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+                cast.to_dtype(DType::BF16)?
+                    .to_dtype(DType::F32)?
+                    .to_vec2::<f32>()?,
+            );
+            assert_eq!(native, cast, "{tokens} tokens");
+        }
+        Ok(())
+    }
+
+    // a bf16 input through a fused group comes out as the cast route's f32 result rounded to bf16
+    #[test]
+    fn a_fused_group_reads_and_writes_bf16_as_the_cast_route_does() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let k = 256;
+        let layers = [(384, 500), (128, 600), (256, 700)]
+            .into_iter()
+            .map(|(n, seed)| {
+                let (t, u, v) = random_linear(k, n, 48, seed)?;
+                Exl3Layer::new_on_device(
+                    t.to_device(&device)?,
+                    u.to_device(&device)?,
+                    v.to_device(&device)?,
+                    Exl3Codebook::ThreeInst,
+                    None,
+                    DType::BF16,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for rows in [1, 4] {
+            let x = random_rows(rows, k, 11)?
+                .to_dtype(DType::BF16)?
+                .to_device(&device)?;
+            let native = layers[0]
+                .fused_group(&[&layers[1], &layers[2]], &x)?
+                .expect("these layers fuse");
+            let cast = layers[0]
+                .fused_group(&[&layers[1], &layers[2]], &x.to_dtype(DType::F32)?)?
+                .expect("these layers fuse");
+            for (n, c) in native.iter().zip(&cast) {
+                assert_eq!(n.dtype(), DType::BF16);
+                assert_eq!(
+                    n.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+                    c.to_dtype(DType::BF16)?
+                        .to_dtype(DType::F32)?
+                        .to_vec2::<f32>()?,
+                    "{rows} rows"
+                );
+            }
+        }
         Ok(())
     }
 

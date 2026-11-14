@@ -6,9 +6,9 @@
 // addresses, `experts` apiece. Scratch is sized for `slots_max` slots (>= bsz x topk) and `ctr` zeroed
 struct Exl3MoeArgs
 {
-    const half* x;              // (bsz, hidden)
-    const int64_t* sel;         // (bsz, topk)
-    const half* rw;             // (bsz, topk)
+    const void* x;              // (bsz, hidden), f16 or bf16 (x_bf16)
+    const void* sel;            // (bsz, topk), int64 or uint32 (sel_u32)
+    const void* rw;             // (bsz, topk), f16 or f32 (rw_f32)
     const int64_t* gate_tables;
     const int64_t* up_tables;
     const int64_t* down_tables;
@@ -19,7 +19,7 @@ struct Exl3MoeArgs
     half* act_out;              // (slots_max, inter)
     float* d_out;               // (slots_max, hidden)
     int* ctr;                   // exl3_moe_coop_ctr_len(slots_max, bsz, inter, hidden)
-    float* out;                 // (bsz, hidden)
+    void* out;                  // (bsz, hidden), f32 or bf16 (out_bf16)
     int bsz;
     int topk;
     int hidden;
@@ -30,6 +30,10 @@ struct Exl3MoeArgs
     int down_words;
     int cb;
     int slots_max;
+    bool x_bf16;
+    bool sel_u32;
+    bool rw_f32;
+    bool out_bf16;
 };
 
 extern "C" int64_t exl3_moe_ctr_len(int slots_max, int bsz, int inter, int hidden)
@@ -48,10 +52,13 @@ extern "C" int launch_exl3_moe(const Exl3MoeArgs* a, cudaStream_t stream)
     if ((k_gu != (int) k_gu || k_d != (int) k_d) && a->cb != 2) return -1;
 
     MoeCoopParams p = {};
-    p.x = a->x;
+    p.x = (const half*) a->x;
     p.x_stride = a->hidden;
-    p.sel = a->sel;
-    p.rw = a->rw;
+    p.sel = (const int64_t*) a->sel;
+    p.rw = (const half*) a->rw;
+    p.x_bf16 = a->x_bf16;
+    p.sel_u32 = a->sel_u32;
+    p.rw_f32 = a->rw_f32;
     p.bsz = a->bsz;
     p.topk = a->topk;
     p.H = a->hidden;
@@ -88,7 +95,8 @@ extern "C" int launch_exl3_moe(const Exl3MoeArgs* a, cudaStream_t stream)
     p.ctr_b = p.ctr_a + p.ctr_a_len;
     p.runs = p.ctr_b + p.ctr_b_len;
     p.n_local = n;
-    p.out = a->out;
+    p.out = a->out_bf16 ? nullptr : (float*) a->out;
+    p.out_bf16 = a->out_bf16 ? (__nv_bfloat16*) a->out : nullptr;
     p.out_stride = a->hidden;
 
     int device;

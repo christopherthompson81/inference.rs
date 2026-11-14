@@ -1,4 +1,5 @@
 #pragma once
+// Modified for inference.rs: the multi-GEMM reads bf16 A when a_bf16 and writes bf16 through C_bf_list
 
 // The GEMM / multi-GEMM wrappers (slab loop, input Hadamard, grid barriers) and the shape table
 // (exl3_kernel_map.cuh) are shared; the backend supplies the tile inner: tensor-core MMA with cp.async
@@ -171,13 +172,22 @@ void exl3_mgemm_kernel(EXL3_MGEMM_ARGS)
         {
             int src = this_warp / total_warps;
             int w = this_warp - src * total_warps;
-            had_hf_r_128_inner<true, false>
-            (
-                A + w * 128,
-                A_had + src * size_m * size_k + w * 128,
-                suh_list[src] + (w * 128) % size_k,
-                0.088388347648f  // 1/sqrt(128)
-            );
+            if (a_bf16)
+                had_hf_r_128_inner<true, false, true>
+                (
+                    A + w * 128,
+                    A_had + src * size_m * size_k + w * 128,
+                    suh_list[src] + (w * 128) % size_k,
+                    0.088388347648f  // 1/sqrt(128)
+                );
+            else
+                had_hf_r_128_inner<true, false>
+                (
+                    A + w * 128,
+                    A_had + src * size_m * size_k + w * 128,
+                    suh_list[src] + (w * 128) % size_k,
+                    0.088388347648f  // 1/sqrt(128)
+                );
         }
         EXL3_GRID_SYNC();
     }
@@ -210,13 +220,22 @@ void exl3_mgemm_kernel(EXL3_MGEMM_ARGS)
             half* A_had_ = A_had + j * size_m * size_k;
 
             for(; this_warp < total_warps; this_warp += warps_grid)
-                had_hf_r_128_inner<true, false>
-                (
-                    A_ + this_warp * 128,
-                    A_had_ + this_warp * 128,
-                    suh + (this_warp * 128) % size_k,
-                    0.088388347648f  // 1/sqrt(128)
-                );
+                if (a_bf16)
+                    had_hf_r_128_inner<true, false, true>
+                    (
+                        A_ + this_warp * 128,
+                        A_had_ + this_warp * 128,
+                        suh + (this_warp * 128) % size_k,
+                        0.088388347648f  // 1/sqrt(128)
+                    );
+                else
+                    had_hf_r_128_inner<true, false>
+                    (
+                        A_ + this_warp * 128,
+                        A_had_ + this_warp * 128,
+                        suh + (this_warp * 128) % size_k,
+                        0.088388347648f  // 1/sqrt(128)
+                    );
         }
 
         #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ > 890)) || defined(USE_ROCM)
@@ -277,6 +296,7 @@ void exl3_mgemm_kernel(EXL3_MGEMM_ARGS)
             if (B_weights) scale *= __half2float(B_weights[j]);
 
             C_ = C_base;
+            __nv_bfloat16* C_bf = C_bf_list ? (__nv_bfloat16*) C_bf_list[mat_index] : nullptr;
 
             int cols = n_j / 128;
             for(; this_warp < total_warps; this_warp += warps_grid)
@@ -284,7 +304,15 @@ void exl3_mgemm_kernel(EXL3_MGEMM_ARGS)
                 int row = this_warp / cols;
                 int col = this_warp - row * cols;
                 int offs = row * n_stride_j + col * 128;
-                if constexpr (c_fp32)
+                if (c_fp32 && C_bf)
+                    had_fb_r_128_inner<false, true>
+                    (
+                        ((const float*) C_) + offs,
+                        C_bf + offs,
+                        svh + col * 128,
+                        scale
+                    );
+                else if constexpr (c_fp32)
                     had_ff_r_128_inner<false, true>
                     (
                         ((const float*) C_) + offs,

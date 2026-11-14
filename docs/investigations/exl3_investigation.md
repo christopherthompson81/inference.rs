@@ -635,3 +635,88 @@ now               2108 s    49.9-50.7 s   41.0 GB (11.7 / 29.4)           10.040
 The RSS was mostly the mapped checkpoint (29.4 GB file-backed: the whole 29.5 GB model, touched as each layer is
 built), which the kernel reclaims under pressure; the process's own memory peaks at 11.7 GB (the calibration states
 are 5 GB of it). Not a problem to chase.
+
+## Run 22 - 2026-11-14 08:40
+
+Decode headroom on Qwen3-30B-A3B-exl3 3.0bpw (3INST). Bandwidth floor: ~1.25 GB of trellis read a token (attention
+3.9 + 3.1 MB, experts 9.4 + 4.7 MB a layer, 48 layers, plus a 233 MB 6-bit head), ~1.3 ms at 936 GB/s; we run 7 ms.
+Where it goes: `prof2.sh` (serve, one warm-up request, nsys over a second 100-token poem request,
+`--cuda-graph-trace=node`), 94 decode steps between head launches.
+
+```
+a step: 7.68 ms wall under nsys (6.9 without), 7.37 ms of kernels, 1208 kernels; gaps 0.31 ms (4%)
+
+                                 us/token   each      exllamav3 1.6.6 (ref_moe trace, Run 7), us/token
+exl3_moe_coop_a (gate+up+silu)   1890       39.4      1946
+exl3_gemm (o_proj x48 + head)    1315       18.5/428  1326 + 278 head
+exl3_mgemm (q/k/v, sliced)        954       19.9       969
+exl3_moe_coop_b (down)            855       17.8       898
+attention (mma + stream-k fixup)  811       15.3+1.6   848 (split + combine)
+casts (f32->bf16 x5, bf16->f16 x3, f32->f16, u32->i64 a layer)   592
+rms_norm x2, badd x2, router topk + gemv, qk norm/rope, cache write, slice ptrs   ~840
+```
+
+So GPU-bound: the step is its kernels. The four EXL3 matmuls are 5.0 ms (65%), the same kernels and times as
+exllamav3's; glue is ~1.4 ms (20%; exllamav3 has its own ~0.9); attention 0.8 ms.
+
+The matmuls under ncu (base clocks, one layer of a decode step):
+
+```
+                 grid x block   DRAM % peak   issue busy   occupancy (theor / achieved)   limit
+moe_coop_a       96 x 512       24            35%          67 / 39%   (0.59 waves)         regs, smem
+moe_coop_b       128 x 512      26            40%          67 / 49%   (0.78 waves)         regs
+mgemm q/k/v      80 x 512       20            41%          33 / 33%                        92 KB smem, 128 regs
+gemm o_proj      82 x 512       16            39%          33 / 33%                        92 KB smem, 114 regs
+```
+
+Neither DRAM (16-26%) nor issue (35-41%) is near its limit: latency-bound, one or two 16-warp blocks an SM with too
+few loads in flight. ALU pipe ~50% of active cycles (the trellis decode), tensor pipe 5-9% (m padded to 16 rows).
+The autotuner's shape/grid choices are already applied, so the headroom is in a decode-specific kernel (more
+warps and loads in flight per SM at m = 1), not in knobs. At 60% of DRAM bandwidth the matmuls would be ~2 ms.
+
+Ranked:
+1. matmul kernels at m = 1: ~3 ms of 7 (new kernel work, the most uncertain)
+2. glue fusion (casts into the EXL3 launches' input/output, residual add + norm, the router's gemv + topk + index
+   cast): ~1 ms, our own code
+3. attention at short context: 0.8 ms for ~250 keys a step (latency of the stream-k mma path), maybe 0.4 ms
+
+## Run 23 - 2026-11-14 09:40
+
+Glue, step one. Every bf16 <-> f16/f32 cast around the EXL3 launches (ten a layer: the q/k/v and expert inputs,
+the q, k, v and expert outputs, the expert picks and weights, o_proj's input and output) cost 1.2 us each in the
+trace. An f16 model (no casts) decoded at 154 against 143, so they were worth up to ~8%.
+
+The kernels now read and write bf16 themselves where it matters most:
+- fused MoE (`MoeCoopParams`): bf16 x, u32 picks, f32 routing weights read in place, bf16 output
+- sliced q/k/v mgemm: bf16 A (`a_bf16`, the input Hadamard loads bf16 and rounds to f16) and bf16 outputs through
+  a second pointer list (`C_bf_list`; the f32 rows stay the kernels' scratch, `had_fb_r_128_inner` rounds the
+  rotated result)
+
+The rounding matches the casts (bf16 -> f32 -> f16 in, f32 -> bf16 out), so both paths are bit-exact against the cast
+route in the GPU tests; only the routing weights differ, now f32 where the cast route rounded them to f16. Left as
+casts: o_proj and the head (`exl3_gemm` shares its argument list with the GEMV and int8 GEMV paths it may hand off
+to), 2 a layer.
+
+Then the pre-FFN residual add and norm as one launch (`cuda_add_rms_norm`, already used by Qwen3.5) in the shared
+decoder's pre-norm layer: badd + rms_norm -> one kernel, for every model on that path.
+
+Decode, Qwen3-30B-A3B-exl3 3.0bpw, poem prompt (`pwr.sh`: 3 x 400-token requests after a warm-up, nvidia-smi at
+200 ms). The 3090 runs at its power cap here (~341 W, throttle reason SwPowerCap, 1950-1965 MHz), and readings drift
+~3% between sessions (f16 read 154 earlier and 150 later), so the paths ran in alternating pairs off one binary (an
+env toggle, since removed):
+
+```
+                                       tok/s (pairs)              kernels a step   busy a step (nsys)
+casts (master)                         138.7  139.2  138.5        1208             7.37 ms
+bf16 in place                          144.4  144.2  144.0         824             6.96 ms
+casts + fused pre-FFN norm             140.2  140.1
+bf16 in place + fused pre-FFN norm     148.0  147.7                                         (+6.6% on master)
+```
+
+Decode accuracy (teacher-forced, `dppl2.sh`, as Run 8): casts 4.74172 (Run 8's), bf16 + fused norm 4.74186; mean
+|d logprob| 0.0056, top-1 agreement 99.8%.
+
+Size: the EXL3 kernel library grows 7.29 -> 7.71 MiB (every mgemm instance carries both input loads and the bf16
+output stage); baseline updated.
+
+Next: the matmul kernels themselves (Run 22's first item).

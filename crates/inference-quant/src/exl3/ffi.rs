@@ -9,9 +9,9 @@ use half::f16;
 /// layer's routed experts for `bsz` tokens, each projection's table its experts' trellis, `suh` and `svh` addresses.
 #[repr(C)]
 pub(crate) struct Exl3MoeArgs {
-    pub x: *const f16,
-    pub sel: *const i64,
-    pub rw: *const f16,
+    pub x: *const c_void,
+    pub sel: *const c_void,
+    pub rw: *const c_void,
     pub gate_tables: *const i64,
     pub up_tables: *const i64,
     pub down_tables: *const i64,
@@ -22,7 +22,7 @@ pub(crate) struct Exl3MoeArgs {
     pub act_out: *mut f16,
     pub d_out: *mut f32,
     pub ctr: *mut i32,
-    pub out: *mut f32,
+    pub out: *mut c_void,
     pub bsz: i32,
     pub topk: i32,
     pub hidden: i32,
@@ -33,6 +33,10 @@ pub(crate) struct Exl3MoeArgs {
     pub down_words: i32,
     pub cb: i32,
     pub slots_max: i32,
+    pub x_bf16: bool,
+    pub sel_u32: bool,
+    pub rw_f32: bool,
+    pub out_bf16: bool,
 }
 
 inference_tensor::kernel_library! {
@@ -82,10 +86,11 @@ inference_tensor::kernel_library! {
         /// A (`m x k`, f16) through `num_src` matrices of their own rotations, cut into `slices` column slices
         /// `slice_width` wide: `b_list` and `svh_list` per slice (offset to its first column), `suh_list` per source,
         /// `ints` the slices' widths, source widths, sources, first columns and source offsets; the outputs end to end
-        /// from `c` (each source `m x` its width) through `c_ptrs` (device scratch for `slices` addresses). `a_had`
-        /// holds `num_src x m x k`.
+        /// from `c` (each source `m x` its width) through `c_ptrs` (device scratch for `slices` addresses, twice that
+        /// with `c_bf`). `a_had` holds `num_src x m x k`. `a` is bf16 when `a_bf16`; a non-null `c_bf` takes the
+        /// outputs as bf16 (`c` f32 scratch then).
         pub(crate) fn launch_exl3_mgemm_sliced(
-            a: *const f16,
+            a: *const c_void,
             b_list: *const u64,
             suh_list: *const u64,
             svh_list: *const u64,
@@ -101,6 +106,8 @@ inference_tensor::kernel_library! {
             cb: i32,
             c_fp32: bool,
             a_had: *mut f16,
+            a_bf16: bool,
+            c_bf: *mut c_void,
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
 

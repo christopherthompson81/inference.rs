@@ -1,4 +1,6 @@
 #pragma once
+// Modified for inference.rs: bf16 input to had_hf_r_128_inner, and had_fb_r_128_inner (f32 in, bf16 out)
+#include <cuda_bf16.h>
 #include "../compat.cuh"
 
 #define ACT_SILU 0
@@ -90,7 +92,7 @@ __device__ inline half2 shuffle_had_h2x32(half2 v, int lane_id)
 
 // Half vector, half scales
 
-template <bool pre_scale, bool post_scale>
+template <bool pre_scale, bool post_scale, bool bf16_in = false>
 inline __device__
 void had_hf_r_128_inner
 (
@@ -102,8 +104,18 @@ void had_hf_r_128_inner
 {
     int t = threadIdx.x & 31;
 
-    // Load
-    half4 v = ((half4*) input_ptr)[t];
+    // Load (bf16 rounded to f16 first, as a separate cast would)
+    half4 v;
+    if constexpr (bf16_in)
+    {
+        uint2 u = ((const uint2*) input_ptr)[t];
+        float2 a = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&u.x));
+        float2 b = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&u.y));
+        v.x = __floats2half2_rn(a.x, a.y);
+        v.y = __floats2half2_rn(b.x, b.y);
+    }
+    else
+        v = ((half4*) input_ptr)[t];
 
     // Pre scale
     if constexpr (pre_scale)
@@ -150,10 +162,9 @@ void had_hf_r_128_inner
 
 template <bool pre_scale, bool post_scale>
 inline __device__
-void had_ff_r_128_inner
+float4 had_ff_r_128_value
 (
     const float* __restrict__ input_ptr,
-    float* __restrict__ output_ptr,
     const half* __restrict__ scale,
     const float r_scale
 )
@@ -207,8 +218,42 @@ void had_ff_r_128_inner
         v.w *= __high2float(scales.y);
     }
 
-    // Store
-    ((float4*) output_ptr)[t] = v;
+    return v;
+}
+
+template <bool pre_scale, bool post_scale>
+inline __device__
+void had_ff_r_128_inner
+(
+    const float* __restrict__ input_ptr,
+    float* __restrict__ output_ptr,
+    const half* __restrict__ scale,
+    const float r_scale
+)
+{
+    float4 v = had_ff_r_128_value<pre_scale, post_scale>(input_ptr, scale, r_scale);
+    ((float4*) output_ptr)[threadIdx.x & 31] = v;
+}
+
+// Float vector, half scales, bf16 output (rounded from the f32 result, as a separate cast would)
+
+template <bool pre_scale, bool post_scale>
+inline __device__
+void had_fb_r_128_inner
+(
+    const float* __restrict__ input_ptr,
+    __nv_bfloat16* __restrict__ output_ptr,
+    const half* __restrict__ scale,
+    const float r_scale
+)
+{
+    float4 v = had_ff_r_128_value<pre_scale, post_scale>(input_ptr, scale, r_scale);
+    __nv_bfloat162 a = __floats2bfloat162_rn(v.x, v.y);
+    __nv_bfloat162 b = __floats2bfloat162_rn(v.z, v.w);
+    uint2 u;
+    u.x = *reinterpret_cast<uint32_t*>(&a);
+    u.y = *reinterpret_cast<uint32_t*>(&b);
+    ((uint2*) output_ptr)[threadIdx.x & 31] = u;
 }
 
 // Float vector, half scales, half output

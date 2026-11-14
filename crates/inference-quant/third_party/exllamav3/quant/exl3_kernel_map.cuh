@@ -1,4 +1,5 @@
 #pragma once
+// Modified for inference.rs: the multi-GEMM takes bf16 A (a_bf16) and writes bf16 outputs (C_bf_list)
 
 #include <cuda_fp16.h>
 #include <stdint.h>
@@ -73,7 +74,9 @@ void exl3_gemm_check_smem(int shape_idx, int bits, bool half_k, const char* who)
     void** __restrict__ C_list, \
     const int* __restrict__ n_stride_list, \
     const int* __restrict__ had_src_list, \
-    const int num_had_src
+    const int num_had_src, \
+    const int a_bf16, \
+    void** __restrict__ C_bf_list
 
 typedef void (*fp_exl3_gemm_kernel) (EXL3_GEMM_ARGS);
 typedef void (*fp_exl3_mgemm_kernel) (EXL3_MGEMM_ARGS);

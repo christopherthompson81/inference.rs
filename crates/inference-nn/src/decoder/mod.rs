@@ -1217,6 +1217,19 @@ impl Norm {
         }
     }
 
+    /// `x + residual` and self of it, fused for the RMS norms.
+    fn forward_add(&self, x: &Tensor, residual: &Tensor) -> Result<(Tensor, Tensor)> {
+        match self {
+            Self::Rms(norm) => norm.forward_add_rms_norm(x, residual),
+            Self::Gemma(norm) => norm.forward_add_rms_norm(x, residual),
+            Self::F32Rms(_) | Self::Layer(_) | Self::Bare(_) => {
+                let xs = (x + residual)?;
+                let normed = self.forward(&xs)?;
+                Ok((xs, normed))
+            }
+        }
+    }
+
     /// `self(x) + residual` and `next` of it, fused; both norms are of one kind.
     fn forward_residual_then_norm(
         &self,
@@ -1344,10 +1357,8 @@ impl<A: LayerAttention, F: LayerFfn> DecoderLayer<A, F> {
             return (xs + self.mlp.forward(&normed)?)? + residual;
         };
         let Some((post_attn, post_ffn)) = &self.norms.post else {
-            let xs = (xs + residual)?;
-            let residual = &xs;
-            let xs = self.mlp.forward(&pre_ffn.forward(&xs)?)?;
-            return residual + xs;
+            let (residual, normed) = pre_ffn.forward_add(&xs, residual)?;
+            return residual + self.mlp.forward(&normed)?;
         };
         let (xs, mlp_in) = post_attn.forward_residual_then_norm(&xs, residual, pre_ffn)?;
         let mlp_out = self.mlp.forward(&mlp_in)?;
