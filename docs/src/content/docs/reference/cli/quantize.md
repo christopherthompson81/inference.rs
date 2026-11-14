@@ -294,4 +294,5 @@ inference quantize exl3 [OPTIONS] --model-id <MODEL_ID> --calibration-file <CALI
 | `--bits <BITS>` | required | Bits per weight: 1 to 8, or 1.5, 2.5, 3.5 (mul1 codebook) |
 | `--head-bits <HEAD_BITS>` |  | Bits per weight of the output head [default: 6] |
 | `--codebook <CODEBOOK>` |  | Codebook: mul1, mcg or 3inst [default: mul1] |
+| `--resident` | `false` | Load the model on the GPU and run it whole per layer, for models whose layers don't stream (the default loads it on the host and streams one layer at a time through the GPU, so the model may exceed its memory) |
 

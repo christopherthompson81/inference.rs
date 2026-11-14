@@ -368,3 +368,146 @@ pipeline/isq_flow/plan.rs     5.5253    5.4942    5.6502  (+2.8%)
 ```
 
 The first text's reading below bf16 (and f32) is that text's luck; the other two put the encoding where 4 bits sit.
+
+## Run 15 - 2026-11-14 14:30
+
+Converter gap 4, models larger than the GPU: streaming. The converter now loads the model on the host in bf16 (`inference
+quantize exl3` default; `--resident` keeps the old GPU load) and keeps the calibration text's hidden states there, one
+tensor per 1024-token chunk. For each layer, the shared decoder stack rebuilds it on the GPU from the checkpoint
+(`LayerStream::build_layer`, the stack keeping its spec and var builder; the rebuilt linears tracked under their checkpoint
+keys), runs every chunk through it to collect the Hessians, encodes and swaps its linears, runs the chunks through the
+encoded layer again for the next layer's inputs, and drops it. Then the head, over the final-normed states.
+
+Tiny Llama, both ways: every layer tensor bit-identical between the resident and streamed writes. The head differs:
+the resident calibration forward hands the head only each chunk's last row (the logits selection), so its Hessian was
+one row per chunk; streamed, it takes every row, as exllamav3's does.
+
+Qwen3-0.6B, 4.0 3inst, the same 485K tokens: 173 s against 363 s resident (one pass over the states per layer instead
+of a pass through the model up to it), 7.9 GB peak RSS; all 702 layer tensors bit-identical to Run 13's, the head
+not.
+
+Found on the way: a tied model never loaded the `lm_head.trellis` written for it (ours or exllamav3's): the decoder
+took the full-precision embedding as the head whenever `tie_word_embeddings`. An EXL3 checkpoint holding its own
+`lm_head` trellis now loads it. Qwen3-0.6B, 200 KB of wikitext-2 test, our perplexity example:
+
+```
+bf16                                24.4875
+EXL3 4.0, resident (one-row head)   25.5624
+EXL3 4.0, streamed (every-row head) 25.5182
+```
+
+(the small eval text of the earlier runs put both within noise of the full-precision head's 24.205: 24.226 / 24.247).
+
+## Run 16 - 2026-11-14 15:30
+
+Speed-ups. Encode time by phase (temporary probe, random weights, 4.0 mul1):
+
+```
+shape (out x in)   factor   regularize   scale search   LDLQ     refit   pack (CPU)
+1024 x 1024        3 ms     0.4 ms       36 ms          94 ms    6 ms    16 ms
+3072 x 1024        3        1            95             261      8       46
+5120 x 5120        32       9            167            1836     101     417
+17408 x 5120       49       45           549            6308     316     1405
+```
+
+LDLQ is ~80%, and it is the trellis quantizer's own time: per row of tiles, ~20 us a tile at any count (64 tiles 1.4
+ms, 320 tiles 6.3 ms, 1088 tiles 21 ms), so it is throughput-bound, not launch-bound. Consequences:
+
+- Batching q/k/v (or gate/up) into one LDLQ, which is exact when they share the input signs and hence the factor
+  (LDLQ is column-separable given L), would save nearly nothing: not done (it would also move the output off
+  exllamav3's per-linear signs).
+- Sharing the factorization saves 3-50 ms a group: not done, for the same reason.
+- Reading the tile states back once at the end instead of after each row of tiles: no change (the sync was not the
+  cost), kept since it costs nothing.
+- Packing the tiles in parallel (rayon): 17408 x 5120 refit+pack 1.72 s -> 0.57 s. Kept; bit-identical.
+
+On the streamed path, q/k/v and gate/up (dense, shared expert, stacked experts) read one input, so the first of each
+collects the Hessian and the rest reuse it: 7 x^T x accumulations a dense layer become 3. And the host load now builds
+no decoder layers at all (`inference_nn::decoder::stream_layers` scope; the forward refuses to run a stack loaded that
+way): only the embedding, final norm and head load on the host.
+
+Qwen3-0.6B, as Run 15: 164 s (from 173), 6.8 GB peak RSS (from 7.9), every tensor bit-identical to Run 15's. A tiny
+OLMoE written streamed matches its resident write in every tensor but the head. At this size a layer is 4.5 s: ~2 s
+encoding, the rest the two passes over 474 chunks (per-chunk overhead more than compute at 0.6B).
+
+## Run 17 - 2026-11-14 16:30
+
+The batching question again, for MoE: Run 16 timed dense shapes only. The quantizer by tile count (one launch,
+mul1):
+
+```
+tiles    8      16     32     48     64     96     128    256    512    1024   4096
+4 bit    1.34   1.29   1.35   1.32   1.38   2.63   2.65   5.24   9.33   17.7   68.4  ms
+2 bit    1.99   2.08   2.25   2.43   2.61   4.71   4.70   8.42   14.5   27.0   104   ms
+```
+
+It runs in waves of 64 tiles: a row of tiles narrower than a wave costs the wave. Dense Qwen3 widths are multiples of
+1024 (whole waves), so Run 16's conclusion holds for them; MoE experts are not: Qwen3-30B-A3B's gate/up rows are 48
+tiles (768 wide). So experts now encode together (`encode::encode_experts`): each prepared alone (padding, damping,
+factor, regularization, scale search), their LDLQs in lockstep with batched matmuls (L stacked `[e, k, k]`), one
+quantizer launch per row of tiles for all of them, a batch capped at 2 GiB of LDLQ state. Bit-identical to encoding
+each alone (unit test: every trellis word and the proxy error). And the scale search quantizes all ten coarse
+scales in one launch and the five fine ones in another (15 launches -> 2), for every linear.
+
+128 random experts, 4.0 mul1:
+
+```
+shape        alone     together
+768 x 2048   32.9 s    25.1 s   (LDLQ 175 -> 110 ms an expert; the scale search ~61 ms an expert either way: it
+2048 x 768   26.6 s    23.6 s    quantizes ~3600 sampled tiles, already whole waves)
+```
+
+The first OLMoE run of this ran out of device memory preparing the experts: each prepared expert held ~1 GB. Cause:
+`Tensor::to_device` moved a view's whole storage (keeping the view's layout into it), so one expert's Hessian
+`h.get(e)` of the host stack `[64, 2048, 2048]` f32 moved all 64 (1.07 GB). The one-expert-at-a-time path of Runs
+14-16 did the same, freeing it each time: ~1 GB over PCIe per expert, 64 GB per projection per layer. Now a view
+whose storage holds more elements than the view moves only its own (`force_contiguous` first; a broadcast view, which
+holds fewer, still moves as it is).
+
+OLMoE-1B-7B-0125-Instruct at 4.0 mul1, the same 485K tokens, streamed with all of the above: 1275 s against Run 14's
+2408 s resident; 78 s a layer; device memory peaking at 7.9 GB (2.1 of it other processes) against 23.8. Perplexity
+by our example, both measured now (512-token windows):
+
+```
+text                          resident (Run 14)   streamed
+this repo's README.md         15.8509             15.7664
+pipeline/isq_flow/plan.rs     5.7292              5.6960
+```
+
+(Run 14's README figure was another revision of the file.)
+
+## Run 18 - 2026-11-14 18:00
+
+Qwen3-14B (bf16, 29.5 GB: larger than the 3090's 24 GB), 4.0 mul1, streamed, the same 485K tokens. First attempt:
+40 layers at 72-73 s (device memory peaking at 13.6 GB with 2.1 of other processes), then out of device memory
+encoding the head. A layer: ~23 s collecting its Hessians (the pass over the states plus the x^T x accumulations,
+~13 s of it, most down_proj's 17408^2), ~40 s encoding (gate 8.6, up 11.4, down 12.7, attention ~7), ~9.5 s
+running the states on.
+
+GPU utilization sampled every 0.5 s across a layer: 77% on average, and idle (0%) for 4-5 s after each MLP
+projection's encoding, three times a layer. That was the swap's reconstruction: `dense_weight` decodes the trellis on
+the host, single-threaded (89M weights for a 17408 x 5120 linear). The encoder already holds the decode on the GPU:
+its LDLQ values rotated back with the stored scales (the refit's row and column scalings commute with the rotations,
+so only the scales' f16 rounding separates it from the refit `q`). `Exl3Encoding::decoded` now carries it, and the
+swap uses it; it matches `dense_weight` to 1e-5 of the weight's scale (asserted in the encoder's test).
+
+The head (151936 x 5120, 3.1 GB a f32 copy): the encoder held the weight as given, its regularized copy and a
+stacked copy, LDLQ's feedback, its rows and their join, and then the refit's `H W`, `H q` and products, all at full
+size. Now the regularized weight is handed to LDLQ and dropped before its values join, LDLQ runs a chunk of 8192
+columns at a time (columns are independent given L; a test pins the chunked run to one over all columns), and the
+refit and output error take `H W`, `H q` and their reductions a chunk at a time. A head-sized encode at 6 bits: 82 s,
+~17 GB of device memory (random weights, a random Hessian).
+
+The rerun with both: 2518 s for the model (40 layers at 59.5-60.7 s, from 72-73; the head 90 s at 6 bits), device
+memory peaking at 18.6 GB (2.1 of other processes; the head's encode is the peak), 8.2 GB written. Perplexity on the
+first 200 KB of wikitext-2 test (our example, 512-token windows; bf16 does not fit the device, so Q8_0 ISQ stands in):
+
+```
+Qwen3-14B Q8_0 (ISQ)     10.0032
+EXL3 4.0 mul1, ours      10.0635  (+0.6%)
+```
+
+Left open: the Hessian x^T x accumulation (~13 s of a 14B layer); the copy of unquantized tensors loads whole shards
+(host RSS reached 42 GB); and a host-memory fallback for a layer or head whose encode does not fit the device (14B's
+are not the largest a model will have): today device OOM ends the run, where it could retry the linear with smaller
+column chunks or with its large intermediates (Hessian, LDLQ feedback, refit products) kept in system RAM.

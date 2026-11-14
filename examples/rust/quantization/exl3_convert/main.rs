@@ -1,11 +1,12 @@
 //! A model converted to EXL3 from a calibration file, each layer encoded against the Hessian of the inputs the layers
-//! before it, already encoded, give it; written as exllamav3's converter lays a model out.
+//! before it, already encoded, give it; written as exllamav3's converter lays a model out. The model loads on the host
+//! and its layers stream through the GPU one at a time, so it may be larger than the GPU's memory.
 //!
 //! Run with: `cargo run --release --example exl3_convert -p inference-examples -- <model> <calibration.txt> <out dir>
 //! <bits> [3inst|mcg|mul1]`
 
 use anyhow::{Context, Result};
-use inference::{Exl3WriteConfig, ModelBuilder};
+use inference::{Exl3WriteConfig, ModelBuilder, ModelDType};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,6 +18,8 @@ async fn main() -> Result<()> {
     let bits = args.next().context(usage)?.parse()?;
     let codebook = args.next();
     ModelBuilder::new(model)
+        .with_force_cpu()
+        .with_dtype(ModelDType::BF16)
         .with_calibration_file(calibration.into())
         .with_exl3_out(Exl3WriteConfig {
             output,

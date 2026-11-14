@@ -5,6 +5,7 @@
 //! stored scales refit to the encoding in the Hessian metric.
 
 use inference_tensor::{DType, Device, Result, Tensor};
+use rayon::prelude::*;
 
 use super::linalg::{cholesky, solve_spd};
 use super::quantize::{pack_tile, quantize_tiles};
@@ -17,6 +18,10 @@ const FACTOR_RETRIES: usize = 10;
 const CODEBOOK_SCALE: f64 = 1.24371088;
 // LDLQ's rows per span between full error-feedback updates
 const SPAN_ROWS: usize = 128;
+// the columns a full-size pass over a linear takes at once (a multiple of the 128-wide rotation)
+const COLUMN_CHUNK: usize = 8192;
+// the device memory a batch of experts' LDLQs may hold at once
+const EXPERT_BATCH_BYTES: usize = 2 << 30;
 // the global scale search: tiles a diagonal of this width samples, a coarse grid, then a fine one around its best
 const SAMPLE_WIDTH: usize = 3;
 const COARSE_SCALES: [f64; 10] = [0.1, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5, 1.7, 1.9];
@@ -35,6 +40,8 @@ pub struct Exl3Encoding {
     /// f16 input scales `(in)` and output scales `(out)`.
     pub suh: Tensor,
     pub svh: Tensor,
+    /// The weight `(out, in)` the stored tensors decode to, in f32 on the encoding's device, at the padded sizes.
+    pub decoded: Tensor,
     /// The output error the encoding leaves, `tr(E H E^T) / tr(W H W^T)` with H undamped.
     pub proxy_error: f64,
 }
@@ -252,15 +259,37 @@ fn sample_tiles(w: &Tensor) -> Result<Tensor> {
     gather_tiles(w, &tiles)
 }
 
-// the mean square error of quantizing `tiles` scaled by `scale`, measured back at their own scale
-fn scaled_error(tiles: &Tensor, scale: f64, bits: Exl3Bits, codebook: Exl3Codebook) -> Result<f64> {
-    let (q, _) = quantize_tiles(&(tiles * scale)?, bits, codebook)?;
-    Ok(f64::from(
-        ((q / scale)? - tiles)?
-            .sqr()?
-            .mean_all()?
-            .to_scalar::<f32>()?,
-    ))
+// the mean square error of quantizing `tiles` scaled by each of `scales`, measured back at their own scale: every
+// scale's copy in one launch, the quantizer's wave being as wide as a small linear's sample
+fn scaled_errors(
+    tiles: &Tensor,
+    scales: &[f64],
+    bits: Exl3Bits,
+    codebook: Exl3Codebook,
+) -> Result<Vec<f64>> {
+    let count = tiles.dim(0)?;
+    let factors = Tensor::from_vec(
+        scales
+            .iter()
+            .flat_map(|&s| std::iter::repeat_n(s as f32, count))
+            .collect::<Vec<_>>(),
+        (scales.len() * count, 1),
+        tiles.device(),
+    )?;
+    let scaled = tiles
+        .unsqueeze(0)?
+        .repeat((scales.len(), 1, 1))?
+        .reshape((scales.len() * count, TILE_VALUES))?;
+    let (q, _) = quantize_tiles(&scaled.broadcast_mul(&factors)?, bits, codebook)?;
+    let errors = q
+        .broadcast_div(&factors)?
+        .sub(&scaled)?
+        .sqr()?
+        .reshape((scales.len(), count * TILE_VALUES))?
+        .mean(1)?
+        .to_device(&Device::Cpu)?
+        .to_vec1::<f32>()?;
+    Ok(errors.into_iter().map(f64::from).collect())
 }
 
 // the global scale whose quantization error over the sampled tiles is least: a coarse grid on a third of the
@@ -271,9 +300,9 @@ fn global_scale(w: &Tensor, bits: Exl3Bits, codebook: Exl3Codebook) -> Result<f6
     let third = (0..count).step_by(3).map(|i| i as u32).collect::<Vec<_>>();
     let len = third.len();
     let sub = tiles.index_select(&Tensor::from_vec(third, len, w.device())?, 0)?;
+    let coarse = scaled_errors(&sub, &COARSE_SCALES, bits, codebook)?;
     let mut best = (f64::INFINITY, COARSE_SCALES[0]);
-    for &s in &COARSE_SCALES {
-        let e = scaled_error(&sub, s, bits, codebook)?;
+    for (&e, &s) in coarse.iter().zip(&COARSE_SCALES) {
         if e < best.0 {
             best = (e, s);
         }
@@ -281,10 +310,7 @@ fn global_scale(w: &Tensor, bits: Exl3Bits, codebook: Exl3Codebook) -> Result<f6
     let fine = (0..5)
         .map(|i| best.1 + FINE_STEP * (i as f64 - 2.0))
         .collect::<Vec<_>>();
-    let errors = fine
-        .iter()
-        .map(|&s| scaled_error(&tiles, s, bits, codebook))
-        .collect::<Result<Vec<_>>>()?;
+    let errors = scaled_errors(&tiles, &fine, bits, codebook)?;
     let at = (0..5)
         .min_by(|&a, &b| errors[a].total_cmp(&errors[b]))
         .unwrap_or(2);
@@ -302,15 +328,16 @@ fn global_scale(w: &Tensor, bits: Exl3Bits, codebook: Exl3Codebook) -> Result<f6
     Ok((fine[at] + offset * FINE_STEP).max(MIN_SCALE))
 }
 
-// LDLQ over the regularized weight `w` (k, n) with the block LDL factor `l`: the encoding's values (k, n) and each
-// tile's states (k / 16, n / 16, 256) on the host
+// LDLQ over the regularized weights `w` (e, k, n), each with its block LDL factor of `l` (e, k, k), in lockstep: each
+// row of tiles of every one through one quantizer launch. The encodings' values (e, k, n), and each one's tile
+// states (k / 16, n / 16, 256) on the host, one after another
 fn ldlq(
     w: &Tensor,
     l: &Tensor,
     bits: Exl3Bits,
     codebook: Exl3Codebook,
 ) -> Result<(Tensor, Vec<i16>)> {
-    let (k, n) = w.dims2()?;
+    let (e, k, n) = w.dims3()?;
     let tiles_n = n / TILE;
     let device = w.device();
     let perm = tile_order();
@@ -321,86 +348,137 @@ fn ldlq(
     let to_positions = Tensor::from_vec(perm.map(|c| c as u32).to_vec(), TILE_VALUES, device)?;
     let to_cells = Tensor::from_vec(inverse.to_vec(), TILE_VALUES, device)?;
     let cols = Tensor::arange(0u32, k as u32, device)?.unsqueeze(0)?;
-    let mut feedback = Tensor::zeros((k, n), DType::F32, device)?;
+    let mut feedback = Tensor::zeros((e, k, n), DType::F32, device)?;
     let mut rows_q = vec![None; k / TILE];
-    let mut states = vec![0i16; k * n];
+    let mut states = vec![None; k / TILE];
     for j in (SPAN_ROWS..=k).rev().step_by(SPAN_ROWS) {
         let i = j - SPAN_ROWS;
-        let span_w = w.narrow(0, i, SPAN_ROWS)?;
+        let span_w = w.narrow(1, i, SPAN_ROWS)?;
         // L's rows of the span, each kept left of its own 16-row block (where the factor's values are)
         let starts = Tensor::from_vec(
             (i..j).map(|r| (r / TILE * TILE) as u32).collect::<Vec<_>>(),
             (SPAN_ROWS, 1),
             device,
         )?;
-        let span_l =
-            (l.narrow(0, i, SPAN_ROWS)? * cols.broadcast_lt(&starts)?.to_dtype(DType::F32)?)?;
-        let span_feedback = feedback.narrow(0, i, SPAN_ROWS)?;
+        let span_l = l
+            .narrow(1, i, SPAN_ROWS)?
+            .broadcast_mul(&cols.broadcast_lt(&starts)?.to_dtype(DType::F32)?)?;
+        let span_feedback = feedback.narrow(1, i, SPAN_ROWS)?;
         let mut done: Vec<Tensor> = Vec::new();
         for bj in (TILE..=SPAN_ROWS).rev().step_by(TILE) {
             let bi = bj - TILE;
-            let mut rows = (span_w.narrow(0, bi, TILE)? + span_feedback.narrow(0, bi, TILE)?)?;
+            let mut rows = (span_w.narrow(1, bi, TILE)? + span_feedback.narrow(1, bi, TILE)?)?;
             if bj < SPAN_ROWS {
-                let below_q = Tensor::cat(&done.iter().rev().collect::<Vec<_>>(), 0)?;
-                let err = (span_w.narrow(0, bj, SPAN_ROWS - bj)? - below_q)?;
+                let below_q = Tensor::cat(&done.iter().rev().collect::<Vec<_>>(), 1)?;
+                let err = (span_w.narrow(1, bj, SPAN_ROWS - bj)? - below_q)?;
                 let l_block = span_l
-                    .narrow(0, bj, SPAN_ROWS - bj)?
-                    .narrow(1, i + bi, TILE)?;
-                rows = (rows + l_block.t()?.contiguous()?.matmul(&err)?)?;
+                    .narrow(1, bj, SPAN_ROWS - bj)?
+                    .narrow(2, i + bi, TILE)?;
+                rows = (rows + l_block.transpose(1, 2)?.contiguous()?.matmul(&err)?)?;
             }
             let tiles = rows
-                .reshape((TILE, tiles_n, TILE))?
-                .transpose(0, 1)?
+                .reshape((e, TILE, tiles_n, TILE))?
+                .transpose(1, 2)?
                 .contiguous()?
-                .reshape((tiles_n, TILE_VALUES))?
+                .reshape((e * tiles_n, TILE_VALUES))?
                 .index_select(&to_positions, 1)?;
             let (values, tile_states) = quantize_tiles(&tiles, bits, codebook)?;
             let q = values
                 .index_select(&to_cells, 1)?
-                .reshape((tiles_n, TILE, TILE))?
-                .transpose(0, 1)?
+                .reshape((e, tiles_n, TILE, TILE))?
+                .transpose(1, 2)?
                 .contiguous()?
-                .reshape((TILE, n))?;
+                .reshape((e, TILE, n))?;
             let tile_row = (i + bi) / TILE;
-            let s = tile_states
-                .to_device(&Device::Cpu)?
-                .flatten_all()?
-                .to_vec1::<i16>()?;
-            states[tile_row * tiles_n * TILE_VALUES..(tile_row + 1) * tiles_n * TILE_VALUES]
-                .copy_from_slice(&s);
+            // read back once at the end, so the rows queue without a sync each
+            states[tile_row] = Some(tile_states.reshape((e, tiles_n, TILE_VALUES))?);
             rows_q[tile_row] = Some(q.clone());
             done.push(q);
         }
-        let span_q = Tensor::cat(&done.iter().rev().collect::<Vec<_>>(), 0)?;
-        feedback = (feedback + span_l.t()?.contiguous()?.matmul(&(span_w - span_q)?)?)?;
+        let span_q = Tensor::cat(&done.iter().rev().collect::<Vec<_>>(), 1)?;
+        feedback = (feedback
+            + span_l
+                .transpose(1, 2)?
+                .contiguous()?
+                .matmul(&(span_w - span_q)?)?)?;
     }
-    let rows = rows_q
-        .into_iter()
-        .map(|r| r.expect("every tile row encoded"))
-        .collect::<Vec<_>>();
-    Ok((Tensor::cat(&rows, 0)?, states))
+    let every = |rows: Vec<Option<Tensor>>| -> Vec<Tensor> {
+        rows.into_iter()
+            .map(|r| r.expect("every tile row encoded"))
+            .collect()
+    };
+    let states = Tensor::cat(&every(states), 1)?
+        .to_device(&Device::Cpu)?
+        .flatten_all()?
+        .to_vec1::<i16>()?;
+    Ok((Tensor::cat(&every(rows_q), 1)?, states))
 }
 
-// tr(E H E^T) / tr(W H W^T) over the columns, for `h` and the weights (k, n)
+// LDLQ over `w` (e, k, n) a chunk of columns at a time (each column's encoding depends only on its own, given L),
+// `w` dropped before the chunks join; states laid out as one `ldlq` over all of them gives them
+fn ldlq_columns(
+    w: Tensor,
+    l: &Tensor,
+    bits: Exl3Bits,
+    codebook: Exl3Codebook,
+) -> Result<(Tensor, Vec<i16>)> {
+    let (e, k, n) = w.dims3()?;
+    if n <= COLUMN_CHUNK {
+        return ldlq(&w, l, bits, codebook);
+    }
+    let (tile_rows, tiles_n) = (k / TILE, n / TILE);
+    let mut states = vec![0i16; e * k * n];
+    let mut values = Vec::new();
+    for (c0, len) in column_chunks(n) {
+        let (q, chunk) = ldlq(&w.narrow(2, c0, len)?.contiguous()?, l, bits, codebook)?;
+        let row = len / TILE * TILE_VALUES;
+        for (i, block) in chunk.chunks(row).enumerate() {
+            let at = (i * tiles_n + c0 / TILE) * TILE_VALUES;
+            states[at..at + row].copy_from_slice(block);
+        }
+        debug_assert_eq!(chunk.len(), e * tile_rows * row);
+        values.push(q);
+    }
+    drop(w);
+    Ok((Tensor::cat(&values, 2)?, states))
+}
+
+// tr(E H E^T) / tr(W H W^T) over the columns, for `h` and the weights (k, n), a chunk of columns at a time
 fn output_error(w: &Tensor, q: &Tensor, h: &Tensor) -> Result<f64> {
     let quadratic = |x: &Tensor| -> Result<f64> {
         Ok(f64::from(
             (x * h.matmul(x)?)?.sum_all()?.to_scalar::<f32>()?,
         ))
     };
-    Ok(quadratic(&(w - q)?)? / quadratic(w)?.max(ZERO))
+    let (mut err, mut norm) = (0.0, 0.0);
+    for (c0, len) in column_chunks(w.dim(1)?) {
+        let w_c = w.narrow(1, c0, len)?.contiguous()?;
+        err += quadratic(&(&w_c - q.narrow(1, c0, len)?.contiguous()?)?)?;
+        norm += quadratic(&w_c)?;
+    }
+    Ok(err / norm.max(ZERO))
 }
 
-/// `weight` `(out, in)` on a CUDA device encoded at `bits` on `codebook` against the input Hessian `hessian`
-/// `(in, in)` (x^T x over the calibration rows, over their count); `seed` fixes the sign flips. A side not in 128-wide
-/// blocks is zero-padded to them, as exllamav3 stores such a linear: the trellis, `suh` and `svh` at the padded sizes.
-pub fn encode(
+// one linear up to its LDLQ (padded, its Hessian damped and factored), and its weight regularized and scaled
+struct Prepared {
+    n: usize,
+    k: usize,
+    had: Tensor,
+    w_orig: Tensor,
+    h: Tensor,
+    h_damped: Tensor,
+    l: Tensor,
+    su: Vec<f32>,
+    sv: Vec<f32>,
+}
+
+fn prepare(
     weight: &Tensor,
     hessian: &Tensor,
     bits: Exl3Bits,
     codebook: Exl3Codebook,
     seed: u64,
-) -> Result<Exl3Encoding> {
+) -> Result<(Prepared, Tensor)> {
     let device = weight.device().clone();
     let (n, k) = weight.dims2()?;
     // zero rows and columns are inert: padded inputs are zero, padded outputs get zero scales
@@ -476,37 +554,80 @@ pub fn encode(
     let g = global_scale(&w, bits, codebook)?;
     w = (w * g)?;
     su.iter_mut().for_each(|s| *s = (f64::from(*s) / g) as f32);
+    Ok((
+        Prepared {
+            n,
+            k,
+            had,
+            w_orig,
+            h,
+            h_damped,
+            l,
+            su,
+            sv,
+        },
+        w,
+    ))
+}
 
-    let (q_reg, states) = ldlq(&w, &l, bits, codebook)?;
+// the column ranges a full-size pass takes at a time, so no `(k, n)` temporary beyond the weights is ever held
+fn column_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
+    (0..n)
+        .step_by(COLUMN_CHUNK)
+        .map(move |c| (c, COLUMN_CHUNK.min(n - c)))
+}
 
+// a prepared linear's LDLQ values and tile states back to its stored tensors
+fn finish(p: Prepared, q_reg: Tensor, states: &[i16], bits: Exl3Bits) -> Result<Exl3Encoding> {
+    let Prepared {
+        n,
+        k,
+        had,
+        w_orig,
+        h,
+        h_damped,
+        su,
+        sv,
+        ..
+    } = p;
+    let device = q_reg.device().clone();
+    let cpu = |t: Tensor| t.to_device(&Device::Cpu)?.to_vec1::<f32>();
     // back to the original basis: undo the input rotation and scales, then the output ones
-    let mut su_t = Tensor::from_vec(su, (k, 1), &device)?;
-    let mut sv_t = Tensor::from_vec(sv, (1, n), &device)?;
-    let mut q = had_left(&q_reg, &had)?.broadcast_mul(&su_t)?;
-    q = had_right(&q, &had)?.broadcast_mul(&sv_t)?;
-
+    let su0 = Tensor::from_vec(su, (k, 1), &device)?;
+    let sv0 = Tensor::from_vec(sv, (1, n), &device)?;
+    let mut q = had_left(&q_reg, &had)?.broadcast_mul(&su0)?;
+    drop(q_reg);
+    q = had_right(&q, &had)?.broadcast_mul(&sv0)?;
+    let (mut su_t, mut sv_t) = (su0, sv0);
     // the stored scales refit to the encoding, output columns in closed form and input rows by a solve, alternated
-    let hw = h_damped.matmul(&w_orig)?;
     for _ in 0..REFIT_ROUNDS {
-        let num = (&q * &hw)?.sum(0)?;
-        let den = (&q * h_damped.matmul(&q)?)?.sum(0)?;
-        let c = num
-            .to_device(&Device::Cpu)?
-            .to_vec1::<f32>()?
-            .iter()
-            .zip(den.to_device(&Device::Cpu)?.to_vec1::<f32>()?)
-            .map(|(&a, d)| if f64::from(d) > ZERO { a / d } else { 1.0 })
-            .collect::<Vec<_>>();
+        let mut c = Vec::with_capacity(n);
+        for (c0, len) in column_chunks(n) {
+            let q_c = q.narrow(1, c0, len)?.contiguous()?;
+            let hw_c = h_damped.matmul(&w_orig.narrow(1, c0, len)?.contiguous()?)?;
+            let num = cpu((&q_c * &hw_c)?.sum(0)?)?;
+            let den = cpu((&q_c * h_damped.matmul(&q_c)?)?.sum(0)?)?;
+            c.extend(
+                num.iter()
+                    .zip(den)
+                    .map(|(&a, d)| if f64::from(d) > ZERO { a / d } else { 1.0 }),
+            );
+        }
         let c = Tensor::from_vec(c, (1, n), &device)?;
         q = q.broadcast_mul(&c)?;
         sv_t = sv_t.broadcast_mul(&c)?;
-        let a = (q.matmul(&q.t()?)? * &h_damped)?;
+        let mut a = Tensor::zeros((k, k), DType::F32, &device)?;
+        let mut b = Tensor::zeros(k, DType::F32, &device)?;
+        for (c0, len) in column_chunks(n) {
+            let q_c = q.narrow(1, c0, len)?.contiguous()?;
+            let hw_c = h_damped.matmul(&w_orig.narrow(1, c0, len)?.contiguous()?)?;
+            a = (a + q_c.matmul(&q_c.t()?)?)?;
+            b = (b + (&q_c * &hw_c)?.sum(1)?)?;
+        }
+        let a = (a * &h_damped)?;
         let a = add_diagonal(&a, 1e-6 * diagonal_mean(&a)?)?;
-        let b = (&q * &hw)?.sum(1)?;
         if let Some(r) = solve_spd(&a, &b)? {
-            let r = r
-                .to_device(&Device::Cpu)?
-                .to_vec1::<f32>()?
+            let r = cpu(r)?
                 .iter()
                 .map(|&v| if v.is_finite() && v > 0.0 { v } else { 1.0 })
                 .collect::<Vec<_>>();
@@ -516,27 +637,160 @@ pub fn encode(
         }
     }
     let proxy_error = output_error(&w_orig, &q, &h)?;
+    drop(w_orig);
+
+    // the weight as the stored tensors decode: the refit scales commute with the rotations, so only their f16
+    // rounding separates it from `q`
+    let (suh, svh) = (su_t.to_dtype(DType::F16)?, sv_t.to_dtype(DType::F16)?);
+    let decoded = q
+        .broadcast_mul(&(suh.to_dtype(DType::F32)? / &su_t)?)?
+        .broadcast_mul(&(svh.to_dtype(DType::F32)? / &sv_t)?)?;
+    drop(q);
+    let decoded = decoded.t()?.contiguous()?;
 
     let words = bits.words();
-    let mut trellis = Vec::with_capacity(k * n / TILE_VALUES * words);
-    for tile in states.chunks(TILE_VALUES) {
-        let tile = tile.iter().map(|&s| s as u16).collect::<Vec<_>>();
-        trellis.extend(pack_tile(&tile, bits).into_iter().map(|w| w as i16));
-    }
+    let trellis = states
+        .par_chunks(TILE_VALUES)
+        .flat_map_iter(|tile| {
+            let tile = tile.iter().map(|&s| s as u16).collect::<Vec<_>>();
+            pack_tile(&tile, bits).into_iter().map(|w| w as i16)
+        })
+        .collect::<Vec<_>>();
     Ok(Exl3Encoding {
         trellis: Tensor::from_vec(trellis, (k / TILE, n / TILE, words), &Device::Cpu)?,
-        suh: su_t.flatten_all()?.to_dtype(DType::F16)?,
-        svh: sv_t.flatten_all()?.to_dtype(DType::F16)?,
+        suh: suh.flatten_all()?,
+        svh: svh.flatten_all()?,
+        decoded,
         proxy_error,
     })
+}
+
+/// `weight` `(out, in)` on a CUDA device encoded at `bits` on `codebook` against the input Hessian `hessian`
+/// `(in, in)` (x^T x over the calibration rows, over their count); `seed` fixes the sign flips. A side not in 128-wide
+/// blocks is zero-padded to them, as exllamav3 stores such a linear: the trellis, `suh` and `svh` at the padded sizes.
+pub fn encode(
+    weight: &Tensor,
+    hessian: &Tensor,
+    bits: Exl3Bits,
+    codebook: Exl3Codebook,
+    seed: u64,
+) -> Result<Exl3Encoding> {
+    Ok(encode_experts(&[(weight, hessian, seed)], bits, codebook)?
+        .pop()
+        .expect("one encoding a linear"))
+}
+
+/// Linears of one shape (a MoE layer's experts of one projection), each `(weight, hessian, seed)` as [`encode`]
+/// takes them, encoded together: their LDLQs run in lockstep, every row of tiles of all of them through one quantizer
+/// launch, which a small linear's row alone leaves mostly idle. Each encoding is the one [`encode`] gives it.
+pub fn encode_experts(
+    linears: &[(&Tensor, &Tensor, u64)],
+    bits: Exl3Bits,
+    codebook: Exl3Codebook,
+) -> Result<Vec<Exl3Encoding>> {
+    let Some(&(first, _, _)) = linears.first() else {
+        return Ok(Vec::new());
+    };
+    let (n, k) = first.dims2()?;
+    let (n, k) = (n.next_multiple_of(HAD), k.next_multiple_of(HAD));
+    // a batch's Hessians (as given and damped), L, weights, feedback and values in f32
+    let per_linear = (3 * k * k + 3 * k * n) * 4;
+    let batch = (EXPERT_BATCH_BYTES / per_linear).max(1);
+    let mut encodings = Vec::with_capacity(linears.len());
+    for chunk in linears.chunks(batch) {
+        let (prepared, mut ws): (Vec<_>, Vec<_>) = chunk
+            .iter()
+            .map(|&(weight, hessian, seed)| prepare(weight, hessian, bits, codebook, seed))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .unzip();
+        // one linear's weight is its own batch, without the copy a stack makes
+        let w = if ws.len() == 1 {
+            ws.pop().expect("one weight").unsqueeze(0)?
+        } else {
+            Tensor::stack(&ws, 0)?
+        };
+        drop(ws);
+        let l = Tensor::stack(&prepared.iter().map(|p| &p.l).collect::<Vec<_>>(), 0)?;
+        let (q, states) = ldlq_columns(w, &l, bits, codebook)?;
+        drop(l);
+        let qs = if prepared.len() == 1 {
+            vec![q.squeeze(0)?]
+        } else {
+            (0..prepared.len())
+                .map(|e| q.get(e))
+                .collect::<Result<Vec<_>>>()?
+        };
+        drop(q);
+        for ((p, q), states) in prepared.into_iter().zip(qs).zip(states.chunks(k * n)) {
+            encodings.push(finish(p, q, states, bits)?);
+        }
+    }
+    Ok(encodings)
 }
 
 #[cfg(test)]
 mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};
 
-    use super::{encode, output_error};
+    use super::{COLUMN_CHUNK, encode, encode_experts, factor, ldlq, ldlq_columns, output_error};
     use crate::exl3::{Exl3Bits, Exl3Codebook, dense_weight};
+
+    // a linear wider than a chunk of columns runs its LDLQ a chunk at a time, to what one LDLQ over all of them gives
+    #[test]
+    fn ldlq_takes_wide_linears_a_chunk_of_columns_at_a_time() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (k, n, rows) = (256, COLUMN_CHUNK + 256, 1024);
+        let x = Tensor::randn(0f32, 1f32, (rows, k), &device)?;
+        let l =
+            factor(&((x.t()?.matmul(&x)? / rows as f64)? + Tensor::eye(k, DType::F32, &device)?)?)?
+                .unsqueeze(0)?;
+        let w = Tensor::randn(0f32, 1f32, (1, k, n), &device)?;
+        let (q, states) = ldlq(&w, &l, Exl3Bits::Whole(3), Exl3Codebook::Mcg)?;
+        let (q_c, states_c) = ldlq_columns(w, &l, Exl3Bits::Whole(3), Exl3Codebook::Mcg)?;
+        let same = states.iter().zip(&states_c).filter(|(a, b)| a == b).count();
+        assert!(
+            same * 1000 >= states.len() * 999,
+            "{same} of {} states agree",
+            states.len()
+        );
+        let off = (q - q_c)?.abs()?.mean_all()?.to_scalar::<f32>()?;
+        assert!(off < 1e-3, "the values differ by {off} on average");
+        Ok(())
+    }
+
+    // experts encoded in lockstep get the encodings each gets alone
+    #[test]
+    fn experts_encode_together_as_each_alone() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (n, k, rows) = (128, 256, 1024);
+        let experts = (0..3)
+            .map(|_| -> Result<_> {
+                let w = Tensor::randn(0f32, 0.02f32, (n, k), &device)?;
+                let x = Tensor::randn(0f32, 1f32, (rows, k), &device)?;
+                Ok((w, (x.t()?.matmul(&x)? / rows as f64)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let linears = experts
+            .iter()
+            .zip(11u64..)
+            .map(|((w, h), seed)| (w, h, seed))
+            .collect::<Vec<_>>();
+        let together = encode_experts(&linears, Exl3Bits::Whole(3), Exl3Codebook::Mul1)?;
+        for (&(w, h, seed), t) in linears.iter().zip(&together) {
+            let alone = encode(w, h, Exl3Bits::Whole(3), Exl3Codebook::Mul1, seed)?;
+            let words = |e: &super::Exl3Encoding| e.trellis.flatten_all()?.to_vec1::<i16>();
+            assert_eq!(words(&alone)?, words(t)?);
+            assert_eq!(alone.proxy_error, t.proxy_error);
+        }
+        Ok(())
+    }
 
     // a random linear against a Hessian of correlated inputs: each encoding decodes, through the loader's own
     // reconstruction, to a weight whose output error is the one reported, and more bits leave less of it
@@ -560,6 +814,15 @@ mod tests {
         ] {
             let e = encode(&w, &h, bits, codebook, 7)?;
             let decoded = dense_weight(&e.trellis, &e.suh, &e.svh, codebook, DType::F32, &device)?;
+            let off = (&decoded - &e.decoded)?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            let norm = decoded.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(
+                off <= 1e-5 * norm,
+                "{bits:?}: the encoder's decode is off the loader's by {off}"
+            );
             let measured = output_error(&w.t()?.contiguous()?, &decoded.t()?.contiguous()?, &h)?;
             assert!(
                 (measured - e.proxy_error).abs() < 0.05 * e.proxy_error + 1e-6,

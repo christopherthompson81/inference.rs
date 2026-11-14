@@ -1008,9 +1008,35 @@ mod tests {
         [
             a_tensor_dropped_on_a_thread_without_a_context_frees_cleanly,
             selecting_no_rows_gives_an_empty_tensor,
-            index_add_takes_a_destination_at_an_offset
+            index_add_takes_a_destination_at_an_offset,
+            a_view_moves_between_devices_without_its_storage
         ]
     );
+
+    // one matrix of a stack moves to the device and back as its own elements, not the stack's storage beside them
+    fn a_view_moves_between_devices_without_its_storage() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let stack = Tensor::arange(0f32, 24.0, &Device::Cpu)?.reshape((4, 6))?;
+        let up = stack.get(2)?.to_device(&device)?;
+        assert_eq!(up.layout().start_offset(), 0);
+        assert_eq!(up.to_vec1::<f32>()?, stack.get(2)?.to_vec1::<f32>()?);
+        let down = up
+            .unsqueeze(0)?
+            .repeat((3, 1))?
+            .get(1)?
+            .to_device(&Device::Cpu)?;
+        assert_eq!(down.layout().start_offset(), 0);
+        assert_eq!(down.to_vec1::<f32>()?, stack.get(2)?.to_vec1::<f32>()?);
+        // a broadcast view holds fewer elements than it shows, and moves as it is
+        let row = Tensor::arange(0f32, 6.0, &Device::Cpu)?.broadcast_as((3, 6))?;
+        assert_eq!(
+            row.to_device(&device)?.to_vec2::<f32>()?,
+            row.to_vec2::<f32>()?
+        );
+        Ok(())
+    }
 
     // a destination that starts inside its storage (one matrix of a stack) adds as the CPU does
     fn index_add_takes_a_destination_at_an_offset() -> Result<()> {

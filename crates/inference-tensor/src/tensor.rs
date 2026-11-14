@@ -2163,6 +2163,13 @@ impl Tensor {
     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
         if self.device().same_device(device) {
             Ok(self.clone())
+        } else if self
+            .storage()
+            .elem_count()
+            .is_some_and(|held| held > self.elem_count())
+        {
+            // a view of a larger storage (one matrix of a stack) moves only its own elements
+            self.force_contiguous()?.to_device(device)
         } else {
             let storage = match (&*self.storage(), device) {
                 (Storage::Cpu(storage), Device::Cuda(cuda)) => {

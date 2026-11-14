@@ -33,6 +33,7 @@ use crate::{
 mod moe;
 mod mtp;
 pub mod qwen3_vl;
+mod stream;
 
 pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SharedExpertSpec, SparseMoe};
 pub use mtp::{MtpBlock, MtpHead, MtpHeadParts, MtpSpec, StandardMtpBlock};
@@ -42,6 +43,7 @@ pub const MLP: &str = "mlp";
 const DEFAULT_ROPE_THETA: f32 = 10_000.0;
 const MERGED_GATE_UP_CHUNKS: usize = 2;
 const O_PROJ: &str = "o_proj";
+const EXL3_TRELLIS: &str = "trellis";
 // draft tokens per step when `--mtp-n-predict` names none; one MTP layer chained this deep stays well accepted
 pub const DEFAULT_MTP_N_PREDICT: usize = 2;
 // With experts offloaded every verified token's missed experts run on the CPU; one draft ties or beats none on
@@ -1271,10 +1273,26 @@ struct LayerNorms {
 thread_local! {
     // the layer a calibration pass on this thread may stop after (usize::MAX: none)
     static CALIBRATION_STOP: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    static STREAM_LAYERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The message a decoder stack's forward stops with after the layer [`stop_after_layer`] names.
 pub const CALIBRATION_STOPPED: &str = "the calibration pass stopped after its layer";
+
+/// Ends a [`stream_layers`] scope.
+pub struct StreamLayers(bool);
+
+impl Drop for StreamLayers {
+    fn drop(&mut self) {
+        STREAM_LAYERS.with(|stream| stream.set(self.0));
+    }
+}
+
+/// Until the guard drops, a standard decoder stack loaded on this thread builds no layers, only what rebuilds them
+/// one at a time ([`crate::model::LayerStream`]): for a converter that streams the model, never running it whole.
+pub fn stream_layers() -> StreamLayers {
+    StreamLayers(STREAM_LAYERS.with(|stream| stream.replace(true)))
+}
 
 /// Ends a [`stop_after_layer`] scope.
 pub struct CalibrationStop(usize);
@@ -1372,6 +1390,46 @@ pub struct DecoderStack<A = AttentionBlock, F = Ffn> {
     has_full_layers: bool,
     pub device: Device,
     pub mapper: Box<dyn DeviceMapper + Send + Sync>,
+    // a standard stack rebuilds any one of its layers on a device of a converter's choosing
+    rebuild: Option<stream::LayerRebuild>,
+}
+
+// one layer from its weights under `vb`: the builder's halves and the norms around them
+fn build_layer<B: LayerBuilder>(
+    builder: &B,
+    shape: &StackShape<'_>,
+    load: &LayerLoad<'_>,
+    vb: ShardedVarBuilder,
+) -> Result<DecoderLayer<B::Attention, B::Ffn>> {
+    let (self_attn, mlp) = builder.build(load, vb.clone())?;
+    let norm = |name| {
+        Norm::new(
+            shape.norm,
+            shape.hidden_size,
+            shape.rms_norm_eps,
+            load.mapper.set_device(load.layer_idx, vb.pp(name), false),
+        )
+    };
+    let names = shape.norm_names;
+    let post = match (names.input, names.post_attn, names.post_ffn, names.pre_ffn) {
+        (_, Some(post_attn), Some(post_ffn), Some(_))
+        | (None, Some(post_attn), Some(post_ffn), None) => {
+            Some((norm(post_attn)?, norm(post_ffn)?))
+        }
+        (Some(_), None, None, _) => None,
+        _ => inference_tensor::bail!(
+            "a layer is pre-norm, a sandwich naming both post norms and pre_ffn, or post-norm with both post norms only"
+        ),
+    };
+    Ok(DecoderLayer {
+        self_attn,
+        mlp,
+        norms: LayerNorms {
+            input: names.input.map(norm).transpose()?,
+            pre_ffn: names.pre_ffn.map(norm).transpose()?,
+            post,
+        },
+    })
 }
 
 impl DecoderStack {
@@ -1415,12 +1473,20 @@ impl DecoderStack {
         }
         let dtype = vb_m.dtype();
         let vb_rope = vb_m.clone();
-        Self::new_with(
+        let rebuild = stream::LayerRebuild {
+            spec: spec.clone(),
+            vb_m: vb_m.clone(),
+            is_gptx,
+            attention: *attention_mechanism,
+            dtype,
+        };
+        let mut stack = Self::new_with_layers(
             spec.shape(),
             vb_m,
             tied_lm_head,
             normal_loading_metadata,
             attention_mechanism,
+            !STREAM_LAYERS.get(),
             |mapper, real_device| {
                 let ropes_of = |kind: &RopeKind| {
                     crate::device_map::per_layer_device(
@@ -1439,7 +1505,9 @@ impl DecoderStack {
                     local_ropes: spec.local_rope.as_ref().map(ropes_of).transpose()?,
                 })
             },
-        )
+        )?;
+        stack.rebuild = Some(rebuild);
+        Ok(stack)
     }
 }
 
@@ -1451,6 +1519,26 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         tied_lm_head: Option<ShardedVarBuilder>,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: &AttentionImplementation,
+        make: impl FnOnce(&dyn DeviceMapper, &Device) -> Result<B>,
+    ) -> Result<Self> {
+        Self::new_with_layers(
+            shape,
+            vb_m,
+            tied_lm_head,
+            normal_loading_metadata,
+            attention_mechanism,
+            true,
+            make,
+        )
+    }
+
+    fn new_with_layers<B: LayerBuilder<Attention = A, Ffn = F>>(
+        shape: StackShape<'_>,
+        vb_m: ShardedVarBuilder,
+        tied_lm_head: Option<ShardedVarBuilder>,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: &AttentionImplementation,
+        with_layers: bool,
         make: impl FnOnce(&dyn DeviceMapper, &Device) -> Result<B>,
     ) -> Result<Self> {
         // one sliding mask serves every sliding layer
@@ -1493,7 +1581,11 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         let builder = make(&*mapper, real_device)?;
         let vb_l = vb_m.pp(names.layers);
         let layers = NiceProgressBar::<_, 'b'>(
-            0..shape.layer_windows.len(),
+            0..if with_layers {
+                shape.layer_windows.len()
+            } else {
+                0
+            },
             "Loading repeating layers",
             &normal_loading_metadata.multi_progress,
         )
@@ -1508,35 +1600,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 device,
                 attention: attention_mechanism,
             };
-            let vb = vb_l.pp(layer_idx);
-            let (self_attn, mlp) = builder.build(&load, vb.clone())?;
-            let norm = |name| {
-                Norm::new(
-                    shape.norm,
-                    shape.hidden_size,
-                    shape.rms_norm_eps,
-                    mapper.set_device(layer_idx, vb.pp(name), false),
-                )
-            };
-            let names = shape.norm_names;
-            let post = match (names.input, names.post_attn, names.post_ffn, names.pre_ffn) {
-                (_, Some(post_attn), Some(post_ffn), Some(_)) | (None, Some(post_attn), Some(post_ffn), None) => {
-                    Some((norm(post_attn)?, norm(post_ffn)?))
-                }
-                (Some(_), None, None, _) => None,
-                _ => inference_tensor::bail!(
-                    "a layer is pre-norm, a sandwich naming both post norms and pre_ffn, or post-norm with both post norms only"
-                ),
-            };
-            Ok(DecoderLayer {
-                self_attn,
-                mlp,
-                norms: LayerNorms {
-                    input: names.input.map(norm).transpose()?,
-                    pre_ffn: names.pre_ffn.map(norm).transpose()?,
-                    post,
-                },
-            })
+            build_layer(&builder, &shape, &load, vb_l.pp(layer_idx))
         })?;
         let norm = Norm::new(
             shape.norm,
@@ -1556,6 +1620,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             has_full_layers: shape.layer_windows.iter().any(Option::is_none),
             device: real_device.clone(),
             mapper,
+            rebuild: None,
         })
     }
 
@@ -1644,6 +1709,11 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         ctx: &mut ModelForwardContext<'_>,
         after_layer: &dyn Fn(usize, Tensor) -> Result<Tensor>,
     ) -> Result<Tensor> {
+        if self.layers.is_empty() && self.rebuild.is_some() {
+            inference_tensor::bail!(
+                "this decoder stack was loaded to stream its layers, and holds none to run"
+            );
+        }
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             let layer_mask = match (&masks.sliding, &masks.full) {
@@ -1851,7 +1921,12 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         max_position_embeddings: usize,
         cfg: ModelConfigMetadata,
     ) -> Result<Self> {
-        let lm_head = if shape.tie_word_embeddings {
+        // an EXL3 conversion encodes a tied head as its own `lm_head`, which exllamav3 runs in place of the embedding
+        let own_head = matches!(
+            shape.quantization_config,
+            Some(inference_quant::QuantizedConfig::Exl3 { .. })
+        ) && vb_lm_head.contains_tensor(EXL3_TRELLIS);
+        let lm_head = if shape.tie_word_embeddings && !own_head {
             if shape.lm_head_bias {
                 inference_tensor::bail!("a tied lm_head with a bias is not supported");
             }
@@ -2115,6 +2190,12 @@ impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin 
 impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
+    }
+    fn layer_stream(&self) -> Option<&dyn crate::model::LayerStream> {
+        self.stack
+            .rebuild
+            .is_some()
+            .then_some(self as &dyn crate::model::LayerStream)
     }
     fn joint_decision(
         &self,
