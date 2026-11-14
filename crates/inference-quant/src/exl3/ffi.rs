@@ -44,6 +44,56 @@ inference_tensor::kernel_library! {
     path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT_EXL3").unwrap_or("");
     id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT_EXL3").unwrap_or("");
     unsafe extern "C" {
+        /// One row `x` (f16, or bf16 with `x_bf16`) through `jobs` trellises of one k (`b`, `suh`, `svh`, `out`, `n`
+        /// apiece) into each `out` (f32, f16 or bf16 by `out_kind`), rotated by its `suh`/`svh` and the Hadamards
+        /// inside; `ws` is the stream's zeroed workspace of `ws_floats` words, its counters left zeroed. 0 when
+        /// launched, -1 for a shape, rate or workspace it does not take.
+        pub(crate) fn launch_exl3_dgemv(
+            x: *const c_void,
+            x_bf16: bool,
+            jobs: i32,
+            b: *const *const u16,
+            suh: *const *const f16,
+            svh: *const *const f16,
+            out: *const *mut c_void,
+            n: *const i32,
+            size_k: i32,
+            tile_u16: i32,
+            cb: i32,
+            ws: *mut f32,
+            ws_floats: i64,
+            out_kind: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// One token's routed experts through the decode kernels: gate, up (silu) and down, each slot weighted by
+        /// `rw` and summed in order into `out` (`hidden`, of `out_kind`); `x` f16 or bf16, `sel` i64 or u32, `rw` f16
+        /// or f32. Each table holds `experts` trellis, then suh, then svh addresses. `ws` as for launch_exl3_dgemv.
+        /// 0 when launched, -1 for shapes, rates or a workspace it does not take.
+        pub(crate) fn launch_exl3_dmoe(
+            x: *const c_void,
+            x_bf16: bool,
+            sel: *const c_void,
+            sel_u32: bool,
+            rw: *const c_void,
+            rw_f32: bool,
+            gate: *const i64,
+            up: *const i64,
+            down: *const i64,
+            experts: i32,
+            topk: i32,
+            hidden: i32,
+            inter: i32,
+            gu_tile_u16: i32,
+            d_tile_u16: i32,
+            cb: i32,
+            ws: *mut f32,
+            ws_floats: i64,
+            out: *mut c_void,
+            out_kind: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
         /// C (`m x n`, f16 or with `c_fp32` f32) = A (`m x k`, f16) times the trellis (`k/16 x n/16 x tile_u16`), A
         /// rotated by `suh` and the Hadamard into `a_had` (A's size) on the way in, C by the Hadamard and `svh` on the
         /// way out. Returns the kernel that ran, 0 for nothing to do, -1 when no kernel fits.

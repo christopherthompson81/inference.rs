@@ -31,6 +31,8 @@ pub struct Exl3Layer {
     // as the first of a fused projection group (q of q, k, v): the group's device tables, built on first use
     group: std::sync::Mutex<Option<GroupTables>>,
     group_tuned: AtomicU8,
+    // the decode GEMV's workspace, its stream's
+    dgemv_scratch: Option<Tensor>,
 }
 
 // the device tables of one input through several EXL3 layers: their trellis, suh and svh addresses and widths
@@ -52,12 +54,74 @@ const GROUP_MAX_ROWS: usize = 16;
 // mul1 tensors up to this rate (a half-integer one counting as the next whole) take the int8 GEMV alone, faster
 // than any fused launch
 const INT8_MAX_K: usize = 5;
+// the decode GEMV's output kinds (exl3_dgemv_instance_exl3.cu) and workspace words (16 MB)
+const DGEMV_WS_FLOATS: usize = 4 << 20;
+const DGEMV_OUT_F32: i32 = 0;
+const DGEMV_MAX_JOBS: usize = 4;
+const DGEMV_OUT_F16: i32 = 1;
+const DGEMV_OUT_BF16: i32 = 2;
 
 // the launcher's autotune buckets: powers of two up to 16 rows, then 16-row steps capped at 64
 fn tune_bucket(m: usize) -> u8 {
     match m.max(2) {
         m @ ..=16 => m.next_power_of_two().trailing_zeros() as u8,
         m => 4 + m.div_ceil(16).min(4) as u8 - 1,
+    }
+}
+
+// one zeroed workspace per stream, made by the first layer built on it (outside any capture) and never regrown, since
+// captured graphs hold its address
+static DGEMV_WORKSPACES: std::sync::Mutex<Vec<(usize, Tensor)>> = std::sync::Mutex::new(Vec::new());
+
+fn dgemv_workspace(device: &Device) -> Result<Option<Tensor>> {
+    let Device::Cuda(dev) = device else {
+        return Ok(None);
+    };
+    let stream = dev.cuda_stream().cu_stream() as usize;
+    let mut all = DGEMV_WORKSPACES.lock().unwrap();
+    if let Some((_, ws)) = all.iter().find(|(s, _)| *s == stream) {
+        return Ok(Some(ws.clone()));
+    }
+    let ws = Tensor::zeros(DGEMV_WS_FLOATS, DType::F32, device)?;
+    all.push((stream, ws.clone()));
+    Ok(Some(ws))
+}
+
+// a decode GEMV output of `n` in `out` and its device address
+//
+// SAFETY: the caller's kernel writes every element before anything reads it
+unsafe fn dgemv_output(
+    dev: &inference_tensor::CudaDevice,
+    out: DType,
+    n: usize,
+) -> Result<(CudaStorage, u64)> {
+    // SAFETY: as the caller promises
+    Ok(unsafe {
+        match out {
+            DType::F32 => {
+                let y = dev.alloc::<f32>(n)?;
+                let p = slice_ptr(&y, 0).0;
+                (CudaStorage::wrap_cuda_slice(y, dev.clone()), p)
+            }
+            DType::F16 => {
+                let y = dev.alloc::<f16>(n)?;
+                let p = slice_ptr(&y, 0).0;
+                (CudaStorage::wrap_cuda_slice(y, dev.clone()), p)
+            }
+            _ => {
+                let y = dev.alloc::<half::bf16>(n)?;
+                let p = slice_ptr(&y, 0).0;
+                (CudaStorage::wrap_cuda_slice(y, dev.clone()), p)
+            }
+        }
+    })
+}
+
+fn dgemv_out_kind(out: DType) -> i32 {
+    match out {
+        DType::F32 => DGEMV_OUT_F32,
+        DType::F16 => DGEMV_OUT_F16,
+        _ => DGEMV_OUT_BF16,
     }
 }
 
@@ -73,6 +137,7 @@ impl Exl3Layer {
         ffi::ensure_loaded().map_err(inference_tensor::Error::msg)?;
         let d = trellis.dims();
         let features = (d[0] * 16, d[1] * 16);
+        let dgemv_scratch = dgemv_workspace(trellis.device())?;
         Ok(Self {
             trellis: trellis.to_dtype(DType::I16)?.contiguous()?,
             suh: suh.to_dtype(DType::F16)?.contiguous()?,
@@ -84,7 +149,115 @@ impl Exl3Layer {
             tuned: AtomicU8::new(0),
             group: std::sync::Mutex::new(None),
             group_tuned: AtomicU8::new(0),
+            dgemv_scratch,
         })
+    }
+
+    // one unpadded row through the decode GEMV, in `out` (f32, f16, or bf16 from a bf16 `x`); None where it does
+    // not run
+    fn dgemv(&self, x: &Tensor, out: DType) -> Result<Option<Tensor>> {
+        Ok(Self::dgemv_jobs(&[self], x, out)?.map(|mut ys| ys.remove(0)))
+    }
+
+    // one row through `layers` (one k, at most DGEMV_MAX_JOBS) in one decode GEMV launch, each output `(1, n)` in
+    // `out`; None where it does not run
+    fn dgemv_jobs(layers: &[&Self], x: &Tensor, out: DType) -> Result<Option<Vec<Tensor>>> {
+        let first = layers[0];
+        let (Device::Cuda(dev), Some(scratch)) = (x.device(), &first.dgemv_scratch) else {
+            return Ok(None);
+        };
+        let (k, _, words) = first.dims();
+        // mul1 at low rates keeps the int8 GEMV, faster than f16 MMA
+        let int8 = first.codebook == Exl3Codebook::Mul1 && words.div_ceil(16) <= INT8_MAX_K;
+        if layers.len() > DGEMV_MAX_JOBS
+            || int8
+            || layers.iter().any(|l| {
+                let (lk, _, lw) = l.dims();
+                l.padded() || lk != k || lw != words || l.codebook != first.codebook
+            })
+        {
+            return Ok(None);
+        }
+        let x = x.contiguous()?;
+        let x_bf16 = x.dtype() == DType::BF16;
+        let (x_s, x_l) = x.storage_and_layout();
+        let (w_s, w_l) = scratch.storage_and_layout();
+        let (Storage::Cuda(x_c), Storage::Cuda(w_c)) = (&*x_s, &*w_s) else {
+            inference_tensor::bail!("an EXL3 layer's tensors live on CUDA");
+        };
+        let (xp, _x) = if x_bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset())
+        };
+        let (sp, _w) = slice_ptr(w_c.as_cuda_slice::<f32>()?, w_l.start_offset());
+        let held = layers
+            .iter()
+            .map(|l| {
+                let (t, u, v) = (
+                    l.trellis.storage_and_layout(),
+                    l.suh.storage_and_layout(),
+                    l.svh.storage_and_layout(),
+                );
+                (t, u, v)
+            })
+            .collect::<Vec<_>>();
+        let mut guards = Vec::new();
+        let (mut b, mut suh, mut svh) = (vec![], vec![], vec![]);
+        for ((t_s, t_l), (u_s, u_l), (v_s, v_l)) in &held {
+            let (Storage::Cuda(t_c), Storage::Cuda(u_c), Storage::Cuda(v_c)) =
+                (&**t_s, &**u_s, &**v_s)
+            else {
+                inference_tensor::bail!("an EXL3 layer's tensors live on CUDA");
+            };
+            let (bp, gb) = slice_ptr(t_c.as_cuda_slice::<i16>()?, t_l.start_offset());
+            let (up, gu) = slice_ptr(u_c.as_cuda_slice::<f16>()?, u_l.start_offset());
+            let (vp, gv) = slice_ptr(v_c.as_cuda_slice::<f16>()?, v_l.start_offset());
+            guards.extend([gb, gu, gv]);
+            b.push(bp);
+            suh.push(up);
+            svh.push(vp);
+        }
+        let (mut outs, mut yp, mut ns) = (vec![], vec![], vec![]);
+        for l in layers {
+            let n = l.dims().1;
+            // SAFETY: the kernel writes every output
+            let (y, p) = unsafe { dgemv_output(dev, out, n)? };
+            outs.push((y, n));
+            yp.push(p);
+            ns.push(n as i32);
+        }
+        // SAFETY: the pointers are the layers' live device tensors (held above; trellis k/16 x n/16 x words, suh k,
+        // svh n), x k, the stream's workspace and each output n, all on this device's stream
+        let ran = unsafe {
+            ffi::launch_exl3_dgemv(
+                xp as *const c_void,
+                x_bf16,
+                layers.len() as i32,
+                b.as_ptr() as *const *const u16,
+                suh.as_ptr() as *const *const f16,
+                svh.as_ptr() as *const *const f16,
+                yp.as_ptr() as *const *mut c_void,
+                ns.as_ptr(),
+                k as i32,
+                words as i32,
+                first.codebook as i32,
+                sp as *mut f32,
+                DGEMV_WS_FLOATS as i64,
+                dgemv_out_kind(out),
+                dev.cuda_stream().cu_stream(),
+            )
+        };
+        drop((_x, _w, guards));
+        drop(held);
+        if ran < 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            outs.into_iter()
+                .map(|(storage, n)| Tensor::from((Storage::Cuda(storage), Shape::from((1, n)))))
+                .collect(),
+        ))
     }
 
     fn dims(&self) -> (usize, usize, usize) {
@@ -193,6 +366,39 @@ impl Exl3Layer {
         // built at any size, so a prefill builds what the decode graphs, captured later, launch with
         if rows > GROUP_MAX_ROWS {
             return Ok(None);
+        }
+        if rows == 1 {
+            let out = match (self.dtype, xs.dtype()) {
+                (DType::F16, _) => DType::F16,
+                (_, DType::BF16) => DType::BF16,
+                _ => DType::F32,
+            };
+            let row = xs.reshape((1, k))?;
+            let row = if out == DType::BF16 {
+                row
+            } else {
+                row.to_dtype(DType::F16)?
+            };
+            drop(group);
+            if let Some(ys) = Self::dgemv_jobs(&layers, &row, out)? {
+                let lead = &xs.dims()[..xs.rank() - 1];
+                return ys
+                    .into_iter()
+                    .zip(&layers)
+                    .map(|(y, l)| {
+                        let mut y = y.to_dtype(xs.dtype())?;
+                        let mut dims = lead.to_vec();
+                        dims.push(l.dims().1);
+                        y = y.reshape(dims)?;
+                        if let Some(bias) = &l.bias {
+                            y = y.broadcast_add(&bias.to_dtype(xs.dtype())?)?;
+                        }
+                        Ok(y)
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(Some);
+            }
+            group = self.group.lock().unwrap();
         }
         let group = group.as_ref().unwrap();
         // bf16 activations go in and come out as they are; the kernels round them through f16 and f32 alike
@@ -443,6 +649,28 @@ impl QuantMethod for Exl3Layer {
         let (k, _, _) = self.dims();
         let (in_features, n) = self.features;
         let rows = x.elem_count() / in_features;
+        if rows == 1 {
+            let out = match (self.dtype, x.dtype()) {
+                (DType::F16, _) => DType::F16,
+                (_, DType::BF16) => DType::BF16,
+                _ => DType::F32,
+            };
+            let row = x.reshape((1, in_features))?;
+            let row = if out == DType::BF16 {
+                row
+            } else {
+                row.to_dtype(DType::F16)?
+            };
+            if let Some(y) = self.dgemv(&row, out)? {
+                let mut y = y.to_dtype(x.dtype())?;
+                if let Some(bias) = &self.bias {
+                    y = y.broadcast_add(&bias.to_dtype(x.dtype())?)?;
+                }
+                let mut out_dims = dims[..dims.len() - 1].to_vec();
+                out_dims.push(n);
+                return y.reshape(out_dims);
+            }
+        }
         let x16 = x
             .reshape((rows, in_features))?
             .to_dtype(DType::F16)?
@@ -549,6 +777,8 @@ pub struct Exl3Experts {
     tuned: AtomicU8,
     // the m buckets the grouped path has launched outside a capture
     grouped_tuned: AtomicU8,
+    // the decode kernels' workspace, its stream's
+    dgemv_ws: Option<Tensor>,
 }
 
 // past this many slots (outside a capture) each expert multiplies its tokens' rows together, in groups of at most
@@ -602,6 +832,7 @@ impl Exl3Experts {
             dtype,
             tuned: AtomicU8::new(0),
             grouped_tuned: AtomicU8::new(0),
+            dgemv_ws: dgemv_workspace(&device)?,
         })
     }
 
@@ -664,6 +895,11 @@ impl Exl3Experts {
             weights.to_dtype(DType::F16)?
         }
         .contiguous()?;
+        if tokens == 1
+            && let Some(ys) = Self::dmoe(gate, up, down, &x, &sel, &rw)?
+        {
+            return Ok(Some(ys));
+        }
         // SAFETY: ffi takes plain sizes
         let ctr_len = unsafe {
             ffi::exl3_moe_ctr_len(slots_max as i32, tokens as i32, inter as i32, hidden as i32)
@@ -797,6 +1033,102 @@ impl Exl3Experts {
         Ok(Some(Tensor::from((
             Storage::Cuda(storage),
             Shape::from((tokens, hidden)),
+        ))))
+    }
+
+    // one token's experts through the decode kernels: `x` (hidden, f16 or bf16), `sel` (topk, u32 or i64), `rw`
+    // (topk, f32 or f16), out `(1, hidden)` bf16 for bf16 `x`, else f32; None where they do not run
+    fn dmoe(
+        gate: &Self,
+        up: &Self,
+        down: &Self,
+        x: &Tensor,
+        sel: &Tensor,
+        rw: &Tensor,
+    ) -> Result<Option<Tensor>> {
+        let (Device::Cuda(dev), Some(ws)) = (x.device(), &gate.dgemv_ws) else {
+            return Ok(None);
+        };
+        let ((hidden, inter, gu_words), (_, _, d_words)) = (gate.dims(), down.dims());
+        let topk = sel.elem_count();
+        let x_bf16 = x.dtype() == DType::BF16;
+        let out = if x_bf16 { DType::BF16 } else { DType::F32 };
+        let (x_s, x_l) = x.storage_and_layout();
+        let (s_s, s_l) = sel.storage_and_layout();
+        let (r_s, r_l) = rw.storage_and_layout();
+        let (g_s, g_l) = gate.tables.storage_and_layout();
+        let (u_s, u_l) = up.tables.storage_and_layout();
+        let (d_s, d_l) = down.tables.storage_and_layout();
+        let (w_s, w_l) = ws.storage_and_layout();
+        let (
+            Storage::Cuda(x_c),
+            Storage::Cuda(s_c),
+            Storage::Cuda(r_c),
+            Storage::Cuda(g_c),
+            Storage::Cuda(u_c),
+            Storage::Cuda(d_c),
+            Storage::Cuda(w_c),
+        ) = (&*x_s, &*s_s, &*r_s, &*g_s, &*u_s, &*d_s, &*w_s)
+        else {
+            inference_tensor::bail!("EXL3 experts' tensors live on CUDA");
+        };
+        let (xp, _x) = if x_bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset())
+        };
+        let sel_u32 = sel.dtype() == DType::U32;
+        let (sp, _s) = if sel_u32 {
+            slice_ptr(s_c.as_cuda_slice::<u32>()?, s_l.start_offset())
+        } else {
+            slice_ptr(s_c.as_cuda_slice::<i64>()?, s_l.start_offset())
+        };
+        let rw_f32 = rw.dtype() == DType::F32;
+        let (rp, _r) = if rw_f32 {
+            slice_ptr(r_c.as_cuda_slice::<f32>()?, r_l.start_offset())
+        } else {
+            slice_ptr(r_c.as_cuda_slice::<f16>()?, r_l.start_offset())
+        };
+        let (gp, _g) = slice_ptr(g_c.as_cuda_slice::<i64>()?, g_l.start_offset());
+        let (up_, _u) = slice_ptr(u_c.as_cuda_slice::<i64>()?, u_l.start_offset());
+        let (dp, _d) = slice_ptr(d_c.as_cuda_slice::<i64>()?, d_l.start_offset());
+        let (wp, _w) = slice_ptr(w_c.as_cuda_slice::<f32>()?, w_l.start_offset());
+        // SAFETY: the kernels write every output
+        let (y, yp) = unsafe { dgemv_output(dev, out, hidden)? };
+        // SAFETY: the pointers are the live device buffers above (x hidden, sel and rw topk, the tables 3 x experts
+        // addresses of the layers' own tensors, the stream's workspace, out hidden), all on this device's stream
+        let ran = unsafe {
+            ffi::launch_exl3_dmoe(
+                xp as *const c_void,
+                x_bf16,
+                sp as *const c_void,
+                sel_u32,
+                rp as *const c_void,
+                rw_f32,
+                gp as *const i64,
+                up_ as *const i64,
+                dp as *const i64,
+                gate.trellis.len() as i32,
+                topk as i32,
+                hidden as i32,
+                inter as i32,
+                gu_words as i32,
+                d_words as i32,
+                gate.codebook as i32,
+                wp as *mut f32,
+                DGEMV_WS_FLOATS as i64,
+                yp as *mut c_void,
+                dgemv_out_kind(out),
+                dev.cuda_stream().cu_stream(),
+            )
+        };
+        drop((_x, _s, _r, _g, _u, _d, _w));
+        if ran < 0 {
+            return Ok(None);
+        }
+        Ok(Some(Tensor::from((
+            Storage::Cuda(y),
+            Shape::from((1, hidden)),
         ))))
     }
 
@@ -1060,6 +1392,7 @@ mod tests {
     // of the largest output: f16 accumulation measures 3.4e-4 .. 8e-4, int8 activations (mul1 at m <= 2) 6e-3
     const F16_BOUND: f32 = 2e-3;
     const INT8_BOUND: f32 = 1.5e-2;
+    const BF16_BOUND: f32 = 6e-3;
 
     fn lcg(n: usize, seed: u32) -> Vec<u32> {
         let mut s = seed;
@@ -1279,6 +1612,106 @@ mod tests {
             ratios.push((tokens, relative_error(&actual, &expected)?));
         }
         assert!(ratios.iter().all(|r| r.1 < F16_BOUND), "{ratios:?}");
+        Ok(())
+    }
+
+    // one bf16 row through the decode GEMV at 2 to 8 bpw (k split eight ways, three column groups) against the
+    // reconstructed weight, and the same bits on a second run
+    #[test]
+    fn the_decode_gemv_matches_the_reconstructed_weight_and_repeats() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (k, n) = (1024, 384);
+        let mut ratios = Vec::new();
+        for (words, codebook, seed) in [
+            (32, Exl3Codebook::ThreeInst, 41),
+            (48, Exl3Codebook::ThreeInst, 42),
+            (64, Exl3Codebook::ThreeInst, 43),
+            (48, Exl3Codebook::Mcg, 44),
+            (32, Exl3Codebook::Mcg, 45),
+            (96, Exl3Codebook::Mul1, 46),
+            (80, Exl3Codebook::ThreeInst, 47),
+            (96, Exl3Codebook::ThreeInst, 48),
+            (128, Exl3Codebook::Mcg, 49),
+        ] {
+            let (trellis, suh, svh) = random_linear(k, n, words, seed)?;
+            let weight = dense_weight(&trellis, &suh, &svh, codebook, DType::F32, &Device::Cpu)?;
+            let layer = Exl3Layer::new_on_device(
+                trellis.to_device(&device)?,
+                suh.to_device(&device)?,
+                svh.to_device(&device)?,
+                codebook,
+                None,
+                DType::BF16,
+            )?;
+            let x = random_rows(1, k, seed + 30)?;
+            let xb = x.to_dtype(DType::BF16)?.to_device(&device)?;
+            let first = layer.forward_raw(&xb)?;
+            let second = layer.forward_raw(&xb)?;
+            assert_eq!(first.dtype(), DType::BF16);
+            assert_eq!(
+                first.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+                second.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+                "{codebook:?} {words}: runs differ"
+            );
+            let expected = x
+                .to_dtype(DType::BF16)?
+                .to_dtype(DType::F32)?
+                .matmul(&weight.t()?)?;
+            ratios.push((codebook, words, relative_error(&first, &expected)?));
+        }
+        // bf16 output rounding (2^-9) on top of the f16 operands
+        assert!(ratios.iter().all(|r| r.2 < BF16_BOUND), "{ratios:?}");
+        Ok(())
+    }
+
+    // m = 1 times by shape, to see how the kernels scale: run under nsys for their own durations
+    #[test]
+    #[ignore = "a benchmark"]
+    fn decode_matmul_times_by_shape() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        const REPS: usize = 200;
+        for (k, n, words) in [
+            (2048, 512, 48),
+            (2048, 1536, 48),
+            (4096, 2048, 48),
+            (4096, 8192, 48),
+            (8192, 8192, 48),
+            (2048, 12288, 48),
+            (768, 16384, 48),
+            (2048, 151936, 96),
+        ] {
+            let (t, u, v) = random_linear(k, n, words, 7)?;
+            let layer = Exl3Layer::new_on_device(
+                t.to_device(&device)?,
+                u.to_device(&device)?,
+                v.to_device(&device)?,
+                Exl3Codebook::ThreeInst,
+                None,
+                DType::F16,
+            )?;
+            let x = random_rows(1, k, 3)?
+                .to_dtype(DType::F16)?
+                .to_device(&device)?;
+            layer.forward_raw(&x)?;
+            device.synchronize()?;
+            let start = std::time::Instant::now();
+            for _ in 0..REPS {
+                layer.forward_raw(&x)?;
+            }
+            device.synchronize()?;
+            let us = start.elapsed().as_secs_f64() * 1e6 / REPS as f64;
+            let mb = (k * n * words / 128) as f64 / 1e6;
+            eprintln!(
+                "{k} x {n}: {us:.1} us a call, {mb:.1} MB, {:.0} GB/s",
+                mb * 1e3 / us
+            );
+        }
         Ok(())
     }
 
