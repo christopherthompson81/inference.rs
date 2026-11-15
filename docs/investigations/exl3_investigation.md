@@ -1431,3 +1431,40 @@ busy from calibration through encoding. Fix: before a layer builds, a thread rea
 (runs from the safetensors headers, neighbours within 1 MiB merged, 8 MiB reads), so its pages are cached while the
 GPU works; the next read-ahead waits for the last, keeping reads sequential. Expected ~10-15% of a conversion from
 slow storage; not measured yet (the running conversion predates it).
+
+## Run 49 - 2026-11-15 11:50
+
+Question: Qwen3.8 27B (dense; fits the 3090) converted by ours at 4.0 mul1, head 6, against the GGUF recipe A (IQ4_KS
+bulk, 14.06 GiB, KLD 0.0169 by ik_llama.cpp) on the same BF16 base.
+
+```
+inference quantize exl3 -m <Qwen/Qwen3.8-27B BF16, USB drive> --calibration-file <exllamav3 cal text, 484K tokens> --bits 4.0
+  1 h 12 min (60-70 s a layer, 96 s for the first; Run 48's idle included), lowest MemAvailable 82.7 GB
+  output 16.30 GiB: layers 11.34 (+0.05 dense), embed 2.37 (BF16), head 0.89, vision 0.86 and MTP 0.79 (BF16)
+examples perplexity <model> --file wiki.test.raw --kld-base Qwen3.8-27B-gguf/bf16-wiki-c512-ch40.kld (40 x 512)
+                 PPL (base 5.9281)  KLD mean  median   p99     same top-1
+  EXL3 4.0 ours  5.9827             0.01244   0.00428  0.1338  94.88%
+  recipe A       5.9488             0.01700   0.00689  0.1820  94.48%
+```
+
+Our harness reproduces recipe A's 0.0169. EXL3 is 27% lower in mean KLD and lower at every quantile, with more
+top-1 agreement, at a 0.6 GiB larger text model, nearly all of it the BF16 embedding (lookups only). Its PPL is
+higher (PPL is not the measure: both sides of the base). Next: decode and DFlash 2 against recipe A.
+
+## Run 50 - 2026-11-15 12:20
+
+Question: Run 49's EXL3 4.0 against recipe A in decode, plain and with DFlash 2 (recipe A's serving setup: q3 KV,
+incoai drafter at q4k, 7 drafts).
+
+```
+rtbench.sh <tag> --pa-cache-type q3 <model> [--mtp-model <DFlash2 drafter> --mtp-n-predict 7 --mtp-draft-isq q4k]
+tok/s                       wiki    code    essay   accept (mean len)
+EXL3 4.0, plain             43.7    43.8    43.8
+recipe A, plain             36.9    37.4    40.0
+EXL3 4.0, DFlash 2 x7       133.9   152.2   75.3    50.8% (4.56)
+recipe A, DFlash 2 x7       181.8   216.3   107.8   48.6% (4.40)
+```
+
+Plain decode: EXL3 leads by ~15%. With DFlash 2 it trails by ~30% at the same acceptance, so the 8-row verify step is
+where EXL3 loses: recipe A's tiled IQ4_KS verify path (qwen38 #494/#503) against our m <= 8 GEMV, and possibly the
+6-bit head at 8 rows on exllamav3's kernel (Run 39 kept it there; this head is 248K x 5120). Not yet profiled.
