@@ -476,8 +476,12 @@ impl<'a> ModelForwardContext<'a> {
     /// discards this forward's logits.
     pub fn lm_head(&self, head: &dyn QuantMethod, xs: &Tensor) -> inference_tensor::Result<Tensor> {
         if self.needs_logits() {
-            // a GGUF head sums in f32 whatever it reads, so an f32 input keeps the logits from rounding to bf16
-            if head.get_qtensor().is_some() && xs.dtype() != DType::F32 {
+            // GGUF and EXL3 heads sum in f32 whatever they read, so an f32 input keeps the logits from rounding to bf16
+            #[cfg(feature = "cuda")]
+            let exl3 = head.exl3_layer().is_some();
+            #[cfg(not(feature = "cuda"))]
+            let exl3 = false;
+            if (head.get_qtensor().is_some() || exl3) && xs.dtype() != DType::F32 {
                 return head.forward(&xs.to_dtype(DType::F32)?);
             }
             return head.forward(xs);

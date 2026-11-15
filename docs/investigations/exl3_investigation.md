@@ -1202,3 +1202,39 @@ head at 6 rows, us a call (nsys, code task)    exllamav3 trellis GEMM 466   ours
 12% slower, twice a step (target and drafter), and greedy DFlash output diverged from plain greedy decode at the same
 characters as before (code 320, wiki 103). The head was not the cause; that leaves the speculative GDN recurrence
 and multi-query attention. Reverted.
+
+## Run 40 - 2026-11-15 00:10
+
+Where greedy DFlash output parts from plain greedy decode (Qwen3.6 EXL3, 5 drafts, temperature 0, top-2 logprobs
+per token; `greedy_lp.sh`). The real-checkpoint MTP test (`qwen3_5_mtp.rs`) already allows this: the verify kernels
+round differently from decode, so drafting may only swap a near-tied top two (TIE_MARGIN 0.25).
+
+```
+                 first differing token   plain top two            DFlash top two           max top-logprob shift before
+code             70                      -0.8496 / -0.8496        -0.6994 / -0.9494        0.145
+wiki             19                      -0.5824 / -0.8324        -0.6396 / -0.7646        0.053
+```
+
+Both are near ties; the code one is exact. The gaps (0.25, 0.125, 0) are bf16 steps at these logit magnitudes. An
+EXL3 head gave bf16 logits, while GGUF heads already read f32 (`ForwardContext::lm_head`) so theirs do not round. EXL3
+heads now read f32 too; decode in alternating pairs is 193.5/193.9 tok/s with bf16 logits against 193.6/193.9.
+
+With f32 logits:
+
+```
+                 first differing token   plain top two            DFlash top two           max top-logprob shift before
+code             40                      -0.7640 / -0.7688        -0.7431 / -0.8151        0.092
+wiki             19                      -0.5998 / -0.8097        -0.6274 / -0.7785        0.056
+```
+
+Still near ties, and the logprobs move by up to 0.09 before the split: far past a kernel's rounding (~1e-3 a layer).
+That is Run 35's sensitivity again: any small numeric difference anywhere in the forward grows to ~0.05-0.1 nats at
+the output. No one component is the cause. It is the sum of the verify forward's parts that are not the
+single-token decode's bits:
+- the bf16 linears at several rows (router, shared-expert gate, the GDN's b/a);
+- the speculative GDN recurrence;
+- multi-query attention.
+
+The EXL3 linears, q/k/v and experts already are (Run 38). Greedy output equal to plain decode would need all three
+bit-identical to their one-token forms (matching reduction orders in flash attention and the recurrence kernels):
+large, and it would only move which of a near-tied pair is picked. Not pursued.
