@@ -1156,3 +1156,33 @@ IQ4_KSS GGUF                                         4234             164       
 nsys, 525-token prefill: 176 ms span, 140 ms of kernels. Experts 42.7 ms (gate/up 30.4, down 12.3), against ~67 ms
 on the mgemm. cuBLAS dense ~26 ms, its reconstruct and rotations ~10 ms. Gathers and weighting ~16 ms, casts ~9 ms,
 GDN ~14 ms. EXL3 library 8.05 -> 8.14 MiB.
+
+## Run 38 - 2026-11-14 23:00
+
+DFlash 2 (5 drafts) on the EXL3 model; real-text decode as the recipe's Run 9 measured it (wiki summary, code
+task, essay; temperature 0.6, top_p 0.95, top_k 20, seed 7, 400 tokens; `rtbench.sh` in the scratchpad):
+
+```
+tok/s                               wiki     code     essay    tokens a step
+EXL3, no speculation                200.6    200.7    200.8
+EXL3, DFlash 2, exllamav3 kernels   299.0    324.1    210.3    3.42
+IQ4_KSS GGUF, DFlash 2              285.9    305.6    198.7    3.57
+EXL3, DFlash 2, ours (below)        337.3    407.7    258.7    3.51
+```
+
+A verify step (nsys, code task, ~4 tokens a step) took 13.7 ms of GPU time: exllamav3's coop MoE kernels 4.1 ms,
+its small-m GEMV 3.1 ms (250 launches of 12.3 us), the drafter ~1.1 ms, and the trellis GEMM ~1.1 ms (likely the
+head at 6 rows). Our m = 1 decode kernels now take up to 8 rows:
+- the GEMV puts the rows in A's first 8 MMA rows (8-15 stay zero), with per-row partials in the workspace; one row
+  a warp is rotated out by the last block. q/k/v and the single linears take it first, up to 8 rows, before the
+  int8 gate;
+- the MoE kernels give slot j token j / topk's row, and the last slot of each (token, column group) sums that
+  token's slots in order into its row.
+
+Each row gets the same bits it gets alone (`a_few_rows_get_each_rows_own_bits`: 2 to 6 bpw, every codebook, and the
+experts at five tokens). Greedy (temperature 0) output with DFlash still differs from plain greedy decode: code at
+char 320 of 1344, wiki at 103 of 1196. So does the GGUF's: identical on code, wiki at 135 of 1226. The tie
+tolerance is off by default (`--mtp-greedy-tolerance` 0), and probabilistic drafting only changes what is proposed:
+a greedy row accepts a draft only if it is the verify row's argmax. What differs is the verify forward's numerics
+against single-token decode. The candidates: the head at 6 rows (past the GEMV workspace, so exllamav3's kernel),
+the speculative GDN recurrence, and multi-query attention. EXL3 library 8.14 -> 8.16 MiB.

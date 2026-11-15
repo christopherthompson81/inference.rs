@@ -44,13 +44,14 @@ inference_tensor::kernel_library! {
     path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT_EXL3").unwrap_or("");
     id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT_EXL3").unwrap_or("");
     unsafe extern "C" {
-        /// One row `x` (f16, or bf16 with `x_bf16`) through `jobs` trellises of one k (`b`, `suh`, `svh`, `out`, `n`
-        /// apiece) into each `out` (f32, f16 or bf16 by `out_kind`), rotated by its `suh`/`svh` and the Hadamards
+        /// `rows` (1 to 8) rows `x` (f16, or bf16 with `x_bf16`) through `jobs` trellises of one k (`b`, `suh`, `svh`,
+        /// `out`, `n` apiece) into each `out` (`rows x n`, f32, f16 or bf16 by `out_kind`), rotated by its `suh`/`svh` and the Hadamards
         /// inside; `ws` is the stream's zeroed workspace of `ws_floats` words, its counters left zeroed. 0 when
         /// launched, -1 for a shape, rate or workspace it does not take.
         pub(crate) fn launch_exl3_dgemv(
             x: *const c_void,
             x_bf16: bool,
+            rows: i32,
             jobs: i32,
             b: *const *const u16,
             suh: *const *const f16,
@@ -66,13 +67,15 @@ inference_tensor::kernel_library! {
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
 
-        /// One token's routed experts through the decode kernels: gate, up (silu) and down, each slot weighted by
-        /// `rw` and summed in order into `out` (`hidden`, of `out_kind`); `x` f16 or bf16, `sel` i64 or u32, `rw` f16
+        /// `tokens` (1 to 8) tokens' routed experts through the decode kernels: gate, up (silu) and down, each slot
+        /// weighted by `rw` and summed in order into its token's row of `out` (`tokens x hidden`, of `out_kind`); `x`
+        /// f16 or bf16, `sel` i64 or u32, `rw` f16
         /// or f32. Each table holds `experts` trellis, then suh, then svh addresses. `ws` as for launch_exl3_dgemv.
         /// 0 when launched, -1 for shapes, rates or a workspace it does not take.
         pub(crate) fn launch_exl3_dmoe(
             x: *const c_void,
             x_bf16: bool,
+            tokens: i32,
             sel: *const c_void,
             sel_u32: bool,
             rw: *const c_void,
