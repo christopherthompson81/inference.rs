@@ -6,6 +6,7 @@
 mod cuda;
 #[cfg(feature = "cuda")]
 mod host_cache;
+pub mod ring;
 #[cfg(feature = "cuda")]
 pub use host_cache::cache_step;
 #[cfg(feature = "cuda")]

@@ -1785,23 +1785,25 @@ impl Qwen3_5TextModel {
             })
             .transpose()?;
         let mapper = normal_loading_metadata.mapper;
-        let (vb_m, weight_prefix) =
-            if layers::contains_tensor_or_uqff(&vb, "language_model.model.embed_tokens.weight") {
-                (
-                    vb.pp("language_model").pp("model"),
-                    TextWeightPrefix::LanguageModelModel,
-                )
-            } else if layers::contains_tensor_or_uqff(
-                &vb,
-                "model.language_model.embed_tokens.weight",
-            ) {
-                (
-                    vb.pp("model").pp("language_model"),
-                    TextWeightPrefix::ModelLanguageModel,
-                )
-            } else {
-                (vb.pp("model"), TextWeightPrefix::Model)
-            };
+        // an EXL3 checkpoint stores its embedding as rings (`trellis`, `signs`) in place of the weight
+        let embedding_under = |prefix: &str| {
+            ["weight", "trellis"].iter().any(|name| {
+                layers::contains_tensor_or_uqff(&vb, &format!("{prefix}.embed_tokens.{name}"))
+            })
+        };
+        let (vb_m, weight_prefix) = if embedding_under("language_model.model") {
+            (
+                vb.pp("language_model").pp("model"),
+                TextWeightPrefix::LanguageModelModel,
+            )
+        } else if embedding_under("model.language_model") {
+            (
+                vb.pp("model").pp("language_model"),
+                TextWeightPrefix::ModelLanguageModel,
+            )
+        } else {
+            (vb.pp("model"), TextWeightPrefix::Model)
+        };
 
         let embed_tokens = layers::embedding_with_legacy_tied_uqff(
             cfg.vocab_size,

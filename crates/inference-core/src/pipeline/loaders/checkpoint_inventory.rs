@@ -9,6 +9,19 @@ pub(crate) struct CheckpointDeviceMapSizes {
     pub(crate) layer_sizes_in_bytes: Vec<usize>,
     pub(crate) non_mapped_size_in_bytes: usize,
     pub(crate) total_model_size_in_bytes: usize,
+    // each layer's per-expert MoE tensors (`experts.<e>.`) and how many experts they hold, for an expert cache
+    pub(crate) layer_expert_bytes: Vec<usize>,
+    pub(crate) layer_experts: Vec<usize>,
+}
+
+// a hashed n-gram table (Qwen3.8-Flash-Next's PLE) loads into host memory whatever the checkpoint
+const HOST_TABLE: &str = ".ngram_embedding.";
+const EXPERTS: &str = ".experts.";
+
+// the expert index of a per-expert tensor name (`...experts.<e>.<proj>...`)
+fn expert_index(name: &str) -> Option<usize> {
+    let rest = &name[name.find(EXPERTS)? + EXPERTS.len()..];
+    rest.split('.').next()?.parse().ok()
 }
 
 fn is_float(dtype: SafeDtype) -> bool {
@@ -111,9 +124,21 @@ pub(crate) fn checkpoint_device_map_sizes(
     };
     let mut layer_sizes_in_bytes = vec![0usize; num_layers];
     let mut non_mapped_size_in_bytes = 0usize;
+    let (mut layer_expert_bytes, mut layer_experts) =
+        (vec![0usize; num_layers], vec![0usize; num_layers]);
 
     for (name, view) in safetensors.tensors() {
+        if name.contains(HOST_TABLE) {
+            continue;
+        }
         let bytes = runtime_tensor_bytes(&name, &view, target_dtype)?;
+        if let Some(layer_idx) = layer_index(&name)
+            && let Some(expert) = expert_index(&name)
+            && layer_idx < num_layers
+        {
+            layer_expert_bytes[layer_idx] += bytes;
+            layer_experts[layer_idx] = layer_experts[layer_idx].max(expert + 1);
+        }
         if let Some(layer_idx) = layer_index(&name) {
             let Some(layer_size) = layer_sizes_in_bytes.get_mut(layer_idx) else {
                 return Ok(None);
@@ -142,6 +167,8 @@ pub(crate) fn checkpoint_device_map_sizes(
         layer_sizes_in_bytes,
         non_mapped_size_in_bytes,
         total_model_size_in_bytes,
+        layer_expert_bytes,
+        layer_experts,
     }))
 }
 

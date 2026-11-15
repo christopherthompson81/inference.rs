@@ -444,13 +444,24 @@ pub(crate) fn auto_device_map_sizes(
                 );
                 let pack_factor =
                     QuantizationConfigShim::get_quant_config_pack_factor(inputs.config, dtype)?;
-                return AutoDeviceMapSizes {
+                let sizes = AutoDeviceMapSizes {
                     layer_sizes_in_bytes: inventory.layer_sizes_in_bytes,
                     non_mapped_size_in_bytes: inventory.non_mapped_size_in_bytes,
                     non_mapped_layer_sizes_in_bytes: Vec::new(),
                     total_model_size_in_bytes: inventory.total_model_size_in_bytes,
-                }
-                .without_host_embedding(&inputs, dtype, pack_factor, None);
+                };
+                // per-expert checkpoints (EXL3's) keep their experts in host memory with a cache of `slots` a layer
+                let sizes = match inputs.moe_expert_cache {
+                    Some(slots) if inventory.layer_experts.iter().any(|&e| e > 0) => sizes
+                        .with_experts_cached(
+                            &inventory.layer_expert_bytes,
+                            &inventory.layer_experts,
+                            slots,
+                            None,
+                        ),
+                    _ => sizes,
+                };
+                return sizes.without_host_embedding(&inputs, dtype, pack_factor, None);
             }
             // The checkpoint itself may be prequantized.
             let weight_pack_factor =

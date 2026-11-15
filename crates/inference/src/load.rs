@@ -294,7 +294,7 @@ macro_rules! load_options_methods {
             self
         }
 
-        /// MoE experts (GGUF, on CUDA) stay in host memory with this many per layer cached on the GPU.
+        /// MoE experts (GGUF or EXL3, on CUDA) stay in host memory with this many per layer cached on the GPU.
         pub fn with_moe_expert_cache(mut self, experts: usize) -> Self {
             self.options.runtime.moe_expert_cache = Some(experts);
             self

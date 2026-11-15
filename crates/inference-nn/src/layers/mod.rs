@@ -77,7 +77,26 @@ pub fn embedding(
     config: &Option<QuantizedConfig>,
 ) -> Result<Arc<dyn QuantMethod>> {
     let on_host = vb.embeddings_on_host();
-    let layer: Arc<dyn QuantMethod> = if matches!(config, Some(QuantizedConfig::Afq { .. }))
+    let layer: Arc<dyn QuantMethod> = if matches!(config, Some(QuantizedConfig::Exl3 { .. }))
+        && vb.contains_tensor("signs")
+        && vb.contains_tensor("trellis")
+    {
+        // exllamav3's rings, decoded once: a lookup table reads too few rows a token to keep them packed
+        let trellis = vb.get_unchecked_dtype("trellis", DType::I16)?;
+        let signs = vb.get_unchecked_dtype("signs", DType::F16)?;
+        let dense = inference_quant::exl3::ring::dense_embedding(
+            &trellis.flatten_all()?.to_vec1::<i16>()?,
+            &signs.flatten_all()?.to_vec1::<f16>()?,
+            in_size,
+            out_size,
+        );
+        let weight = Tensor::from_vec(dense, (in_size, out_size), &Device::Cpu)?
+            .to_dtype(vb.dtype())?
+            .to_device(vb.device())?;
+        Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+            Linear::new(weight, None),
+        ))?)
+    } else if matches!(config, Some(QuantizedConfig::Afq { .. }))
         || should_apply_immediate_isq(&vb)
         || vb.weight_source().is_some()
     {

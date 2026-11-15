@@ -1306,3 +1306,52 @@ GGUF IQ4_KSS, CPU misses, 128 / 64 slots (recipe Run 9): 95-103 / 56-62
 At 128 slots EXL3 is near the GGUF's CPU-miss path. Below that the GGUF wins: its misses run at the CPU's memory
 bandwidth, these over PCIe 3 (~11 GB/s). The loader does not pick this for EXL3 itself (the planner is GGUF's);
 `--moe-expert-cache` asks for it.
+
+## Run 43 - 2026-11-15 07:28
+
+Question: does Qwen3.8-Flash-Next's EXL3 (turboderp 1.66bpw_h4_ng3: ring-coded token embedding and hashed n-gram
+table, experts mostly K=1.5) load and score next to the IQ4_XS GGUF, and why did the first perplexity run run out of
+host memory?
+
+Loader work: the n-gram table ships as `ngram_embedding.safetensors` (128 shards of tail-biting mul1 rings, K=3, 31
+words a row, plus per-head bias), added to the file list and kept out of the device-map inventory; `exl3::ring`
+decodes rings (n-gram rows on gather, the embedding to dense once at load); embed_tokens and QSA's fused index
+projection probe `.trellis` as well as `.weight`. The inventory counts per-layer expert bytes so `--moe-expert-cache`
+plans EXL3 experts in host memory.
+
+The out-of-memory run was the perplexity example, not the loader: its safetensors branch dropped
+`--moe-expert-cache` (only the GGUF branch passed it), so the planner sized experts on the device and mapped layers
+37-47 to the CPU, where EXL3 rebuilds experts dense (~5 GB a layer). Serve and bench runs had mapped 0-47 to cuda[0].
+Fixed in the example, along with the paged cache sized to the scored window (without it the QSA context capped at 2051
+and a 4096 window failed).
+
+```
+examples perplexity -m <exl3 1.66bpw> --moe-expert-cache 64 --pa-cache-type auto --file wiki.test.raw --llama-cpp-ctx 4096
+examples perplexity --gguf <IQ4_XS 3 shards> (same flags)
+  EXL3 1.66bpw  PPL 1.6935   load 50 s, lowest MemAvailable 64.0 GB of 125.7 GiB (pinned experts + ring table in RAM)
+  GGUF IQ4_XS   PPL 1.3207   lowest MemAvailable 106.3 GB (experts pageable in the file mapping)
+```
+
+EXL3 is 28% above the GGUF at about 40% of its bits. One 4096 window; no exllamav3 number to compare (the model does
+not fit its 24 GB card without offload), so quantization loss and a decode error in the new ring paths are not yet
+separated. Next: check `exl3::ring` decodes against exllamav3's own codec on sampled embedding and n-gram rows.
+
+## Run 44 - 2026-11-15 07:55
+
+Question: warm real-text decode for Flash-Next EXL3 1.66bpw against the IQ4_XS GGUF, both with experts in host memory.
+At 1.66 bpw the EXL3 is a speed test, not an accuracy one (Run 43).
+
+```
+rtbench.sh <tag> --moe-expert-cache <slots> -m <exl3 | gguf>   (serve, warm-up pass, then wiki/code/essay, 400 tokens)
+                    wiki   code   essay  tok/s
+  EXL3 64 slots     27.7   24.1   23.5
+  GGUF 64 slots     26.7   28.7   29.6
+  EXL3 128 slots    36.1   30.1   30.4
+  GGUF 128 slots    37.6   41.0   42.4
+  EXL3 256 slots    55.0   44.8   45.1   (all 48 layers on cuda[0])
+```
+
+At equal slots the GGUF wins: its misses run on the CPU at memory bandwidth, EXL3's are read over PCIe 3 by the
+kernels (as on Qwen3.6, Run 42). EXL3's experts are ~2.5x smaller, so twice the slots fit: 256 slots (half of the 512
+experts) beats the GGUF's best fit (160 slots already spilled layers 43-47 to the CPU in qwen4exp Run 12). The fit, not
+the miss path, is where the low-bit EXL3 pays off.

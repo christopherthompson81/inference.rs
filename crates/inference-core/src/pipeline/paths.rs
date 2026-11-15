@@ -23,6 +23,8 @@ const SAFETENSOR_MATCH: &str = r"model-\d+-of-\d+\.safetensors\b";
 const QUANT_SAFETENSOR_MATCH: &str = r"model\.safetensors\b";
 const CONSOLIDATED_SAFETENSOR_MATCH: &str = r"consolidated\.safetensors\b";
 const SAFETENSOR_INDEX: &str = "model.safetensors.index.json";
+// exllamav3 keeps a hashed n-gram table in a file of its own, outside the index
+const EXL3_NGRAM_TABLE: &str = "ngram_embedding.safetensors";
 const NATIVE_CONFIG: &str = "params.json";
 const HF_CONFIG: &str = "config.json";
 // architectures whose loader reads Mistral's native `params.json` even beside a `config.json`
@@ -168,7 +170,13 @@ pub fn get_model_paths(
             let safetensors = if repo_files.iter().any(|file| file == SAFETENSOR_INDEX) {
                 let index_path =
                     crate::pipeline::hf::get_file(api, model_id, SAFETENSOR_INDEX, &revision)?;
-                parse_safetensor_index(&fs::read_to_string(index_path)?)?
+                let mut files = parse_safetensor_index(&fs::read_to_string(index_path)?)?;
+                if repo_files.iter().any(|file| file == EXL3_NGRAM_TABLE)
+                    && !files.iter().any(|file| file == EXL3_NGRAM_TABLE)
+                {
+                    files.push(EXL3_NGRAM_TABLE.to_string());
+                }
+                files
             } else {
                 repo_files
                     .iter()
