@@ -906,6 +906,8 @@ const FUSED_MAX_SLOTS: usize = 256;
 const FUSED_ACT_SILU: i32 = 0;
 // 16 beat 32 (10%), 64 and 8 on a 256-expert prefill
 const GROUP_ROWS: usize = 16;
+// the grouped prefill kernels' rows a group (exl3_dgemv_instance_exl3.cu's GROUP_M)
+const GROUPED_KERNEL_ROWS: usize = 16;
 
 // slots grouped by expert into matrices of `m` rows, at most GROUP_ROWS (which bounds the padding to the largest group)
 struct SlotGroups {
@@ -920,6 +922,11 @@ struct SlotGroups {
 
 impl SlotGroups {
     fn of(ids: &[u32]) -> Self {
+        Self::of_rows(ids, None)
+    }
+
+    // `rows` fixes the group height, else the largest group's up to GROUP_ROWS
+    fn of_rows(ids: &[u32], rows: Option<usize>) -> Self {
         let slots = ids.len();
         let mut by_expert = std::collections::BTreeMap::<u32, Vec<u32>>::new();
         for (j, &e) in ids.iter().enumerate() {
@@ -931,6 +938,7 @@ impl SlotGroups {
             .max()
             .unwrap_or(1)
             .min(GROUP_ROWS);
+        let m = rows.unwrap_or(m);
         let groups = by_expert
             .iter()
             .flat_map(|(&e, members)| members.chunks(m).map(move |rows| (e, rows)))
@@ -1390,6 +1398,113 @@ impl Exl3Experts {
             .index_select(&Tensor::from_vec(groups.place, slots, x.device())?, 0)
     }
 
+    // `groups` (GROUPED_KERNEL_ROWS rows each) through our grouped kernels: each group row's output (`groups x rows x
+    // hidden`, f32); None for rates they do not take
+    fn grouped_kernels(
+        gate: &Self,
+        up: &Self,
+        down: &Self,
+        xs: &Tensor,
+        groups: &SlotGroups,
+        tokens: usize,
+    ) -> Result<Option<Tensor>> {
+        let Device::Cuda(dev) = xs.device() else {
+            return Ok(None);
+        };
+        let ((hidden, inter, gu_words), (_, _, d_words)) = (gate.dims(), down.dims());
+        let count = groups.experts.len();
+        let rows = count * GROUPED_KERNEL_ROWS;
+        let topk = groups.place.len() / tokens;
+        let row_token = groups
+            .rows
+            .iter()
+            .map(|&j| {
+                if j as usize == groups.place.len() {
+                    tokens as u32
+                } else {
+                    j / topk as u32
+                }
+            })
+            .collect::<Vec<_>>();
+        let row_token = Tensor::from_vec(row_token, rows, xs.device())?;
+        let group_expert = Tensor::from_vec(groups.experts.clone(), count, xs.device())?;
+        let x_bf16 = xs.dtype() == DType::BF16;
+        let x = if x_bf16 {
+            xs.contiguous()?
+        } else {
+            xs.to_dtype(DType::F16)?.contiguous()?
+        };
+        let (x_s, x_l) = x.storage_and_layout();
+        let (r_s, r_l) = row_token.storage_and_layout();
+        let (e_s, e_l) = group_expert.storage_and_layout();
+        let (g_s, g_l) = gate.tables.storage_and_layout();
+        let (u_s, u_l) = up.tables.storage_and_layout();
+        let (d_s, d_l) = down.tables.storage_and_layout();
+        let (
+            Storage::Cuda(x_c),
+            Storage::Cuda(r_c),
+            Storage::Cuda(e_c),
+            Storage::Cuda(g_c),
+            Storage::Cuda(u_c),
+            Storage::Cuda(d_c),
+        ) = (&*x_s, &*r_s, &*e_s, &*g_s, &*u_s, &*d_s)
+        else {
+            inference_tensor::bail!("EXL3 experts' tensors live on CUDA");
+        };
+        let (xp, _x) = if x_bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset())
+        };
+        let (rp, _r) = slice_ptr(r_c.as_cuda_slice::<u32>()?, r_l.start_offset());
+        let (ep, _e) = slice_ptr(e_c.as_cuda_slice::<i64>()?, e_l.start_offset());
+        let (gp, _g) = slice_ptr(g_c.as_cuda_slice::<i64>()?, g_l.start_offset());
+        let (upp, _u) = slice_ptr(u_c.as_cuda_slice::<i64>()?, u_l.start_offset());
+        let (dp, _d) = slice_ptr(d_c.as_cuda_slice::<i64>()?, d_l.start_offset());
+        // SAFETY: the kernels write every element of both before reading it
+        let (act, out) = unsafe {
+            (
+                dev.alloc::<f16>(rows * inter)?,
+                dev.alloc::<f32>(rows * hidden)?,
+            )
+        };
+        let (ap, _a) = slice_ptr(&act, 0);
+        let (op, _o) = slice_ptr(&out, 0);
+        // SAFETY: the pointers span their buffers (x tokens x hidden, row_token rows, group_expert count, the tables 3 x
+        // experts each, act rows x inter, out rows x hidden), and the tables address these layers' own tensors
+        let ran = unsafe {
+            ffi::launch_exl3_grouped_moe(
+                xp as *const c_void,
+                x_bf16,
+                rp as *const u32,
+                ep as *const i64,
+                count as i32,
+                tokens as i32,
+                gp as *const i64,
+                upp as *const i64,
+                dp as *const i64,
+                gate.trellis.len() as i32,
+                hidden as i32,
+                inter as i32,
+                gu_words as i32,
+                d_words as i32,
+                gate.codebook as i32,
+                ap as *mut f16,
+                op as *mut f32,
+                dev.cuda_stream().cu_stream(),
+            )
+        };
+        drop((_x, _r, _e, _g, _u, _d, _a, _o));
+        drop(act);
+        if ran < 0 {
+            return Ok(None);
+        }
+        Ok(Some(Tensor::from((
+            Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+            Shape::from((rows, hidden)),
+        ))))
+    }
+
     // a prompt's routed experts, grouped by expert once for all three projections: each group's token rows gathered
     // from `xs`, gate and up, the activation and down in the grouped layout, and each slot weighted back into its token
     fn grouped_silu_moe(
@@ -1403,8 +1518,23 @@ impl Exl3Experts {
         let (tokens, topk) = ids.dims2()?;
         let hidden = gate.dims().0;
         let device = xs.device();
-        let groups = SlotGroups::of(&ids.to_dtype(DType::U32)?.flatten_all()?.to_vec1::<u32>()?);
+        let groups = SlotGroups::of_rows(
+            &ids.to_dtype(DType::U32)?.flatten_all()?.to_vec1::<u32>()?,
+            Some(GROUPED_KERNEL_ROWS),
+        );
         let slots = tokens * topk;
+        if let Some(rows) = Self::grouped_kernels(gate, up, down, xs, &groups, tokens)? {
+            let ys = rows
+                .index_select(&Tensor::from_vec(groups.place, slots, device)?, 0)?
+                .reshape((tokens, topk, hidden))?
+                .broadcast_mul(&weights.to_dtype(DType::F32)?.unsqueeze(2)?)?
+                .sum(1)?;
+            return if xs.dtype() == DType::BF16 {
+                ys.to_dtype(DType::BF16)
+            } else {
+                Ok(ys)
+            };
+        }
         // padding rows read the zero row appended past the tokens
         let token_rows = groups
             .rows

@@ -1127,3 +1127,32 @@ every slot. Sizing for the worst case costs more again: ~512 groups where a laye
 activation runs on 8192 rows instead of ~5600, and the cooperative mgemm steps through the idle groups. Reverted. A
 win would need exact sizes without a host read, so groups made by the GEMM from offsets on the device, not a fixed
 grid.
+
+## Run 37 - 2026-11-14 22:15
+
+Our own grouped expert kernels for prefill (`exl3_dgemv_instance_exl3.cu`), after the decode GEMV. That GEMV's
+m16n8k16 MMAs used one row of A; here all 16 rows are an expert group's tokens. The block layout:
+- a block per (group, 128 output columns), 8 warps of 16 columns, over every k, so no workspace and no grid sync;
+- per 128-wide k step (one Hadamard span), the group's token rows are gathered and rotated (`* suh`, Hadamard) into
+  shared memory, and each warp decodes its trellis tiles in registers (exllamav3's `dq8_regs_*`) into full MMAs;
+- gate and up share a block. At the end both are rotated out, silu(gate) * up stays in f32, and it is rotated by
+  down's suh into down's f16 input (the block's 128 columns are exactly one of down's Hadamard spans);
+- down reads that input, runs the same loop, and rotates out by svh.
+
+2 to 4 bpw, every codebook; other rates keep exllamav3's mgemm. Groups are fixed at 16 rows (host-built, exact
+count).
+
+Error against an f32 reference, 8 of layer 0's real experts, 100 bf16 tokens (outlier channel at 200x), top-2:
+ours 1.71e-3 relative rms, exllamav3's mgemm route 2.81e-3. The fused-MoE test's 100-token case runs these kernels
+at 3 and 4 bpw.
+
+```
+inference bench 512 / 128, Qwen3.6 exllamav3 4.0     prefill tok/s    decode tok/s   KLD
+Run 35 (mgemm experts)                               3190             198            0.02209
+our grouped kernels                                  3924, 3922       198, 198       0.02239 (in the band)
+IQ4_KSS GGUF                                         4234             164            0.0216
+```
+
+nsys, 525-token prefill: 176 ms span, 140 ms of kernels. Experts 42.7 ms (gate/up 30.4, down 12.3), against ~67 ms
+on the mgemm. cuBLAS dense ~26 ms, its reconstruct and rotations ~10 ms. Gathers and weighting ~16 ms, casts ~9 ms,
+GDN ~14 ms. EXL3 library 8.05 -> 8.14 MiB.

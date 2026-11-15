@@ -195,6 +195,30 @@ inference_tensor::kernel_library! {
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
 
+        /// A prompt's routed experts in groups of 16 rows (`row_token`, `group_expert`, `groups` of them): gate, up and
+        /// silu into `act` (`groups x 16 x inter` f16, down's rotated input), down into `out` (`groups x 16 x hidden`
+        /// f32). -1 for shapes or rates it does not take.
+        pub(crate) fn launch_exl3_grouped_moe(
+            x: *const c_void,
+            x_bf16: bool,
+            row_token: *const u32,
+            group_expert: *const i64,
+            groups: i32,
+            tokens: i32,
+            gate: *const i64,
+            up: *const i64,
+            down: *const i64,
+            experts: i32,
+            hidden: i32,
+            inter: i32,
+            gu_tile_u16: i32,
+            d_tile_u16: i32,
+            cb: i32,
+            act: *mut f16,
+            out: *mut f32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
         /// The counters `launch_exl3_moe` needs, in i32s.
         pub(crate) fn exl3_moe_ctr_len(slots_max: i32, bsz: i32, inter: i32, hidden: i32) -> i64;
 

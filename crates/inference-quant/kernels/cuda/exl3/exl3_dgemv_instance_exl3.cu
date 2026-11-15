@@ -500,6 +500,245 @@ constexpr int KR_256_BLOCKS_PER_SM = 16;
 // the workspace's leading words: a completion counter per column group
 constexpr int DGEMV_COUNTERS = 4096;
 
+// Prefill MoE in groups of 16 rows (an expert's tokens), all 16 rows of each MMA real: a block per (group, 128-column
+// group) over every k, so no workspace. Gate and up (with silu and the rotation into down's input) in one kernel, down
+// in another. 2 to 4 bpw; other rates take exllamav3's kernels
+constexpr int GROUP_M = 16;
+// k a step: one Hadamard span
+constexpr int KC = 128;
+// shared rows of A padded past KC: 68 words apart, so the fragment loads of a warp's eight row pairs miss each other's
+// banks
+constexpr int SA_STRIDE = KC + 8;
+
+// m16n8k16, f16 inputs, f32 accumulate, all 16 rows of A: a0/a1 rows r and r + 8 at k pair 2t, a2/a3 at 2t + 8
+__device__ __forceinline__ void mma16(half2 a0, half2 a1, half2 a2, half2 a3, const FragB& b, float* c)
+{
+    const uint32_t* bb = reinterpret_cast<const uint32_t*>(&b);
+    uint32_t r0 = *reinterpret_cast<uint32_t*>(&a0), r1 = *reinterpret_cast<uint32_t*>(&a1);
+    uint32_t r2 = *reinterpret_cast<uint32_t*>(&a2), r3 = *reinterpret_cast<uint32_t*>(&a3);
+    asm volatile
+    (
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(r0), "r"(r1), "r"(r2), "r"(r3), "r"(bb[0]), "r"(bb[1])
+    );
+}
+
+// 16 rows of A (sa: GROUP_M x SA_STRIDE f16, one k step) times the warp's loaded tiles, into c0 (its columns 0..7)
+// and c1 (8..15)
+template <int bits, int cb>
+__device__ __forceinline__ void mma_tiles16(const uint32_t (&w)[KC / 16 * tile_loads(bits)], const half* sa, int lane,
+                                            float* c0, float* c1)
+{
+    static_assert(bits >= 2 && bits <= 4, "the grouped kernels decode 2 to 4 bpw in registers");
+    [[maybe_unused]] int src_a = 0, src_b = 0, s2 = 0;
+    if constexpr (bits == 2)
+    {
+        src_b = lane >> 1;
+        src_a = (src_b + 15) & 15;
+    }
+    else if constexpr (bits == 3)
+    {
+        int b1 = ((lane << 3) + 257) * 3;
+        int b2 = b1 + 21;
+        int i2 = (b2 - 1) / 32;
+        s2 = (i2 + 1) * 32 - b2;
+        src_a = ((b1 - 16) / 32) % 24;
+        src_b = i2 % 24;
+    }
+    const int r = lane / 4, t = lane % 4;
+    const half2* lo = reinterpret_cast<const half2*>(sa + r * SA_STRIDE);
+    const half2* hi = reinterpret_cast<const half2*>(sa + (r + 8) * SA_STRIDE);
+    #pragma unroll
+    for (int s = 0; s < KC / 16; ++s)
+    {
+        FragB f0, f1;
+        if constexpr (bits == 4)
+        {
+            uint32_t aw = __shfl_sync(0xffffffffu, w[s], (lane + 31) & 31);
+            exl3_gemv_ns::dq8_regs_4bits<cb>(aw, w[s], f0, f1);
+        }
+        else if constexpr (bits == 2)
+        {
+            uint32_t bw = __shfl_sync(0xffffffffu, w[s], src_b);
+            uint32_t aw = __shfl_sync(0xffffffffu, w[s], src_a);
+            exl3_gemv_ns::dq8_regs_2bits<cb>(aw, bw, lane << 3, f0, f1);
+        }
+        else
+        {
+            uint32_t aw = __shfl_sync(0xffffffffu, w[s], src_a);
+            uint32_t bw = __shfl_sync(0xffffffffu, w[s], src_b);
+            exl3_gemv_ns::dq8_regs_3bits<cb>(aw, bw, s2, f0, f1);
+        }
+        half2 a0 = lo[s * 8 + t], a1 = hi[s * 8 + t], a2 = lo[s * 8 + t + 4], a3 = hi[s * 8 + t + 4];
+        mma16(a0, a1, a2, a3, f0, c0);
+        mma16(a0, a1, a2, a3, f1, c1);
+    }
+}
+
+// a warp's accumulators into its 16 columns of so (GROUP_M x SO_STRIDE f32)
+constexpr int SO_STRIDE = GROUP_COLS + 4;
+__device__ __forceinline__ void store_acc(float* so, int warp, int lane, const float* c0, const float* c1)
+{
+    const int r = lane / 4, c = warp * 16 + 2 * (lane % 4);
+    so[r * SO_STRIDE + c] = c0[0];
+    so[r * SO_STRIDE + c + 1] = c0[1];
+    so[(r + 8) * SO_STRIDE + c] = c0[2];
+    so[(r + 8) * SO_STRIDE + c + 1] = c0[3];
+    so[r * SO_STRIDE + c + 8] = c1[0];
+    so[r * SO_STRIDE + c + 9] = c1[1];
+    so[(r + 8) * SO_STRIDE + c + 8] = c1[2];
+    so[(r + 8) * SO_STRIDE + c + 9] = c1[3];
+}
+
+struct GroupedParams
+{
+    const void* x;              // tokens x H, f16 or bf16 (x_bf16)
+    bool x_bf16;
+    const uint32_t* row_token;  // groups x GROUP_M, each row's token (tokens for padding: a zero row)
+    const int64_t* group_expert;// groups
+    int tokens;
+    const int64_t* gate;        // each projection's table: experts trellis, then suh, then svh addresses
+    const int64_t* up;
+    const int64_t* down;
+    int experts;
+    int H;
+    int I;
+    half* act;                  // groups x GROUP_M x I, down's rotated input
+    float* out;                 // groups x GROUP_M x H
+};
+
+// gate and up for one group's 16 rows and 128 columns of I: each k step's rows gathered and rotated by both
+// projections' suh, then at the end both rotated out, silu(gate) * up, and that rotated by down's suh into act
+template <int bits, int cb>
+__global__ __launch_bounds__(THREADS)
+void grouped_gu_kernel(const __grid_constant__ GroupedParams p)
+{
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int cgroup = blockIdx.x, grp = blockIdx.y;
+    const int e = (int) p.group_expert[grp];
+    const uint32_t* bg = (const uint32_t*) p.gate[e];
+    const uint32_t* bu = (const uint32_t*) p.up[e];
+    const half* suh_g = (const half*) p.gate[p.experts + e];
+    const half* suh_u = (const half*) p.up[p.experts + e];
+    const half* svh_g = (const half*) p.gate[2 * p.experts + e] + cgroup * GROUP_COLS;
+    const half* svh_u = (const half*) p.up[2 * p.experts + e] + cgroup * GROUP_COLS;
+    const half* suh_d = (const half*) p.down[p.experts + e] + cgroup * GROUP_COLS;
+    const int ntiles = p.I / 16, tile = cgroup * WARPS + warp;
+
+    __shared__ half sa[2][GROUP_M * SA_STRIDE];
+    __shared__ float so[2][GROUP_M * SO_STRIDE];
+    float g0[4] = {}, g1[4] = {}, u0[4] = {}, u1[4] = {};
+    for (int kz = 0; kz < p.H / KC; ++kz)
+    {
+        uint32_t wg[KC / 16 * tile_loads(bits)], wu[KC / 16 * tile_loads(bits)];
+        load_tiles<bits, KC>(wg, bg, ntiles, tile, kz, lane);
+        load_tiles<bits, KC>(wu, bu, ntiles, tile, kz, lane);
+        for (int r = warp; r < GROUP_M; r += WARPS)
+        {
+            const uint32_t tok = p.row_token[grp * GROUP_M + r];
+            const int k0 = kz * KC + lane * 4;
+            float x0 = 0.0f, x1 = 0.0f, x2 = 0.0f, x3 = 0.0f;
+            if (tok < (uint32_t) p.tokens) load4(p.x, p.x_bf16, (size_t) tok * p.H + k0, x0, x1, x2, x3);
+            #pragma unroll
+            for (int j = 0; j < 2; ++j)
+            {
+                uint2 su = *((const uint2*) ((j ? suh_u : suh_g) + k0));
+                float2 s01 = __half22float2(*reinterpret_cast<half2*>(&su.x));
+                float2 s23 = __half22float2(*reinterpret_cast<half2*>(&su.y));
+                float v0 = x0 * s01.x, v1 = x1 * s01.y, v2 = x2 * s23.x, v3 = x3 * s23.y;
+                had128(v0, v1, v2, v3, lane);
+                half2* row = reinterpret_cast<half2*>(sa[j] + r * SA_STRIDE);
+                row[lane * 2] = __floats2half2_rn(v0, v1);
+                row[lane * 2 + 1] = __floats2half2_rn(v2, v3);
+            }
+        }
+        __syncthreads();
+        mma_tiles16<bits, cb>(wg, sa[0], lane, g0, g1);
+        mma_tiles16<bits, cb>(wu, sa[1], lane, u0, u1);
+        __syncthreads();
+    }
+    store_acc(so[0], warp, lane, g0, g1);
+    store_acc(so[1], warp, lane, u0, u1);
+    __syncthreads();
+    for (int r = warp; r < GROUP_M; r += WARPS)
+    {
+        float og[4], ou[4];
+        rotate_out(so[0] + r * SO_STRIDE, svh_g, lane, og);
+        rotate_out(so[1] + r * SO_STRIDE, svh_u, lane, ou);
+        uint2 su = *((const uint2*) (suh_d + lane * 4));
+        float2 s01 = __half22float2(*reinterpret_cast<half2*>(&su.x));
+        float2 s23 = __half22float2(*reinterpret_cast<half2*>(&su.y));
+        float a[4];
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) a[i] = og[i] / (1.0f + __expf(-og[i])) * ou[i];
+        a[0] *= s01.x; a[1] *= s01.y; a[2] *= s23.x; a[3] *= s23.y;
+        had128(a[0], a[1], a[2], a[3], lane);
+        half2 h01 = __floats2half2_rn(a[0], a[1]), h23 = __floats2half2_rn(a[2], a[3]);
+        uint2 u;
+        u.x = *reinterpret_cast<uint32_t*>(&h01);
+        u.y = *reinterpret_cast<uint32_t*>(&h23);
+        *((uint2*) (p.act + ((size_t) grp * GROUP_M + r) * p.I + cgroup * GROUP_COLS + lane * 4)) = u;
+    }
+}
+
+// down for one group's 16 rows (act, already rotated) and 128 columns of H, rotated out by svh into out
+template <int bits, int cb>
+__global__ __launch_bounds__(THREADS)
+void grouped_down_kernel(const __grid_constant__ GroupedParams p)
+{
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int cgroup = blockIdx.x, grp = blockIdx.y;
+    const int e = (int) p.group_expert[grp];
+    const uint32_t* bd = (const uint32_t*) p.down[e];
+    const half* svh_d = (const half*) p.down[2 * p.experts + e] + cgroup * GROUP_COLS;
+    const int ntiles = p.H / 16, tile = cgroup * WARPS + warp;
+
+    __shared__ half sa[GROUP_M * SA_STRIDE];
+    __shared__ float so[GROUP_M * SO_STRIDE];
+    float c0[4] = {}, c1[4] = {};
+    for (int kz = 0; kz < p.I / KC; ++kz)
+    {
+        uint32_t w[KC / 16 * tile_loads(bits)];
+        load_tiles<bits, KC>(w, bd, ntiles, tile, kz, lane);
+        for (int r = warp; r < GROUP_M; r += WARPS)
+            *((uint2*) (sa + r * SA_STRIDE) + lane) =
+                *((const uint2*) (p.act + ((size_t) grp * GROUP_M + r) * p.I + kz * KC) + lane);
+        __syncthreads();
+        mma_tiles16<bits, cb>(w, sa, lane, c0, c1);
+        __syncthreads();
+    }
+    store_acc(so, warp, lane, c0, c1);
+    __syncthreads();
+    for (int r = warp; r < GROUP_M; r += WARPS)
+    {
+        float o[4];
+        rotate_out(so + r * SO_STRIDE, svh_d, lane, o);
+        *((float4*) (p.out + ((size_t) grp * GROUP_M + r) * p.H + cgroup * GROUP_COLS + lane * 4)) =
+            make_float4(o[0], o[1], o[2], o[3]);
+    }
+}
+
+typedef void (*grouped_fn)(const GroupedParams);
+
+template <int bits>
+static grouped_fn select_grouped_cb(bool gu, int cb)
+{
+    if (cb == 0) return gu ? grouped_gu_kernel<bits, 0> : grouped_down_kernel<bits, 0>;
+    if (cb == 1) return gu ? grouped_gu_kernel<bits, 1> : grouped_down_kernel<bits, 1>;
+    if (cb == 2) return gu ? grouped_gu_kernel<bits, 2> : grouped_down_kernel<bits, 2>;
+    return nullptr;
+}
+
+static grouped_fn select_grouped(bool gu, int bits, int cb)
+{
+    if (bits == 2) return select_grouped_cb<2>(gu, cb);
+    if (bits == 3) return select_grouped_cb<3>(gu, cb);
+    if (bits == 4) return select_grouped_cb<4>(gu, cb);
+    return nullptr;
+}
+
 }  // namespace exl3_dgemv
 
 // One row x (f16, or bf16 with x_bf16) through `jobs` trellises of one k (B, suh, svh, out, n apiece; tiles of
@@ -603,6 +842,34 @@ extern "C" int launch_exl3_dmoe(const void* x, bool x_bf16, const void* sel, boo
     ka<<<topk * 2 * ig * p.splits_a, THREADS, 0, stream>>>(p);
     cuda_check(cudaPeekAtLastError());
     kb<<<topk * hg * p.splits_b, THREADS, 0, stream>>>(p);
+    cuda_check(cudaPeekAtLastError());
+    return 0;
+}
+
+// A prompt's routed experts in groups of 16 rows (row_token, group_expert: `groups` of them, host-built), gate, up and
+// silu into act (groups x 16 x inter f16, down's rotated input), down into out (groups x 16 x hidden f32). Each table
+// holds `experts` trellis, then suh, then svh addresses. Returns 0 when launched, -1 for shapes or rates it does not
+// take.
+extern "C" int launch_exl3_grouped_moe(const void* x, bool x_bf16, const uint32_t* row_token,
+                                       const int64_t* group_expert, int groups, int tokens, const int64_t* gate,
+                                       const int64_t* up, const int64_t* down, int experts, int hidden, int inter,
+                                       int gu_tile_u16, int d_tile_u16, int cb, half* act, float* out,
+                                       cudaStream_t stream)
+{
+    using namespace exl3_dgemv;
+    if (gu_tile_u16 % 16 || d_tile_u16 % 16 || hidden % 128 || inter % 128 || groups < 1) return -1;
+    grouped_fn gu = select_grouped(true, gu_tile_u16 / 16, cb);
+    grouped_fn dn = select_grouped(false, d_tile_u16 / 16, cb);
+    if (!gu || !dn) return -1;
+    GroupedParams p = {};
+    p.x = x; p.x_bf16 = x_bf16;
+    p.row_token = row_token; p.group_expert = group_expert; p.tokens = tokens;
+    p.gate = gate; p.up = up; p.down = down; p.experts = experts;
+    p.H = hidden; p.I = inter;
+    p.act = act; p.out = out;
+    gu<<<dim3(inter / GROUP_COLS, groups), THREADS, 0, stream>>>(p);
+    cuda_check(cudaPeekAtLastError());
+    dn<<<dim3(hidden / GROUP_COLS, groups), THREADS, 0, stream>>>(p);
     cuda_check(cudaPeekAtLastError());
     return 0;
 }
