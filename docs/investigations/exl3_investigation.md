@@ -1645,3 +1645,25 @@ Reverted.
 Kept: an unpadded bf16 input takes the reconstruction directly, `had_in` reading bf16 and `had_out` writing bf16 (the
 same values as the casts around f16 and f32; test `bf16_reconstruction_matches_the_cast_route`): TTFT 883 -> 917 /
 910 tok/s.
+
+## Run 56 - 2026-11-15 22:10
+
+Question: Run 55's ~5 ms a token the IQ4_KS GGUF seemed to lose in the server's real-text runs.
+
+```
+nsys, a sampled request (temperature 0.6), wall a decode step: recipe A 19.99 ms (GPU 20.21), EXL3 21.22 (21.52);
+  sampling kernels ~0.04 ms a step, host gaps ~0.07, D2H a few bytes a step
+samplebench.py (essay, 400 tokens), recipe A, first pass: greedy 51.9, then t0.6 43.6, seed 41.7, top_k 41.6 ...
+alternating, with nvidia-smi every second:
+  greedy 52.7 / t0.6 52.5 / greedy 52.6 / t0.6 52.5 / greedy 52.5 / t0.6 46.3 tok/s
+  during the last: clocks_throttle_reasons 0x20 (SW thermal slowdown), SM 870-885 MHz at 62 C core
+nvidia-smi -q: SW Thermal Slowdown 6,670,805,312 us accumulated, HW Thermal Slowdown 0; core limits 83/93/95 C
+```
+
+There is no GGUF serving overhead: sampling costs nothing measurable, and the slow runs were throttled. The card
+drops to ~880 MHz under software thermal slowdown with the core near 62 C, which on a 3090 points at the GDDR6X
+junction temperature (not reported on GeForce). Sustained memory-bound decode is what heats it, so long benchmark
+sequences slow down partway through, and order decides which variant pays. Runs 50 and 54's tok/s tables (and the
+"EXL3 ~20% faster plain decode" reading) are contaminated by this; the nsys GPU-time comparisons and `inference
+bench` (short) are not: plain decode recipe A 50.6 vs EXL3 47.2 tok/s. For A/B decode numbers: log
+clocks_throttle_reasons and discard runs that hit 0x20.
