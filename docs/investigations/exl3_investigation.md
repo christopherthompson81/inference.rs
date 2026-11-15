@@ -1739,3 +1739,20 @@ Qwen3.6 35B-A3B EXL3 4.0 (ours)
   KLD 0.02210 (Run 31) -> 0.02225, p99 0.2117, top-1 93.40%   (within Run 35's +-0.0007)
 EXL3 kernel library +0.09 MiB
 ```
+
+## Run 60 - 2026-11-16 02:00
+
+Question: does Qwen3.8 27B EXL3 4.0 serve the full window beside the DFlash 2 drafter, as recipe A does (262K, q3
+KV, drafter at q4k, 7 drafts: 23.2 GiB against the 23.5 GiB ceiling)?
+
+```
+serve --pa-context-len 262144 --pa-cache-type q3 --mtp-model <DFlash2> --mtp-n-predict 7 --mtp-draft-isq q4k
+  -m <exl3 4.0 ours>      (the vision tower loads on cuda[0] too)
+  8192 KV blocks of 32: 262,112 tokens; server 20,466 MiB at load
+fullwin.py: the first 1.11M characters of wikitext-2 test plus a question about its first article
+  prompt 256,146 tokens, answered correctly, wall 605 s (prefill 473 tok/s over the window), decode 67.2 tok/s at
+  that depth; device peak 22,164 MiB with the desktop's ~313 MiB (nvidia-smi each second), no throttle samples
+```
+
+It fits with ~1.3 GiB to spare at peak. Recipe A's figures (23.2 GiB; 51 tok/s DFlash decode at 261K) are from
+October, not this session.
