@@ -1109,3 +1109,21 @@ IQ4_KSS GGUF                                         4234             164       
 ```
 
 EXL3 library 8.01 -> 8.05 MiB.
+
+## Run 36 - 2026-11-14 21:35
+
+Dead end: grouping the slots by expert on the device, to drop the one host read of the routing ids a layer (16.7-25
+ms of idle GPU in a 525-token prefill). exllamav3's indexed GEMM skips a group whose expert is -1, so one kernel (one
+block) built the groups with room for the most any routing makes: slots / 16 plus one an expert, -1 past the last. It
+counted each expert's slots, laid out its groups, and placed each slot in slot order.
+
+```
+512-token prefill, tok/s           host grouping   device, global ids   device, ids in shared (u16)
+                                   3190            3004                 3050
+```
+
+The kernel took 143 us a call with the ids in global memory (11.5 ms over 80 calls): one thread an expert scans
+every slot. Sizing for the worst case costs more again: ~512 groups where a layer used ~350. Every gather and
+activation runs on 8192 rows instead of ~5600, and the cooperative mgemm steps through the idle groups. Reverted. A
+win would need exact sizes without a host read, so groups made by the GEMM from offsets on the device, not a fixed
+grid.
