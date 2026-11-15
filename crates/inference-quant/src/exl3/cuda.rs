@@ -567,7 +567,13 @@ impl Exl3Layer {
         else {
             inference_tensor::bail!("an EXL3 layer's tensors live on CUDA");
         };
-        let (xp, _x) = slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset());
+        // a bf16 x is rotated as read and the output rotated into bf16, the same values as casting around f16 and f32
+        let bf16 = x.dtype() == DType::BF16;
+        let (xp, _x) = if bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset())
+        };
         let (tp, _t) = slice_ptr(t_c.as_cuda_slice::<i16>()?, t_l.start_offset());
         let (up, _u) = slice_ptr(u_c.as_cuda_slice::<f16>()?, u_l.start_offset());
         let (vp, _v) = slice_ptr(v_c.as_cuda_slice::<f16>()?, v_l.start_offset());
@@ -603,7 +609,7 @@ impl Exl3Layer {
         unsafe {
             ffi::launch_exl3_had_in(
                 xp as *const c_void,
-                false,
+                bf16,
                 xhp as *mut f16,
                 up as *const f16,
                 rows as i32,
@@ -638,23 +644,38 @@ impl Exl3Layer {
             )
         }
         .map_err(|e| inference_tensor::Error::Cuda(Box::new(e)))?;
+        // SAFETY: the bf16 output (rows x n) is written whole by the rotation
+        let out = if bf16 {
+            Some(unsafe { dev.alloc::<half::bf16>(rows * n)? })
+        } else {
+            None
+        };
+        let o_ptr = out.as_ref().map(|o| slice_ptr(o, 0));
+        let op = o_ptr.as_ref().map_or(0, |(p, _)| *p);
         // SAFETY: as above
         unsafe {
             ffi::launch_exl3_had_out(
                 yp as *mut f32,
-                std::ptr::null_mut(),
+                op as *mut c_void,
                 vp as *const f16,
                 rows as i32,
                 n as i32,
                 stream,
             );
         }
-        drop((_x, _t, _u, _v, _xh, _w, _y));
+        drop((_x, _t, _u, _v, _xh, _w, _y, o_ptr));
         drop((xh, w));
-        Ok(Some(Tensor::from((
-            Storage::Cuda(CudaStorage::wrap_cuda_slice(y, dev.clone())),
-            Shape::from((rows, n)),
-        ))))
+        let shape = Shape::from((rows, n));
+        Ok(Some(match out {
+            Some(o) => Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(o, dev.clone())),
+                shape,
+            )),
+            None => Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(y, dev.clone())),
+                shape,
+            )),
+        }))
     }
 
     fn matmul(&self, x: &Tensor) -> Result<Tensor> {
@@ -789,14 +810,25 @@ impl QuantMethod for Exl3Layer {
                 return y.reshape(out_dims);
             }
         }
-        let x16 = x
-            .reshape((rows, in_features))?
-            .to_dtype(DType::F16)?
-            .pad_with_zeros(1, 0, k - in_features)?
-            .contiguous()?;
-        let mut y = match self.recon_matmul(&x16)? {
+        // an unpadded bf16 x takes the reconstruction without casts either side
+        let direct = if x.dtype() == DType::BF16 && in_features == k {
+            self.recon_matmul(&x.reshape((rows, k))?.contiguous()?)?
+        } else {
+            None
+        };
+        let mut y = match direct {
             Some(y) => y,
-            None => self.matmul(&x16)?,
+            None => {
+                let x16 = x
+                    .reshape((rows, in_features))?
+                    .to_dtype(DType::F16)?
+                    .pad_with_zeros(1, 0, k - in_features)?
+                    .contiguous()?;
+                match self.recon_matmul(&x16)? {
+                    Some(y) => y,
+                    None => self.matmul(&x16)?,
+                }
+            }
         };
         if self.padded() {
             y = y.narrow(1, 0, n)?;
@@ -2337,6 +2369,44 @@ mod tests {
                 mb * 1e3 / us
             );
         }
+        Ok(())
+    }
+
+    // a bf16 prefill reconstruction reads and writes bf16 in its rotations, the same bits as casting around f16 and f32
+    #[test]
+    fn bf16_reconstruction_matches_the_cast_route() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (k, n, rows) = (512, 384, super::RECON_MIN_ROWS + 16);
+        let (t, u, v) = random_linear(k, n, 64, 11)?;
+        let layer = Exl3Layer::new_on_device(
+            t.to_device(&device)?,
+            u.to_device(&device)?,
+            v.to_device(&device)?,
+            Exl3Codebook::Mul1,
+            None,
+            DType::BF16,
+        )?;
+        let x = random_rows(rows, k, 5)?
+            .to_dtype(DType::BF16)?
+            .to_device(&device)?;
+        let direct = layer
+            .recon_matmul(&x)?
+            .expect("reconstructs past RECON_MIN_ROWS");
+        let cast = layer
+            .recon_matmul(&x.to_dtype(DType::F16)?)?
+            .expect("reconstructs past RECON_MIN_ROWS")
+            .to_dtype(DType::BF16)?;
+        assert_eq!(direct.dtype(), DType::BF16);
+        assert_eq!(
+            direct
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            cast.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?
+        );
         Ok(())
     }
 

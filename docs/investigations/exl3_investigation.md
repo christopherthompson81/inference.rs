@@ -1613,3 +1613,35 @@ Qwen3.6 35B-A3B EXL3 4.0, DFlash 2 x5 verify step (nsys): master 12.43 ms GPU, n
 Plain decode gains ~3% though the isolated 1-row shapes lost; the verify step is within 6% of recipe A and DFlash
 within 5-7%, at 27% lower KLD and ~20% faster plain decode. Qwen3.6 is level (its dense layers stay on the earlier
 kernel; its tok/s against Run 38 moves with per-task acceptance). The EXL3 kernel library grows 0.07 MiB.
+
+## Run 55 - 2026-11-15 21:30
+
+Question: what is left in Qwen3.8 27B EXL3 decode and prefill against recipe A, after #965?
+
+```
+nsys, GPU ms a step              EXL3     recipe A
+DFlash 2 x7 verify step          29.52    27.89    linears 19.65 (tile 17.38 + o_proj 2.27) vs 17.64; head 3.30 vs 4.23
+plain decode step                22.10    20.87    linears 17.98 vs 16.37 (+ their q8_1 quantize 0.62); head 1.55 vs 1.23
+inference bench, 4096 / 32:      TTFT 883 tok/s vs 1580; decode 47.2 vs 50.6 tok/s
+```
+
+Correction to Runs 50 and 54: EXL3's ~20% plain-decode lead over recipe A in the server (rtbench, 46 against 37-40
+tok/s) is not in the kernels. `inference bench` and the nsys step times put recipe A ahead in plain decode (50.6
+against 47.2 tok/s); the GGUF loses ~5 ms a token outside the GPU in the server's real-text runs (not yet traced).
+
+Tile kernel occupancy (127 registers and 36 KB shared, 2 blocks an SM, ~30% warps active, DRAM 74-79%): a pairwise
+warp reduction (16 KB) with registers capped for 3 blocks spilled (15-30% slower); 4 column tiles a warp (2 sets x
+4 k-splits) and split targets 3-8 an SM were within the isolated benchmark's +-5%, and in the model 29.65 vs 29.52 ms
+(verify) and 22.08 vs 22.10 (plain). Reverted: occupancy is not the limit.
+
+Prefill (nsys over `inference bench` 4096): exl3_gemm 10.8 s of 19.2 s busy, cuBLAS 3.75, reconstruct 0.76, casts
+1.2 (cast_f32_bf16 0.75, cast_bf16_f16 0.46), had_out 0.23. The 27B's gate/up/down (89M values) passed
+RECON_MAX_VALUES (64M), so they ran on exllamav3's GEMM. Reconstructing them in k-slices for cuBLAS (beta = 1
+after the first): 855 tok/s against 883, cuBLAS 12.2 s and reconstruct 2.5 s (once a 512-token chunk). Both GEMMs
+accumulate f16 in f32, which GA102 runs at half its f16 tensor rate (71 TFLOPS dense): a 4096-token prefill of 27B
+weights is ~213 TFLOP, >= 3 s at peak, so EXL3 prefill sits near that bound; the GGUF's MMQ runs int8 (4x the rate).
+Reverted.
+
+Kept: an unpadded bf16 input takes the reconstruction directly, `had_in` reading bf16 and `had_out` writing bf16 (the
+same values as the casts around f16 and f32; test `bf16_reconstruction_matches_the_cast_route`): TTFT 883 -> 917 /
+910 tok/s.
