@@ -1694,3 +1694,27 @@ The tensor-core int8 GEMM is 3x the f16 one, and the weight passes (f16 reconstr
 now cost more than it: a kernel decoding trellis tiles straight to transposed int8 would leave ~1/4 of their 6.2 s,
 projecting ~1700 tok/s. The price is +0.0009 mean KLD (7%), still 22% under recipe A; per-row activation scales are
 the likely source (weight rounding adds ~0.8% relative noise against the activations' ~2%).
+
+## Run 58 - 2026-11-16 00:10
+
+Question: does finer activation scaling recover Run 57's int8 prefill KLD? (Temporary switches; patch kept in the
+scratchpad.)
+
+```
+wikitext 40 x 512 against the BF16 base, Qwen3.8 27B EXL3 4.0     KLD mean  p99     same top-1  4096 prefill tok/s
+f16 route                                                          0.01244   0.1338  94.88%      904-914
+weights rounded to the int8 grid, f16 GEMM (isolates the weights)  0.01251   0.1295  94.92%
+int8, one activation scale a row (Run 57)                          0.01334   0.1472  94.69%      1137
+int8, a scale a row and k-slice: 1024                              0.01331   0.1422  94.87%      785
+                                 512                               0.01293   0.1417  95.05%      562
+                                 256                               0.01314   0.1439  94.97%      345
+int8 weights, activations as int8 plus an int8 residual (one GEMM
+  of 2 x rows; activation error ~1/127 of the above)               0.01291   0.1372  94.86%      874-879
+(throttle reasons logged; 0x20 in 24 of 368 samples during the slice runs, none in the others)
+```
+
+The weights' int8 rounding is negligible (+0.00007). The activations' is not recoverable by finer scales: KLD does not
+fall with the slice, and near-exact activations still read +0.0005, about the size of KLD's sensitivity to any small
+numeric change (Run 35: up to +-0.0007 on Qwen3.6). So the int8 route's cost lies between ~+0.0005 and +0.0009, which
+KLD cannot pin down; per-k-slice products (a GEMM and an f32 pass each) cost more than the int8 GEMM saves, and the
+residual doubles the GEMM. Without a fused trellis-to-int8 weight kernel, only the per-row variant is faster than f16.
