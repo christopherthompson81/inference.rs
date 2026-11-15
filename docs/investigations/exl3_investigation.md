@@ -998,3 +998,44 @@ bf16 Hessian GEMM (#957), and all-experts calibration across all 40 layers, wher
 add up.
 The ~60 s a layer the test added is mostly the hack: 512 identical gate/up Hessians per chunk, where one shared
 Hessian (the shared expert's) would serve every expert, and a per-expert gather loop for the down Hessians.
+
+## Run 33 - 2026-11-14 19:40
+
+Run 32's gap, on Qwen3.5-0.8B: the same GDN + attention stack without experts, minutes a conversion, several
+seeds a setting. The base came from a BF16 GGUF (llama.cpp's `convert_hf_to_gguf.py`), with `llama-perplexity
+--kl-divergence-base`, wikitext-2 40 x 512 (BF16 PPL 16.60). Every conversion is 4.0 mul1, head 6, scored by our
+`perplexity --kld-base`.
+Temporary switches (not committed; the patch is kept in the scratchpad):
+- `TMP_SEED_SALT`: the per-tensor encoder seed.
+- `TMP_CAL_CHUNK`: the calibration chunk length.
+- `TMP_F16`: the calibration forward in f16. f32 can't run: the GDN's CUDA recurrence takes f16/bf16 only.
+- `TMP_CAL_TOKENS`: calibration token ids read from a file.
+
+exllamav3's seed, through a wrapper offsetting `make_quant_args`'s per-tensor seed.
+
+```
+KLD mean (3 seeds)                                   each                          mean     min. s
+ours, our calibration text, bf16                     0.02332 0.02260 0.02273       0.0229   151
+ours, 2048-token chunks                              0.02375 0.02308 0.02407       0.0236   146
+ours, calibration forward in f16                     0.02254 0.02223 0.02296       0.0226
+ours, exllamav3's exact 250 x 2048 rows              0.02265 0.02222 0.02236       0.0224
+exllamav3 1.6.6 (seed offsets 0, 1000, 2000)         0.02159 0.02269 0.02250       0.0223   230
+```
+
+exllamav3's first conversion was a lucky draw. Over three seeds it is level with ours on its own calibration rows
+(0.0223 against 0.0224), and either converter's seeds spread by about 0.001. Checked along the way, with the same
+calibration rows:
+- Per-tensor proxy errors equal exllamav3's within 2% in layers 0, 1, 12 and 23, and on the head (0.000100 /
+  0.000099). Each converter grades against its own Hessian, but with the same rows layer 0's Hessians differ only
+  by fp16 against bf16.
+- Every text tensor is at the same rate (4 bpw).
+- Both capture one pass per decoder layer, quantizing the whole layer before the next.
+- The only file difference that is not a marker shape: exllamav3 stores the GDN's `in_proj_a`/`in_proj_b` in F16,
+  ours BF16. Converted to F16, ours scores 0.02264 against 0.02265.
+
+What is left between the converters is the calibration text: about 0.0005, inside the seed spread but in the same
+direction across all three seeds. exllamav3's mix is weighted wiki 50, c4 20, code 20, multilingual 10, technical
+10, tiny 5, and random-token rows 20 (about 15% of rows). It builds whole-article rows with shuffled lines, and BOS
+on alternate articles. Ours is the same files taken in equal parts, as one stream. Some of that edge may be its wiki
+weight (37% of rows), which leans toward the wikitext eval. Run 31's Qwen3.6 gap (0.0221 against 0.0215, one seed
+each) fits the same reading: a seed draw plus the calibration mix.
