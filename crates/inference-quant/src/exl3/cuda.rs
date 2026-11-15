@@ -2340,6 +2340,54 @@ mod tests {
         Ok(())
     }
 
+    // verify-row times (1 and 8 rows) at a dense 27B's 4 bpw mul1 shapes, as weight GB/s
+    #[test]
+    #[ignore = "a benchmark"]
+    fn verify_gemv_times_by_rows() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        const REPS: usize = 200;
+        const WORDS_4BPW: usize = 64;
+        for (k, n) in [
+            (5120, 17408),
+            (17408, 5120),
+            (5120, 10240),
+            (6144, 5120),
+            (5120, 12288),
+        ] {
+            let (t, u, v) = random_linear(k, n, WORDS_4BPW, 7)?;
+            let layer = Exl3Layer::new_on_device(
+                t.to_device(&device)?,
+                u.to_device(&device)?,
+                v.to_device(&device)?,
+                Exl3Codebook::Mul1,
+                None,
+                DType::F16,
+            )?;
+            for rows in [1, 8] {
+                let x = random_rows(rows, k, 3)?
+                    .to_dtype(DType::F16)?
+                    .to_device(&device)?;
+                layer.forward_raw(&x)?;
+                device.synchronize()?;
+                let start = std::time::Instant::now();
+                for _ in 0..REPS {
+                    layer.forward_raw(&x)?;
+                }
+                device.synchronize()?;
+                let us = start.elapsed().as_secs_f64() * 1e6 / REPS as f64;
+                let mb = (k * n * WORDS_4BPW / 128) as f64 / 1e6;
+                eprintln!(
+                    "{k} x {n}, {rows} rows: {us:.1} us a call, {mb:.1} MB, {:.0} GB/s",
+                    mb * 1e3 / us
+                );
+            }
+        }
+        Ok(())
+    }
+
     // bf16 activations, u32 picks and f32 weights read in place come out as the cast route's f32 result rounded to bf16
     #[test]
     fn the_fused_moe_reads_and_writes_bf16_as_the_cast_route_does() -> Result<()> {

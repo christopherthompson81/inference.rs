@@ -52,6 +52,8 @@ __device__ __forceinline__ void load4(const void* x, bool bf16, int i, float& v0
 
 // m16n8k16, f16 inputs, f32 accumulate; rows 8..15 of A zero
 constexpr int MAX_ROWS = 8;
+// half2s between rows of the rotated input: KR / 2 is a multiple of 32 banks, so 4 more spread a warp's 8 rows over them
+__host__ __device__ constexpr int sx_stride(int kr) { return kr / 2 + 4; }
 __device__ __forceinline__ void mma_row0(half2 a0, half2 a2, const FragB& b, float* c)
 {
     const uint32_t* bb = reinterpret_cast<const uint32_t*>(&b);
@@ -83,7 +85,7 @@ __device__ __forceinline__ void load_tiles(uint32_t (&w)[KR / 16 * tile_loads(bi
             w[s * L + l] = lane + 32 * l < TILE_WORDS ? __ldcs(bp + (size_t) s * ntiles * TILE_WORDS + 32 * l) : 0;
 }
 
-// `rows` rows (up to 8; row r of sx at r * KR / 2: the split's KR rotated f16 values) times the warp's loaded tiles:
+// `rows` rows (up to 8; row r of sx at r * sx_stride(KR): the split's KR rotated f16 values) times the warp's loaded tiles:
 // row r's 16 columns into red[r * GROUP_COLS ..]. Past 4 bpw the words go through `stage` (the warp's KR / 16 tiles
 // of shared memory) to exllamav3's generic decode
 template <int bits, int cb, int KR>
@@ -144,7 +146,7 @@ __device__ __forceinline__ void dot_tiles(const uint32_t (&w)[KR / 16 * tile_loa
             exl3_gemv_ns::dq8_regs_3bits<cb>(aw, bw, s2, f0, f1);
         }
         // A row lane / 4: k pairs (2 (lane % 4), +1) and (+8, +9) of this slice; rows 8..15 stay zero
-        const half2* row = sx + (lane / 4) * (KR / 2);
+        const half2* row = sx + (lane / 4) * sx_stride(KR);
         half2 a0 = lane / 4 < rows ? row[s * 8 + lane % 4] : hz;
         half2 a2 = lane / 4 < rows ? row[s * 8 + lane % 4 + 4] : hz;
         mma_row0(a0, a2, f0, c0);
@@ -278,13 +280,13 @@ void dgemv_kernel(const __grid_constant__ Params p)
     load_tiles<bits, KR>(w, job.B, ntiles, tile, kz, lane);
 
     const int rows = p.rows;
-    __shared__ half2 sx[MAX_ROWS * KR / 2];
+    __shared__ half2 sx[MAX_ROWS * sx_stride(KR)];
     __shared__ float red[MAX_ROWS * GROUP_COLS];
     __shared__ bool last;
     for (int wc = warp; wc < rows * (KR / 128); wc += WARPS)
     {
         const int r = wc / (KR / 128), c = wc % (KR / 128);
-        rotate_in(p.x, p.x_bf16, job.suh, kz * KR + c * 128 + lane * 4, sx + r * (KR / 2) + c * 64, lane,
+        rotate_in(p.x, p.x_bf16, job.suh, kz * KR + c * 128 + lane * 4, sx + r * sx_stride(KR) + c * 64, lane,
                   (size_t) r * p.size_k);
     }
     __syncthreads();

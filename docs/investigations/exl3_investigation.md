@@ -1468,3 +1468,44 @@ recipe A, DFlash 2 x7       181.8   216.3   107.8   48.6% (4.40)
 Plain decode: EXL3 leads by ~15%. With DFlash 2 it trails by ~30% at the same acceptance, so the 8-row verify step is
 where EXL3 loses: recipe A's tiled IQ4_KS verify path (qwen38 #494/#503) against our m <= 8 GEMV, and possibly the
 6-bit head at 8 rows on exllamav3's kernel (Run 39 kept it there; this head is 248K x 5120). Not yet profiled.
+
+## Run 51 - 2026-11-15 13:40
+
+Question: why our decode GEMV loses at DFlash verify rows on Qwen3.8 27B (Run 50).
+
+nsys over a warm DFlash request (7 drafts): a verify step 37.4 ms for EXL3 against 27.9 for recipe A. `dgemv_kernel`
+28 ms of it (320 launches a step, 87.7 us each) against `mmvq_tc_iq4_ks_kernel` 17.6 ms (384 x 45.9 us), the same
+~12 GB of weights a step: ~430 against ~720 GB/s. The head is not it (exl3_gemm 3.2 ms a step, the GGUF's q6_K
+head 4.2).
+
+New ignored benchmark `verify_gemv_times_by_rows` (27B shapes, mul1 4 bpw, 1 and 8 rows):
+
+```
+5120 x 17408 (gate, up)     1 row 63.4 us (703 GB/s)    8 rows 97.0 us (460 GB/s)
+17408 x 5120 (down)         1 row 64.1 us (696)         8 rows 99.8 us (446)
+ncu, 5120 x 17408, KR 256:  1 row  68 us, DRAM read 44.7 MB, write 0.9 MB, L2 53 MB, 23.2M instructions
+                            8 rows 96 us, DRAM read 53.0 MB, write 12.4 MB, L2 84 MB, 30.8M instructions
+stalls per issue, 1 -> 8 rows: mio_throttle 0.06 -> 1.72, short_scoreboard 0.24 -> 1.07, long_scoreboard 0.57 -> 2.04
+```
+
+Two costs. The f32 split partials (20 splits x 8 rows x 17408) outgrow the 6 MB L2 and make a DRAM round trip,
+~21 MB on top of 45. And the rotated input's rows sat KR / 2 half2s apart, a multiple of 32 banks, so a warp's 8 rows
+read one bank group (8-way conflicts). Padding the row stride by 4 (`sx_stride`) is layout only, the same bits:
+
+```
+                    8 rows before   after
+5120 x 17408        97.0            91.0 us
+17408 x 5120        99.8            94.5
+5120 x 10240        60.8            58.5
+6144 x 5120         42.5            39.1
+5120 x 12288        70.4            66.2       (1 row unchanged)
+```
+
+Larger splits (fewer partials; `EXL3_DGEMV_KR`, instances for 512 and 1024 built for the test and removed): 512
+takes the two big shapes to ~87 us at 8 rows but costs 5-15% at 1 row and on the smaller shapes; 1024 is worse
+everywhere. A forced 128 at 8 rows overflows the 16 MB workspace and falls back to exllamav3's GEMM, which measured
+75.5 us on the big shape (faster than ours there).
+
+What is left is structural: split-k over blocks needs f32 partials per row. A kernel whose blocks loop over several
+k-chunks, accumulating in registers and loading the next chunk while the MMA runs, would cut the partials by the
+loop count. Its sums would differ from today's m = 1 bits, so decode would move to it too.
