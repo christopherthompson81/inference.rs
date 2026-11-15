@@ -965,3 +965,36 @@ ours 4.0                                    1648, 1642          196.3, 196.4
 Ours is 3% behind exllamav3 on KLD and level on speed. The 3% is not chased here: the calibration chunking
 differs (exllamav3 runs its rows at its own lengths), and Run 9 measured the same order of gap on Qwen3-0.6B.
 Not done: MTP and the vision tower are left in BF16 rather than encoded.
+
+## Run 32 - 2026-11-14 18:25
+
+Does exllamav3's all-experts calibration explain Run 31's KLD gap (ours 0.02210, exllamav3 0.02146)? exllamav3
+(`capture_pass_experts`) runs every calibration row through every expert for the Hessians. Ours uses only the
+rows the router sends each one: with top-8 of 256, about 15K of 512K tokens per expert on average, and far fewer
+for rare experts.
+
+The quick test used temporary switches (not committed; the patch is kept in the scratchpad). `TMP_ALL_EXPERTS`
+feeds each expert's gate/up Hessian every token, and its down Hessian its own activations on every token.
+`TMP_STOP_LAYER=10` encodes layers 0-9 only. The ten layers were spliced into a symlinked copy of our Run 31
+output, and the shards' tensor names and shapes checked equal. A control re-encoded the same layers with routed
+Hessians and only the encoder's per-tensor seed changed (`TMP_SEED_SALT`).
+
+```
+wikitext-2 40 x 512 vs the BF16 base       KLD mean   KLD p99   same top-1   PPL (base 5.8237)   s a layer
+ours (Run 31)                              0.02210    0.217     93.57%       5.8707              160
+layers 0-9 all-experts                     0.02197    0.209     93.75%       5.8896              213-230
+layers 0-9 reseeded only (control)         0.02200    0.222     93.77%       5.8741              159-166
+exllamav3                                  0.02146    0.198     93.81%       5.8694
+```
+
+Reseeding alone moves the mean KLD by 0.0001, the same as all-experts calibration. The all-experts p99 is lower
+(0.209 against the control's 0.222), but the control moved p99 by 0.005 itself. So on ten layers, the effect is not
+distinguishable from encoding noise. It is at most a small part of a 0.0006 gap. The proxy errors of the two runs
+cannot be compared: each grades against its own Hessian, and the routed run's few-token Hessians flatter rare
+experts.
+
+Not ruled out: calibration layout (exllamav3 runs 250 rows of 2048 tokens, ours 473 chunks of about 1024), the
+bf16 Hessian GEMM (#957), and all-experts calibration across all 40 layers, where a small per-layer effect could
+add up.
+The ~60 s a layer the test added is mostly the hack: 512 identical gate/up Hessians per chunk, where one shared
+Hessian (the shared expert's) would serve every expert, and a per-expert gather loop for the down Hessians.
