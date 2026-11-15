@@ -1,10 +1,13 @@
-// Our decode GEMV over the EXL3 trellis (m = 1), no grid sync: a block per (128-column group, k-split of 128 or 256
-// rows) of up to four matrices sharing x, each warp one 16-column tile, its trellis words loaded up front while the
-// block rotates its slice of x. Partial rows meet in the stream's workspace and the last block of a column group sums
-// them in split order (the same bits every run), rotates them out (Hadamard, svh) and resets its counter.
-// exllamav3's in-register window extraction and codebook decode (exl3_gemv_kernel.cuh).
+// Our decode GEMV over the EXL3 trellis (1 to 8 rows), no grid sync, up to four matrices sharing x. Large matrices at
+// 2 to 4 bpw take the tile kernel: x rotated once, then a block per (128-column group, k-split) whose warps split k, the
+// weights as the MMA's A. The rest take a block per (column group, 128 or 256 rows of k), each warp one 16-column tile,
+// its trellis words loaded up front while the block rotates its slice of x. Partial rows meet in the
+// stream's workspace and the last block of a column group sums them in split order (the same bits every run), rotates
+// them out (Hadamard, svh) and resets its counter. exllamav3's in-register window extraction and codebook decode
+// (exl3_gemv_kernel.cuh).
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <algorithm>
 #include <cstdlib>
 #include "util.h"
 #include "util.cuh"
@@ -52,6 +55,8 @@ __device__ __forceinline__ void load4(const void* x, bool bf16, int i, float& v0
 
 // m16n8k16, f16 inputs, f32 accumulate; rows 8..15 of A zero
 constexpr int MAX_ROWS = 8;
+// half2s between rows of the rotated input: KR / 2 is a multiple of 32 banks, so 4 more spread a warp's 8 rows over them
+__host__ __device__ constexpr int sx_stride(int kr) { return kr / 2 + 4; }
 __device__ __forceinline__ void mma_row0(half2 a0, half2 a2, const FragB& b, float* c)
 {
     const uint32_t* bb = reinterpret_cast<const uint32_t*>(&b);
@@ -83,7 +88,40 @@ __device__ __forceinline__ void load_tiles(uint32_t (&w)[KR / 16 * tile_loads(bi
             w[s * L + l] = lane + 32 * l < TILE_WORDS ? __ldcs(bp + (size_t) s * ntiles * TILE_WORDS + 32 * l) : 0;
 }
 
-// `rows` rows (up to 8; row r of sx at r * KR / 2: the split's KR rotated f16 values) times the warp's loaded tiles:
+// one 16x16 tile's words (a word a lane, 2 to 4 bpw) decoded into its two n8 B fragments, by exllamav3's in-register
+// window extraction (exl3_gemv_kernel's per-lane window sources)
+template <int bits, int cb>
+__device__ __forceinline__ void decode_tile(uint32_t w, int lane, FragB& f0, FragB& f1)
+{
+    static_assert(bits >= 2 && bits <= 4, "a tile's words decode in registers at 2 to 4 bpw");
+    if constexpr (bits == 4)
+    {
+        uint32_t aw = __shfl_sync(0xffffffffu, w, (lane + 31) & 31);
+        exl3_gemv_ns::dq8_regs_4bits<cb>(aw, w, f0, f1);
+    }
+    else if constexpr (bits == 2)
+    {
+        const int src_b = lane >> 1;
+        const int src_a = (src_b + 15) & 15;
+        uint32_t bw = __shfl_sync(0xffffffffu, w, src_b);
+        uint32_t aw = __shfl_sync(0xffffffffu, w, src_a);
+        exl3_gemv_ns::dq8_regs_2bits<cb>(aw, bw, lane << 3, f0, f1);
+    }
+    else
+    {
+        const int b1 = ((lane << 3) + 257) * 3;
+        const int b2 = b1 + 21;
+        const int i2 = (b2 - 1) / 32;
+        const int s2 = (i2 + 1) * 32 - b2;
+        const int src_a = ((b1 - 16) / 32) % 24;
+        const int src_b = i2 % 24;
+        uint32_t aw = __shfl_sync(0xffffffffu, w, src_a);
+        uint32_t bw = __shfl_sync(0xffffffffu, w, src_b);
+        exl3_gemv_ns::dq8_regs_3bits<cb>(aw, bw, s2, f0, f1);
+    }
+}
+
+// `rows` rows (up to 8; row r of sx at r * sx_stride(KR): the split's KR rotated f16 values) times the warp's loaded tiles:
 // row r's 16 columns into red[r * GROUP_COLS ..]. Past 4 bpw the words go through `stage` (the warp's KR / 16 tiles
 // of shared memory) to exllamav3's generic decode
 template <int bits, int cb, int KR>
@@ -101,23 +139,6 @@ __device__ __forceinline__ void dot_tiles(const uint32_t (&w)[KR / 16 * tile_loa
                 if (lane + 32 * l < TILE_WORDS) stage[s * TILE_WORDS + lane + 32 * l] = w[s * L + l];
         __syncwarp();
     }
-    // per-lane window sources (exl3_gemv_kernel's)
-    [[maybe_unused]] int src_a = 0, src_b = 0, s2 = 0;
-    if constexpr (bits == 2)
-    {
-        src_b = lane >> 1;
-        src_a = (src_b + 15) & 15;
-    }
-    else if constexpr (bits == 3)
-    {
-        int b1 = ((lane << 3) + 257) * 3;
-        int b2 = b1 + 21;
-        int i2 = (b2 - 1) / 32;
-        s2 = (i2 + 1) * 32 - b2;
-        src_a = ((b1 - 16) / 32) % 24;
-        src_b = i2 % 24;
-    }
-
     float c0[4] = {}, c1[4] = {};
     const half2 hz = __half2half2(__ushort_as_half(0));
     #pragma unroll
@@ -126,25 +147,10 @@ __device__ __forceinline__ void dot_tiles(const uint32_t (&w)[KR / 16 * tile_loa
         FragB f0, f1;
         if constexpr (bits > 4)
             dq_dispatch<bits, cb>(stage + s * TILE_WORDS, lane << 3, f0, f1);
-        else if constexpr (bits == 4)
-        {
-            uint32_t aw = __shfl_sync(0xffffffffu, w[s], (lane + 31) & 31);
-            exl3_gemv_ns::dq8_regs_4bits<cb>(aw, w[s], f0, f1);
-        }
-        else if constexpr (bits == 2)
-        {
-            uint32_t bw = __shfl_sync(0xffffffffu, w[s], src_b);
-            uint32_t aw = __shfl_sync(0xffffffffu, w[s], src_a);
-            exl3_gemv_ns::dq8_regs_2bits<cb>(aw, bw, lane << 3, f0, f1);
-        }
         else
-        {
-            uint32_t aw = __shfl_sync(0xffffffffu, w[s], src_a);
-            uint32_t bw = __shfl_sync(0xffffffffu, w[s], src_b);
-            exl3_gemv_ns::dq8_regs_3bits<cb>(aw, bw, s2, f0, f1);
-        }
+            decode_tile<bits, cb>(w[s], lane, f0, f1);
         // A row lane / 4: k pairs (2 (lane % 4), +1) and (+8, +9) of this slice; rows 8..15 stay zero
-        const half2* row = sx + (lane / 4) * (KR / 2);
+        const half2* row = sx + (lane / 4) * sx_stride(KR);
         half2 a0 = lane / 4 < rows ? row[s * 8 + lane % 4] : hz;
         half2 a2 = lane / 4 < rows ? row[s * 8 + lane % 4 + 4] : hz;
         mma_row0(a0, a2, f0, c0);
@@ -247,14 +253,31 @@ struct Params
     int size_k;
     int rows;               // 1 to MAX_ROWS
     int splits;
+    int run;                // the tile kernel's k-tiles a split (the last split may take fewer)
     int groups;             // all jobs' column groups
     int total_n;            // all jobs' columns
     int jobs;
     int out_kind;
     float* partial;         // splits x rows x total_n
     int* counters;          // a counter per column group, left zeroed
+    const half2* xr;        // past one row: jobs x rows x k / 2, each job's rows rotated once (null: blocks rotate)
     Job job[MAX_JOBS];
 };
+
+// each job's rows of x rotated (x * suh, then 128-wide Hadamards) into p.xr, a warp a 128-wide piece: the same values
+// the GEMV's blocks would each rotate for themselves
+__global__ __launch_bounds__(THREADS)
+void rotate_rows_kernel(const __grid_constant__ Params p, half2* xr)
+{
+    const int lane = threadIdx.x % 32;
+    const int pieces = p.size_k / 128;
+    const int wc = blockIdx.x * WARPS + threadIdx.x / 32;
+    if (wc >= p.jobs * p.rows * pieces) return;
+    const int piece = wc % pieces, jr = wc / pieces;
+    const int j = jr / p.rows, r = jr % p.rows;
+    rotate_in(p.x, p.x_bf16, p.job[j].suh, piece * 128 + lane * 4, xr + (size_t) jr * (p.size_k / 2) + piece * 64,
+              lane, (size_t) r * p.size_k);
+}
 
 template <int bits, int cb, int KR>
 __global__ __launch_bounds__(THREADS)
@@ -278,15 +301,27 @@ void dgemv_kernel(const __grid_constant__ Params p)
     load_tiles<bits, KR>(w, job.B, ntiles, tile, kz, lane);
 
     const int rows = p.rows;
-    __shared__ half2 sx[MAX_ROWS * KR / 2];
+    __shared__ half2 sx[MAX_ROWS * sx_stride(KR)];
     __shared__ float red[MAX_ROWS * GROUP_COLS];
     __shared__ bool last;
-    for (int wc = warp; wc < rows * (KR / 128); wc += WARPS)
+    if (p.xr)
     {
-        const int r = wc / (KR / 128), c = wc % (KR / 128);
-        rotate_in(p.x, p.x_bf16, job.suh, kz * KR + c * 128 + lane * 4, sx + r * (KR / 2) + c * 64, lane,
-                  (size_t) r * p.size_k);
+        // 16-byte copies of the split's slice of each pre-rotated row (sx_stride(KR) keeps rows 16-byte aligned)
+        constexpr int ROW_U4 = KR / 8;
+        const uint4* src = (const uint4*) (p.xr + (size_t) j * rows * (p.size_k / 2) + kz * (KR / 2));
+        for (int i = threadIdx.x; i < rows * ROW_U4; i += THREADS)
+        {
+            const int r = i / ROW_U4, q = i % ROW_U4;
+            *((uint4*) (sx + r * sx_stride(KR)) + q) = __ldcg(src + (size_t) r * (p.size_k / 8) + q);
+        }
     }
+    else
+        for (int wc = warp; wc < rows * (KR / 128); wc += WARPS)
+        {
+            const int r = wc / (KR / 128), c = wc % (KR / 128);
+            rotate_in(p.x, p.x_bf16, job.suh, kz * KR + c * 128 + lane * 4, sx + r * sx_stride(KR) + c * 64, lane,
+                      (size_t) r * p.size_k);
+        }
     __syncthreads();
     __shared__ uint32_t stage[bits > 4 ? WARPS * KR / 16 * 8 * bits : 1];
     dot_tiles<bits, cb, KR>(w, sx, rows, lane, red + warp * 16, stage + (bits > 4 ? warp * KR / 16 * 8 * bits : 0));
@@ -304,6 +339,141 @@ void dgemv_kernel(const __grid_constant__ Params p)
         {
             float sum = 0.0f;
             for (int z = 0; z < splits; ++z)
+                sum += __ldcg(part + ((size_t) z * rows + i / GROUP_COLS) * p.total_n + i % GROUP_COLS);
+            red[i] = sum;
+        }
+        __syncthreads();
+    }
+    if (warp < rows)
+    {
+        float o[4];
+        rotate_out(red + warp * GROUP_COLS, job.svh + col0, lane, o);
+        store4(job.out, p.out_kind, (size_t) warp * job.n + col0 + lane * 4, o);
+    }
+}
+
+// m16n8k16 with the weights as A: a tile's two n8 B fragments are A's four registers (W^T rows g and g + 8, k pairs
+// 2t and 2t + 8) against up to 8 rows of x as B
+__device__ __forceinline__ void mma_wt(const FragB& f0, const FragB& f1, uint32_t b0, uint32_t b1, float* c)
+{
+    const uint32_t* r0 = reinterpret_cast<const uint32_t*>(&f0);
+    const uint32_t* r1 = reinterpret_cast<const uint32_t*>(&f1);
+    asm volatile
+    (
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(r0[0]), "r"(r1[0]), "r"(r0[1]), "r"(r1[1]), "r"(b0), "r"(b1)
+    );
+}
+
+// k-tiles a warp of the tile kernel loads ahead
+constexpr int TILE_PREFETCH = 4;
+constexpr int GROUP_TILES = GROUP_COLS / 16;
+
+// 2 to 4 bpw, any row count, x rotated beforehand (p.xr): a block per (128-column group, split of `run` k-tiles), its
+// warps splitting the split's k-tiles and each taking all 8 column tiles, loaded TILE_PREFETCH k-tiles ahead. The
+// weights are the MMA's A so every row of B is a row of x, and the warps' sums meet in shared memory, so a split's
+// partial rows cover all its k-tiles
+template <int bits, int cb>
+__global__ __launch_bounds__(THREADS)
+void dgemv_tile_kernel(const __grid_constant__ Params p)
+{
+    constexpr int TILE_WORDS = 8 * bits;
+    const int warp = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int g = blockIdx.x % p.groups;
+    const int kz = blockIdx.x / p.groups;
+    int j = 0;
+    #pragma unroll
+    for (int i = 1; i < MAX_JOBS; ++i)
+        if (i < p.jobs && g >= p.job[i].group0) j = i;
+    const Job& job = p.job[j];
+    const int group = g - job.group0;
+    const int ntiles = job.n / 16;
+    const int rows = p.rows;
+    const int ktiles = p.size_k / 16;
+    const int s0 = kz * p.run, s1 = min(s0 + p.run, ktiles);
+    const int per = (s1 - s0 + WARPS - 1) / WARPS;
+    const int k0 = s0 + warp * per, k1 = min(k0 + per, s1);
+
+    // lane's word of column tile ct at k-tile kt; x as B: row lane / 4, k pairs 2 (lane % 4) and + 8
+    const uint32_t* bw = job.B + (size_t) group * GROUP_TILES * TILE_WORDS + lane;
+    const int xrow = lane / 4;
+    const uint32_t* xb = (const uint32_t*) (p.xr + ((size_t) j * rows + min(xrow, rows - 1)) * (p.size_k / 2))
+                         + lane % 4;
+    auto load = [&](int kt, uint32_t (&w)[GROUP_TILES], uint32_t (&x)[2])
+    {
+        const uint32_t* t = bw + (size_t) kt * ntiles * TILE_WORDS;
+        #pragma unroll
+        for (int ct = 0; ct < GROUP_TILES; ++ct) w[ct] = lane < TILE_WORDS ? __ldcs(t + ct * TILE_WORDS) : 0;
+        x[0] = xrow < rows ? __ldcg(xb + kt * 8) : 0;
+        x[1] = xrow < rows ? __ldcg(xb + kt * 8 + 4) : 0;
+    };
+
+    uint32_t ring[TILE_PREFETCH][GROUP_TILES], xr[TILE_PREFETCH][2];
+    #pragma unroll
+    for (int d = 0; d < TILE_PREFETCH; ++d)
+        if (k0 + d < k1) load(k0 + d, ring[d], xr[d]);
+
+    float acc[GROUP_TILES][4] = {};
+    for (int kt = k0; kt < k1; kt += TILE_PREFETCH)
+    {
+        #pragma unroll
+        for (int d = 0; d < TILE_PREFETCH; ++d)
+        {
+            if (kt + d >= k1) break;
+            #pragma unroll
+            for (int ct = 0; ct < GROUP_TILES; ++ct)
+            {
+                FragB f0, f1;
+                decode_tile<bits, cb>(ring[d][ct], lane, f0, f1);
+                mma_wt(f0, f1, xr[d][0], xr[d][1], acc[ct]);
+            }
+            if (kt + d + TILE_PREFETCH < k1) load(kt + d + TILE_PREFETCH, ring[d], xr[d]);
+        }
+    }
+
+    // lane holds columns g, g + 8 of each tile for rows 2t, 2t + 1; the warps' sums added in warp order
+    __shared__ float wred[WARPS][MAX_ROWS * GROUP_COLS];
+    __shared__ float red[MAX_ROWS * GROUP_COLS];
+    __shared__ bool last;
+    const int cg = lane / 4, r0 = 2 * (lane % 4);
+    #pragma unroll
+    for (int ct = 0; ct < GROUP_TILES; ++ct)
+    {
+        if (r0 < rows)
+        {
+            wred[warp][r0 * GROUP_COLS + ct * 16 + cg] = acc[ct][0];
+            wred[warp][r0 * GROUP_COLS + ct * 16 + cg + 8] = acc[ct][2];
+        }
+        if (r0 + 1 < rows)
+        {
+            wred[warp][(r0 + 1) * GROUP_COLS + ct * 16 + cg] = acc[ct][1];
+            wred[warp][(r0 + 1) * GROUP_COLS + ct * 16 + cg + 8] = acc[ct][3];
+        }
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < rows * GROUP_COLS; i += THREADS)
+    {
+        float sum = 0.0f;
+        #pragma unroll
+        for (int w2 = 0; w2 < WARPS; ++w2) sum += wred[w2][i];
+        red[i] = sum;
+    }
+    __syncthreads();
+
+    const int col0 = group * GROUP_COLS;
+    if (p.splits > 1)
+    {
+        float* part = p.partial + job.col0 + col0;
+        for (int i = threadIdx.x; i < rows * GROUP_COLS; i += THREADS)
+            __stcg(part + ((size_t) kz * rows + i / GROUP_COLS) * p.total_n + i % GROUP_COLS, red[i]);
+        if (!arrive_last(p.counters + g, p.splits, &last)) return;
+        for (int i = threadIdx.x; i < rows * GROUP_COLS; i += THREADS)
+        {
+            float sum = 0.0f;
+            for (int z = 0; z < p.splits; ++z)
                 sum += __ldcg(part + ((size_t) z * rows + i / GROUP_COLS) * p.total_n + i % GROUP_COLS);
             red[i] = sum;
         }
@@ -490,6 +660,14 @@ typedef void (*moe_fn)(const MoeParams);
 
 typedef void (*dgemv_fn)(const Params);
 
+static dgemv_fn select_tile(int bits, int cb)
+{
+    #define SEL(b_, c_) if (bits == b_ && cb == c_) return dgemv_tile_kernel<b_, c_>;
+    SEL(2, 0) SEL(2, 1) SEL(2, 2) SEL(3, 0) SEL(3, 1) SEL(3, 2) SEL(4, 0) SEL(4, 1) SEL(4, 2)
+    #undef SEL
+    return nullptr;
+}
+
 static dgemv_fn select(int bits, int cb, int kr)
 {
     #define SEL(b_, c_, k_) if (bits == b_ && cb == c_ && kr == k_) return dgemv_kernel<b_, c_, k_>;
@@ -515,6 +693,10 @@ static moe_fn select_moe(bool a, int bits, int cb, int kr)
 
 // k rows a block: 128 (more blocks, shorter serial chains), 256 past this many blocks a multiprocessor (fewer partials)
 constexpr int KR_256_BLOCKS_PER_SM = 16;
+// the tile kernel's blocks a multiprocessor it splits k to reach, and the weights a launch needs to take it: on smaller
+// matrices its separate rotation launch and fewer blocks cost more than it saves (a 2048-wide MoE's dense layers)
+constexpr int TILE_BLOCKS_PER_SM = 4;
+constexpr int64_t TILE_MIN_WEIGHTS = 1 << 25;
 // the workspace's leading words: a completion counter per column group
 constexpr int DGEMV_COUNTERS = 4096;
 
@@ -759,6 +941,12 @@ static grouped_fn select_grouped(bool gu, int bits, int cb)
 
 }  // namespace exl3_dgemv
 
+// rows a block for `groups` column groups over k: 128, or 256 past KR_256_BLOCKS_PER_SM blocks a multiprocessor
+static int pick_kr(int groups, int size_k, int sms)
+{
+    return groups * (size_k / 128) > exl3_dgemv::KR_256_BLOCKS_PER_SM * sms && size_k % 256 == 0 ? 256 : 128;
+}
+
 // `rows` (1 to 8) rows x (f16, or bf16 with x_bf16) through `jobs` trellises of one k (B, suh, svh, out, n apiece;
 // tiles of tile_u16 words): each out (rows x n, f32, f16 or bf16 by out_kind) = had(had(x * suh) @ W) * svh. ws is the
 // stream's workspace of ws_floats words, zeroed when made: counters first (left zeroed), then the partial rows.
@@ -787,31 +975,53 @@ extern "C" int launch_exl3_dgemv(const void* x, bool x_bf16, int rows, int jobs,
     int device;
     cudaGetDevice(&device);
     const int sms = DevCtx::instance().get_num_sms(device);
-    static int forced = -2;
-    if (forced == -2)
+    const int bits = tile_u16 / 16;
+    if (bits >= 2 && bits <= 4 && (int64_t) size_k * p.total_n >= TILE_MIN_WEIGHTS)
     {
-        const char* env = std::getenv("EXL3_DGEMV_KR");
-        forced = env ? atoi(env) : 0;
+        // splits from the shape alone, so a row's sums are the same bits at any row count
+        const int ktiles = size_k / 16;
+        const int want =
+            std::max(1, std::min(ktiles / WARPS, (TILE_BLOCKS_PER_SM * sms + p.groups - 1) / p.groups));
+        p.run = (ktiles + want - 1) / want;
+        p.splits = (ktiles + p.run - 1) / p.run;
+        const int64_t rotated = (int64_t) jobs * rows * size_k / 2;
+        if (p.groups > DGEMV_COUNTERS || DGEMV_COUNTERS + (int64_t) p.splits * rows * p.total_n + rotated > ws_floats)
+            return -1;
+        dgemv_fn kernel = select_tile(bits, cb);
+        if (!kernel) return -1;
+        p.counters = (int*) ws;
+        p.partial = ws + DGEMV_COUNTERS;
+        half2* xr = (half2*) (ws + ws_floats - rotated);
+        const int warps = jobs * rows * (size_k / 128);
+        rotate_rows_kernel<<<(warps + WARPS - 1) / WARPS, THREADS, 0, stream>>>(p, xr);
+        p.xr = xr;
+        kernel<<<p.groups * p.splits, THREADS, 0, stream>>>(p);
+        cuda_check(cudaPeekAtLastError());
+        return 0;
     }
-    int kr = forced ? forced : p.groups * (size_k / 128) > KR_256_BLOCKS_PER_SM * sms && size_k % 256 == 0 ? 256 : 128;
-    if (tile_u16 / 16 > 4) kr = 128;
-    if (size_k % kr) return -1;
-    dgemv_fn kernel = select(tile_u16 / 16, cb, kr);
+    // a block per (column group, 128 or 256 rows of k)
+    const int kr = bits <= 4 ? pick_kr(p.groups, size_k, sms) : 128;
+    dgemv_fn kernel = select(bits, cb, kr);
     if (!kernel) return -1;
     p.splits = size_k / kr;
-    if (p.groups > DGEMV_COUNTERS || DGEMV_COUNTERS + (int64_t) p.splits * rows * p.total_n > ws_floats) return -1;
+    // past one row, the rows rotated once at the workspace's end (a half2 a word)
+    const int64_t rotated = rows > 1 ? (int64_t) jobs * rows * size_k / 2 : 0;
+    if (p.groups > DGEMV_COUNTERS || DGEMV_COUNTERS + (int64_t) p.splits * rows * p.total_n + rotated > ws_floats)
+        return -1;
     p.counters = (int*) ws;
     p.partial = ws + DGEMV_COUNTERS;
+    if (rotated)
+    {
+        half2* xr = (half2*) (ws + ws_floats - rotated);
+        const int warps = jobs * rows * (size_k / 128);
+        rotate_rows_kernel<<<(warps + WARPS - 1) / WARPS, THREADS, 0, stream>>>(p, xr);
+        p.xr = xr;
+    }
     kernel<<<p.groups * p.splits, THREADS, 0, stream>>>(p);
     cuda_check(cudaPeekAtLastError());
     return 0;
 }
 
-// rows a block for `groups` column groups over k: 128, or 256 past KR_256_BLOCKS_PER_SM blocks a multiprocessor
-static int pick_kr(int groups, int size_k, int sms)
-{
-    return groups * (size_k / 128) > exl3_dgemv::KR_256_BLOCKS_PER_SM * sms && size_k % 256 == 0 ? 256 : 128;
-}
 
 // `tokens` (1 to 8) tokens' routed experts (sel, rw: tokens x topk) through gate, up (silu) and down into out (tokens
 // x H, of out_kind). Each table holds `experts` trellis, then suh, then svh addresses. ws as launch_exl3_dgemv's.

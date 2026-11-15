@@ -1468,3 +1468,148 @@ recipe A, DFlash 2 x7       181.8   216.3   107.8   48.6% (4.40)
 Plain decode: EXL3 leads by ~15%. With DFlash 2 it trails by ~30% at the same acceptance, so the 8-row verify step is
 where EXL3 loses: recipe A's tiled IQ4_KS verify path (qwen38 #494/#503) against our m <= 8 GEMV, and possibly the
 6-bit head at 8 rows on exllamav3's kernel (Run 39 kept it there; this head is 248K x 5120). Not yet profiled.
+
+## Run 51 - 2026-11-15 13:40
+
+Question: why our decode GEMV loses at DFlash verify rows on Qwen3.8 27B (Run 50).
+
+nsys over a warm DFlash request (7 drafts): a verify step 37.4 ms for EXL3 against 27.9 for recipe A. `dgemv_kernel`
+28 ms of it (320 launches a step, 87.7 us each) against `mmvq_tc_iq4_ks_kernel` 17.6 ms (384 x 45.9 us), the same
+~12 GB of weights a step: ~430 against ~720 GB/s. The head is not it (exl3_gemm 3.2 ms a step, the GGUF's q6_K
+head 4.2).
+
+New ignored benchmark `verify_gemv_times_by_rows` (27B shapes, mul1 4 bpw, 1 and 8 rows):
+
+```
+5120 x 17408 (gate, up)     1 row 63.4 us (703 GB/s)    8 rows 97.0 us (460 GB/s)
+17408 x 5120 (down)         1 row 64.1 us (696)         8 rows 99.8 us (446)
+ncu, 5120 x 17408, KR 256:  1 row  68 us, DRAM read 44.7 MB, write 0.9 MB, L2 53 MB, 23.2M instructions
+                            8 rows 96 us, DRAM read 53.0 MB, write 12.4 MB, L2 84 MB, 30.8M instructions
+stalls per issue, 1 -> 8 rows: mio_throttle 0.06 -> 1.72, short_scoreboard 0.24 -> 1.07, long_scoreboard 0.57 -> 2.04
+```
+
+Two costs. The f32 split partials (20 splits x 8 rows x 17408) outgrow the 6 MB L2 and make a DRAM round trip,
+~21 MB on top of 45. And the rotated input's rows sat KR / 2 half2s apart, a multiple of 32 banks, so a warp's 8 rows
+read one bank group (8-way conflicts). Padding the row stride by 4 (`sx_stride`) is layout only, the same bits:
+
+```
+                    8 rows before   after
+5120 x 17408        97.0            91.0 us
+17408 x 5120        99.8            94.5
+5120 x 10240        60.8            58.5
+6144 x 5120         42.5            39.1
+5120 x 12288        70.4            66.2       (1 row unchanged)
+```
+
+Larger splits (fewer partials; `EXL3_DGEMV_KR`, instances for 512 and 1024 built for the test and removed): 512
+takes the two big shapes to ~87 us at 8 rows but costs 5-15% at 1 row and on the smaller shapes; 1024 is worse
+everywhere. A forced 128 at 8 rows overflows the 16 MB workspace and falls back to exllamav3's GEMM, which measured
+75.5 us on the big shape (faster than ours there).
+
+What is left is structural: split-k over blocks needs f32 partials per row. A kernel whose blocks loop over several
+k-chunks, accumulating in registers and loading the next chunk while the MMA runs, would cut the partials by the
+loop count. Its sums would differ from today's m = 1 bits, so decode would move to it too.
+
+## Run 52 - 2026-11-15 15:10
+
+Question: does cutting Run 51's f32 split partials close the 8-row gap?
+
+A looped kernel (`dgemv_run_kernel`, patch kept in the scratchpad): a block takes its column group over `run`
+consecutive 256-row chunks, loading the next chunk's words while the MMAs take this one, accumulating across chunks;
+`run` from the shape alone (aiming at N blocks a multiprocessor), so a row's bits match at any row count.
+
+```
+verify_gemv_times_by_rows, us (today's kernel after Run 51's padding: 1 row / 8 rows)
+                     today        run, 3/SM     run, 6/SM     run, 12/SM
+5120 x 17408         62.0 / 91.0  84.0 / 94.5   79.1 / 88.5   73.9 / 90.7
+17408 x 5120         62.8 / 94.5  80.0 / 89.8   81.1 / 90.9   73.6 / 92.2
+5120 x 12288         46.5 / 66.2  62.2 / 69.5   58.9 / 67.7   55.4 / 70.9
+ncu, run 6/SM, 5120 x 17408: 8 rows DRAM read 45.5 MB, write 3.7 (partials gone), 85 us at 64% of DRAM peak;
+  64 registers, 4 blocks an SM, grid 544 = 1.7 waves, 58% warps active
+```
+
+The partials' DRAM round trip is gone, but the kernel is slower: one chunk of loads in flight a block and 4 blocks an
+SM do not keep DRAM busy, where today's many short blocks with every load issued up front do (700 GB/s at 1 row).
+
+Block order group-major instead (a group's splits back to back, so its partials are summed while in L2; the same
+sums): 8 rows 91.0 -> 87.6 on 5120 x 17408, but 1 row 46.5 -> 63.9 on 5120 x 12288 and slower on every 1-row shape:
+split-major order is what keeps the weight reads local. Reverted both.
+
+Left untested: rotating x once a launch into an f16 buffer (each block now repeats the 8 rows' Hadamards; 8 rows run
+32% more instructions than 1, Run 51), and exllamav3's GEMM at verify rows where it is faster (75.5 us on 5120 x 17408
+at 8 rows), which would give up the bit match between decode and verify.
+
+## Run 53 - 2026-11-15 16:20
+
+Question: Run 52's two untested options. (1) Rotate x once a launch: past one row, `rotate_rows_kernel` writes each
+job's rows rotated (the same `rotate_in`, so the same bits) to the workspace's end, and the GEMV's blocks copy their
+slice into shared memory instead of each repeating the Hadamards. (2) exllamav3's kernel at verify rows (a temporary
+switch, not kept).
+
+```
+verify_gemv_times_by_rows, 8 rows, us     padded (Run 51)   + rotate once   exllamav3's path
+5120 x 17408                              91.0              89.1            78.1
+17408 x 5120                              94.5              94.1            86.2
+5120 x 10240                              58.5              56.4            43.3
+6144 x 5120                               39.1              37.6            39.1
+5120 x 12288                              66.2              64.2            61.0
+(1 row unchanged; the 25 EXL3 GPU tests pass)
+
+nsys, warm DFlash 2 x7 request, GPU time a verify step:
+  EXL3 before (Run 50)            37.4 ms   dgemv 28.1
+  EXL3 padded + rotate once       34.3 ms   dgemv 24.0
+  EXL3 with exllamav3's kernels   34.2 ms   exl3_gemm 24.3
+  recipe A                        27.9 ms   mmvq_tc_iq4_ks 17.6
+```
+
+In the model the two layout fixes take 15% off the linears (more than the isolated shapes showed), and exllamav3's
+kernel is then level with ours, so (2) would only give up the bit match between decode and verify: dropped. The
+verify step is 23% behind recipe A, whose tiled IQ4_KS lays a matrix out for the verify rows at load.
+
+## Run 54 - 2026-11-15 19:40
+
+Question: recipe A's tiled IQ4_KS verify kernel against ours, with the same structure over EXL3 trellises.
+
+Recipe A's load-time tiling regroups 16 rows so a warp's fragment loads coalesce; a trellis already stores each 16x16
+tile's words contiguously, so the layout needs nothing. What differs is the kernel: there the weights are the MMA's
+A (16 rows) and the 8 input rows its B (n = 8), every MMA lane useful, ours put x in A with rows 8-15 zero; its warps
+split k and meet in shared memory, so no partials go through DRAM; each warp streams a long run of k with blocks
+prefetched ahead. Our decode already gives the right registers: a tile's two n8 B fragments are W^T's A fragment.
+
+`dgemv_tile_kernel` (2 to 4 bpw): x rotated once (Run 53's kernel), a block per (128-column group, split of `run`
+k-tiles), its 8 warps splitting the split's k-tiles, each taking all 8 column tiles with 4 k-tiles loaded ahead,
+one m16n8k16 a tile against all rows; warp sums added in warp order in shared memory, then Run 51's partials (now few,
+splits from TILE_BLOCKS_PER_SM = 4) and rotation out. `decode_tile` is the per-tile decode `dot_tiles` now shares.
+
+```
+verify_gemv_times_by_rows, us, PR #965's kernel -> tile kernel (4 blocks an SM)
+                 1 row         8 rows
+5120 x 17408     63.2 -> 64.4  89.0 -> 69.4
+17408 x 5120     64.8 -> 70.2  93.8 -> 72.5
+5120 x 10240     41.5 -> 47.2  55.7 -> 48.6
+6144 x 5120      29.3 -> 34.4  36.6 -> 38.3
+5120 x 12288     49.1 -> 53.7  64.6 -> 55.9
+2048 x 8192      18.1 -> 23.9  25.3 -> 28.1      (Qwen3.6's dense shapes: slower throughout; the separate
+4096 x 2048      12.9 -> 15.9  19.1 -> 21.2       rotation launch and few blocks dominate small matrices)
+2048 x 512        5.9 ->  8.2  10.3 -> 11.0
+```
+
+So the tile kernel takes matrices of at least 2^25 weights (TILE_MIN_WEIGHTS), the rest keep the earlier kernel; the
+choice is by shape alone, so a row's bits still match between decode and verify. 2 and 8 blocks an SM were worse
+than 4.
+
+```
+Qwen3.8 27B EXL3 4.0 (q3 KV)                                   wiki    code    essay
+plain decode, alternating builds: PR #965 kernel   round 1     44.9    45.2    45.0
+                                  tile kernel      round 1     46.1    46.5    46.6
+                                  PR #965 kernel   round 2     44.7    44.9    43.6
+                                  tile kernel      round 2     46.1    46.5    46.5
+DFlash 2 x7, GPU time a verify step (nsys): PR #965 34.3 ms (linears 24.0) -> 29.5 ms (19.6); recipe A 27.9 (17.6)
+DFlash 2 x7 tok/s: tile kernel 172.6 / 201.6 / 100.7 (accept 52.0%), again 176.5 / 201.8 / 101.9 (48.9%)
+                   recipe A    181.0 / 215.6 / 108.0 (49.5%)
+Qwen3.6 35B-A3B EXL3 4.0, DFlash 2 x5 verify step (nsys): master 12.43 ms GPU, now 12.42 (dgemv 2.38 -> 2.19)
+```
+
+Plain decode gains ~3% though the isolated 1-row shapes lost; the verify step is within 6% of recipe A and DFlash
+within 5-7%, at 27% lower KLD and ~20% faster plain decode. Qwen3.6 is level (its dense layers stay on the earlier
+kernel; its tok/s against Run 38 moves with per-task acceptance). The EXL3 kernel library grows 0.07 MiB.
