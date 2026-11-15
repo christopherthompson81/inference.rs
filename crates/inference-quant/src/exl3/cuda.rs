@@ -779,15 +779,59 @@ pub struct Exl3Experts {
     dgemv_ws: Option<Tensor>,
 }
 
-// past this many slots (outside a capture) each expert multiplies its tokens' rows together, in groups of at most
-// GROUP_ROWS (which bounds the padding to the largest group)
+// past this many slots (outside a capture) each expert multiplies its tokens' rows together (SlotGroups)
 const GROUPED_MIN_SLOTS: usize = 64;
 // exllamav3's fused decode MoE takes up to this many tokens (its MAX_BSZN) and 256 slots
 const FUSED_MAX_TOKENS: usize = 8;
 const FUSED_MAX_SLOTS: usize = 256;
 // the kernels' MOE_COOP_ACT_SILU
 const FUSED_ACT_SILU: i32 = 0;
-const GROUP_ROWS: usize = 64;
+// 32-row groups take exllamav3's multi-row tiles: 16-row ones ran a 512-token prefill ~10% faster but at 3% more KLD
+const GROUP_ROWS: usize = 32;
+
+// slots grouped by expert into matrices of `m` rows, at most GROUP_ROWS (which bounds the padding to the largest group)
+struct SlotGroups {
+    m: usize,
+    // each group's expert
+    experts: Vec<i64>,
+    // each group row's slot, the slot count for padding
+    rows: Vec<u32>,
+    // each slot's group row
+    place: Vec<u32>,
+}
+
+impl SlotGroups {
+    fn of(ids: &[u32]) -> Self {
+        let slots = ids.len();
+        let mut by_expert = std::collections::BTreeMap::<u32, Vec<u32>>::new();
+        for (j, &e) in ids.iter().enumerate() {
+            by_expert.entry(e).or_default().push(j as u32);
+        }
+        let m = by_expert
+            .values()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(1)
+            .min(GROUP_ROWS);
+        let groups = by_expert
+            .iter()
+            .flat_map(|(&e, members)| members.chunks(m).map(move |rows| (e, rows)))
+            .collect::<Vec<_>>();
+        let (mut rows, mut place) = (vec![slots as u32; groups.len() * m], vec![0u32; slots]);
+        for (g, (_, members)) in groups.iter().enumerate() {
+            for (r, &j) in members.iter().enumerate() {
+                rows[g * m + r] = j;
+                place[j as usize] = (g * m + r) as u32;
+            }
+        }
+        Self {
+            m,
+            experts: groups.iter().map(|&(e, _)| i64::from(e)).collect(),
+            rows,
+            place,
+        }
+    }
+}
 
 impl Exl3Experts {
     /// `parts` holds each expert's trellis, `suh`, `svh` and codebook, on the device.
@@ -856,14 +900,21 @@ impl Exl3Experts {
         let (tokens, topk) = ids.dims2()?;
         let ((hidden, inter, gu_words), (d_in, d_out, d_words)) = (gate.dims(), down.dims());
         let experts = gate.trellis.len();
-        if tokens > FUSED_MAX_TOKENS
-            || up.dims() != gate.dims()
+        if up.dims() != gate.dims()
             || (d_in, d_out) != (inter, hidden)
             || [up, down]
                 .iter()
                 .any(|p| p.trellis.len() != experts || p.codebook != gate.codebook)
         {
             return Ok(None);
+        }
+        if tokens > FUSED_MAX_TOKENS {
+            let capturing = dev.cuda_stream().capture_status().map_err(inference_tensor::Error::wrap)?
+                != inference_tensor::cuda::cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
+            if capturing || tokens * topk <= GROUPED_MIN_SLOTS {
+                return Ok(None);
+            }
+            return Self::grouped_silu_moe(gate, up, down, xs, ids, weights).map(Some);
         }
         let slots_max = (FUSED_MAX_TOKENS * topk).min(FUSED_MAX_SLOTS);
         if tokens * topk > slots_max {
@@ -1205,42 +1256,76 @@ impl Exl3Experts {
         )))
     }
 
-    // as one row a slot, the slots grouped by expert into multi-row matrices (padded with a zero row to the largest),
-    // so each expert's weights are read once a group (reads the indices on the host)
+    // as one row a slot, the slots grouped by expert into multi-row matrices, so each expert's weights are read once a
+    // group (reads the indices on the host)
     fn grouped_matmul(&self, x: &Tensor, ids: &[u32]) -> Result<Tensor> {
         let slots = ids.len();
-        let mut by_expert = std::collections::BTreeMap::<u32, Vec<u32>>::new();
-        for (j, &e) in ids.iter().enumerate() {
-            by_expert.entry(e).or_default().push(j as u32);
-        }
-        let m = by_expert
-            .values()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(1)
-            .min(GROUP_ROWS);
-        let groups = by_expert
-            .iter()
-            .flat_map(|(&e, members)| members.chunks(m).map(move |rows| (e, rows)))
-            .collect::<Vec<_>>();
-        // padding rows read the zero row appended past the slots
-        let (mut rows, mut place) = (vec![slots as u32; groups.len() * m], vec![0u32; slots]);
-        for (g, (_, members)) in groups.iter().enumerate() {
-            for (r, &j) in members.iter().enumerate() {
-                rows[g * m + r] = j;
-                place[j as usize] = (g * m + r) as u32;
-            }
-        }
-        let experts = groups
-            .iter()
-            .map(|&(e, _)| i64::from(e))
-            .collect::<Vec<_>>();
+        let groups = SlotGroups::of(ids);
         let padded = Tensor::cat(&[x, &x.narrow(0, 0, 1)?.zeros_like()?], 0)?
-            .index_select(&Tensor::from_vec(rows, groups.len() * m, x.device())?, 0)?
+            .index_select(
+                &Tensor::from_vec(groups.rows, groups.experts.len() * groups.m, x.device())?,
+                0,
+            )?
             .contiguous()?;
-        let experts = Tensor::from_vec(experts, groups.len(), x.device())?;
-        self.indexed_matmul(&padded, &experts, m, &self.grouped_tuned)?
-            .index_select(&Tensor::from_vec(place, slots, x.device())?, 0)
+        let experts = Tensor::from_vec(groups.experts.clone(), groups.experts.len(), x.device())?;
+        self.indexed_matmul(&padded, &experts, groups.m, &self.grouped_tuned)?
+            .index_select(&Tensor::from_vec(groups.place, slots, x.device())?, 0)
+    }
+
+    // a prompt's routed experts, grouped by expert once for all three projections: each group's token rows gathered
+    // from `xs`, gate and up, the activation and down in the grouped layout, and each slot weighted back into its token
+    fn grouped_silu_moe(
+        gate: &Self,
+        up: &Self,
+        down: &Self,
+        xs: &Tensor,
+        ids: &Tensor,
+        weights: &Tensor,
+    ) -> Result<Tensor> {
+        let (tokens, topk) = ids.dims2()?;
+        let hidden = gate.dims().0;
+        let device = xs.device();
+        let groups = SlotGroups::of(&ids.to_dtype(DType::U32)?.flatten_all()?.to_vec1::<u32>()?);
+        let slots = tokens * topk;
+        // padding rows read the zero row appended past the tokens
+        let token_rows = groups
+            .rows
+            .iter()
+            .map(|&j| {
+                if j as usize == slots {
+                    tokens as u32
+                } else {
+                    j / topk as u32
+                }
+            })
+            .collect::<Vec<_>>();
+        let rows = token_rows.len();
+        let x = Tensor::cat(
+            &[
+                &xs.to_dtype(DType::F16)?,
+                &Tensor::zeros((1, hidden), DType::F16, device)?,
+            ],
+            0,
+        )?
+        .index_select(&Tensor::from_vec(token_rows, rows, device)?, 0)?
+        .contiguous()?;
+        let experts = Tensor::from_vec(groups.experts.clone(), groups.experts.len(), device)?;
+        let g = gate.indexed_matmul(&x, &experts, groups.m, &gate.grouped_tuned)?;
+        let u = up.indexed_matmul(&x, &experts, groups.m, &up.grouped_tuned)?;
+        let act = (inference_tensor::nn::ops::silu(&g)? * u)?
+            .to_dtype(DType::F16)?
+            .contiguous()?;
+        let ys = down
+            .indexed_matmul(&act, &experts, groups.m, &down.grouped_tuned)?
+            .index_select(&Tensor::from_vec(groups.place, slots, device)?, 0)?
+            .reshape((tokens, topk, hidden))?
+            .broadcast_mul(&weights.to_dtype(DType::F32)?.unsqueeze(2)?)?
+            .sum(1)?;
+        if xs.dtype() == DType::BF16 {
+            ys.to_dtype(DType::BF16)
+        } else {
+            Ok(ys)
+        }
     }
 
     fn dense(&self, device: &Device) -> Result<Tensor> {
@@ -1539,7 +1624,8 @@ mod tests {
     }
 
     // the fused MoE against the dense layer it computes: per token, the routing-weighted sum over its experts of
-    // down(silu(gate(x)) * up(x)), gate and up at one rate and down at another, at one token and five
+    // down(silu(gate(x)) * up(x)), gate and up at one rate and down at another, at one token, five, and a hundred
+    // (grouped by expert, groups split past GROUP_ROWS)
     #[test]
     fn the_fused_moe_matches_its_dense_layer() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
@@ -1578,7 +1664,7 @@ mod tests {
         let (up, up_w) = projection(hidden, inter, 48, 300)?;
         let (down, down_w) = projection(inter, hidden, 64, 400)?;
         let mut ratios = Vec::new();
-        for tokens in [1, 5] {
+        for tokens in [1, 5, 100] {
             let xs = random_rows(tokens, hidden, 9)?;
             let ids = (0..tokens * topk)
                 .map(|j| ((j * 5 + 1) % experts) as u32)

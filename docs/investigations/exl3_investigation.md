@@ -1039,3 +1039,37 @@ direction across all three seeds. exllamav3's mix is weighted wiki 50, c4 20, co
 on alternate articles. Ours is the same files taken in equal parts, as one stream. Some of that edge may be its wiki
 weight (37% of rows), which leans toward the wikitext eval. Run 31's Qwen3.6 gap (0.0221 against 0.0215, one seed
 each) fits the same reading: a seed draw plus the calibration mix.
+
+## Run 34 - 2026-11-14 20:30
+
+MoE prefill, Qwen3.6-35B-A3B exllamav3 4.0. A server prefill of 525 tokens under nsys took 309 ms: 248 ms of
+kernels, 37 ms idle. The routed experts ran one projection at a time through the generic gather path:
+- gate and up each copied the input once per top-k slot (8x) as f16;
+- each projection read the routing indices on the host (three syncs a layer);
+- each built its padded grouped input with its own gather, and gathered its f32 output back to slot order;
+- each group was padded to the largest group's rows, capped at 64.
+
+Now, past 8 tokens, outside a capture, past 64 slots, `fused_silu_moe` groups once a layer (`SlotGroups`):
+- each group's token rows gathered straight from the hidden states;
+- gate and up, then silu(gate) * up in f32, then down, in the grouped layout;
+- the slots gathered back and weighted per token.
+
+```
+inference bench 512 / 128                      prefill tok/s   decode tok/s   KLD (wikitext-2 vs BF16 base)
+before (generic path, 64-row groups)           1659            197            0.02146
+generic, 16-row groups                         2120-2134                      0.02175
+fused, 16-row groups                           2740            198            0.02190
+fused, 32-row groups                           2500, 2489      198            0.02120
+fused, 64-row groups                           2039                           0.02120
+fused, 16 rows, EXL3_GEMM_H_ACC off            2535            198            0.02177
+IQ4_KSS GGUF                                   4234            164            0.0216
+```
+
+16-row groups take exllamav3's single-block tiles (TILESIZE_M 16). On sm_86 those accumulate the MMAs in f16
+(`EXL3_GEMM_H_ACC`), but turning that off recovers only 0.00013 of the 0.0007, and it slows the other GEMMs' 16-row
+tiles. So the single-block path loses accuracy here for some other reason, not found. Multi-row tiles (32 and 64
+rows land on the same variants: equal KLD to five digits) match the dense path. 32 rows is the default: faster and
+more accurate than where this started. The fused path's f32 activation beats the generic path's bf16 one by 0.00026.
+
+Left for prefill: the dense `exl3_gemm` (~67 ms for 525 tokens; exllamav3 reconstructs to f16 and runs an hgemm past
+144 rows), the casts around the EXL3 calls, and the host read of the routing indices (one sync a layer now).
