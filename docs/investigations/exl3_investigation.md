@@ -1371,3 +1371,63 @@ serve --moe-expert-cache 512 --pa-context-len 16384 -m <Flash-Next exl3 1.66bpw>
 
 352 slots is near the ~360 estimated from the GGUF's fit. EXL3 offload under `--pa-cache-type auto` now quantizes
 the KV cache like GGUF offload; Runs 42-44 ran BF16 KV.
+
+## Run 46 - 2026-11-15 09:35
+
+Question: Flash-Next EXL3 2.68bpw_h6_ng8 (turboderp KLD 0.0249; model files only, the 1.66 branch's 3-bit n-gram table
+linked in) decode at the largest expert cache that fits.
+
+Per-tensor bits: experts 61440 tensors at K=2.5 and 12288 at K=3 (1.66: K=1.5 and 2); everything else 6.
+
+```
+rtbench.sh fnx268-c512 --moe-expert-cache 512 -m <exl3 2.68bpw>
+  WARN ... requested=512 slots=200 context=16384      (Layers 0-47: cuda[0], KV q3)
+  wiki 34.1   code 26.5   essay 26.9 tok/s
+GGUF IQ4_XS, Run 44: 128 slots 37.6 / 41.0 / 42.4
+```
+
+200 slots, as estimated from file sizes. But decode trails the GGUF at 128 slots by ~30%, where 1.66 at 256 led it.
+Rough miss budget: at 200 of 512 experts a layer, ~140 misses a token of ~1.5 MB each is ~210 MB over PCIe 3, ~20 ms of
+a ~33 ms step, so the in-kernel bus reads look like the limit. Not yet profiled: the achieved bus rate of the mapped
+reads (zero-copy reads by kernels often reach well under memcpy's ~12 GB/s), and the K=2.5 expert kernels' share.
+
+## Run 47 - 2026-11-15 10:10
+
+Question: where does Run 46's 2.68bpw decode step go, and do the kernels' reads of host experts run at the bus rate?
+
+```
+prof3.sh p268 --moe-expert-cache 512 -m <exl3 2.68bpw>   (200 slots; warm 100-token request under nsys)
+  span 4190 ms, kernels busy 3997 ms, idle > 0.1 ms 58 ms
+  exl3_moe_coop_a 1596 ms (3960 x 403 us)   exl3_moe_coop_b 809 ms (3960 x 204 us)   exllamav3's, the K=2.5 layers
+  moe_a 343 ms (792 x 434 us)               moe_b 171 ms (792 x 216 us)              ours, the K=3 layers
+  dgemv 384 ms, gemv_batched 177 ms; cache fills 6 MB in the window (warm, not churning)
+nvidia-smi dmon -s t during rtbench decode: rx 7-10 GB/s a second (mean 8.7, peak 12.0); link Gen3 x16
+```
+
+The MoE kernels are ~70% of the step at ~600 us a layer either way, against tens of us were the layer's experts all on
+the device, so the step is bus-bound, and ours and exllamav3's match: the kernel is not the lever. The reads already
+run at ~70% of Gen3's practical ~12 GB/s. 8.7 GB/s over a ~33 ms step is ~290 MB a token, ~190 of the 480 picks
+(top-10 x 48) missing with 39% of experts cached: routing is flat enough that hits track coverage closely.
+
+Implication: staging misses at the full bus rate (a gather kernel with wide coalesced reads into a device buffer, the
+MoE kernel then reading VRAM) caps out near +20-25% (~33-35 tok/s), still under the GGUF's 38-42 at 128 slots, whose
+misses run on the CPU at memory bandwidth with nothing crossing the bus. On PCIe 3, EXL3 offload leads only where the
+cache covers most experts (1.66 bpw at 256 slots).
+
+## Run 48 - 2026-11-15 10:25
+
+Question: where does the GPU sit idle in the streamed converter (Qwen3.8 27B BF16, 4.0 mul1, source shards on a USB
+drive)?
+
+```
+nvidia-smi utilization every 0.5 s + iostat on the drive, 230 s across layers 2-6
+  mean GPU util 81%, 17% of samples under 10%
+  GDN layers 65 s: ~6 s idle at each layer's start while the drive reads ~140 MB/s (its sequential rate)
+  attention layer 3 (82 s): ~28 s idle while the drive reads 11-54 MB/s
+```
+
+Every idle stretch is the next layer's weights coming off the drive on first touch of the mapped shards; the GPU is
+busy from calibration through encoding. Fix: before a layer builds, a thread reads the next layer's tensor bytes
+(runs from the safetensors headers, neighbours within 1 MiB merged, 8 MiB reads), so its pages are cached while the
+GPU works; the next read-ahead waits for the last, keeping reads sequential. Expected ~10-15% of a conversion from
+slow storage; not measured yet (the running conversion predates it).
