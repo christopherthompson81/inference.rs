@@ -7,7 +7,7 @@ use inference_nn::moe::OFFLOAD_STAGING_EXPERTS;
 use inference_quant::GgufType;
 use inference_quant::{IsqType, QuantizedWeightSource};
 use inference_tensor::{DType, Device};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     Topology, TryIntoDType,
@@ -270,6 +270,23 @@ impl AutoDeviceMapSizes {
     }
 }
 
+// The checkpoint's own tensor sizes, when its layers map straight from them (no topology, LoRA or MatFormer slicing)
+pub(crate) fn checkpoint_inventory(
+    inputs: &AutoDeviceMapSizingInputs<'_>,
+    dtype: DType,
+) -> Result<Option<crate::pipeline::loaders::CheckpointDeviceMapSizes>> {
+    if inputs.topology.is_some() || inputs.has_lora || inputs.matformer.is_some() {
+        return Ok(None);
+    }
+    let num_layers = inputs.loader.num_layers(inputs.config)?;
+    crate::pipeline::loaders::checkpoint_device_map_sizes(
+        inputs.weight_filenames,
+        num_layers,
+        dtype,
+        |name| inputs.loader.checkpoint_layer_index(inputs.config, name),
+    )
+}
+
 pub(crate) struct AutoDeviceMapSizes {
     pub layer_sizes_in_bytes: Vec<usize>,
     pub non_mapped_size_in_bytes: usize,
@@ -425,32 +442,31 @@ pub(crate) fn auto_device_map_sizes(
             )
         }
         AutoDeviceMapSizing::Checkpoint => {
-            let inventory =
-                if inputs.topology.is_none() && !inputs.has_lora && inputs.matformer.is_none() {
-                    let num_layers = inputs.loader.num_layers(inputs.config)?;
-                    crate::pipeline::loaders::checkpoint_device_map_sizes(
-                        inputs.weight_filenames,
-                        num_layers,
-                        dtype,
-                        |name| inputs.loader.checkpoint_layer_index(inputs.config, name),
-                    )?
-                } else {
-                    None
-                };
-            if let Some(inventory) = inventory {
-                info!(
+            if let Some(inventory) = checkpoint_inventory(&inputs, dtype)? {
+                debug!(
                     model_mib = inventory.total_model_size_in_bytes / (1024 * 1024),
                     "Using checkpoint tensor inventory for automatic device mapping"
                 );
                 let pack_factor =
                     QuantizationConfigShim::get_quant_config_pack_factor(inputs.config, dtype)?;
-                return AutoDeviceMapSizes {
+                let sizes = AutoDeviceMapSizes {
                     layer_sizes_in_bytes: inventory.layer_sizes_in_bytes,
                     non_mapped_size_in_bytes: inventory.non_mapped_size_in_bytes,
                     non_mapped_layer_sizes_in_bytes: Vec::new(),
                     total_model_size_in_bytes: inventory.total_model_size_in_bytes,
-                }
-                .without_host_embedding(&inputs, dtype, pack_factor, None);
+                };
+                // per-expert checkpoints (EXL3's) keep their experts in host memory with a cache of `slots` a layer
+                let sizes = match inputs.moe_expert_cache {
+                    Some(slots) if inventory.layer_experts.iter().any(|&e| e > 0) => sizes
+                        .with_experts_cached(
+                            &inventory.layer_expert_bytes,
+                            &inventory.layer_experts,
+                            slots,
+                            None,
+                        ),
+                    _ => sizes,
+                };
+                return sizes.without_host_embedding(&inputs, dtype, pack_factor, None);
             }
             // The checkpoint itself may be prequantized.
             let weight_pack_factor =

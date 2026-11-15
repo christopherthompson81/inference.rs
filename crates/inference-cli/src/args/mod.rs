@@ -1107,7 +1107,8 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub no_embeddings_on_host: bool,
 
-    /// Keep MoE experts (GGUF, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs the rest
+    /// Keep MoE experts (GGUF or EXL3, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs
+    /// a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus
     #[arg(long, value_name = "EXPERTS")]
     #[serde(default)]
     pub moe_expert_cache: Option<usize>,
@@ -1419,7 +1420,8 @@ pub struct BenchRuntimeOptions {
     #[arg(long)]
     pub mtp_draft_isq: Option<String>,
 
-    /// Keep MoE experts (GGUF, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs the rest
+    /// Keep MoE experts (GGUF or EXL3, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs
+    /// a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus
     #[arg(long, value_name = "EXPERTS")]
     pub moe_expert_cache: Option<usize>,
 }

@@ -9,6 +9,21 @@ pub(crate) struct CheckpointDeviceMapSizes {
     pub(crate) layer_sizes_in_bytes: Vec<usize>,
     pub(crate) non_mapped_size_in_bytes: usize,
     pub(crate) total_model_size_in_bytes: usize,
+    // each layer's per-expert MoE tensors (`experts.<e>.`) and how many experts they hold, for an expert cache
+    pub(crate) layer_expert_bytes: Vec<usize>,
+    pub(crate) layer_experts: Vec<usize>,
+}
+
+// a hashed n-gram table (Qwen3.8-Flash-Next's PLE) loads into host memory whatever the checkpoint
+const HOST_TABLE: &str = ".ngram_embedding.";
+const EXPERTS: &str = ".experts.";
+// only EXL3 experts (trellis-coded) have a host-memory path, so only they are reported for an expert cache
+const HOST_EXPERT_TENSOR: &str = ".trellis";
+
+// the expert index of a per-expert tensor name (`...experts.<e>.<proj>...`)
+fn expert_index(name: &str) -> Option<usize> {
+    let rest = &name[name.find(EXPERTS)? + EXPERTS.len()..];
+    rest.split('.').next()?.parse().ok()
 }
 
 fn is_float(dtype: SafeDtype) -> bool {
@@ -111,9 +126,23 @@ pub(crate) fn checkpoint_device_map_sizes(
     };
     let mut layer_sizes_in_bytes = vec![0usize; num_layers];
     let mut non_mapped_size_in_bytes = 0usize;
+    let (mut layer_expert_bytes, mut layer_experts) =
+        (vec![0usize; num_layers], vec![0usize; num_layers]);
+    let mut host_experts = false;
 
     for (name, view) in safetensors.tensors() {
+        if name.contains(HOST_TABLE) {
+            continue;
+        }
         let bytes = runtime_tensor_bytes(&name, &view, target_dtype)?;
+        if let Some(layer_idx) = layer_index(&name)
+            && let Some(expert) = expert_index(&name)
+            && layer_idx < num_layers
+        {
+            layer_expert_bytes[layer_idx] += bytes;
+            layer_experts[layer_idx] = layer_experts[layer_idx].max(expert + 1);
+            host_experts |= name.ends_with(HOST_EXPERT_TENSOR);
+        }
         if let Some(layer_idx) = layer_index(&name) {
             let Some(layer_size) = layer_sizes_in_bytes.get_mut(layer_idx) else {
                 return Ok(None);
@@ -131,6 +160,10 @@ pub(crate) fn checkpoint_device_map_sizes(
     if layer_sizes_in_bytes.contains(&0) {
         return Ok(None);
     }
+    if !host_experts {
+        layer_expert_bytes.fill(0);
+        layer_experts.fill(0);
+    }
     let mapped_size = layer_sizes_in_bytes
         .iter()
         .try_fold(0usize, |total, size| total.checked_add(*size))
@@ -142,6 +175,8 @@ pub(crate) fn checkpoint_device_map_sizes(
         layer_sizes_in_bytes,
         non_mapped_size_in_bytes,
         total_model_size_in_bytes,
+        layer_expert_bytes,
+        layer_experts,
     }))
 }
 
@@ -166,6 +201,78 @@ mod tests {
             None
         );
         assert_eq!(standard_layer_index("mtp.layers.0.mlp.weight"), None);
+    }
+
+    #[test]
+    fn only_trellis_coded_experts_count_for_an_expert_cache() -> Result<()> {
+        let dir = tempdir()?;
+        let words = vec![0u8; 8];
+        let signs = vec![0u8; 4];
+        let inventory = |names: &[(&str, SafeDtype, Vec<usize>, &[u8])]| -> Result<_> {
+            let path = dir.path().join("weights.safetensors");
+            let tensors = names
+                .iter()
+                .map(|(name, dtype, shape, data)| {
+                    Ok((*name, TensorView::new(*dtype, shape.clone(), data)?))
+                })
+                .collect::<Result<HashMap<_, _>>>()?;
+            serialize_to_file(tensors, None, &path)?;
+            Ok(
+                checkpoint_device_map_sizes(&[path], 1, DType::BF16, standard_layer_index)?
+                    .unwrap(),
+            )
+        };
+        let exl3 = inventory(&[
+            (
+                "model.layers.0.mlp.experts.0.up_proj.trellis",
+                SafeDtype::I16,
+                vec![2, 2],
+                &words,
+            ),
+            (
+                "model.layers.0.mlp.experts.0.up_proj.suh",
+                SafeDtype::F16,
+                vec![2],
+                &signs,
+            ),
+            (
+                "model.layers.0.mlp.experts.1.up_proj.trellis",
+                SafeDtype::I16,
+                vec![2, 2],
+                &words,
+            ),
+            (
+                "model.layers.0.mlp.experts.1.up_proj.suh",
+                SafeDtype::F16,
+                vec![2],
+                &signs,
+            ),
+            (
+                "model.layers.0.norm.weight",
+                SafeDtype::BF16,
+                vec![2],
+                &signs,
+            ),
+        ])?;
+        assert_eq!(exl3.layer_experts, [2]);
+        assert_eq!(exl3.layer_expert_bytes, [24]);
+        let dense = inventory(&[
+            (
+                "model.layers.0.mlp.experts.0.up_proj.weight",
+                SafeDtype::BF16,
+                vec![4],
+                &words,
+            ),
+            (
+                "model.layers.0.mlp.experts.1.up_proj.weight",
+                SafeDtype::BF16,
+                vec![4],
+                &words,
+            ),
+        ])?;
+        assert_eq!(dense.layer_experts, [0]);
+        assert_eq!(dense.layer_expert_bytes, [0]);
+        Ok(())
     }
 
     #[test]

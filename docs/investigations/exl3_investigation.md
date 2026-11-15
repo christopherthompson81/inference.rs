@@ -1238,3 +1238,233 @@ single-token decode's bits:
 The EXL3 linears, q/k/v and experts already are (Run 38). Greedy output equal to plain decode would need all three
 bit-identical to their one-token forms (matching reduction orders in flash attention and the recurrence kernels):
 large, and it would only move which of a near-tied pair is picked. Not pursued.
+
+## Run 41 - 2026-11-15 00:55
+
+Toward Qwen3.8-Flash-Next on EXL3 (turboderp's quants: 1.66 bpw is 28.2 GiB of weights and an 18.5 GiB n-gram table;
+2.05 bpw 33.2 + 24.4), which does not fit 24 GB. Can EXL3 layers leave the GPU yet? A layer the device map puts on
+the CPU loads, but `linear_b`/`experts_b` decode it to a dense weight in the model's dtype. And any CPU layer turns
+PagedAttention off for the whole model:
+
+```
+Qwen3.6 EXL3 4.0, inference bench 512 / 64           prefill tok/s    decode tok/s
+all layers on the GPU                                3922             198
+-n "0:36" (layers 36-39 on the CPU, as bf16)         17.2 (29.8 s)    11.4
+```
+
+Keeping them quantized off the GPU, step 1: with `--moe-expert-cache`, a CUDA layer's EXL3 experts load into
+page-locked host memory mapped into the device (`Exl3Experts::new_in_host`): one allocation a projection, each
+expert's trellis, suh and svh 256-byte aligned. The address tables point there. The kernels (decode, verify,
+grouped prefill) read the address tables as before, so they are unchanged and read the experts over the bus: no
+dequantization, no CPU compute, and decode graphs and PagedAttention stay. No device cache yet.
+
+```
+Qwen3.6 EXL3 4.0, every layer's experts in host memory    prefill tok/s    decode tok/s    KLD (40 x 512)
+                                                          271              22.2            0.02214
+```
+
+Decode reads ~512 MB of experts a token (40 layers x 8 x 1.6 MB) in 45 ms: ~11 GB/s, PCIe 3 x16. KLD is in the band
+of Run 35. `experts_in_host_memory_match_experts_on_the_device` pins the same bits as on the device at 1, 5 and 100
+tokens.
+
+Next: a device cache of hot experts per layer, so hits read VRAM and only misses cross the bus.
+
+## Run 42 - 2026-11-15 01:40
+
+Step 2: the device cache (`exl3/host_cache.rs`). Each offloaded projection has:
+- `N` slots in VRAM (`--moe-expert-cache N`);
+- a host copy of its address table;
+- decayed use scores (0.9 a step);
+- a mapped routing record.
+
+Each fused MoE forward copies its picks into the record (a node decode graphs capture). `cache_step`, called from
+`offload_activity` as each step starts (outside any capture), does three things:
+- scores the last step's picks;
+- points the table at the slots whose copies have landed;
+- starts up to 16 copies (16 in flight at most) on a copy stream of its own.
+
+An expert replaces a cached one only past 1.5x its score. The evicted expert's entry points back at host memory, and
+an event recorded after that on the compute stream gates the copy that overwrites its slot. A new expert's entry
+points at its slot only once its copy's event has completed. So a kernel reads valid bytes either way, and the
+results are the same bits as on the device: `experts_in_host_memory_match_experts_on_the_device` now runs eight
+rounds with a 3-slot cache stepped between them, and asserts experts landed.
+
+```
+inference bench 512 / 128 (synthetic tokens), decode tok/s     cache 64   cache 256
+fills a step 1                                                 27.2       27.0
+fills a step 4                                                 38.3       42.8
+fills a step 16                                                39.7       68.8 (still warming within 128 tokens)
+
+real text (rtbench, 400 tokens), 16 fills          wiki     code     essay
+cache 64                                           50.5     41.6     38.0
+cache 128                                          98.8     77.5     65.8
+cache 256 (every expert)                           198.1    188.4    150.4
+no cache (Run 41)                                  22.2 (bench)
+GGUF IQ4_KSS, CPU misses, 128 / 64 slots (recipe Run 9): 95-103 / 56-62
+```
+
+At 128 slots EXL3 is near the GGUF's CPU-miss path. Below that the GGUF wins: its misses run at the CPU's memory
+bandwidth, these over PCIe 3 (~11 GB/s). The loader does not pick this for EXL3 itself (the planner is GGUF's);
+`--moe-expert-cache` asks for it.
+
+## Run 43 - 2026-11-15 07:28
+
+Question: does Qwen3.8-Flash-Next's EXL3 (turboderp 1.66bpw_h4_ng3: ring-coded token embedding and hashed n-gram
+table, experts mostly K=1.5) load and score next to the IQ4_XS GGUF, and why did the first perplexity run run out of
+host memory?
+
+Loader work: the n-gram table ships as `ngram_embedding.safetensors` (128 shards of tail-biting mul1 rings, K=3, 31
+words a row, plus per-head bias), added to the file list and kept out of the device-map inventory; `exl3::ring`
+decodes rings (n-gram rows on gather, the embedding to dense once at load); embed_tokens and QSA's fused index
+projection probe `.trellis` as well as `.weight`. The inventory counts per-layer expert bytes so `--moe-expert-cache`
+plans EXL3 experts in host memory.
+
+The out-of-memory run was the perplexity example, not the loader: its safetensors branch dropped
+`--moe-expert-cache` (only the GGUF branch passed it), so the planner sized experts on the device and mapped layers
+37-47 to the CPU, where EXL3 rebuilds experts dense (~5 GB a layer). Serve and bench runs had mapped 0-47 to cuda[0].
+Fixed in the example, along with the paged cache sized to the scored window (without it the QSA context capped at 2051
+and a 4096 window failed).
+
+```
+examples perplexity -m <exl3 1.66bpw> --moe-expert-cache 64 --pa-cache-type auto --file wiki.test.raw --llama-cpp-ctx 4096
+examples perplexity --gguf <IQ4_XS 3 shards> (same flags)
+  EXL3 1.66bpw  PPL 1.6935   load 50 s, lowest MemAvailable 64.0 GB of 125.7 GiB (pinned experts + ring table in RAM)
+  GGUF IQ4_XS   PPL 1.3207   lowest MemAvailable 106.3 GB (experts pageable in the file mapping)
+```
+
+EXL3 is 28% above the GGUF at about 40% of its bits. One 4096 window; no exllamav3 number to compare (the model does
+not fit its 24 GB card without offload), so quantization loss and a decode error in the new ring paths are not yet
+separated. Next: check `exl3::ring` decodes against exllamav3's own codec on sampled embedding and n-gram rows.
+
+## Run 44 - 2026-11-15 07:55
+
+Question: warm real-text decode for Flash-Next EXL3 1.66bpw against the IQ4_XS GGUF, both with experts in host memory.
+At 1.66 bpw the EXL3 is a speed test, not an accuracy one (Run 43).
+
+```
+rtbench.sh <tag> --moe-expert-cache <slots> -m <exl3 | gguf>   (serve, warm-up pass, then wiki/code/essay, 400 tokens)
+                    wiki   code   essay  tok/s
+  EXL3 64 slots     27.7   24.1   23.5
+  GGUF 64 slots     26.7   28.7   29.6
+  EXL3 128 slots    36.1   30.1   30.4
+  GGUF 128 slots    37.6   41.0   42.4
+  EXL3 256 slots    55.0   44.8   45.1   (all 48 layers on cuda[0])
+```
+
+At equal slots the GGUF wins: its misses run on the CPU at memory bandwidth, EXL3's are read over PCIe 3 by the
+kernels (as on Qwen3.6, Run 42). EXL3's experts are ~2.5x smaller, so twice the slots fit: 256 slots (half of the 512
+experts) beats the GGUF's best fit (160 slots already spilled layers 43-47 to the CPU in qwen4exp Run 12). The fit, not
+the miss path, is where the low-bit EXL3 pays off.
+
+## Run 45 - 2026-11-15 08:40
+
+Question: does an EXL3 expert cache too large for the GPU shrink to fit, as a GGUF's does, instead of moving layers
+to the CPU? It did not: the slot planner (`ExpertCachePlan::slots`) only read expert counts from GGUF and UQFF
+sources. It now reads them from the checkpoint inventory too, which reports experts only when they are trellis-coded
+(a BF16 checkpoint's experts have no host-memory path).
+
+```
+serve --moe-expert-cache 512 --pa-context-len 16384 -m <Flash-Next exl3 1.66bpw>
+  WARN the requested MoE expert cache does not fit ...; caching fewer experts per layer requested=512 slots=352
+  Layers 0-47: cuda[0]; KV cache q3 (offload policy under `auto`, as for GGUF)
+```
+
+352 slots is near the ~360 estimated from the GGUF's fit. EXL3 offload under `--pa-cache-type auto` now quantizes
+the KV cache like GGUF offload; Runs 42-44 ran BF16 KV.
+
+## Run 46 - 2026-11-15 09:35
+
+Question: Flash-Next EXL3 2.68bpw_h6_ng8 (turboderp KLD 0.0249; model files only, the 1.66 branch's 3-bit n-gram table
+linked in) decode at the largest expert cache that fits.
+
+Per-tensor bits: experts 61440 tensors at K=2.5 and 12288 at K=3 (1.66: K=1.5 and 2); everything else 6.
+
+```
+rtbench.sh fnx268-c512 --moe-expert-cache 512 -m <exl3 2.68bpw>
+  WARN ... requested=512 slots=200 context=16384      (Layers 0-47: cuda[0], KV q3)
+  wiki 34.1   code 26.5   essay 26.9 tok/s
+GGUF IQ4_XS, Run 44: 128 slots 37.6 / 41.0 / 42.4
+```
+
+200 slots, as estimated from file sizes. But decode trails the GGUF at 128 slots by ~30%, where 1.66 at 256 led it.
+Rough miss budget: at 200 of 512 experts a layer, ~140 misses a token of ~1.5 MB each is ~210 MB over PCIe 3, ~20 ms of
+a ~33 ms step, so the in-kernel bus reads look like the limit. Not yet profiled: the achieved bus rate of the mapped
+reads (zero-copy reads by kernels often reach well under memcpy's ~12 GB/s), and the K=2.5 expert kernels' share.
+
+## Run 47 - 2026-11-15 10:10
+
+Question: where does Run 46's 2.68bpw decode step go, and do the kernels' reads of host experts run at the bus rate?
+
+```
+prof3.sh p268 --moe-expert-cache 512 -m <exl3 2.68bpw>   (200 slots; warm 100-token request under nsys)
+  span 4190 ms, kernels busy 3997 ms, idle > 0.1 ms 58 ms
+  exl3_moe_coop_a 1596 ms (3960 x 403 us)   exl3_moe_coop_b 809 ms (3960 x 204 us)   exllamav3's, the K=2.5 layers
+  moe_a 343 ms (792 x 434 us)               moe_b 171 ms (792 x 216 us)              ours, the K=3 layers
+  dgemv 384 ms, gemv_batched 177 ms; cache fills 6 MB in the window (warm, not churning)
+nvidia-smi dmon -s t during rtbench decode: rx 7-10 GB/s a second (mean 8.7, peak 12.0); link Gen3 x16
+```
+
+The MoE kernels are ~70% of the step at ~600 us a layer either way, against tens of us were the layer's experts all on
+the device, so the step is bus-bound, and ours and exllamav3's match: the kernel is not the lever. The reads already
+run at ~70% of Gen3's practical ~12 GB/s. 8.7 GB/s over a ~33 ms step is ~290 MB a token, ~190 of the 480 picks
+(top-10 x 48) missing with 39% of experts cached: routing is flat enough that hits track coverage closely.
+
+Implication: staging misses at the full bus rate (a gather kernel with wide coalesced reads into a device buffer, the
+MoE kernel then reading VRAM) caps out near +20-25% (~33-35 tok/s), still under the GGUF's 38-42 at 128 slots, whose
+misses run on the CPU at memory bandwidth with nothing crossing the bus. On PCIe 3, EXL3 offload leads only where the
+cache covers most experts (1.66 bpw at 256 slots).
+
+## Run 48 - 2026-11-15 10:25
+
+Question: where does the GPU sit idle in the streamed converter (Qwen3.8 27B BF16, 4.0 mul1, source shards on a USB
+drive)?
+
+```
+nvidia-smi utilization every 0.5 s + iostat on the drive, 230 s across layers 2-6
+  mean GPU util 81%, 17% of samples under 10%
+  GDN layers 65 s: ~6 s idle at each layer's start while the drive reads ~140 MB/s (its sequential rate)
+  attention layer 3 (82 s): ~28 s idle while the drive reads 11-54 MB/s
+```
+
+Every idle stretch is the next layer's weights coming off the drive on first touch of the mapped shards; the GPU is
+busy from calibration through encoding. Fix: before a layer builds, a thread reads the next layer's tensor bytes
+(runs from the safetensors headers, neighbours within 1 MiB merged, 8 MiB reads), so its pages are cached while the
+GPU works; the next read-ahead waits for the last, keeping reads sequential. Expected ~10-15% of a conversion from
+slow storage; not measured yet (the running conversion predates it).
+
+## Run 49 - 2026-11-15 11:50
+
+Question: Qwen3.8 27B (dense; fits the 3090) converted by ours at 4.0 mul1, head 6, against the GGUF recipe A (IQ4_KS
+bulk, 14.06 GiB, KLD 0.0169 by ik_llama.cpp) on the same BF16 base.
+
+```
+inference quantize exl3 -m <Qwen/Qwen3.8-27B BF16, USB drive> --calibration-file <exllamav3 cal text, 484K tokens> --bits 4.0
+  1 h 12 min (60-70 s a layer, 96 s for the first; Run 48's idle included), lowest MemAvailable 82.7 GB
+  output 16.30 GiB: layers 11.34 (+0.05 dense), embed 2.37 (BF16), head 0.89, vision 0.86 and MTP 0.79 (BF16)
+examples perplexity <model> --file wiki.test.raw --kld-base Qwen3.8-27B-gguf/bf16-wiki-c512-ch40.kld (40 x 512)
+                 PPL (base 5.9281)  KLD mean  median   p99     same top-1
+  EXL3 4.0 ours  5.9827             0.01244   0.00428  0.1338  94.88%
+  recipe A       5.9488             0.01700   0.00689  0.1820  94.48%
+```
+
+Our harness reproduces recipe A's 0.0169. EXL3 is 27% lower in mean KLD and lower at every quantile, with more
+top-1 agreement, at a 0.6 GiB larger text model, nearly all of it the BF16 embedding (lookups only). Its PPL is
+higher (PPL is not the measure: both sides of the base). Next: decode and DFlash 2 against recipe A.
+
+## Run 50 - 2026-11-15 12:20
+
+Question: Run 49's EXL3 4.0 against recipe A in decode, plain and with DFlash 2 (recipe A's serving setup: q3 KV,
+incoai drafter at q4k, 7 drafts).
+
+```
+rtbench.sh <tag> --pa-cache-type q3 <model> [--mtp-model <DFlash2 drafter> --mtp-n-predict 7 --mtp-draft-isq q4k]
+tok/s                       wiki    code    essay   accept (mean len)
+EXL3 4.0, plain             43.7    43.8    43.8
+recipe A, plain             36.9    37.4    40.0
+EXL3 4.0, DFlash 2 x7       133.9   152.2   75.3    50.8% (4.56)
+recipe A, DFlash 2 x7       181.8   216.3   107.8   48.6% (4.40)
+```
+
+Plain decode: EXL3 leads by ~15%. With DFlash 2 it trails by ~30% at the same acceptance, so the 8-row verify step is
+where EXL3 loses: recipe A's tiled IQ4_KS verify path (qwen38 #494/#503) against our m <= 8 GEMV, and possibly the
+6-bit head at 8 rows on exllamav3's kernel (Run 39 kept it there; this head is 248K x 5120). Not yet profiled.

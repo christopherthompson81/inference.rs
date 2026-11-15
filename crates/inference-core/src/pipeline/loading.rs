@@ -644,14 +644,25 @@ impl ExpertCachePlan<'_> {
     fn offloadable_experts(&self) -> Result<Option<usize>> {
         // one GPU: the fit is the primary device's, as a split across GPUs would map layers instead
         let gpus = self.devices.iter().filter(|d| d.is_cuda()).count();
-        if gpus != 1
-            || !self.devices.first().is_some_and(Device::is_cuda)
-            || !matches!(
-                self.sizing.sizing,
-                super::isq_flow::AutoDeviceMapSizing::PreparedWeightSource
-                    | super::isq_flow::AutoDeviceMapSizing::Uqff
-            )
-        {
+        if gpus != 1 || !self.devices.first().is_some_and(Device::is_cuda) {
+            return Ok(None);
+        }
+        // an EXL3 checkpoint's experts, as its inventory counts them
+        if matches!(
+            self.sizing.sizing,
+            super::isq_flow::AutoDeviceMapSizing::Checkpoint
+        ) {
+            return Ok(
+                super::isq_flow::checkpoint_inventory(&self.sizing, self.dtype)?
+                    .and_then(|inventory| inventory.layer_experts.into_iter().max())
+                    .filter(|&experts| experts > 0),
+            );
+        }
+        if !matches!(
+            self.sizing.sizing,
+            super::isq_flow::AutoDeviceMapSizing::PreparedWeightSource
+                | super::isq_flow::AutoDeviceMapSizing::Uqff
+        ) {
             return Ok(None);
         }
         let Some(source) = self.sizing.weight_source else {

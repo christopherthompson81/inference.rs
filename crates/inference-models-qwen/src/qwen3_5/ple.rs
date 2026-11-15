@@ -183,6 +183,8 @@ struct NgramTable {
     shards: Vec<(usize, usize, Arc<dyn QuantMethod>)>,
     // a GGUF's table read in place from its mapping: tens of GB of which each token reads a few rows
     mapped: Option<inference_quant::MappedBlocks>,
+    // an EXL3 checkpoint's table, kept as exllamav3's trellis rings and decoded a row at a time
+    rings: Option<inference_quant::exl3::ring::NgramRings>,
 }
 
 impl NgramTable {
@@ -204,12 +206,21 @@ impl NgramTable {
             return Ok(Self {
                 shards: Vec::new(),
                 mapped: Some(blocks),
+                rings: None,
+            });
+        }
+        if vb.contains_tensor("shard_0.trellis") {
+            return Ok(Self {
+                shards: Vec::new(),
+                mapped: None,
+                rings: Some(Self::load_rings(rows, head_dim, &vb)?),
             });
         }
         if vb.contains_tensor("weight") {
             return Ok(Self {
                 shards: vec![(0, rows, table(vb, rows)?)],
                 mapped: None,
+                rings: None,
             });
         }
         let parts = (0..)
@@ -232,11 +243,57 @@ impl NgramTable {
         Ok(Self {
             shards,
             mapped: None,
+            rings: None,
         })
+    }
+
+    // exllamav3's quantized table (`shard_N.trellis` rings, a bias per hash head)
+    fn load_rings(
+        rows: usize,
+        head_dim: usize,
+        vb: &ShardedVarBuilder,
+    ) -> Result<inference_quant::exl3::ring::NgramRings> {
+        if head_dim != inference_quant::exl3::ring::NGRAM_ROW {
+            inference_tensor::bail!("EXL3 n-gram rings are 160 wide, this table's rows {head_dim}");
+        }
+        let (mut shards, mut first, mut words) = (Vec::new(), 0, 0);
+        for part in 0.. {
+            let name = format!("shard_{part}.trellis");
+            if !vb.contains_tensor(&name) {
+                break;
+            }
+            let shard = vb.get_unchecked_dtype(&name, DType::I16)?;
+            let (shard_rows, shard_words) = shard.dims2()?;
+            words = shard_words;
+            shards.push((first, shard.flatten_all()?.to_vec1::<i16>()?));
+            first += shard_rows;
+        }
+        let head_bias = vb
+            .get_unchecked_dtype("head_bias", DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let head_offsets = vb
+            .get_unchecked_dtype("head_offsets", DType::I64)?
+            .to_vec1::<i64>()?;
+        let table =
+            inference_quant::exl3::ring::NgramRings::new(shards, words, head_bias, head_offsets)?;
+        if table.rows() < rows {
+            inference_tensor::bail!(
+                "EXL3 n-gram rings hold {} rows, the hash needs {rows}",
+                table.rows()
+            );
+        }
+        Ok(table)
     }
 
     /// The rows `ids`, `[ids, head_dim]` at `dtype`, gathered on the host shard by shard.
     fn gather(&self, ids: &[u32], dtype: inference_tensor::DType) -> Result<Tensor> {
+        if let Some(rings) = &self.rings {
+            let dim = inference_quant::exl3::ring::NGRAM_ROW;
+            let mut rows = vec![0f32; ids.len() * dim];
+            rings.gather(ids, &mut rows)?;
+            return Tensor::from_vec(rows, (ids.len(), dim), &Device::Cpu)?.to_dtype(dtype);
+        }
         if let Some(blocks) = &self.mapped {
             let cols = blocks.dims[1];
             return Tensor::from_vec(blocks.gather_rows(ids)?, (ids.len(), cols), &Device::Cpu)?
@@ -330,6 +387,19 @@ impl PleLayer {
             ple.head_dim(),
             vb_table.pp("ple_embedding").pp("ngram_embedding"),
         )?;
+        if let Some(rings) = &table.rings
+            && !rings
+                .head_offsets()
+                .iter()
+                .map(|&o| o as u64)
+                .eq(hash.head_offsets.iter().copied())
+        {
+            inference_tensor::bail!(
+                "the EXL3 n-gram table's heads start at {:?}, the hash's at {:?}",
+                rings.head_offsets(),
+                hash.head_offsets
+            );
+        }
         Ok(Self {
             lookup: Arc::new(NgramLookup {
                 cfg: ple,

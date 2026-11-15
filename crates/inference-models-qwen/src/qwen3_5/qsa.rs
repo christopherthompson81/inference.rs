@@ -105,7 +105,11 @@ impl QsaIndexer {
             )
         };
         let q_width = qsa.n_heads * qsa.head_dim;
-        let projection = if vb.contains_tensor("index_qk_proj.weight") {
+        // EXL3 stores the fused projection as a trellis
+        let projection = if ["weight", "trellis"]
+            .iter()
+            .any(|name| vb.contains_tensor(&format!("index_qk_proj.{name}")))
+        {
             IndexerProjection::Fused(linear(
                 "index_qk_proj",
                 q_width + qsa.kv_heads * qsa.head_dim,

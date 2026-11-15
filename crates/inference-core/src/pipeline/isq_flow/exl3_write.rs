@@ -36,6 +36,9 @@ const LAYOUT_VERSION: &str = "1.6.6";
 // the markers' stored multipliers (only their presence is read)
 const MCG_MULT: u32 = 0xCBAC1FED;
 const MUL1_MULT: u32 = 0x83DCD12D;
+// read-ahead of the next layer's weights: the read size, and the gap below which neighbouring tensors read as one
+const PREFETCH_CHUNK: usize = 8 << 20;
+const PREFETCH_MERGE_GAP: u64 = 1 << 20;
 
 /// The checkpoint a write copies its unquantized tensors and files from.
 pub(crate) struct Exl3Source<'a> {
@@ -47,6 +50,78 @@ pub(crate) struct Exl3Source<'a> {
 fn layer_of(key: &str) -> Option<usize> {
     let rest = &key[key.find(LAYERS)? + LAYERS.len()..];
     rest.split('.').next()?.parse().ok()
+}
+
+// a shard's bytes `[start, end)`
+type Run = (PathBuf, u64, u64);
+
+// each layer's tensor bytes in the source shards, as runs with near neighbours merged
+fn layer_ranges(weights: &[PathBuf]) -> Result<BTreeMap<usize, Vec<Run>>> {
+    use std::io::Read;
+    let mut layers: BTreeMap<usize, Vec<Run>> = BTreeMap::new();
+    for path in weights {
+        let mut file = std::fs::File::open(path)?;
+        let mut len = [0u8; 8];
+        file.read_exact(&mut len)?;
+        let len = u64::from_le_bytes(len);
+        let mut header = vec![0u8; usize::try_from(len)?];
+        file.read_exact(&mut header)?;
+        let header: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&header)?;
+        let base = 8 + len;
+        for (name, info) in &header {
+            let (Some(layer), Some([start, end])) = (
+                layer_of(name),
+                info.get("data_offsets")
+                    .and_then(|o| serde_json::from_value::<[u64; 2]>(o.clone()).ok()),
+            ) else {
+                continue;
+            };
+            layers
+                .entry(layer)
+                .or_default()
+                .push((path.clone(), base + start, base + end));
+        }
+    }
+    for runs in layers.values_mut() {
+        runs.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        let mut merged: Vec<Run> = Vec::with_capacity(runs.len());
+        for (path, start, end) in runs.drain(..) {
+            match merged.last_mut() {
+                Some(last) if last.0 == path && start <= last.2 + PREFETCH_MERGE_GAP => {
+                    last.2 = last.2.max(end);
+                }
+                _ => merged.push((path, start, end)),
+            }
+        }
+        *runs = merged;
+    }
+    Ok(layers)
+}
+
+// reads `runs` so their pages are cached when the layer builds from the mapped shards; a failure only loses the hint
+fn prefetch(runs: Vec<Run>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; PREFETCH_CHUNK];
+        for (path, start, end) in runs {
+            if let Err(e) = read_run(&path, start, end, &mut buf) {
+                tracing::debug!("reading ahead `{}` failed: {e}", path.display());
+                return;
+            }
+        }
+    })
+}
+
+fn read_run(path: &Path, start: u64, end: u64, buf: &mut [u8]) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut left = end - start;
+    while left > 0 {
+        let n = usize::try_from(left).map_or(buf.len(), |l| l.min(buf.len()));
+        file.read_exact(&mut buf[..n])?;
+        left -= n as u64;
+    }
+    Ok(())
 }
 
 fn fnv(key: &str) -> u64 {
@@ -303,9 +378,15 @@ pub(crate) fn write_exl3(
     );
     let mut weight_map = BTreeMap::new();
     match drive.layer_stream() {
-        Some(stream) if ctx.load_device.is_cpu() => {
-            write_streamed(stream, &tokens, ctx, &mut encoder, out, &mut weight_map)?
-        }
+        Some(stream) if ctx.load_device.is_cpu() => write_streamed(
+            stream,
+            &tokens,
+            ctx,
+            &mut encoder,
+            out,
+            &mut weight_map,
+            source.weights,
+        )?,
         _ if ctx.load_device.is_cpu() => {
             anyhow::bail!(
                 "this model does not rebuild its layers to stream them; load it on the GPU to write EXL3"
@@ -409,8 +490,10 @@ fn write_streamed(
     encoder: &mut Encoder,
     out: &Path,
     weight_map: &mut BTreeMap<String, String>,
+    weights: &[PathBuf],
 ) -> Result<()> {
     let gpu = Device::new_cuda(0)?;
+    let mut ranges = layer_ranges(weights)?;
     let mut states = Vec::new();
     for chunk in tokens.chunks(CALIBRATION_CHUNK_SIZE) {
         let ids = ctx
@@ -425,8 +508,14 @@ fn write_streamed(
         "Streaming {layers} layers through {gpu:?}, {} chunks of hidden states on the host.",
         states.len()
     );
+    let mut ahead: Option<std::thread::JoinHandle<()>> = None;
     for layer_idx in 0..layers {
         let start = std::time::Instant::now();
+        // the read-ahead of this layer finishes before the next one's starts, so reads stay sequential
+        if let Some(reading) = ahead.take() {
+            let _ = reading.join();
+        }
+        ahead = ranges.remove(&(layer_idx + 1)).map(prefetch);
         let layer = stream.build_layer(layer_idx, &gpu)?;
         let group = layer
             .modules()
@@ -590,7 +679,7 @@ fn copy_side_files(config: &Path, out: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::layer_of;
+    use super::{layer_of, layer_ranges, prefetch};
 
     #[test]
     fn modules_order_by_their_layer() {
@@ -600,5 +689,34 @@ mod tests {
             Some(3)
         );
         assert_eq!(layer_of("lm_head"), None);
+    }
+
+    #[test]
+    fn a_layers_tensors_read_ahead_as_merged_runs() -> anyhow::Result<()> {
+        use safetensors::{Dtype, serialize_to_file, tensor::TensorView};
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("model.safetensors");
+        let data = vec![0u8; 64];
+        let tensors = [
+            "model.layers.0.a.weight",
+            "model.layers.0.b.weight",
+            "model.layers.1.a.weight",
+            "model.embed_tokens.weight",
+        ]
+        .map(|name| Ok::<_, anyhow::Error>((name, TensorView::new(Dtype::U8, vec![64], &data)?)));
+        serialize_to_file(
+            tensors.into_iter().collect::<anyhow::Result<Vec<_>>>()?,
+            None,
+            &path,
+        )?;
+        let mut ranges = layer_ranges(std::slice::from_ref(&path))?;
+        assert_eq!(ranges.keys().copied().collect::<Vec<_>>(), [0, 1]);
+        let layer0 = &ranges[&0];
+        assert_eq!(layer0.len(), 1, "neighbouring tensors read as one run");
+        assert_eq!(layer0[0].2 - layer0[0].1, 128);
+        let file = std::fs::metadata(&path)?.len();
+        assert!(ranges.values().flatten().all(|&(_, _, end)| end <= file));
+        prefetch(ranges.remove(&1).unwrap()).join().unwrap();
+        Ok(())
     }
 }
