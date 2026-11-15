@@ -1,5 +1,7 @@
 // exllamav3's reconstruct kernel and 128-wide row Hadamards (third_party/exllamav3), and our C ABI over them: a
 // prefill matmul as the rotated input times the reconstructed f16 weight (cuBLAS, by the caller), rotated out
+#include <algorithm>
+#include <cstdint>
 #include "quant/reconstruct.cu"
 #include "quant/hadamard_inner.cuh"
 
@@ -84,5 +86,56 @@ extern "C" int launch_exl3_reconstruct(half* out, const uint16_t* trellis, int k
     }
     #undef RECON_CB
     #undef RECON
+    return 0;
+}
+
+// int8 prefill: the rotated input at one scale a row, and the int32 product back to f32
+constexpr int I8_THREADS = 256;
+// grid-stride blocks a multiprocessor for the rescale
+constexpr int I8_BLOCKS_PER_SM = 16;
+
+// `rows x k` f16 to int8 with one scale a row (max |x| / 127, into `scale`), a block a row
+__global__ __launch_bounds__(I8_THREADS) void quant_rows_i8_kernel(const half* x, int8_t* q, float* scale, int k)
+{
+    const half* row = x + (size_t) blockIdx.x * k;
+    float m = 0.0f;
+    for (int i = threadIdx.x; i < k; i += I8_THREADS) m = fmaxf(m, fabsf(__half2float(row[i])));
+    for (int o = 16; o; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+    __shared__ float wm[I8_THREADS / 32];
+    if (threadIdx.x % 32 == 0) wm[threadIdx.x / 32] = m;
+    __syncthreads();
+    m = 0.0f;
+    for (int w = 0; w < I8_THREADS / 32; ++w) m = fmaxf(m, wm[w]);
+    const float s = m > 0.0f ? m / 127.0f : 1.0f;
+    if (threadIdx.x == 0) scale[blockIdx.x] = s;
+    const float inv = 1.0f / s;
+    int8_t* qr = q + (size_t) blockIdx.x * k;
+    for (int i = threadIdx.x; i < k; i += I8_THREADS) qr[i] = (int8_t) __float2int_rn(__half2float(row[i]) * inv);
+}
+
+// `rows x n` int32 to f32, times each row's scale and the weight scale
+__global__ __launch_bounds__(I8_THREADS) void dequant_i32_kernel(const int* c, float* y, const float* rs, float ws,
+                                                                 int n, size_t total)
+{
+    for (size_t i = (size_t) blockIdx.x * I8_THREADS + threadIdx.x; i < total; i += (size_t) gridDim.x * I8_THREADS)
+        y[i] = (float) c[i] * rs[i / n] * ws;
+}
+
+extern "C" int launch_exl3_quant_rows_i8(const half* x, int8_t* q, float* scale, int rows, int k, cudaStream_t stream)
+{
+    if (rows < 1 || k < 1) return -1;
+    quant_rows_i8_kernel<<<rows, I8_THREADS, 0, stream>>>(x, q, scale, k);
+    return 0;
+}
+
+extern "C" int launch_exl3_dequant_i32(const int* c, float* y, const float* rs, float ws, int rows, int n,
+                                       cudaStream_t stream)
+{
+    int device, sms;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device);
+    const size_t total = (size_t) rows * n;
+    const int blocks = (int) std::min<size_t>((total + I8_THREADS - 1) / I8_THREADS, (size_t) sms * I8_BLOCKS_PER_SM);
+    dequant_i32_kernel<<<blocks, I8_THREADS, 0, stream>>>(c, y, rs, ws, n, total);
     return 0;
 }

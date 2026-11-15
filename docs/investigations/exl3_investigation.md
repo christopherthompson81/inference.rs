@@ -1718,3 +1718,24 @@ fall with the slice, and near-exact activations still read +0.0005, about the si
 numeric change (Run 35: up to +-0.0007 on Qwen3.6). So the int8 route's cost lies between ~+0.0005 and +0.0009, which
 KLD cannot pin down; per-k-slice products (a GEMM and an f32 pass each) cost more than the int8 GEMM saves, and the
 residual doubles the GEMM. Without a fused trellis-to-int8 weight kernel, only the per-row variant is faster than f16.
+
+## Run 59 - 2026-11-16 01:20
+
+The int8 prefill route (Runs 57-58), built: mul1 at 2 to 4 bpw past RECON_MIN_ROWS decodes its trellis straight to
+transposed int8 weights (`trellis_wt_i8_kernel`, beside the decode GEMV for `decode_tile`: a warp a tile, 16 columns x
+128 k staged in shared memory for 8-byte stores) at 127 over mul1's bound, quantizes the rotated input at one scale a
+row, and runs cuBLAS's int8 tensor cores (TN) with int32 accumulation, rescaled to f32 before the rotation out. Other
+codebooks and rates keep the f16 reconstruction. Up to 256M weights (bytes) take it, so a 27B's MLP does and the head
+does not. Tests: `int8_prefill_weights_are_the_reconstruction_rounded_and_transposed` (bit-exact against the f16
+reconstruction rounded), and the kernels' test bounds 200-row mul1 products at 2% (measured 1.0%).
+
+```
+Qwen3.8 27B EXL3 4.0, inference bench 4096 / 32 (no throttle samples)
+  prefill   f16 route ~910 tok/s  ->  int8 1679 / 1675        recipe A 1580
+  decode    47.8 / 47.7 (unchanged)
+  KLD (wikitext 40 x 512, BF16 base)  0.01244 -> 0.01334, p99 0.1338 -> 0.1472, top-1 94.88 -> 94.69%  (recipe A 0.01700)
+Qwen3.6 35B-A3B EXL3 4.0 (ours)
+  prefill 3922 (#962) -> 4403 tok/s          IQ4_KSS GGUF 4234
+  KLD 0.02210 (Run 31) -> 0.02225, p99 0.2117, top-1 93.40%   (within Run 35's +-0.0007)
+EXL3 kernel library +0.09 MiB
+```

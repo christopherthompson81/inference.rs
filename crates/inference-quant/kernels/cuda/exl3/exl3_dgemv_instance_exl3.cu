@@ -487,6 +487,41 @@ void dgemv_tile_kernel(const __grid_constant__ Params p)
     }
 }
 
+// Prefill on int8 tensor cores: a 2 to 4 bpw trellis as int8 weights at one scale (`inv`, 127 over the codebook's bound:
+// the rotated basis holds codebook values only), transposed to n x k (k contiguous, cuBLAS's int8 tensor-core layout).
+// A block per (16 columns, WT_KTILES k-tiles), a warp a tile, rows staged in shared memory for 8-byte stores
+constexpr int WT_KTILES = 8;
+
+template <int bits, int cb>
+__global__ __launch_bounds__(THREADS) void trellis_wt_i8_kernel(const uint32_t* B, int8_t* q, float inv, int k, int n)
+{
+    constexpr int TILE_WORDS = 8 * bits;
+    constexpr int ROW = WT_KTILES * 16;
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int nt = blockIdx.x, kt = blockIdx.y * WT_KTILES + warp;
+    __shared__ int8_t s[16][ROW + 8];
+    const uint32_t w = lane < TILE_WORDS ? __ldcs(B + ((size_t) kt * (n / 16) + nt) * TILE_WORDS + lane) : 0;
+    FragB f0, f1;
+    decode_tile<bits, cb>(w, lane, f0, f1);
+    // f0 holds column g's k pairs 2t and 2t + 8, f1 column g + 8's
+    const int g = lane / 4, c = warp * 16 + 2 * (lane % 4);
+    auto put = [&](int row, int col, const half2& v)
+    {
+        const float2 f = __half22float2(v);
+        s[row][col] = (int8_t) __float2int_rn(f.x * inv);
+        s[row][col + 1] = (int8_t) __float2int_rn(f.y * inv);
+    };
+    const half2* h0 = reinterpret_cast<const half2*>(&f0);
+    const half2* h1 = reinterpret_cast<const half2*>(&f1);
+    put(g, c, h0[0]);
+    put(g, c + 8, h0[1]);
+    put(g + 8, c, h1[0]);
+    put(g + 8, c + 8, h1[1]);
+    __syncthreads();
+    const int r = threadIdx.x / (ROW / 8), p = threadIdx.x % (ROW / 8);
+    *(uint2*) (q + (size_t) (nt * 16 + r) * k + (size_t) blockIdx.y * ROW + p * 8) = *(const uint2*) &s[r][p * 8];
+}
+
 // A MoE layer's routed experts for one token: gate and up (kernel A, whose last block of each slot's column group
 // rotates both out, applies silu(gate) * up and rotates that into the down projection's input), then down (kernel B,
 // whose last block of a slot's column group rotates out and weights it, and whose last slot of a column group sums
@@ -1102,6 +1137,22 @@ extern "C" int launch_exl3_grouped_moe(const void* x, bool x_bf16, const uint32_
     gu<<<dim3(inter / GROUP_COLS, groups), THREADS, 0, stream>>>(p);
     cuda_check(cudaPeekAtLastError());
     dn<<<dim3(hidden / GROUP_COLS, groups), THREADS, 0, stream>>>(p);
+    cuda_check(cudaPeekAtLastError());
+    return 0;
+}
+
+// The `k x n` trellis (tiles of tile_u16 words, 2 to 4 bpw) as `n x k` int8 weights times `inv`; -1 for a shape or rate
+// it does not take
+extern "C" int launch_exl3_trellis_wt_i8(const uint16_t* trellis, int8_t* q, float inv, int k, int n, int tile_u16,
+                                         int cb, cudaStream_t stream)
+{
+    using namespace exl3_dgemv;
+    const int bits = tile_u16 / 16;
+    if (tile_u16 % 16 || bits < 2 || bits > 4 || cb < 0 || cb > 2 || k % (WT_KTILES * 16) || n % 16) return -1;
+    const dim3 grid(n / 16, k / (WT_KTILES * 16));
+    #define WT(b_, c_) if (bits == b_ && cb == c_) trellis_wt_i8_kernel<b_, c_><<<grid, THREADS, 0, stream>>>((const uint32_t*) trellis, q, inv, k, n);
+    WT(2, 0) WT(2, 1) WT(2, 2) WT(3, 0) WT(3, 1) WT(3, 2) WT(4, 0) WT(4, 1) WT(4, 2)
+    #undef WT
     cuda_check(cudaPeekAtLastError());
     return 0;
 }

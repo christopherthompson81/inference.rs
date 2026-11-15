@@ -21,7 +21,7 @@ pub fn ring_words(dim: usize, k: usize) -> usize {
 }
 
 // every 16-bit state's mul1 value, as the CUDA decode rounds it (f16)
-fn codebook() -> &'static [f32] {
+pub(crate) fn codebook() -> &'static [f32] {
     static TABLE: OnceLock<Vec<f32>> = OnceLock::new();
     TABLE.get_or_init(|| {
         (0..STATES as u32)
