@@ -1565,3 +1565,51 @@ nsys, warm DFlash 2 x7 request, GPU time a verify step:
 In the model the two layout fixes take 15% off the linears (more than the isolated shapes showed), and exllamav3's
 kernel is then level with ours, so (2) would only give up the bit match between decode and verify: dropped. The
 verify step is 23% behind recipe A, whose tiled IQ4_KS lays a matrix out for the verify rows at load.
+
+## Run 54 - 2026-11-15 19:40
+
+Question: recipe A's tiled IQ4_KS verify kernel against ours, with the same structure over EXL3 trellises.
+
+Recipe A's load-time tiling regroups 16 rows so a warp's fragment loads coalesce; a trellis already stores each 16x16
+tile's words contiguously, so the layout needs nothing. What differs is the kernel: there the weights are the MMA's
+A (16 rows) and the 8 input rows its B (n = 8), every MMA lane useful, ours put x in A with rows 8-15 zero; its warps
+split k and meet in shared memory, so no partials go through DRAM; each warp streams a long run of k with blocks
+prefetched ahead. Our decode already gives the right registers: a tile's two n8 B fragments are W^T's A fragment.
+
+`dgemv_tile_kernel` (2 to 4 bpw): x rotated once (Run 53's kernel), a block per (128-column group, split of `run`
+k-tiles), its 8 warps splitting the split's k-tiles, each taking all 8 column tiles with 4 k-tiles loaded ahead,
+one m16n8k16 a tile against all rows; warp sums added in warp order in shared memory, then Run 51's partials (now few,
+splits from TILE_BLOCKS_PER_SM = 4) and rotation out. `decode_tile` is the per-tile decode `dot_tiles` now shares.
+
+```
+verify_gemv_times_by_rows, us, PR #965's kernel -> tile kernel (4 blocks an SM)
+                 1 row         8 rows
+5120 x 17408     63.2 -> 64.4  89.0 -> 69.4
+17408 x 5120     64.8 -> 70.2  93.8 -> 72.5
+5120 x 10240     41.5 -> 47.2  55.7 -> 48.6
+6144 x 5120      29.3 -> 34.4  36.6 -> 38.3
+5120 x 12288     49.1 -> 53.7  64.6 -> 55.9
+2048 x 8192      18.1 -> 23.9  25.3 -> 28.1      (Qwen3.6's dense shapes: slower throughout; the separate
+4096 x 2048      12.9 -> 15.9  19.1 -> 21.2       rotation launch and few blocks dominate small matrices)
+2048 x 512        5.9 ->  8.2  10.3 -> 11.0
+```
+
+So the tile kernel takes matrices of at least 2^25 weights (TILE_MIN_WEIGHTS), the rest keep the earlier kernel; the
+choice is by shape alone, so a row's bits still match between decode and verify. 2 and 8 blocks an SM were worse
+than 4.
+
+```
+Qwen3.8 27B EXL3 4.0 (q3 KV)                                   wiki    code    essay
+plain decode, alternating builds: PR #965 kernel   round 1     44.9    45.2    45.0
+                                  tile kernel      round 1     46.1    46.5    46.6
+                                  PR #965 kernel   round 2     44.7    44.9    43.6
+                                  tile kernel      round 2     46.1    46.5    46.5
+DFlash 2 x7, GPU time a verify step (nsys): PR #965 34.3 ms (linears 24.0) -> 29.5 ms (19.6); recipe A 27.9 (17.6)
+DFlash 2 x7 tok/s: tile kernel 172.6 / 201.6 / 100.7 (accept 52.0%), again 176.5 / 201.8 / 101.9 (48.9%)
+                   recipe A    181.0 / 215.6 / 108.0 (49.5%)
+Qwen3.6 35B-A3B EXL3 4.0, DFlash 2 x5 verify step (nsys): master 12.43 ms GPU, now 12.42 (dgemv 2.38 -> 2.19)
+```
+
+Plain decode gains ~3% though the isolated 1-row shapes lost; the verify step is within 6% of recipe A and DFlash
+within 5-7%, at 27% lower KLD and ~20% faster plain decode. Qwen3.6 is level (its dense layers stay on the earlier
+kernel; its tok/s against Run 38 moves with per-task acceptance). The EXL3 kernel library grows 0.07 MiB.

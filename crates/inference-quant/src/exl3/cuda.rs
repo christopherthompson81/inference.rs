@@ -2340,7 +2340,7 @@ mod tests {
         Ok(())
     }
 
-    // verify-row times (1 and 8 rows) at a dense 27B's 4 bpw mul1 shapes, as weight GB/s
+    // verify-row times (1 and 8 rows) at 4 bpw mul1 shapes, as weight GB/s: a dense 27B's, then a 35B-A3B MoE's dense ones
     #[test]
     #[ignore = "a benchmark"]
     fn verify_gemv_times_by_rows() -> Result<()> {
@@ -2356,6 +2356,11 @@ mod tests {
             (5120, 10240),
             (6144, 5120),
             (5120, 12288),
+            (2048, 8192),
+            (4096, 2048),
+            (2048, 4096),
+            (2048, 512),
+            (512, 2048),
         ] {
             let (t, u, v) = random_linear(k, n, WORDS_4BPW, 7)?;
             let layer = Exl3Layer::new_on_device(
