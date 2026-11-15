@@ -161,6 +161,40 @@ inference_tensor::kernel_library! {
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
 
+        /// `rows x k` x (f16, or bf16 with `x_bf16`) times `suh`, rotated by 128-wide Hadamards, into `out` (f16); -1
+        /// for a shape it does not take.
+        pub(crate) fn launch_exl3_had_in(
+            x: *const c_void,
+            x_bf16: bool,
+            out: *mut f16,
+            suh: *const f16,
+            rows: i32,
+            k: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// `rows x n` f32 `y` rotated by 128-wide Hadamards, times `svh`: in place, or into `out_bf16` when not null.
+        pub(crate) fn launch_exl3_had_out(
+            y: *mut f32,
+            out_bf16: *mut c_void,
+            svh: *const f16,
+            rows: i32,
+            n: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// The trellis (`k / 16 x n / 16` tiles of `words` uint16) as its f16 weight `k x n` in the rotated basis;
+        /// -1 for a rate or shape it does not take.
+        pub(crate) fn launch_exl3_reconstruct(
+            out: *mut f16,
+            trellis: *const u16,
+            k: i32,
+            n: i32,
+            words: i32,
+            cb: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
         /// The counters `launch_exl3_moe` needs, in i32s.
         pub(crate) fn exl3_moe_ctr_len(slots_max: i32, bsz: i32, inter: i32, hidden: i32) -> i64;
 

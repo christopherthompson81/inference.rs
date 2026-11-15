@@ -1073,3 +1073,39 @@ more accurate than where this started. The fused path's f32 activation beats the
 
 Left for prefill: the dense `exl3_gemm` (~67 ms for 525 tokens; exllamav3 reconstructs to f16 and runs an hgemm past
 144 rows), the casts around the EXL3 calls, and the host read of the routing indices (one sync a layer now).
+
+## Run 35 - 2026-11-14 21:15
+
+Dense prefill matmuls through cuBLAS, as exllamav3 does past 144 rows. Its reconstruct kernel decodes the trellis to
+the f16 weight in the rotated basis; ours rotates the input (`* suh`, Hadamard, f16), runs one `cublasGemmEx` (f16
+in, f32 out, f32 compute), and rotates the output in place (Hadamard, `* svh`). Weights past 64M values (the head)
+stay on the trellis GEMM.
+Why: one 512-token chunk's dense projections (Qwen3.6, 250 GEMMs) take ~66 ms on the trellis GEMM, and torch's cuBLAS
+f16 GEMM does them in 29.6 ms at 48.5 TFLOPS with f32 accumulation (28.1 ms with f16 accumulation: not worth it).
+
+Error against the CPU reconstruction (relative rms):
+- Random weights, 512 x 512: 0.00036-0.00050 for the reconstruct path at 200 rows, every codebook and the
+  half-integer rate, against the trellis GEMM's 0.0006-0.0009 at 32 rows.
+- Real weights (layer 0's `out_proj` and shared `down_proj`, layer 3's `o_proj`), 200 bf16 rows with an outlier
+  channel at 300x: reconstruct 1.68e-3, trellis GEMM 1.82e-3 and 2.33e-3.
+
+KLD against BF16 moved anyway: 0.02120 -> 0.02222. Both paths are deterministic (each scores 0.00000 against its own
+earlier output). Scored against each other they differ by KLD 0.0054 (96.9% top-1 agreement). But that difference is
+the same 0.0050-0.0056 whether the reconstruct path runs everywhere or only for k = 4096, 512 or 2048. It does not
+add up layer by layer: any small numeric change perturbs this model's logits that much, likely through the GDN
+recurrence. Against BF16 those three partial runs score 0.02170, 0.02220 and 0.02263.
+
+So at 40 chunks, KLD against BF16 cannot rank kernels whose results differ by less than ~0.0007. That retracts Run
+34's reading: its 16-row "3% loss" was this noise, and in isolation the 16-row tiles have the same error as 32 and
+64. GROUP_ROWS goes back to 16. Kernels are judged by their error against an f32 reference. KLD at this length only
+catches gross breakage. The converter comparisons of Runs 31-33 sit at the same scale. Run 33 used three seeds a
+side and a 0.8B model, so its equivalence conclusion holds, but single-run KLD differences under ~0.001 mean little.
+
+```
+inference bench 512 / 128, Qwen3.6 exllamav3 4.0     prefill tok/s    decode tok/s   KLD
+start (Run 33)                                       1660             197            0.02146
+grouped MoE, 16 rows + dense through cuBLAS          3190, 3192       198            0.02209
+IQ4_KSS GGUF                                         4234             164            0.0216
+```
+
+EXL3 library 8.01 -> 8.05 MiB.

@@ -60,6 +60,10 @@ const DGEMV_OUT_F32: i32 = 0;
 const DGEMV_MAX_JOBS: usize = 4;
 const DGEMV_OUT_F16: i32 = 1;
 const DGEMV_OUT_BF16: i32 = 2;
+// from this many rows a matmul reconstructs its f16 weight for cuBLAS (exllamav3's AUTO_RECONSTRUCT_THRESHOLD)
+const RECON_MIN_ROWS: usize = 144;
+// a larger weight (the head) stays on the trellis GEMM rather than reconstruct this many f16 values at once
+const RECON_MAX_VALUES: usize = 64 << 20;
 
 // the launcher's autotune buckets: powers of two up to 16 rows, then 16-row steps capped at 64
 fn tune_bucket(m: usize) -> u8 {
@@ -537,6 +541,117 @@ impl Exl3Layer {
 
     // `x` (`m x in`, f16, contiguous) times the weight, `m x out` in f16 for an f16 model (as the kernels write it),
     // else f32
+    // `x` (`rows x k`, f16) times the weight reconstructed to f16 (rotated basis) by one cuBLAS GEMM between the input
+    // and output rotations, f32 out; None below RECON_MIN_ROWS, past RECON_MAX_VALUES, or for a rate it does not take
+    fn recon_matmul(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        use inference_tensor::cuda_backend::cudarc::cublas::{result, sys};
+        let Device::Cuda(dev) = x.device() else {
+            return Ok(None);
+        };
+        let (k, n, words) = self.dims();
+        let rows = x.dim(0)?;
+        if rows < RECON_MIN_ROWS || k * n > RECON_MAX_VALUES {
+            return Ok(None);
+        }
+        let (x_s, x_l) = x.storage_and_layout();
+        let (t_s, t_l) = self.trellis.storage_and_layout();
+        let (u_s, u_l) = self.suh.storage_and_layout();
+        let (v_s, v_l) = self.svh.storage_and_layout();
+        let (Storage::Cuda(x_c), Storage::Cuda(t_c), Storage::Cuda(u_c), Storage::Cuda(v_c)) =
+            (&*x_s, &*t_s, &*u_s, &*v_s)
+        else {
+            inference_tensor::bail!("an EXL3 layer's tensors live on CUDA");
+        };
+        let (xp, _x) = slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset());
+        let (tp, _t) = slice_ptr(t_c.as_cuda_slice::<i16>()?, t_l.start_offset());
+        let (up, _u) = slice_ptr(u_c.as_cuda_slice::<f16>()?, u_l.start_offset());
+        let (vp, _v) = slice_ptr(v_c.as_cuda_slice::<f16>()?, v_l.start_offset());
+        // SAFETY: the kernels write every element before anything reads it
+        let (xh, w, y) = unsafe {
+            (
+                dev.alloc::<f16>(rows * k)?,
+                dev.alloc::<f16>(k * n)?,
+                dev.alloc::<f32>(rows * n)?,
+            )
+        };
+        let (xhp, _xh) = slice_ptr(&xh, 0);
+        let (wp, _w) = slice_ptr(&w, 0);
+        let (yp, _y) = slice_ptr(&y, 0);
+        let stream = dev.cuda_stream().cu_stream();
+        // SAFETY: the pointers span their buffers (x rows x k, the trellis k / 16 x n / 16 x words, suh k, svh n,
+        // xh rows x k, w k x n, y rows x n), all on this stream
+        let ran = unsafe {
+            ffi::launch_exl3_reconstruct(
+                wp as *mut f16,
+                tp as *const u16,
+                k as i32,
+                n as i32,
+                words as i32,
+                self.codebook as i32,
+                stream,
+            )
+        };
+        if ran < 0 {
+            return Ok(None);
+        }
+        // SAFETY: as above
+        unsafe {
+            ffi::launch_exl3_had_in(
+                xp as *const c_void,
+                false,
+                xhp as *mut f16,
+                up as *const f16,
+                rows as i32,
+                k as i32,
+                stream,
+            );
+        }
+        let (alpha, beta) = (1.0f32, 0.0f32);
+        // column-major: y^T (n x rows) = w^T (n x k, row-major w is its column-major transpose) times xh^T (k x rows)
+        // SAFETY: the pointers span their buffers, on the blas handle's stream
+        unsafe {
+            result::gemm_ex(
+                *dev.cublas_handle().handle(),
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                n as i32,
+                rows as i32,
+                k as i32,
+                (&raw const alpha).cast(),
+                wp as *const _,
+                sys::cudaDataType_t::CUDA_R_16F,
+                n as i32,
+                xhp as *const _,
+                sys::cudaDataType_t::CUDA_R_16F,
+                k as i32,
+                (&raw const beta).cast(),
+                yp as *mut _,
+                sys::cudaDataType_t::CUDA_R_32F,
+                n as i32,
+                sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )
+        }
+        .map_err(|e| inference_tensor::Error::Cuda(Box::new(e)))?;
+        // SAFETY: as above
+        unsafe {
+            ffi::launch_exl3_had_out(
+                yp as *mut f32,
+                std::ptr::null_mut(),
+                vp as *const f16,
+                rows as i32,
+                n as i32,
+                stream,
+            );
+        }
+        drop((_x, _t, _u, _v, _xh, _w, _y));
+        drop((xh, w));
+        Ok(Some(Tensor::from((
+            Storage::Cuda(CudaStorage::wrap_cuda_slice(y, dev.clone())),
+            Shape::from((rows, n)),
+        ))))
+    }
+
     fn matmul(&self, x: &Tensor) -> Result<Tensor> {
         if self.dtype == DType::F16 {
             self.matmul_into::<f16>(x, false)
@@ -674,7 +789,10 @@ impl QuantMethod for Exl3Layer {
             .to_dtype(DType::F16)?
             .pad_with_zeros(1, 0, k - in_features)?
             .contiguous()?;
-        let mut y = self.matmul(&x16)?;
+        let mut y = match self.recon_matmul(&x16)? {
+            Some(y) => y,
+            None => self.matmul(&x16)?,
+        };
         if self.padded() {
             y = y.narrow(1, 0, n)?;
         }
@@ -786,8 +904,8 @@ const FUSED_MAX_TOKENS: usize = 8;
 const FUSED_MAX_SLOTS: usize = 256;
 // the kernels' MOE_COOP_ACT_SILU
 const FUSED_ACT_SILU: i32 = 0;
-// 32-row groups take exllamav3's multi-row tiles: 16-row ones ran a 512-token prefill ~10% faster but at 3% more KLD
-const GROUP_ROWS: usize = 32;
+// 16 beat 32 (10%), 64 and 8 on a 256-expert prefill
+const GROUP_ROWS: usize = 16;
 
 // slots grouped by expert into matrices of `m` rows, at most GROUP_ROWS (which bounds the padding to the largest group)
 struct SlotGroups {
@@ -1526,7 +1644,8 @@ mod tests {
     }
 
     // the kernels against the CPU reconstruction: random trellises (every codebook, a half-integer rate), random
-    // signed scales, one and two rows (the GEMVs; mul1's two-row one quantizes activations to int8) and 32 (the GEMM)
+    // signed scales, one and two rows (the GEMVs; mul1's two-row one quantizes activations to int8), 32 (the GEMM) and
+    // 200 (the f16 reconstruction through cuBLAS)
     #[test]
     fn the_kernels_match_the_reconstructed_weight() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
@@ -1552,7 +1671,7 @@ mod tests {
                 None,
                 DType::F16,
             )?;
-            for m in [1, 2, 32] {
+            for m in [1, 2, 32, 200] {
                 let x = random_rows(m, k, seed + 30)?;
                 let expected = x.matmul(&weight.t()?)?;
                 let actual = layer.forward_raw(&x.to_dtype(DType::F16)?.to_device(&device)?)?;
