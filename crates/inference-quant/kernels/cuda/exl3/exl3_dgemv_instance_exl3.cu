@@ -255,8 +255,24 @@ struct Params
     int out_kind;
     float* partial;         // splits x rows x total_n
     int* counters;          // a counter per column group, left zeroed
+    const half2* xr;        // past one row: jobs x rows x k / 2, each job's rows rotated once (null: blocks rotate)
     Job job[MAX_JOBS];
 };
+
+// each job's rows of x rotated (x * suh, then 128-wide Hadamards) into p.xr, a warp a 128-wide piece: the same values
+// the GEMV's blocks would each rotate for themselves
+__global__ __launch_bounds__(THREADS)
+void rotate_rows_kernel(const __grid_constant__ Params p, half2* xr)
+{
+    const int lane = threadIdx.x % 32;
+    const int pieces = p.size_k / 128;
+    const int wc = blockIdx.x * WARPS + threadIdx.x / 32;
+    if (wc >= p.jobs * p.rows * pieces) return;
+    const int piece = wc % pieces, jr = wc / pieces;
+    const int j = jr / p.rows, r = jr % p.rows;
+    rotate_in(p.x, p.x_bf16, p.job[j].suh, piece * 128 + lane * 4, xr + (size_t) jr * (p.size_k / 2) + piece * 64,
+              lane, (size_t) r * p.size_k);
+}
 
 template <int bits, int cb, int KR>
 __global__ __launch_bounds__(THREADS)
@@ -283,12 +299,24 @@ void dgemv_kernel(const __grid_constant__ Params p)
     __shared__ half2 sx[MAX_ROWS * sx_stride(KR)];
     __shared__ float red[MAX_ROWS * GROUP_COLS];
     __shared__ bool last;
-    for (int wc = warp; wc < rows * (KR / 128); wc += WARPS)
+    if (p.xr)
     {
-        const int r = wc / (KR / 128), c = wc % (KR / 128);
-        rotate_in(p.x, p.x_bf16, job.suh, kz * KR + c * 128 + lane * 4, sx + r * sx_stride(KR) + c * 64, lane,
-                  (size_t) r * p.size_k);
+        // 16-byte copies of the split's slice of each pre-rotated row (sx_stride(KR) keeps rows 16-byte aligned)
+        constexpr int ROW_U4 = KR / 8;
+        const uint4* src = (const uint4*) (p.xr + (size_t) j * rows * (p.size_k / 2) + kz * (KR / 2));
+        for (int i = threadIdx.x; i < rows * ROW_U4; i += THREADS)
+        {
+            const int r = i / ROW_U4, q = i % ROW_U4;
+            *((uint4*) (sx + r * sx_stride(KR)) + q) = __ldcg(src + (size_t) r * (p.size_k / 8) + q);
+        }
     }
+    else
+        for (int wc = warp; wc < rows * (KR / 128); wc += WARPS)
+        {
+            const int r = wc / (KR / 128), c = wc % (KR / 128);
+            rotate_in(p.x, p.x_bf16, job.suh, kz * KR + c * 128 + lane * 4, sx + r * sx_stride(KR) + c * 64, lane,
+                      (size_t) r * p.size_k);
+        }
     __syncthreads();
     __shared__ uint32_t stage[bits > 4 ? WARPS * KR / 16 * 8 * bits : 1];
     dot_tiles<bits, cb, KR>(w, sx, rows, lane, red + warp * 16, stage + (bits > 4 ? warp * KR / 16 * 8 * bits : 0));
@@ -801,9 +829,19 @@ extern "C" int launch_exl3_dgemv(const void* x, bool x_bf16, int rows, int jobs,
     dgemv_fn kernel = select(tile_u16 / 16, cb, kr);
     if (!kernel) return -1;
     p.splits = size_k / kr;
-    if (p.groups > DGEMV_COUNTERS || DGEMV_COUNTERS + (int64_t) p.splits * rows * p.total_n > ws_floats) return -1;
+    // past one row, the rows rotated once at the workspace's end (a half2 a word)
+    const int64_t rotated = rows > 1 ? (int64_t) jobs * rows * size_k / 2 : 0;
+    if (p.groups > DGEMV_COUNTERS || DGEMV_COUNTERS + (int64_t) p.splits * rows * p.total_n + rotated > ws_floats)
+        return -1;
     p.counters = (int*) ws;
     p.partial = ws + DGEMV_COUNTERS;
+    if (rotated)
+    {
+        half2* xr = (half2*) (ws + ws_floats - rotated);
+        const int warps = jobs * rows * (size_k / 128);
+        rotate_rows_kernel<<<(warps + WARPS - 1) / WARPS, THREADS, 0, stream>>>(p, xr);
+        p.xr = xr;
+    }
     kernel<<<p.groups * p.splits, THREADS, 0, stream>>>(p);
     cuda_check(cudaPeekAtLastError());
     return 0;

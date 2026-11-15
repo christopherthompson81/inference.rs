@@ -1538,3 +1538,30 @@ split-major order is what keeps the weight reads local. Reverted both.
 Left untested: rotating x once a launch into an f16 buffer (each block now repeats the 8 rows' Hadamards; 8 rows run
 32% more instructions than 1, Run 51), and exllamav3's GEMM at verify rows where it is faster (75.5 us on 5120 x 17408
 at 8 rows), which would give up the bit match between decode and verify.
+
+## Run 53 - 2026-11-15 16:20
+
+Question: Run 52's two untested options. (1) Rotate x once a launch: past one row, `rotate_rows_kernel` writes each
+job's rows rotated (the same `rotate_in`, so the same bits) to the workspace's end, and the GEMV's blocks copy their
+slice into shared memory instead of each repeating the Hadamards. (2) exllamav3's kernel at verify rows (a temporary
+switch, not kept).
+
+```
+verify_gemv_times_by_rows, 8 rows, us     padded (Run 51)   + rotate once   exllamav3's path
+5120 x 17408                              91.0              89.1            78.1
+17408 x 5120                              94.5              94.1            86.2
+5120 x 10240                              58.5              56.4            43.3
+6144 x 5120                               39.1              37.6            39.1
+5120 x 12288                              66.2              64.2            61.0
+(1 row unchanged; the 25 EXL3 GPU tests pass)
+
+nsys, warm DFlash 2 x7 request, GPU time a verify step:
+  EXL3 before (Run 50)            37.4 ms   dgemv 28.1
+  EXL3 padded + rotate once       34.3 ms   dgemv 24.0
+  EXL3 with exllamav3's kernels   34.2 ms   exl3_gemm 24.3
+  recipe A                        27.9 ms   mmvq_tc_iq4_ks 17.6
+```
+
+In the model the two layout fixes take 15% off the linears (more than the isolated shapes showed), and exllamav3's
+kernel is then level with ours, so (2) would only give up the bit match between decode and verify: dropped. The
+verify step is 23% behind recipe A, whose tiled IQ4_KS lays a matrix out for the verify rows at load.
