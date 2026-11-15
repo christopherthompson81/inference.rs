@@ -1667,3 +1667,30 @@ sequences slow down partway through, and order decides which variant pays. Runs 
 "EXL3 ~20% faster plain decode" reading) are contaminated by this; the nsys GPU-time comparisons and `inference
 bench` (short) are not: plain decode recipe A 50.6 vs EXL3 47.2 tok/s. For A/B decode numbers: log
 clocks_throttle_reasons and discard runs that hit 0x20.
+
+## Run 57 - 2026-11-15 23:00
+
+Question: can an int8 prefill matmul lift EXL3's 27B prefill (913 tok/s at 4096 against recipe A's 1580) and at
+what cost in KLD? (Temporary switch; patch kept in the scratchpad.)
+
+Route: the rotated input quantized to int8 with one scale a row (max |x| / 127); the reconstructed weight (codebook
+values in the rotated basis, mul1 bound ~3.5) at one scale, 127 / bound; cuBLAS int8 GEMM, int32 accumulate; int32 to
+f32 times both scales; rotation out as before. The MLP (89M values) allowed through without slicing.
+
+```
+inference bench 4096 / 8, alternating, no throttle samples (0x20 0 of 101):
+  f16 913.9 / 907.1 tok/s    int8, NN layout 763.9 / 759.7
+  nsys: cuBLAS picked ampere_igemm_int8_128x128_ldg4_nn (CUDA cores) 12.2 s, quant_w 2.9, reconstruct 2.4
+int8, weights transposed while quantized (n x k, cuBLAS's TN tensor-core layout): 1137 tok/s
+  nsys (busy 14.3 s): GEMM 4.06 s, quant_wt 3.81, reconstruct 2.41, dequant 0.65, had_out 0.49
+KLD, wikitext 40 x 512 against the BF16 base (prefill runs this route at 512-token chunks):
+                 KLD mean   median    p99      same top-1   PPL
+  f16 (Run 49)   0.01244    0.00428   0.1338   94.88%       5.9827
+  int8           0.01334    0.00475   0.1472   94.69%       5.9864
+  recipe A       0.01700    0.00689   0.1820   94.48%
+```
+
+The tensor-core int8 GEMM is 3x the f16 one, and the weight passes (f16 reconstruct, then a transposing int8 pass)
+now cost more than it: a kernel decoding trellis tiles straight to transposed int8 would leave ~1/4 of their 6.2 s,
+projecting ~1700 tok/s. The price is +0.0009 mean KLD (7%), still 22% under recipe A; per-row activation scales are
+the likely source (weight rounding adds ~0.8% relative noise against the activations' ~2%).
