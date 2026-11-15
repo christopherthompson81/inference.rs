@@ -68,6 +68,10 @@ const DGEMV_OUT_BF16: i32 = 2;
 const RECON_MIN_ROWS: usize = 144;
 // a larger weight (the head) stays on the trellis GEMM rather than reconstruct this many f16 values at once
 const RECON_MAX_VALUES: usize = 64 << 20;
+// the int8 weights a prefill product holds at once (bytes), so a 27B's MLP takes it and the head does not
+const RECON_MAX_I8_VALUES: usize = 256 << 20;
+// int8 levels either side of zero
+const I8_LEVELS: f32 = 127.0;
 
 // the launcher's autotune buckets: powers of two up to 16 rows, then 16-row steps capped at 64
 fn tune_bucket(m: usize) -> u8 {
@@ -79,6 +83,16 @@ fn tune_bucket(m: usize) -> u8 {
 
 // one zeroed workspace per stream, made by the first layer built on it (outside any capture) and never regrown, since
 // captured graphs hold its address
+// the largest |value| mul1 decodes to, the int8 prefill's weight scale
+fn mul1_bound() -> f32 {
+    static BOUND: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *BOUND.get_or_init(|| {
+        super::ring::codebook()
+            .iter()
+            .fold(0f32, |m, v| m.max(v.abs()))
+    })
+}
+
 static DGEMV_WORKSPACES: std::sync::Mutex<Vec<(usize, Tensor)>> = std::sync::Mutex::new(Vec::new());
 
 fn dgemv_workspace(device: &Device) -> Result<Option<Tensor>> {
@@ -549,13 +563,21 @@ impl Exl3Layer {
     // `x` (`rows x k`, f16) times the weight reconstructed to f16 (rotated basis) by one cuBLAS GEMM between the input
     // and output rotations, f32 out; None below RECON_MIN_ROWS, past RECON_MAX_VALUES, or for a rate it does not take
     fn recon_matmul(&self, x: &Tensor) -> Result<Option<Tensor>> {
-        use inference_tensor::cuda_backend::cudarc::cublas::{result, sys};
         let Device::Cuda(dev) = x.device() else {
             return Ok(None);
         };
         let (k, n, words) = self.dims();
         let rows = x.dim(0)?;
-        if rows < RECON_MIN_ROWS || k * n > RECON_MAX_VALUES {
+        // mul1 at 2 to 4 bpw runs on int8 tensor cores: its weights are codebook values, one scale covers them
+        let int8 = self.codebook == Exl3Codebook::Mul1
+            && words % 16 == 0
+            && (2..=4).contains(&(words / 16));
+        let cap = if int8 {
+            RECON_MAX_I8_VALUES
+        } else {
+            RECON_MAX_VALUES
+        };
+        if rows < RECON_MIN_ROWS || k * n > cap {
             return Ok(None);
         }
         let (x_s, x_l) = x.storage_and_layout();
@@ -567,24 +589,91 @@ impl Exl3Layer {
         else {
             inference_tensor::bail!("an EXL3 layer's tensors live on CUDA");
         };
-        let (xp, _x) = slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset());
+        // a bf16 x is rotated as read and the output rotated into bf16, the same values as casting around f16 and f32
+        let bf16 = x.dtype() == DType::BF16;
+        let (xp, _x) = if bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset())
+        };
         let (tp, _t) = slice_ptr(t_c.as_cuda_slice::<i16>()?, t_l.start_offset());
         let (up, _u) = slice_ptr(u_c.as_cuda_slice::<f16>()?, u_l.start_offset());
         let (vp, _v) = slice_ptr(v_c.as_cuda_slice::<f16>()?, v_l.start_offset());
         // SAFETY: the kernels write every element before anything reads it
-        let (xh, w, y) = unsafe {
-            (
-                dev.alloc::<f16>(rows * k)?,
-                dev.alloc::<f16>(k * n)?,
-                dev.alloc::<f32>(rows * n)?,
-            )
-        };
+        let (xh, y) = unsafe { (dev.alloc::<f16>(rows * k)?, dev.alloc::<f32>(rows * n)?) };
         let (xhp, _xh) = slice_ptr(&xh, 0);
-        let (wp, _w) = slice_ptr(&w, 0);
         let (yp, _y) = slice_ptr(&y, 0);
         let stream = dev.cuda_stream().cu_stream();
-        // SAFETY: the pointers span their buffers (x rows x k, the trellis k / 16 x n / 16 x words, suh k, svh n,
-        // xh rows x k, w k x n, y rows x n), all on this stream
+        // SAFETY: the pointers span their buffers (x rows x k, suh k, xh rows x k), on this stream
+        unsafe {
+            ffi::launch_exl3_had_in(
+                xp as *const c_void,
+                bf16,
+                xhp as *mut f16,
+                up as *const f16,
+                rows as i32,
+                k as i32,
+                stream,
+            );
+        }
+        let ran = if int8 {
+            self.int8_product(dev, xhp, tp, yp, rows)?
+        } else {
+            self.f16_product(dev, xhp, tp, yp, rows)?
+        };
+        if !ran {
+            return Ok(None);
+        }
+        // SAFETY: the bf16 output (rows x n) is written whole by the rotation
+        let out = if bf16 {
+            Some(unsafe { dev.alloc::<half::bf16>(rows * n)? })
+        } else {
+            None
+        };
+        let o_ptr = out.as_ref().map(|o| slice_ptr(o, 0));
+        let op = o_ptr.as_ref().map_or(0, |(p, _)| *p);
+        // SAFETY: as above
+        unsafe {
+            ffi::launch_exl3_had_out(
+                yp as *mut f32,
+                op as *mut c_void,
+                vp as *const f16,
+                rows as i32,
+                n as i32,
+                stream,
+            );
+        }
+        drop((_x, _t, _u, _v, _xh, _y, o_ptr));
+        drop(xh);
+        let shape = Shape::from((rows, n));
+        Ok(Some(match out {
+            Some(o) => Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(o, dev.clone())),
+                shape,
+            )),
+            None => Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(y, dev.clone())),
+                shape,
+            )),
+        }))
+    }
+
+    // y (rows x n, f32) = xh (rows x k, rotated f16) times the f16 reconstruction; false for a rate it does not take
+    fn f16_product(
+        &self,
+        dev: &inference_tensor::CudaDevice,
+        xhp: u64,
+        tp: u64,
+        yp: u64,
+        rows: usize,
+    ) -> Result<bool> {
+        use inference_tensor::cuda_backend::cudarc::cublas::{result, sys};
+        let (k, n, words) = self.dims();
+        let stream = dev.cuda_stream().cu_stream();
+        // SAFETY: written whole by the reconstruction before the product reads it
+        let w = unsafe { dev.alloc::<f16>(k * n)? };
+        let (wp, _w) = slice_ptr(&w, 0);
+        // SAFETY: the trellis is k / 16 x n / 16 tiles of `words` u16 and w k x n, on this stream
         let ran = unsafe {
             ffi::launch_exl3_reconstruct(
                 wp as *mut f16,
@@ -597,19 +686,7 @@ impl Exl3Layer {
             )
         };
         if ran < 0 {
-            return Ok(None);
-        }
-        // SAFETY: as above
-        unsafe {
-            ffi::launch_exl3_had_in(
-                xp as *const c_void,
-                false,
-                xhp as *mut f16,
-                up as *const f16,
-                rows as i32,
-                k as i32,
-                stream,
-            );
+            return Ok(false);
         }
         let (alpha, beta) = (1.0f32, 0.0f32);
         // column-major: y^T (n x rows) = w^T (n x k, row-major w is its column-major transpose) times xh^T (k x rows)
@@ -638,23 +715,106 @@ impl Exl3Layer {
             )
         }
         .map_err(|e| inference_tensor::Error::Cuda(Box::new(e)))?;
+        drop(_w);
+        Ok(true)
+    }
+
+    // y (rows x n, f32) = xh (rows x k, rotated f16) times the weights on int8 tensor cores: the trellis decoded
+    // straight to transposed int8 at the codebook's scale, xh at one scale a row, int32 products rescaled
+    fn int8_product(
+        &self,
+        dev: &inference_tensor::CudaDevice,
+        xhp: u64,
+        tp: u64,
+        yp: u64,
+        rows: usize,
+    ) -> Result<bool> {
+        use inference_tensor::cuda_backend::cudarc::cublas::{result, sys};
+        let (k, n, words) = self.dims();
+        let stream = dev.cuda_stream().cu_stream();
+        let bound = mul1_bound();
+        // SAFETY: each buffer is written whole before it is read
+        let (wq, xq, rs, ci) = unsafe {
+            (
+                dev.alloc::<i8>(n * k)?,
+                dev.alloc::<i8>(rows * k)?,
+                dev.alloc::<f32>(rows)?,
+                dev.alloc::<i32>(rows * n)?,
+            )
+        };
+        let (wqp, _wq) = slice_ptr(&wq, 0);
+        let (xqp, _xq) = slice_ptr(&xq, 0);
+        let (rsp, _rs) = slice_ptr(&rs, 0);
+        let (cip, _ci) = slice_ptr(&ci, 0);
+        // SAFETY: the trellis is k / 16 x n / 16 tiles of `words` u16, wq n x k, xh and xq rows x k, rs rows, on this
+        // stream
+        let ran = unsafe {
+            ffi::launch_exl3_trellis_wt_i8(
+                tp as *const u16,
+                wqp as *mut i8,
+                I8_LEVELS / bound,
+                k as i32,
+                n as i32,
+                words as i32,
+                self.codebook as i32,
+                stream,
+            )
+        };
+        if ran < 0 {
+            return Ok(false);
+        }
         // SAFETY: as above
         unsafe {
-            ffi::launch_exl3_had_out(
+            ffi::launch_exl3_quant_rows_i8(
+                xhp as *const f16,
+                xqp as *mut i8,
+                rsp as *mut f32,
+                rows as i32,
+                k as i32,
+                stream,
+            );
+        }
+        let (alpha, beta) = (1i32, 0i32);
+        // column-major: ci^T (n x rows) = wq^T (wq n x k row-major is k x n column-major, transposed) times xq^T
+        // SAFETY: the pointers span their buffers, on the blas handle's stream
+        unsafe {
+            result::gemm_ex(
+                *dev.cublas_handle().handle(),
+                sys::cublasOperation_t::CUBLAS_OP_T,
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                n as i32,
+                rows as i32,
+                k as i32,
+                (&raw const alpha).cast(),
+                wqp as *const _,
+                sys::cudaDataType_t::CUDA_R_8I,
+                k as i32,
+                xqp as *const _,
+                sys::cudaDataType_t::CUDA_R_8I,
+                k as i32,
+                (&raw const beta).cast(),
+                cip as *mut _,
+                sys::cudaDataType_t::CUDA_R_32I,
+                n as i32,
+                sys::cublasComputeType_t::CUBLAS_COMPUTE_32I,
+                sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )
+        }
+        .map_err(|e| inference_tensor::Error::Cuda(Box::new(e)))?;
+        // SAFETY: ci and y rows x n, rs rows, on this stream
+        unsafe {
+            ffi::launch_exl3_dequant_i32(
+                cip as *const i32,
                 yp as *mut f32,
-                std::ptr::null_mut(),
-                vp as *const f16,
+                rsp as *const f32,
+                bound / I8_LEVELS,
                 rows as i32,
                 n as i32,
                 stream,
             );
         }
-        drop((_x, _t, _u, _v, _xh, _w, _y));
-        drop((xh, w));
-        Ok(Some(Tensor::from((
-            Storage::Cuda(CudaStorage::wrap_cuda_slice(y, dev.clone())),
-            Shape::from((rows, n)),
-        ))))
+        drop((_wq, _xq, _rs, _ci));
+        Ok(true)
     }
 
     fn matmul(&self, x: &Tensor) -> Result<Tensor> {
@@ -789,14 +949,25 @@ impl QuantMethod for Exl3Layer {
                 return y.reshape(out_dims);
             }
         }
-        let x16 = x
-            .reshape((rows, in_features))?
-            .to_dtype(DType::F16)?
-            .pad_with_zeros(1, 0, k - in_features)?
-            .contiguous()?;
-        let mut y = match self.recon_matmul(&x16)? {
+        // an unpadded bf16 x takes the reconstruction without casts either side
+        let direct = if x.dtype() == DType::BF16 && in_features == k {
+            self.recon_matmul(&x.reshape((rows, k))?.contiguous()?)?
+        } else {
+            None
+        };
+        let mut y = match direct {
             Some(y) => y,
-            None => self.matmul(&x16)?,
+            None => {
+                let x16 = x
+                    .reshape((rows, in_features))?
+                    .to_dtype(DType::F16)?
+                    .pad_with_zeros(1, 0, k - in_features)?
+                    .contiguous()?;
+                match self.recon_matmul(&x16)? {
+                    Some(y) => y,
+                    None => self.matmul(&x16)?,
+                }
+            }
         };
         if self.padded() {
             y = y.narrow(1, 0, n)?;
@@ -1851,6 +2022,8 @@ mod tests {
 
     // of the largest output: f16 accumulation measures 3.4e-4 .. 8e-4
     const F16_BOUND: f32 = 2e-3;
+    // the int8 prefill (mul1 at 2 to 4 bpw past RECON_MIN_ROWS): int8 weights and one activation scale a row
+    const INT8_PREFILL_BOUND: f32 = 0.02;
     const BF16_BOUND: f32 = 6e-3;
 
     fn lcg(n: usize, seed: u32) -> Vec<u32> {
@@ -1902,8 +2075,8 @@ mod tests {
     }
 
     // the kernels against the CPU reconstruction: random trellises (every codebook, a half-integer rate), random
-    // signed scales, one and two rows (the decode GEMV), 32 (the GEMM) and
-    // 200 (the f16 reconstruction through cuBLAS)
+    // signed scales, one and two rows (the decode GEMV), 32 (the GEMM) and 200 (the reconstruction through cuBLAS:
+    // int8 tensor cores for mul1 at 2 to 4 bpw, f16 for the rest)
     #[test]
     fn the_kernels_match_the_reconstructed_weight() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
@@ -1935,7 +2108,9 @@ mod tests {
                 let actual = layer.forward_raw(&x.to_dtype(DType::F16)?.to_device(&device)?)?;
                 let ratio = relative_error(&actual, &expected)?;
                 ratios.push(format!("{codebook:?} {words} m {m}: {ratio}"));
-                failed |= ratio > F16_BOUND;
+                let int8 =
+                    codebook == Exl3Codebook::Mul1 && words % 16 == 0 && m >= super::RECON_MIN_ROWS;
+                failed |= ratio > if int8 { INT8_PREFILL_BOUND } else { F16_BOUND };
             }
         }
         assert!(!failed, "{ratios:?}");
@@ -2337,6 +2512,113 @@ mod tests {
                 mb * 1e3 / us
             );
         }
+        Ok(())
+    }
+
+    // the int8 prefill's weights decode straight from the trellis to the f16 reconstruction's values at the codebook's
+    // scale, rounded and transposed (2 to 4 bpw)
+    #[test]
+    fn int8_prefill_weights_are_the_reconstruction_rounded_and_transposed() -> Result<()> {
+        let Ok(Device::Cuda(dev)) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (k, n) = (256, 384);
+        let inv = super::I8_LEVELS / super::mul1_bound();
+        for words in [32, 48, 64] {
+            let (trellis, _, _) = random_linear(k, n, words, 9)?;
+            let trellis = trellis.to_device(&Device::Cuda(dev.clone()))?;
+            let (t_s, t_l) = trellis.storage_and_layout();
+            let inference_tensor::Storage::Cuda(t_c) = &*t_s else {
+                unreachable!("on CUDA")
+            };
+            let (tp, _t) = crate::utils::slice_ptr(t_c.as_cuda_slice::<i16>()?, t_l.start_offset());
+            // SAFETY: both are written whole before they are read
+            let (w, q) = unsafe { (dev.alloc::<half::f16>(k * n)?, dev.alloc::<i8>(n * k)?) };
+            let ((wp, _w), (qp, _q)) = (
+                crate::utils::slice_ptr(&w, 0),
+                crate::utils::slice_ptr(&q, 0),
+            );
+            let stream = dev.cuda_stream().cu_stream();
+            // SAFETY: the trellis is k / 16 x n / 16 tiles of `words` u16, w k x n, q n x k, on this stream
+            let (a, b) = unsafe {
+                (
+                    super::ffi::launch_exl3_reconstruct(
+                        wp as *mut half::f16,
+                        tp as *const u16,
+                        k as i32,
+                        n as i32,
+                        words as i32,
+                        Exl3Codebook::Mul1 as i32,
+                        stream,
+                    ),
+                    super::ffi::launch_exl3_trellis_wt_i8(
+                        tp as *const u16,
+                        qp as *mut i8,
+                        inv,
+                        k as i32,
+                        n as i32,
+                        words as i32,
+                        Exl3Codebook::Mul1 as i32,
+                        stream,
+                    ),
+                )
+            };
+            assert_eq!((a, b), (0, 0), "{words} words");
+            drop((_t, _w, _q));
+            let w = dev
+                .cuda_stream()
+                .clone_dtoh(&w)
+                .map_err(inference_tensor::Error::wrap)?;
+            let q = dev
+                .cuda_stream()
+                .clone_dtoh(&q)
+                .map_err(inference_tensor::Error::wrap)?;
+            for kk in 0..k {
+                for nn in 0..n {
+                    let expected = (w[kk * n + nn].to_f32() * inv).round_ties_even() as i8;
+                    assert_eq!(q[nn * k + kk], expected, "{words} words, k {kk}, n {nn}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // a bf16 prefill reconstruction reads and writes bf16 in its rotations, the same bits as casting around f16 and f32
+    #[test]
+    fn bf16_reconstruction_matches_the_cast_route() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (k, n, rows) = (512, 384, super::RECON_MIN_ROWS + 16);
+        let (t, u, v) = random_linear(k, n, 64, 11)?;
+        let layer = Exl3Layer::new_on_device(
+            t.to_device(&device)?,
+            u.to_device(&device)?,
+            v.to_device(&device)?,
+            Exl3Codebook::Mul1,
+            None,
+            DType::BF16,
+        )?;
+        let x = random_rows(rows, k, 5)?
+            .to_dtype(DType::BF16)?
+            .to_device(&device)?;
+        let direct = layer
+            .recon_matmul(&x)?
+            .expect("reconstructs past RECON_MIN_ROWS");
+        let cast = layer
+            .recon_matmul(&x.to_dtype(DType::F16)?)?
+            .expect("reconstructs past RECON_MIN_ROWS")
+            .to_dtype(DType::BF16)?;
+        assert_eq!(direct.dtype(), DType::BF16);
+        assert_eq!(
+            direct
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            cast.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?
+        );
         Ok(())
     }
 

@@ -186,6 +186,39 @@ inference_tensor::kernel_library! {
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
 
+        /// The `k x n` trellis (2 to 4 bpw) as `n x k` int8 weights times `inv`; -1 for a shape or rate it does not take.
+        pub(crate) fn launch_exl3_trellis_wt_i8(
+            trellis: *const u16,
+            q: *mut i8,
+            inv: f32,
+            k: i32,
+            n: i32,
+            tile_u16: i32,
+            cb: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// `rows x k` f16 `x` as int8 `q`, one scale a row (max |x| / 127) into `scale`.
+        pub(crate) fn launch_exl3_quant_rows_i8(
+            x: *const f16,
+            q: *mut i8,
+            scale: *mut f32,
+            rows: i32,
+            k: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// `rows x n` int32 `c` as f32 `y`, times each row's `rs` and `ws`.
+        pub(crate) fn launch_exl3_dequant_i32(
+            c: *const i32,
+            y: *mut f32,
+            rs: *const f32,
+            ws: f32,
+            rows: i32,
+            n: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
         /// The trellis (`k / 16 x n / 16` tiles of `words` uint16) as its f16 weight `k x n` in the rotated basis;
         /// -1 for a rate or shape it does not take.
         pub(crate) fn launch_exl3_reconstruct(

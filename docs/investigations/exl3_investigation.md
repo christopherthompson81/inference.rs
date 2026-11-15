@@ -1613,3 +1613,129 @@ Qwen3.6 35B-A3B EXL3 4.0, DFlash 2 x5 verify step (nsys): master 12.43 ms GPU, n
 Plain decode gains ~3% though the isolated 1-row shapes lost; the verify step is within 6% of recipe A and DFlash
 within 5-7%, at 27% lower KLD and ~20% faster plain decode. Qwen3.6 is level (its dense layers stay on the earlier
 kernel; its tok/s against Run 38 moves with per-task acceptance). The EXL3 kernel library grows 0.07 MiB.
+
+## Run 55 - 2026-11-15 21:30
+
+Question: what is left in Qwen3.8 27B EXL3 decode and prefill against recipe A, after #965?
+
+```
+nsys, GPU ms a step              EXL3     recipe A
+DFlash 2 x7 verify step          29.52    27.89    linears 19.65 (tile 17.38 + o_proj 2.27) vs 17.64; head 3.30 vs 4.23
+plain decode step                22.10    20.87    linears 17.98 vs 16.37 (+ their q8_1 quantize 0.62); head 1.55 vs 1.23
+inference bench, 4096 / 32:      TTFT 883 tok/s vs 1580; decode 47.2 vs 50.6 tok/s
+```
+
+Correction to Runs 50 and 54: EXL3's ~20% plain-decode lead over recipe A in the server (rtbench, 46 against 37-40
+tok/s) is not in the kernels. `inference bench` and the nsys step times put recipe A ahead in plain decode (50.6
+against 47.2 tok/s); the GGUF loses ~5 ms a token outside the GPU in the server's real-text runs (not yet traced).
+
+Tile kernel occupancy (127 registers and 36 KB shared, 2 blocks an SM, ~30% warps active, DRAM 74-79%): a pairwise
+warp reduction (16 KB) with registers capped for 3 blocks spilled (15-30% slower); 4 column tiles a warp (2 sets x
+4 k-splits) and split targets 3-8 an SM were within the isolated benchmark's +-5%, and in the model 29.65 vs 29.52 ms
+(verify) and 22.08 vs 22.10 (plain). Reverted: occupancy is not the limit.
+
+Prefill (nsys over `inference bench` 4096): exl3_gemm 10.8 s of 19.2 s busy, cuBLAS 3.75, reconstruct 0.76, casts
+1.2 (cast_f32_bf16 0.75, cast_bf16_f16 0.46), had_out 0.23. The 27B's gate/up/down (89M values) passed
+RECON_MAX_VALUES (64M), so they ran on exllamav3's GEMM. Reconstructing them in k-slices for cuBLAS (beta = 1
+after the first): 855 tok/s against 883, cuBLAS 12.2 s and reconstruct 2.5 s (once a 512-token chunk). Both GEMMs
+accumulate f16 in f32, which GA102 runs at half its f16 tensor rate (71 TFLOPS dense): a 4096-token prefill of 27B
+weights is ~213 TFLOP, >= 3 s at peak, so EXL3 prefill sits near that bound; the GGUF's MMQ runs int8 (4x the rate).
+Reverted.
+
+Kept: an unpadded bf16 input takes the reconstruction directly, `had_in` reading bf16 and `had_out` writing bf16 (the
+same values as the casts around f16 and f32; test `bf16_reconstruction_matches_the_cast_route`): TTFT 883 -> 917 /
+910 tok/s.
+
+## Run 56 - 2026-11-15 22:10
+
+Question: Run 55's ~5 ms a token the IQ4_KS GGUF seemed to lose in the server's real-text runs.
+
+```
+nsys, a sampled request (temperature 0.6), wall a decode step: recipe A 19.99 ms (GPU 20.21), EXL3 21.22 (21.52);
+  sampling kernels ~0.04 ms a step, host gaps ~0.07, D2H a few bytes a step
+samplebench.py (essay, 400 tokens), recipe A, first pass: greedy 51.9, then t0.6 43.6, seed 41.7, top_k 41.6 ...
+alternating, with nvidia-smi every second:
+  greedy 52.7 / t0.6 52.5 / greedy 52.6 / t0.6 52.5 / greedy 52.5 / t0.6 46.3 tok/s
+  during the last: clocks_throttle_reasons 0x20 (SW thermal slowdown), SM 870-885 MHz at 62 C core
+nvidia-smi -q: SW Thermal Slowdown 6,670,805,312 us accumulated, HW Thermal Slowdown 0; core limits 83/93/95 C
+```
+
+There is no GGUF serving overhead: sampling costs nothing measurable, and the slow runs were throttled. The card
+drops to ~880 MHz under software thermal slowdown with the core near 62 C, which on a 3090 points at the GDDR6X
+junction temperature (not reported on GeForce). Sustained memory-bound decode is what heats it, so long benchmark
+sequences slow down partway through, and order decides which variant pays. Runs 50 and 54's tok/s tables (and the
+"EXL3 ~20% faster plain decode" reading) are contaminated by this; the nsys GPU-time comparisons and `inference
+bench` (short) are not: plain decode recipe A 50.6 vs EXL3 47.2 tok/s. For A/B decode numbers: log
+clocks_throttle_reasons and discard runs that hit 0x20.
+
+## Run 57 - 2026-11-15 23:00
+
+Question: can an int8 prefill matmul lift EXL3's 27B prefill (913 tok/s at 4096 against recipe A's 1580) and at
+what cost in KLD? (Temporary switch; patch kept in the scratchpad.)
+
+Route: the rotated input quantized to int8 with one scale a row (max |x| / 127); the reconstructed weight (codebook
+values in the rotated basis, mul1 bound ~3.5) at one scale, 127 / bound; cuBLAS int8 GEMM, int32 accumulate; int32 to
+f32 times both scales; rotation out as before. The MLP (89M values) allowed through without slicing.
+
+```
+inference bench 4096 / 8, alternating, no throttle samples (0x20 0 of 101):
+  f16 913.9 / 907.1 tok/s    int8, NN layout 763.9 / 759.7
+  nsys: cuBLAS picked ampere_igemm_int8_128x128_ldg4_nn (CUDA cores) 12.2 s, quant_w 2.9, reconstruct 2.4
+int8, weights transposed while quantized (n x k, cuBLAS's TN tensor-core layout): 1137 tok/s
+  nsys (busy 14.3 s): GEMM 4.06 s, quant_wt 3.81, reconstruct 2.41, dequant 0.65, had_out 0.49
+KLD, wikitext 40 x 512 against the BF16 base (prefill runs this route at 512-token chunks):
+                 KLD mean   median    p99      same top-1   PPL
+  f16 (Run 49)   0.01244    0.00428   0.1338   94.88%       5.9827
+  int8           0.01334    0.00475   0.1472   94.69%       5.9864
+  recipe A       0.01700    0.00689   0.1820   94.48%
+```
+
+The tensor-core int8 GEMM is 3x the f16 one, and the weight passes (f16 reconstruct, then a transposing int8 pass)
+now cost more than it: a kernel decoding trellis tiles straight to transposed int8 would leave ~1/4 of their 6.2 s,
+projecting ~1700 tok/s. The price is +0.0009 mean KLD (7%), still 22% under recipe A; per-row activation scales are
+the likely source (weight rounding adds ~0.8% relative noise against the activations' ~2%).
+
+## Run 58 - 2026-11-16 00:10
+
+Question: does finer activation scaling recover Run 57's int8 prefill KLD? (Temporary switches; patch kept in the
+scratchpad.)
+
+```
+wikitext 40 x 512 against the BF16 base, Qwen3.8 27B EXL3 4.0     KLD mean  p99     same top-1  4096 prefill tok/s
+f16 route                                                          0.01244   0.1338  94.88%      904-914
+weights rounded to the int8 grid, f16 GEMM (isolates the weights)  0.01251   0.1295  94.92%
+int8, one activation scale a row (Run 57)                          0.01334   0.1472  94.69%      1137
+int8, a scale a row and k-slice: 1024                              0.01331   0.1422  94.87%      785
+                                 512                               0.01293   0.1417  95.05%      562
+                                 256                               0.01314   0.1439  94.97%      345
+int8 weights, activations as int8 plus an int8 residual (one GEMM
+  of 2 x rows; activation error ~1/127 of the above)               0.01291   0.1372  94.86%      874-879
+(throttle reasons logged; 0x20 in 24 of 368 samples during the slice runs, none in the others)
+```
+
+The weights' int8 rounding is negligible (+0.00007). The activations' is not recoverable by finer scales: KLD does not
+fall with the slice, and near-exact activations still read +0.0005, about the size of KLD's sensitivity to any small
+numeric change (Run 35: up to +-0.0007 on Qwen3.6). So the int8 route's cost lies between ~+0.0005 and +0.0009, which
+KLD cannot pin down; per-k-slice products (a GEMM and an f32 pass each) cost more than the int8 GEMM saves, and the
+residual doubles the GEMM. Without a fused trellis-to-int8 weight kernel, only the per-row variant is faster than f16.
+
+## Run 59 - 2026-11-16 01:20
+
+The int8 prefill route (Runs 57-58), built: mul1 at 2 to 4 bpw past RECON_MIN_ROWS decodes its trellis straight to
+transposed int8 weights (`trellis_wt_i8_kernel`, beside the decode GEMV for `decode_tile`: a warp a tile, 16 columns x
+128 k staged in shared memory for 8-byte stores) at 127 over mul1's bound, quantizes the rotated input at one scale a
+row, and runs cuBLAS's int8 tensor cores (TN) with int32 accumulation, rescaled to f32 before the rotation out. Other
+codebooks and rates keep the f16 reconstruction. Up to 256M weights (bytes) take it, so a 27B's MLP does and the head
+does not. Tests: `int8_prefill_weights_are_the_reconstruction_rounded_and_transposed` (bit-exact against the f16
+reconstruction rounded), and the kernels' test bounds 200-row mul1 products at 2% (measured 1.0%).
+
+```
+Qwen3.8 27B EXL3 4.0, inference bench 4096 / 32 (no throttle samples)
+  prefill   f16 route ~910 tok/s  ->  int8 1679 / 1675        recipe A 1580
+  decode    47.8 / 47.7 (unchanged)
+  KLD (wikitext 40 x 512, BF16 base)  0.01244 -> 0.01334, p99 0.1338 -> 0.1472, top-1 94.88 -> 94.69%  (recipe A 0.01700)
+Qwen3.6 35B-A3B EXL3 4.0 (ours)
+  prefill 3922 (#962) -> 4403 tok/s          IQ4_KSS GGUF 4234
+  KLD 0.02210 (Run 31) -> 0.02225, p99 0.2117, top-1 93.40%   (within Run 35's +-0.0007)
+EXL3 kernel library +0.09 MiB
+```
