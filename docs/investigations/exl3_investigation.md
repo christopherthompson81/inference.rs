@@ -1509,3 +1509,32 @@ everywhere. A forced 128 at 8 rows overflows the 16 MB workspace and falls back 
 What is left is structural: split-k over blocks needs f32 partials per row. A kernel whose blocks loop over several
 k-chunks, accumulating in registers and loading the next chunk while the MMA runs, would cut the partials by the
 loop count. Its sums would differ from today's m = 1 bits, so decode would move to it too.
+
+## Run 52 - 2026-11-15 15:10
+
+Question: does cutting Run 51's f32 split partials close the 8-row gap?
+
+A looped kernel (`dgemv_run_kernel`, patch kept in the scratchpad): a block takes its column group over `run`
+consecutive 256-row chunks, loading the next chunk's words while the MMAs take this one, accumulating across chunks;
+`run` from the shape alone (aiming at N blocks a multiprocessor), so a row's bits match at any row count.
+
+```
+verify_gemv_times_by_rows, us (today's kernel after Run 51's padding: 1 row / 8 rows)
+                     today        run, 3/SM     run, 6/SM     run, 12/SM
+5120 x 17408         62.0 / 91.0  84.0 / 94.5   79.1 / 88.5   73.9 / 90.7
+17408 x 5120         62.8 / 94.5  80.0 / 89.8   81.1 / 90.9   73.6 / 92.2
+5120 x 12288         46.5 / 66.2  62.2 / 69.5   58.9 / 67.7   55.4 / 70.9
+ncu, run 6/SM, 5120 x 17408: 8 rows DRAM read 45.5 MB, write 3.7 (partials gone), 85 us at 64% of DRAM peak;
+  64 registers, 4 blocks an SM, grid 544 = 1.7 waves, 58% warps active
+```
+
+The partials' DRAM round trip is gone, but the kernel is slower: one chunk of loads in flight a block and 4 blocks an
+SM do not keep DRAM busy, where today's many short blocks with every load issued up front do (700 GB/s at 1 row).
+
+Block order group-major instead (a group's splits back to back, so its partials are summed while in L2; the same
+sums): 8 rows 91.0 -> 87.6 on 5120 x 17408, but 1 row 46.5 -> 63.9 on 5120 x 12288 and slower on every 1-row shape:
+split-major order is what keeps the weight reads local. Reverted both.
+
+Left untested: rotating x once a launch into an f16 buffer (each block now repeats the 8 rows' Hadamards; 8 rows run
+32% more instructions than 1, Run 51), and exllamav3's GEMM at verify rows where it is faster (75.5 us on 5120 x 17408
+at 8 rows), which would give up the bit match between decode and verify.
