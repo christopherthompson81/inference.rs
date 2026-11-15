@@ -1186,3 +1186,19 @@ tolerance is off by default (`--mtp-greedy-tolerance` 0), and probabilistic draf
 a greedy row accepts a draft only if it is the verify row's argmax. What differs is the verify forward's numerics
 against single-token decode. The candidates: the head at 6 rows (past the GEMV workspace, so exllamav3's kernel),
 the speculative GDN recurrence, and multi-query attention. EXL3 library 8.14 -> 8.16 MiB.
+
+## Run 39 - 2026-11-14 23:40
+
+Dead end: the 6 bpw head at a verify step's rows on our GEMV. At 6 rows its split partials need ~24M floats, past
+the stream's 4M workspace, so it falls back to exllamav3's kernel. With 1940 column groups it has blocks enough
+without splitting k, so a block took all 16 of its k steps in turn. Each step went from zero and was added to the
+running sum in order: the same f32 sum as the split partials added in split order. A head-width case (5 rows, n
+106496) gave each row its one-row bits.
+
+```
+head at 6 rows, us a call (nsys, code task)    exllamav3 trellis GEMM 466   ours, k in one block 522   + next-step prefetch 538
+```
+
+12% slower, twice a step (target and drafter), and greedy DFlash output diverged from plain greedy decode at the same
+characters as before (code 320, wiki 103). The head was not the cause; that leaves the speculative GDN recurrence
+and multi-query attention. Reverted.
