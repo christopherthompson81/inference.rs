@@ -1355,3 +1355,19 @@ At equal slots the GGUF wins: its misses run on the CPU at memory bandwidth, EXL
 kernels (as on Qwen3.6, Run 42). EXL3's experts are ~2.5x smaller, so twice the slots fit: 256 slots (half of the 512
 experts) beats the GGUF's best fit (160 slots already spilled layers 43-47 to the CPU in qwen4exp Run 12). The fit, not
 the miss path, is where the low-bit EXL3 pays off.
+
+## Run 45 - 2026-11-15 08:40
+
+Question: does an EXL3 expert cache too large for the GPU shrink to fit, as a GGUF's does, instead of moving layers
+to the CPU? It did not: the slot planner (`ExpertCachePlan::slots`) only read expert counts from GGUF and UQFF
+sources. It now reads them from the checkpoint inventory too, which reports experts only when they are trellis-coded
+(a BF16 checkpoint's experts have no host-memory path).
+
+```
+serve --moe-expert-cache 512 --pa-context-len 16384 -m <Flash-Next exl3 1.66bpw>
+  WARN the requested MoE expert cache does not fit ...; caching fewer experts per layer requested=512 slots=352
+  Layers 0-47: cuda[0]; KV cache q3 (offload policy under `auto`, as for GGUF)
+```
+
+352 slots is near the ~360 estimated from the GGUF's fit. EXL3 offload under `--pa-cache-type auto` now quantizes
+the KV cache like GGUF offload; Runs 42-44 ran BF16 KV.

@@ -5,7 +5,9 @@ mod embedding_loaders;
 mod multimodal_loaders;
 mod normal_loaders;
 pub use crate::device_map::AutoDeviceMapParams;
-pub(crate) use checkpoint_inventory::{checkpoint_device_map_sizes, checkpoint_runtime_size};
+pub(crate) use checkpoint_inventory::{
+    CheckpointDeviceMapSizes, checkpoint_device_map_sizes, checkpoint_runtime_size,
+};
 use inference_nn::loaders::NonMappedSubModel;
 pub use inference_nn::loaders::{AutoDeviceMapQuantization, DeviceMappedModelLoader};
 pub(crate) use inference_nn::loaders::{QK_ROPE_LAYOUT_CONFIG_KEY, qk_rope_layout_from_config};
