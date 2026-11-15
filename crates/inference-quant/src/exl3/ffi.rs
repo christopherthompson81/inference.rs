@@ -44,13 +44,14 @@ inference_tensor::kernel_library! {
     path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT_EXL3").unwrap_or("");
     id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT_EXL3").unwrap_or("");
     unsafe extern "C" {
-        /// One row `x` (f16, or bf16 with `x_bf16`) through `jobs` trellises of one k (`b`, `suh`, `svh`, `out`, `n`
-        /// apiece) into each `out` (f32, f16 or bf16 by `out_kind`), rotated by its `suh`/`svh` and the Hadamards
+        /// `rows` (1 to 8) rows `x` (f16, or bf16 with `x_bf16`) through `jobs` trellises of one k (`b`, `suh`, `svh`,
+        /// `out`, `n` apiece) into each `out` (`rows x n`, f32, f16 or bf16 by `out_kind`), rotated by its `suh`/`svh` and the Hadamards
         /// inside; `ws` is the stream's zeroed workspace of `ws_floats` words, its counters left zeroed. 0 when
         /// launched, -1 for a shape, rate or workspace it does not take.
         pub(crate) fn launch_exl3_dgemv(
             x: *const c_void,
             x_bf16: bool,
+            rows: i32,
             jobs: i32,
             b: *const *const u16,
             suh: *const *const f16,
@@ -66,13 +67,15 @@ inference_tensor::kernel_library! {
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
 
-        /// One token's routed experts through the decode kernels: gate, up (silu) and down, each slot weighted by
-        /// `rw` and summed in order into `out` (`hidden`, of `out_kind`); `x` f16 or bf16, `sel` i64 or u32, `rw` f16
+        /// `tokens` (1 to 8) tokens' routed experts through the decode kernels: gate, up (silu) and down, each slot
+        /// weighted by `rw` and summed in order into its token's row of `out` (`tokens x hidden`, of `out_kind`); `x`
+        /// f16 or bf16, `sel` i64 or u32, `rw` f16
         /// or f32. Each table holds `experts` trellis, then suh, then svh addresses. `ws` as for launch_exl3_dgemv.
         /// 0 when launched, -1 for shapes, rates or a workspace it does not take.
         pub(crate) fn launch_exl3_dmoe(
             x: *const c_void,
             x_bf16: bool,
+            tokens: i32,
             sel: *const c_void,
             sel_u32: bool,
             rw: *const c_void,
@@ -158,6 +161,64 @@ inference_tensor::kernel_library! {
             a_had: *mut f16,
             a_bf16: bool,
             c_bf: *mut c_void,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// `rows x k` x (f16, or bf16 with `x_bf16`) times `suh`, rotated by 128-wide Hadamards, into `out` (f16); -1
+        /// for a shape it does not take.
+        pub(crate) fn launch_exl3_had_in(
+            x: *const c_void,
+            x_bf16: bool,
+            out: *mut f16,
+            suh: *const f16,
+            rows: i32,
+            k: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// `rows x n` f32 `y` rotated by 128-wide Hadamards, times `svh`: in place, or into `out_bf16` when not null.
+        pub(crate) fn launch_exl3_had_out(
+            y: *mut f32,
+            out_bf16: *mut c_void,
+            svh: *const f16,
+            rows: i32,
+            n: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// The trellis (`k / 16 x n / 16` tiles of `words` uint16) as its f16 weight `k x n` in the rotated basis;
+        /// -1 for a rate or shape it does not take.
+        pub(crate) fn launch_exl3_reconstruct(
+            out: *mut f16,
+            trellis: *const u16,
+            k: i32,
+            n: i32,
+            words: i32,
+            cb: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// A prompt's routed experts in groups of 16 rows (`row_token`, `group_expert`, `groups` of them): gate, up and
+        /// silu into `act` (`groups x 16 x inter` f16, down's rotated input), down into `out` (`groups x 16 x hidden`
+        /// f32). -1 for shapes or rates it does not take.
+        pub(crate) fn launch_exl3_grouped_moe(
+            x: *const c_void,
+            x_bf16: bool,
+            row_token: *const u32,
+            group_expert: *const i64,
+            groups: i32,
+            tokens: i32,
+            gate: *const i64,
+            up: *const i64,
+            down: *const i64,
+            experts: i32,
+            hidden: i32,
+            inter: i32,
+            gu_tile_u16: i32,
+            d_tile_u16: i32,
+            cb: i32,
+            act: *mut f16,
+            out: *mut f32,
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
 

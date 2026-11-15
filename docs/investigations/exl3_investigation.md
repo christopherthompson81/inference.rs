@@ -1039,3 +1039,150 @@ direction across all three seeds. exllamav3's mix is weighted wiki 50, c4 20, co
 on alternate articles. Ours is the same files taken in equal parts, as one stream. Some of that edge may be its wiki
 weight (37% of rows), which leans toward the wikitext eval. Run 31's Qwen3.6 gap (0.0221 against 0.0215, one seed
 each) fits the same reading: a seed draw plus the calibration mix.
+
+## Run 34 - 2026-11-14 20:30
+
+MoE prefill, Qwen3.6-35B-A3B exllamav3 4.0. A server prefill of 525 tokens under nsys took 309 ms: 248 ms of
+kernels, 37 ms idle. The routed experts ran one projection at a time through the generic gather path:
+- gate and up each copied the input once per top-k slot (8x) as f16;
+- each projection read the routing indices on the host (three syncs a layer);
+- each built its padded grouped input with its own gather, and gathered its f32 output back to slot order;
+- each group was padded to the largest group's rows, capped at 64.
+
+Now, past 8 tokens, outside a capture, past 64 slots, `fused_silu_moe` groups once a layer (`SlotGroups`):
+- each group's token rows gathered straight from the hidden states;
+- gate and up, then silu(gate) * up in f32, then down, in the grouped layout;
+- the slots gathered back and weighted per token.
+
+```
+inference bench 512 / 128                      prefill tok/s   decode tok/s   KLD (wikitext-2 vs BF16 base)
+before (generic path, 64-row groups)           1659            197            0.02146
+generic, 16-row groups                         2120-2134                      0.02175
+fused, 16-row groups                           2740            198            0.02190
+fused, 32-row groups                           2500, 2489      198            0.02120
+fused, 64-row groups                           2039                           0.02120
+fused, 16 rows, EXL3_GEMM_H_ACC off            2535            198            0.02177
+IQ4_KSS GGUF                                   4234            164            0.0216
+```
+
+16-row groups take exllamav3's single-block tiles (TILESIZE_M 16). On sm_86 those accumulate the MMAs in f16
+(`EXL3_GEMM_H_ACC`), but turning that off recovers only 0.00013 of the 0.0007, and it slows the other GEMMs' 16-row
+tiles. So the single-block path loses accuracy here for some other reason, not found. Multi-row tiles (32 and 64
+rows land on the same variants: equal KLD to five digits) match the dense path. 32 rows is the default: faster and
+more accurate than where this started. The fused path's f32 activation beats the generic path's bf16 one by 0.00026.
+
+Left for prefill: the dense `exl3_gemm` (~67 ms for 525 tokens; exllamav3 reconstructs to f16 and runs an hgemm past
+144 rows), the casts around the EXL3 calls, and the host read of the routing indices (one sync a layer now).
+
+## Run 35 - 2026-11-14 21:15
+
+Dense prefill matmuls through cuBLAS, as exllamav3 does past 144 rows. Its reconstruct kernel decodes the trellis to
+the f16 weight in the rotated basis; ours rotates the input (`* suh`, Hadamard, f16), runs one `cublasGemmEx` (f16
+in, f32 out, f32 compute), and rotates the output in place (Hadamard, `* svh`). Weights past 64M values (the head)
+stay on the trellis GEMM.
+Why: one 512-token chunk's dense projections (Qwen3.6, 250 GEMMs) take ~66 ms on the trellis GEMM, and torch's cuBLAS
+f16 GEMM does them in 29.6 ms at 48.5 TFLOPS with f32 accumulation (28.1 ms with f16 accumulation: not worth it).
+
+Error against the CPU reconstruction (relative rms):
+- Random weights, 512 x 512: 0.00036-0.00050 for the reconstruct path at 200 rows, every codebook and the
+  half-integer rate, against the trellis GEMM's 0.0006-0.0009 at 32 rows.
+- Real weights (layer 0's `out_proj` and shared `down_proj`, layer 3's `o_proj`), 200 bf16 rows with an outlier
+  channel at 300x: reconstruct 1.68e-3, trellis GEMM 1.82e-3 and 2.33e-3.
+
+KLD against BF16 moved anyway: 0.02120 -> 0.02222. Both paths are deterministic (each scores 0.00000 against its own
+earlier output). Scored against each other they differ by KLD 0.0054 (96.9% top-1 agreement). But that difference is
+the same 0.0050-0.0056 whether the reconstruct path runs everywhere or only for k = 4096, 512 or 2048. It does not
+add up layer by layer: any small numeric change perturbs this model's logits that much, likely through the GDN
+recurrence. Against BF16 those three partial runs score 0.02170, 0.02220 and 0.02263.
+
+So at 40 chunks, KLD against BF16 cannot rank kernels whose results differ by less than ~0.0007. That retracts Run
+34's reading: its 16-row "3% loss" was this noise, and in isolation the 16-row tiles have the same error as 32 and
+64. GROUP_ROWS goes back to 16. Kernels are judged by their error against an f32 reference. KLD at this length only
+catches gross breakage. The converter comparisons of Runs 31-33 sit at the same scale. Run 33 used three seeds a
+side and a 0.8B model, so its equivalence conclusion holds, but single-run KLD differences under ~0.001 mean little.
+
+```
+inference bench 512 / 128, Qwen3.6 exllamav3 4.0     prefill tok/s    decode tok/s   KLD
+start (Run 33)                                       1660             197            0.02146
+grouped MoE, 16 rows + dense through cuBLAS          3190, 3192       198            0.02209
+IQ4_KSS GGUF                                         4234             164            0.0216
+```
+
+EXL3 library 8.01 -> 8.05 MiB.
+
+## Run 36 - 2026-11-14 21:35
+
+Dead end: grouping the slots by expert on the device, to drop the one host read of the routing ids a layer (16.7-25
+ms of idle GPU in a 525-token prefill). exllamav3's indexed GEMM skips a group whose expert is -1, so one kernel (one
+block) built the groups with room for the most any routing makes: slots / 16 plus one an expert, -1 past the last. It
+counted each expert's slots, laid out its groups, and placed each slot in slot order.
+
+```
+512-token prefill, tok/s           host grouping   device, global ids   device, ids in shared (u16)
+                                   3190            3004                 3050
+```
+
+The kernel took 143 us a call with the ids in global memory (11.5 ms over 80 calls): one thread an expert scans
+every slot. Sizing for the worst case costs more again: ~512 groups where a layer used ~350. Every gather and
+activation runs on 8192 rows instead of ~5600, and the cooperative mgemm steps through the idle groups. Reverted. A
+win would need exact sizes without a host read, so groups made by the GEMM from offsets on the device, not a fixed
+grid.
+
+## Run 37 - 2026-11-14 22:15
+
+Our own grouped expert kernels for prefill (`exl3_dgemv_instance_exl3.cu`), after the decode GEMV. That GEMV's
+m16n8k16 MMAs used one row of A; here all 16 rows are an expert group's tokens. The block layout:
+- a block per (group, 128 output columns), 8 warps of 16 columns, over every k, so no workspace and no grid sync;
+- per 128-wide k step (one Hadamard span), the group's token rows are gathered and rotated (`* suh`, Hadamard) into
+  shared memory, and each warp decodes its trellis tiles in registers (exllamav3's `dq8_regs_*`) into full MMAs;
+- gate and up share a block. At the end both are rotated out, silu(gate) * up stays in f32, and it is rotated by
+  down's suh into down's f16 input (the block's 128 columns are exactly one of down's Hadamard spans);
+- down reads that input, runs the same loop, and rotates out by svh.
+
+2 to 4 bpw, every codebook; other rates keep exllamav3's mgemm. Groups are fixed at 16 rows (host-built, exact
+count).
+
+Error against an f32 reference, 8 of layer 0's real experts, 100 bf16 tokens (outlier channel at 200x), top-2:
+ours 1.71e-3 relative rms, exllamav3's mgemm route 2.81e-3. The fused-MoE test's 100-token case runs these kernels
+at 3 and 4 bpw.
+
+```
+inference bench 512 / 128, Qwen3.6 exllamav3 4.0     prefill tok/s    decode tok/s   KLD
+Run 35 (mgemm experts)                               3190             198            0.02209
+our grouped kernels                                  3924, 3922       198, 198       0.02239 (in the band)
+IQ4_KSS GGUF                                         4234             164            0.0216
+```
+
+nsys, 525-token prefill: 176 ms span, 140 ms of kernels. Experts 42.7 ms (gate/up 30.4, down 12.3), against ~67 ms
+on the mgemm. cuBLAS dense ~26 ms, its reconstruct and rotations ~10 ms. Gathers and weighting ~16 ms, casts ~9 ms,
+GDN ~14 ms. EXL3 library 8.05 -> 8.14 MiB.
+
+## Run 38 - 2026-11-14 23:00
+
+DFlash 2 (5 drafts) on the EXL3 model; real-text decode as the recipe's Run 9 measured it (wiki summary, code
+task, essay; temperature 0.6, top_p 0.95, top_k 20, seed 7, 400 tokens; `rtbench.sh` in the scratchpad):
+
+```
+tok/s                               wiki     code     essay    tokens a step
+EXL3, no speculation                200.6    200.7    200.8
+EXL3, DFlash 2, exllamav3 kernels   299.0    324.1    210.3    3.42
+IQ4_KSS GGUF, DFlash 2              285.9    305.6    198.7    3.57
+EXL3, DFlash 2, ours (below)        337.3    407.7    258.7    3.51
+```
+
+A verify step (nsys, code task, ~4 tokens a step) took 13.7 ms of GPU time: exllamav3's coop MoE kernels 4.1 ms,
+its small-m GEMV 3.1 ms (250 launches of 12.3 us), the drafter ~1.1 ms, and the trellis GEMM ~1.1 ms (likely the
+head at 6 rows). Our m = 1 decode kernels now take up to 8 rows:
+- the GEMV puts the rows in A's first 8 MMA rows (8-15 stay zero), with per-row partials in the workspace; one row
+  a warp is rotated out by the last block. q/k/v and the single linears take it first, up to 8 rows, before the
+  int8 gate;
+- the MoE kernels give slot j token j / topk's row, and the last slot of each (token, column group) sums that
+  token's slots in order into its row.
+
+Each row gets the same bits it gets alone (`a_few_rows_get_each_rows_own_bits`: 2 to 6 bpw, every codebook, and the
+experts at five tokens). Greedy (temperature 0) output with DFlash still differs from plain greedy decode: code at
+char 320 of 1344, wiki at 103 of 1196. So does the GGUF's: identical on code, wiki at 135 of 1226. The tie
+tolerance is off by default (`--mtp-greedy-tolerance` 0), and probabilistic drafting only changes what is proposed:
+a greedy row accepts a draft only if it is the verify row's argmax. What differs is the verify forward's numerics
+against single-token decode. The candidates: the head at 6 rows (past the GEMV workspace, so exllamav3's kernel),
+the speculative GDN recurrence, and multi-query attention. EXL3 library 8.14 -> 8.16 MiB.

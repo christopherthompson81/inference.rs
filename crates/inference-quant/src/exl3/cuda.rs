@@ -58,8 +58,14 @@ const INT8_MAX_K: usize = 5;
 const DGEMV_WS_FLOATS: usize = 4 << 20;
 const DGEMV_OUT_F32: i32 = 0;
 const DGEMV_MAX_JOBS: usize = 4;
+// the decode GEMV's and one-token MoE kernels' most rows (a speculative verify's few tokens; MAX_ROWS)
+const DGEMV_MAX_ROWS: usize = 8;
 const DGEMV_OUT_F16: i32 = 1;
 const DGEMV_OUT_BF16: i32 = 2;
+// from this many rows a matmul reconstructs its f16 weight for cuBLAS (exllamav3's AUTO_RECONSTRUCT_THRESHOLD)
+const RECON_MIN_ROWS: usize = 144;
+// a larger weight (the head) stays on the trellis GEMM rather than reconstruct this many f16 values at once
+const RECON_MAX_VALUES: usize = 64 << 20;
 
 // the launcher's autotune buckets: powers of two up to 16 rows, then 16-row steps capped at 64
 fn tune_bucket(m: usize) -> u8 {
@@ -153,21 +159,23 @@ impl Exl3Layer {
         })
     }
 
-    // one unpadded row through the decode GEMV, in `out` (f32, f16, or bf16 from a bf16 `x`); None where it does
-    // not run
+    // up to DGEMV_MAX_ROWS unpadded rows through the decode GEMV, in `out` (f32, f16, or bf16 from a bf16 `x`); None
+    // where it does not run
     fn dgemv(&self, x: &Tensor, out: DType) -> Result<Option<Tensor>> {
         Ok(Self::dgemv_jobs(&[self], x, out)?.map(|mut ys| ys.remove(0)))
     }
 
-    // one row through `layers` (one k, at most DGEMV_MAX_JOBS) in one decode GEMV launch, each output `(1, n)` in
-    // `out`; None where it does not run
+    // up to DGEMV_MAX_ROWS rows through `layers` (one k, at most DGEMV_MAX_JOBS) in one decode GEMV launch, each
+    // output `(rows, n)` in `out`; None where it does not run
     fn dgemv_jobs(layers: &[&Self], x: &Tensor, out: DType) -> Result<Option<Vec<Tensor>>> {
         let first = layers[0];
         let (Device::Cuda(dev), Some(scratch)) = (x.device(), &first.dgemv_scratch) else {
             return Ok(None);
         };
         let (k, _, words) = first.dims();
-        if layers.len() > DGEMV_MAX_JOBS
+        let rows = x.elem_count() / k;
+        if rows > DGEMV_MAX_ROWS
+            || layers.len() > DGEMV_MAX_JOBS
             || layers.iter().any(|l| {
                 let (lk, _, lw) = l.dims();
                 l.padded() || lk != k || lw != words || l.codebook != first.codebook
@@ -219,7 +227,7 @@ impl Exl3Layer {
         for l in layers {
             let n = l.dims().1;
             // SAFETY: the kernel writes every output
-            let (y, p) = unsafe { dgemv_output(dev, out, n)? };
+            let (y, p) = unsafe { dgemv_output(dev, out, rows * n)? };
             outs.push((y, n));
             yp.push(p);
             ns.push(n as i32);
@@ -230,6 +238,7 @@ impl Exl3Layer {
             ffi::launch_exl3_dgemv(
                 xp as *const c_void,
                 x_bf16,
+                rows as i32,
                 layers.len() as i32,
                 b.as_ptr() as *const *const u16,
                 suh.as_ptr() as *const *const f16,
@@ -252,7 +261,7 @@ impl Exl3Layer {
         }
         Ok(Some(
             outs.into_iter()
-                .map(|(storage, n)| Tensor::from((Storage::Cuda(storage), Shape::from((1, n)))))
+                .map(|(storage, n)| Tensor::from((Storage::Cuda(storage), Shape::from((rows, n)))))
                 .collect(),
         ))
     }
@@ -297,6 +306,37 @@ impl Exl3Layer {
             .collect::<Vec<_>>();
         let (k, _, words) = self.dims();
         let rows = xs.elem_count() / k;
+        if rows <= DGEMV_MAX_ROWS && layers.iter().all(|l| l.dtype == self.dtype) {
+            let out = match (self.dtype, xs.dtype()) {
+                (DType::F16, _) => DType::F16,
+                (_, DType::BF16) => DType::BF16,
+                _ => DType::F32,
+            };
+            let x = xs.reshape((rows, k))?;
+            let x = if out == DType::BF16 {
+                x
+            } else {
+                x.to_dtype(DType::F16)?
+            };
+            if let Some(ys) = Self::dgemv_jobs(&layers, &x, out)? {
+                let lead = &xs.dims()[..xs.rank() - 1];
+                return ys
+                    .into_iter()
+                    .zip(&layers)
+                    .map(|(y, l)| {
+                        let mut y = y.to_dtype(xs.dtype())?;
+                        let mut dims = lead.to_vec();
+                        dims.push(l.dims().1);
+                        y = y.reshape(dims)?;
+                        if let Some(bias) = &l.bias {
+                            y = y.broadcast_add(&bias.to_dtype(xs.dtype())?)?;
+                        }
+                        Ok(y)
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(Some);
+            }
+        }
         let int8 =
             rows > 1 && self.codebook == Exl3Codebook::Mul1 && words.div_ceil(16) <= INT8_MAX_K;
         if int8
@@ -364,39 +404,6 @@ impl Exl3Layer {
         // built at any size, so a prefill builds what the decode graphs, captured later, launch with
         if rows > GROUP_MAX_ROWS {
             return Ok(None);
-        }
-        if rows == 1 {
-            let out = match (self.dtype, xs.dtype()) {
-                (DType::F16, _) => DType::F16,
-                (_, DType::BF16) => DType::BF16,
-                _ => DType::F32,
-            };
-            let row = xs.reshape((1, k))?;
-            let row = if out == DType::BF16 {
-                row
-            } else {
-                row.to_dtype(DType::F16)?
-            };
-            drop(group);
-            if let Some(ys) = Self::dgemv_jobs(&layers, &row, out)? {
-                let lead = &xs.dims()[..xs.rank() - 1];
-                return ys
-                    .into_iter()
-                    .zip(&layers)
-                    .map(|(y, l)| {
-                        let mut y = y.to_dtype(xs.dtype())?;
-                        let mut dims = lead.to_vec();
-                        dims.push(l.dims().1);
-                        y = y.reshape(dims)?;
-                        if let Some(bias) = &l.bias {
-                            y = y.broadcast_add(&bias.to_dtype(xs.dtype())?)?;
-                        }
-                        Ok(y)
-                    })
-                    .collect::<Result<Vec<_>>>()
-                    .map(Some);
-            }
-            group = self.group.lock().unwrap();
         }
         let group = group.as_ref().unwrap();
         // bf16 activations go in and come out as they are; the kernels round them through f16 and f32 alike
@@ -537,6 +544,117 @@ impl Exl3Layer {
 
     // `x` (`m x in`, f16, contiguous) times the weight, `m x out` in f16 for an f16 model (as the kernels write it),
     // else f32
+    // `x` (`rows x k`, f16) times the weight reconstructed to f16 (rotated basis) by one cuBLAS GEMM between the input
+    // and output rotations, f32 out; None below RECON_MIN_ROWS, past RECON_MAX_VALUES, or for a rate it does not take
+    fn recon_matmul(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        use inference_tensor::cuda_backend::cudarc::cublas::{result, sys};
+        let Device::Cuda(dev) = x.device() else {
+            return Ok(None);
+        };
+        let (k, n, words) = self.dims();
+        let rows = x.dim(0)?;
+        if rows < RECON_MIN_ROWS || k * n > RECON_MAX_VALUES {
+            return Ok(None);
+        }
+        let (x_s, x_l) = x.storage_and_layout();
+        let (t_s, t_l) = self.trellis.storage_and_layout();
+        let (u_s, u_l) = self.suh.storage_and_layout();
+        let (v_s, v_l) = self.svh.storage_and_layout();
+        let (Storage::Cuda(x_c), Storage::Cuda(t_c), Storage::Cuda(u_c), Storage::Cuda(v_c)) =
+            (&*x_s, &*t_s, &*u_s, &*v_s)
+        else {
+            inference_tensor::bail!("an EXL3 layer's tensors live on CUDA");
+        };
+        let (xp, _x) = slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset());
+        let (tp, _t) = slice_ptr(t_c.as_cuda_slice::<i16>()?, t_l.start_offset());
+        let (up, _u) = slice_ptr(u_c.as_cuda_slice::<f16>()?, u_l.start_offset());
+        let (vp, _v) = slice_ptr(v_c.as_cuda_slice::<f16>()?, v_l.start_offset());
+        // SAFETY: the kernels write every element before anything reads it
+        let (xh, w, y) = unsafe {
+            (
+                dev.alloc::<f16>(rows * k)?,
+                dev.alloc::<f16>(k * n)?,
+                dev.alloc::<f32>(rows * n)?,
+            )
+        };
+        let (xhp, _xh) = slice_ptr(&xh, 0);
+        let (wp, _w) = slice_ptr(&w, 0);
+        let (yp, _y) = slice_ptr(&y, 0);
+        let stream = dev.cuda_stream().cu_stream();
+        // SAFETY: the pointers span their buffers (x rows x k, the trellis k / 16 x n / 16 x words, suh k, svh n,
+        // xh rows x k, w k x n, y rows x n), all on this stream
+        let ran = unsafe {
+            ffi::launch_exl3_reconstruct(
+                wp as *mut f16,
+                tp as *const u16,
+                k as i32,
+                n as i32,
+                words as i32,
+                self.codebook as i32,
+                stream,
+            )
+        };
+        if ran < 0 {
+            return Ok(None);
+        }
+        // SAFETY: as above
+        unsafe {
+            ffi::launch_exl3_had_in(
+                xp as *const c_void,
+                false,
+                xhp as *mut f16,
+                up as *const f16,
+                rows as i32,
+                k as i32,
+                stream,
+            );
+        }
+        let (alpha, beta) = (1.0f32, 0.0f32);
+        // column-major: y^T (n x rows) = w^T (n x k, row-major w is its column-major transpose) times xh^T (k x rows)
+        // SAFETY: the pointers span their buffers, on the blas handle's stream
+        unsafe {
+            result::gemm_ex(
+                *dev.cublas_handle().handle(),
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                n as i32,
+                rows as i32,
+                k as i32,
+                (&raw const alpha).cast(),
+                wp as *const _,
+                sys::cudaDataType_t::CUDA_R_16F,
+                n as i32,
+                xhp as *const _,
+                sys::cudaDataType_t::CUDA_R_16F,
+                k as i32,
+                (&raw const beta).cast(),
+                yp as *mut _,
+                sys::cudaDataType_t::CUDA_R_32F,
+                n as i32,
+                sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )
+        }
+        .map_err(|e| inference_tensor::Error::Cuda(Box::new(e)))?;
+        // SAFETY: as above
+        unsafe {
+            ffi::launch_exl3_had_out(
+                yp as *mut f32,
+                std::ptr::null_mut(),
+                vp as *const f16,
+                rows as i32,
+                n as i32,
+                stream,
+            );
+        }
+        drop((_x, _t, _u, _v, _xh, _w, _y));
+        drop((xh, w));
+        Ok(Some(Tensor::from((
+            Storage::Cuda(CudaStorage::wrap_cuda_slice(y, dev.clone())),
+            Shape::from((rows, n)),
+        ))))
+    }
+
     fn matmul(&self, x: &Tensor) -> Result<Tensor> {
         if self.dtype == DType::F16 {
             self.matmul_into::<f16>(x, false)
@@ -647,13 +765,13 @@ impl QuantMethod for Exl3Layer {
         let (k, _, _) = self.dims();
         let (in_features, n) = self.features;
         let rows = x.elem_count() / in_features;
-        if rows == 1 {
+        if rows <= DGEMV_MAX_ROWS {
             let out = match (self.dtype, x.dtype()) {
                 (DType::F16, _) => DType::F16,
                 (_, DType::BF16) => DType::BF16,
                 _ => DType::F32,
             };
-            let row = x.reshape((1, in_features))?;
+            let row = x.reshape((rows, in_features))?;
             let row = if out == DType::BF16 {
                 row
             } else {
@@ -674,7 +792,10 @@ impl QuantMethod for Exl3Layer {
             .to_dtype(DType::F16)?
             .pad_with_zeros(1, 0, k - in_features)?
             .contiguous()?;
-        let mut y = self.matmul(&x16)?;
+        let mut y = match self.recon_matmul(&x16)? {
+            Some(y) => y,
+            None => self.matmul(&x16)?,
+        };
         if self.padded() {
             y = y.narrow(1, 0, n)?;
         }
@@ -779,15 +900,67 @@ pub struct Exl3Experts {
     dgemv_ws: Option<Tensor>,
 }
 
-// past this many slots (outside a capture) each expert multiplies its tokens' rows together, in groups of at most
-// GROUP_ROWS (which bounds the padding to the largest group)
+// past this many slots (outside a capture) each expert multiplies its tokens' rows together (SlotGroups)
 const GROUPED_MIN_SLOTS: usize = 64;
 // exllamav3's fused decode MoE takes up to this many tokens (its MAX_BSZN) and 256 slots
 const FUSED_MAX_TOKENS: usize = 8;
 const FUSED_MAX_SLOTS: usize = 256;
 // the kernels' MOE_COOP_ACT_SILU
 const FUSED_ACT_SILU: i32 = 0;
-const GROUP_ROWS: usize = 64;
+// 16 beat 32 (10%), 64 and 8 on a 256-expert prefill
+const GROUP_ROWS: usize = 16;
+// the grouped prefill kernels' rows a group (exl3_dgemv_instance_exl3.cu's GROUP_M)
+const GROUPED_KERNEL_ROWS: usize = 16;
+
+// slots grouped by expert into matrices of `m` rows, at most GROUP_ROWS (which bounds the padding to the largest group)
+struct SlotGroups {
+    m: usize,
+    // each group's expert
+    experts: Vec<i64>,
+    // each group row's slot, the slot count for padding
+    rows: Vec<u32>,
+    // each slot's group row
+    place: Vec<u32>,
+}
+
+impl SlotGroups {
+    fn of(ids: &[u32]) -> Self {
+        Self::of_rows(ids, None)
+    }
+
+    // `rows` fixes the group height, else the largest group's up to GROUP_ROWS
+    fn of_rows(ids: &[u32], rows: Option<usize>) -> Self {
+        let slots = ids.len();
+        let mut by_expert = std::collections::BTreeMap::<u32, Vec<u32>>::new();
+        for (j, &e) in ids.iter().enumerate() {
+            by_expert.entry(e).or_default().push(j as u32);
+        }
+        let m = by_expert
+            .values()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(1)
+            .min(GROUP_ROWS);
+        let m = rows.unwrap_or(m);
+        let groups = by_expert
+            .iter()
+            .flat_map(|(&e, members)| members.chunks(m).map(move |rows| (e, rows)))
+            .collect::<Vec<_>>();
+        let (mut rows, mut place) = (vec![slots as u32; groups.len() * m], vec![0u32; slots]);
+        for (g, (_, members)) in groups.iter().enumerate() {
+            for (r, &j) in members.iter().enumerate() {
+                rows[g * m + r] = j;
+                place[j as usize] = (g * m + r) as u32;
+            }
+        }
+        Self {
+            m,
+            experts: groups.iter().map(|&(e, _)| i64::from(e)).collect(),
+            rows,
+            place,
+        }
+    }
+}
 
 impl Exl3Experts {
     /// `parts` holds each expert's trellis, `suh`, `svh` and codebook, on the device.
@@ -856,14 +1029,21 @@ impl Exl3Experts {
         let (tokens, topk) = ids.dims2()?;
         let ((hidden, inter, gu_words), (d_in, d_out, d_words)) = (gate.dims(), down.dims());
         let experts = gate.trellis.len();
-        if tokens > FUSED_MAX_TOKENS
-            || up.dims() != gate.dims()
+        if up.dims() != gate.dims()
             || (d_in, d_out) != (inter, hidden)
             || [up, down]
                 .iter()
                 .any(|p| p.trellis.len() != experts || p.codebook != gate.codebook)
         {
             return Ok(None);
+        }
+        if tokens > FUSED_MAX_TOKENS {
+            let capturing = dev.cuda_stream().capture_status().map_err(inference_tensor::Error::wrap)?
+                != inference_tensor::cuda::cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
+            if capturing || tokens * topk <= GROUPED_MIN_SLOTS {
+                return Ok(None);
+            }
+            return Self::grouped_silu_moe(gate, up, down, xs, ids, weights).map(Some);
         }
         let slots_max = (FUSED_MAX_TOKENS * topk).min(FUSED_MAX_SLOTS);
         if tokens * topk > slots_max {
@@ -893,7 +1073,7 @@ impl Exl3Experts {
             weights.to_dtype(DType::F16)?
         }
         .contiguous()?;
-        if tokens == 1
+        if tokens <= DGEMV_MAX_ROWS
             && let Some(ys) = Self::dmoe(gate, up, down, &x, &sel, &rw)?
         {
             return Ok(Some(ys));
@@ -1034,8 +1214,9 @@ impl Exl3Experts {
         ))))
     }
 
-    // one token's experts through the decode kernels: `x` (hidden, f16 or bf16), `sel` (topk, u32 or i64), `rw`
-    // (topk, f32 or f16), out `(1, hidden)` bf16 for bf16 `x`, else f32; None where they do not run
+    // up to DGEMV_MAX_ROWS tokens' experts through the decode kernels: `x` (tokens x hidden, f16 or bf16), `sel` and
+    // `rw` (tokens x topk; u32 or i64, f32 or f16), out `(tokens, hidden)` bf16 for bf16 `x`, else f32; None where they
+    // do not run
     fn dmoe(
         gate: &Self,
         up: &Self,
@@ -1048,7 +1229,7 @@ impl Exl3Experts {
             return Ok(None);
         };
         let ((hidden, inter, gu_words), (_, _, d_words)) = (gate.dims(), down.dims());
-        let topk = sel.elem_count();
+        let (tokens, topk) = sel.dims2()?;
         let x_bf16 = x.dtype() == DType::BF16;
         let out = if x_bf16 { DType::BF16 } else { DType::F32 };
         let (x_s, x_l) = x.storage_and_layout();
@@ -1092,13 +1273,14 @@ impl Exl3Experts {
         let (dp, _d) = slice_ptr(d_c.as_cuda_slice::<i64>()?, d_l.start_offset());
         let (wp, _w) = slice_ptr(w_c.as_cuda_slice::<f32>()?, w_l.start_offset());
         // SAFETY: the kernels write every output
-        let (y, yp) = unsafe { dgemv_output(dev, out, hidden)? };
+        let (y, yp) = unsafe { dgemv_output(dev, out, tokens * hidden)? };
         // SAFETY: the pointers are the live device buffers above (x hidden, sel and rw topk, the tables 3 x experts
         // addresses of the layers' own tensors, the stream's workspace, out hidden), all on this device's stream
         let ran = unsafe {
             ffi::launch_exl3_dmoe(
                 xp as *const c_void,
                 x_bf16,
+                tokens as i32,
                 sp as *const c_void,
                 sel_u32,
                 rp as *const c_void,
@@ -1126,7 +1308,7 @@ impl Exl3Experts {
         }
         Ok(Some(Tensor::from((
             Storage::Cuda(y),
-            Shape::from((1, hidden)),
+            Shape::from((tokens, hidden)),
         ))))
     }
 
@@ -1205,42 +1387,198 @@ impl Exl3Experts {
         )))
     }
 
-    // as one row a slot, the slots grouped by expert into multi-row matrices (padded with a zero row to the largest),
-    // so each expert's weights are read once a group (reads the indices on the host)
+    // as one row a slot, the slots grouped by expert into multi-row matrices, so each expert's weights are read once a
+    // group (reads the indices on the host)
     fn grouped_matmul(&self, x: &Tensor, ids: &[u32]) -> Result<Tensor> {
         let slots = ids.len();
-        let mut by_expert = std::collections::BTreeMap::<u32, Vec<u32>>::new();
-        for (j, &e) in ids.iter().enumerate() {
-            by_expert.entry(e).or_default().push(j as u32);
-        }
-        let m = by_expert
-            .values()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(1)
-            .min(GROUP_ROWS);
-        let groups = by_expert
-            .iter()
-            .flat_map(|(&e, members)| members.chunks(m).map(move |rows| (e, rows)))
-            .collect::<Vec<_>>();
-        // padding rows read the zero row appended past the slots
-        let (mut rows, mut place) = (vec![slots as u32; groups.len() * m], vec![0u32; slots]);
-        for (g, (_, members)) in groups.iter().enumerate() {
-            for (r, &j) in members.iter().enumerate() {
-                rows[g * m + r] = j;
-                place[j as usize] = (g * m + r) as u32;
-            }
-        }
-        let experts = groups
-            .iter()
-            .map(|&(e, _)| i64::from(e))
-            .collect::<Vec<_>>();
+        let groups = SlotGroups::of(ids);
         let padded = Tensor::cat(&[x, &x.narrow(0, 0, 1)?.zeros_like()?], 0)?
-            .index_select(&Tensor::from_vec(rows, groups.len() * m, x.device())?, 0)?
+            .index_select(
+                &Tensor::from_vec(groups.rows, groups.experts.len() * groups.m, x.device())?,
+                0,
+            )?
             .contiguous()?;
-        let experts = Tensor::from_vec(experts, groups.len(), x.device())?;
-        self.indexed_matmul(&padded, &experts, m, &self.grouped_tuned)?
-            .index_select(&Tensor::from_vec(place, slots, x.device())?, 0)
+        let experts = Tensor::from_vec(groups.experts.clone(), groups.experts.len(), x.device())?;
+        self.indexed_matmul(&padded, &experts, groups.m, &self.grouped_tuned)?
+            .index_select(&Tensor::from_vec(groups.place, slots, x.device())?, 0)
+    }
+
+    // `groups` (GROUPED_KERNEL_ROWS rows each) through our grouped kernels: each group row's output (`groups x rows x
+    // hidden`, f32); None for rates they do not take
+    fn grouped_kernels(
+        gate: &Self,
+        up: &Self,
+        down: &Self,
+        xs: &Tensor,
+        groups: &SlotGroups,
+        tokens: usize,
+    ) -> Result<Option<Tensor>> {
+        let Device::Cuda(dev) = xs.device() else {
+            return Ok(None);
+        };
+        let ((hidden, inter, gu_words), (_, _, d_words)) = (gate.dims(), down.dims());
+        let count = groups.experts.len();
+        let rows = count * GROUPED_KERNEL_ROWS;
+        let topk = groups.place.len() / tokens;
+        let row_token = groups
+            .rows
+            .iter()
+            .map(|&j| {
+                if j as usize == groups.place.len() {
+                    tokens as u32
+                } else {
+                    j / topk as u32
+                }
+            })
+            .collect::<Vec<_>>();
+        let row_token = Tensor::from_vec(row_token, rows, xs.device())?;
+        let group_expert = Tensor::from_vec(groups.experts.clone(), count, xs.device())?;
+        let x_bf16 = xs.dtype() == DType::BF16;
+        let x = if x_bf16 {
+            xs.contiguous()?
+        } else {
+            xs.to_dtype(DType::F16)?.contiguous()?
+        };
+        let (x_s, x_l) = x.storage_and_layout();
+        let (r_s, r_l) = row_token.storage_and_layout();
+        let (e_s, e_l) = group_expert.storage_and_layout();
+        let (g_s, g_l) = gate.tables.storage_and_layout();
+        let (u_s, u_l) = up.tables.storage_and_layout();
+        let (d_s, d_l) = down.tables.storage_and_layout();
+        let (
+            Storage::Cuda(x_c),
+            Storage::Cuda(r_c),
+            Storage::Cuda(e_c),
+            Storage::Cuda(g_c),
+            Storage::Cuda(u_c),
+            Storage::Cuda(d_c),
+        ) = (&*x_s, &*r_s, &*e_s, &*g_s, &*u_s, &*d_s)
+        else {
+            inference_tensor::bail!("EXL3 experts' tensors live on CUDA");
+        };
+        let (xp, _x) = if x_bf16 {
+            slice_ptr(x_c.as_cuda_slice::<half::bf16>()?, x_l.start_offset())
+        } else {
+            slice_ptr(x_c.as_cuda_slice::<f16>()?, x_l.start_offset())
+        };
+        let (rp, _r) = slice_ptr(r_c.as_cuda_slice::<u32>()?, r_l.start_offset());
+        let (ep, _e) = slice_ptr(e_c.as_cuda_slice::<i64>()?, e_l.start_offset());
+        let (gp, _g) = slice_ptr(g_c.as_cuda_slice::<i64>()?, g_l.start_offset());
+        let (upp, _u) = slice_ptr(u_c.as_cuda_slice::<i64>()?, u_l.start_offset());
+        let (dp, _d) = slice_ptr(d_c.as_cuda_slice::<i64>()?, d_l.start_offset());
+        // SAFETY: the kernels write every element of both before reading it
+        let (act, out) = unsafe {
+            (
+                dev.alloc::<f16>(rows * inter)?,
+                dev.alloc::<f32>(rows * hidden)?,
+            )
+        };
+        let (ap, _a) = slice_ptr(&act, 0);
+        let (op, _o) = slice_ptr(&out, 0);
+        // SAFETY: the pointers span their buffers (x tokens x hidden, row_token rows, group_expert count, the tables 3 x
+        // experts each, act rows x inter, out rows x hidden), and the tables address these layers' own tensors
+        let ran = unsafe {
+            ffi::launch_exl3_grouped_moe(
+                xp as *const c_void,
+                x_bf16,
+                rp as *const u32,
+                ep as *const i64,
+                count as i32,
+                tokens as i32,
+                gp as *const i64,
+                upp as *const i64,
+                dp as *const i64,
+                gate.trellis.len() as i32,
+                hidden as i32,
+                inter as i32,
+                gu_words as i32,
+                d_words as i32,
+                gate.codebook as i32,
+                ap as *mut f16,
+                op as *mut f32,
+                dev.cuda_stream().cu_stream(),
+            )
+        };
+        drop((_x, _r, _e, _g, _u, _d, _a, _o));
+        drop(act);
+        if ran < 0 {
+            return Ok(None);
+        }
+        Ok(Some(Tensor::from((
+            Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+            Shape::from((rows, hidden)),
+        ))))
+    }
+
+    // a prompt's routed experts, grouped by expert once for all three projections: each group's token rows gathered
+    // from `xs`, gate and up, the activation and down in the grouped layout, and each slot weighted back into its token
+    fn grouped_silu_moe(
+        gate: &Self,
+        up: &Self,
+        down: &Self,
+        xs: &Tensor,
+        ids: &Tensor,
+        weights: &Tensor,
+    ) -> Result<Tensor> {
+        let (tokens, topk) = ids.dims2()?;
+        let hidden = gate.dims().0;
+        let device = xs.device();
+        let groups = SlotGroups::of_rows(
+            &ids.to_dtype(DType::U32)?.flatten_all()?.to_vec1::<u32>()?,
+            Some(GROUPED_KERNEL_ROWS),
+        );
+        let slots = tokens * topk;
+        if let Some(rows) = Self::grouped_kernels(gate, up, down, xs, &groups, tokens)? {
+            let ys = rows
+                .index_select(&Tensor::from_vec(groups.place, slots, device)?, 0)?
+                .reshape((tokens, topk, hidden))?
+                .broadcast_mul(&weights.to_dtype(DType::F32)?.unsqueeze(2)?)?
+                .sum(1)?;
+            return if xs.dtype() == DType::BF16 {
+                ys.to_dtype(DType::BF16)
+            } else {
+                Ok(ys)
+            };
+        }
+        // padding rows read the zero row appended past the tokens
+        let token_rows = groups
+            .rows
+            .iter()
+            .map(|&j| {
+                if j as usize == slots {
+                    tokens as u32
+                } else {
+                    j / topk as u32
+                }
+            })
+            .collect::<Vec<_>>();
+        let rows = token_rows.len();
+        let x = Tensor::cat(
+            &[
+                &xs.to_dtype(DType::F16)?,
+                &Tensor::zeros((1, hidden), DType::F16, device)?,
+            ],
+            0,
+        )?
+        .index_select(&Tensor::from_vec(token_rows, rows, device)?, 0)?
+        .contiguous()?;
+        let experts = Tensor::from_vec(groups.experts.clone(), groups.experts.len(), device)?;
+        let g = gate.indexed_matmul(&x, &experts, groups.m, &gate.grouped_tuned)?;
+        let u = up.indexed_matmul(&x, &experts, groups.m, &up.grouped_tuned)?;
+        let act = (inference_tensor::nn::ops::silu(&g)? * u)?
+            .to_dtype(DType::F16)?
+            .contiguous()?;
+        let ys = down
+            .indexed_matmul(&act, &experts, groups.m, &down.grouped_tuned)?
+            .index_select(&Tensor::from_vec(groups.place, slots, device)?, 0)?
+            .reshape((tokens, topk, hidden))?
+            .broadcast_mul(&weights.to_dtype(DType::F32)?.unsqueeze(2)?)?
+            .sum(1)?;
+        if xs.dtype() == DType::BF16 {
+            ys.to_dtype(DType::BF16)
+        } else {
+            Ok(ys)
+        }
     }
 
     fn dense(&self, device: &Device) -> Result<Tensor> {
@@ -1387,9 +1725,8 @@ mod tests {
     use crate::QuantMethod;
     use crate::exl3::{Exl3Codebook, dense_weight};
 
-    // of the largest output: f16 accumulation measures 3.4e-4 .. 8e-4, int8 activations (mul1 at m = 2) 6e-3
+    // of the largest output: f16 accumulation measures 3.4e-4 .. 8e-4
     const F16_BOUND: f32 = 2e-3;
-    const INT8_BOUND: f32 = 1.5e-2;
     const BF16_BOUND: f32 = 6e-3;
 
     fn lcg(n: usize, seed: u32) -> Vec<u32> {
@@ -1441,7 +1778,8 @@ mod tests {
     }
 
     // the kernels against the CPU reconstruction: random trellises (every codebook, a half-integer rate), random
-    // signed scales, one and two rows (the GEMVs; mul1's two-row one quantizes activations to int8) and 32 (the GEMM)
+    // signed scales, one and two rows (the decode GEMV), 32 (the GEMM) and
+    // 200 (the f16 reconstruction through cuBLAS)
     #[test]
     fn the_kernels_match_the_reconstructed_weight() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
@@ -1467,14 +1805,13 @@ mod tests {
                 None,
                 DType::F16,
             )?;
-            for m in [1, 2, 32] {
+            for m in [1, 2, 32, 200] {
                 let x = random_rows(m, k, seed + 30)?;
                 let expected = x.matmul(&weight.t()?)?;
                 let actual = layer.forward_raw(&x.to_dtype(DType::F16)?.to_device(&device)?)?;
                 let ratio = relative_error(&actual, &expected)?;
                 ratios.push(format!("{codebook:?} {words} m {m}: {ratio}"));
-                let int8 = codebook == Exl3Codebook::Mul1 && m == 2;
-                failed |= ratio > if int8 { INT8_BOUND } else { F16_BOUND };
+                failed |= ratio > F16_BOUND;
             }
         }
         assert!(!failed, "{ratios:?}");
@@ -1539,7 +1876,8 @@ mod tests {
     }
 
     // the fused MoE against the dense layer it computes: per token, the routing-weighted sum over its experts of
-    // down(silu(gate(x)) * up(x)), gate and up at one rate and down at another, at one token and five
+    // down(silu(gate(x)) * up(x)), gate and up at one rate and down at another, at one token, five, and a hundred
+    // (grouped by expert, groups split past GROUP_ROWS)
     #[test]
     fn the_fused_moe_matches_its_dense_layer() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
@@ -1578,7 +1916,7 @@ mod tests {
         let (up, up_w) = projection(hidden, inter, 48, 300)?;
         let (down, down_w) = projection(inter, hidden, 64, 400)?;
         let mut ratios = Vec::new();
-        for tokens in [1, 5] {
+        for tokens in [1, 5, 100] {
             let xs = random_rows(tokens, hidden, 9)?;
             let ids = (0..tokens * topk)
                 .map(|j| ((j * 5 + 1) % experts) as u32)
@@ -1610,6 +1948,89 @@ mod tests {
             ratios.push((tokens, relative_error(&actual, &expected)?));
         }
         assert!(ratios.iter().all(|r| r.1 < F16_BOUND), "{ratios:?}");
+        Ok(())
+    }
+
+    // a speculative verify's few rows through the decode GEMV and the MoE decode kernels: each row the bits it gets
+    // alone (2 to 8 bpw, every codebook; the experts at five tokens, one at a time)
+    #[test]
+    fn a_few_rows_get_each_rows_own_bits() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let bits =
+            |t: &Tensor| -> Result<Vec<Vec<f32>>> { t.to_dtype(DType::F32)?.to_vec2::<f32>() };
+        let (k, n, rows) = (1024, 384, 5);
+        for (words, codebook, seed) in [
+            (32, Exl3Codebook::ThreeInst, 61),
+            (48, Exl3Codebook::Mcg, 62),
+            (64, Exl3Codebook::Mul1, 63),
+            (96, Exl3Codebook::ThreeInst, 64),
+        ] {
+            let (trellis, suh, svh) = random_linear(k, n, words, seed)?;
+            let layer = Exl3Layer::new_on_device(
+                trellis.to_device(&device)?,
+                suh.to_device(&device)?,
+                svh.to_device(&device)?,
+                codebook,
+                None,
+                DType::BF16,
+            )?;
+            let x = random_rows(rows, k, seed + 30)?
+                .to_dtype(DType::BF16)?
+                .to_device(&device)?;
+            let together = bits(&layer.forward_raw(&x)?)?;
+            for (r, row) in together.iter().enumerate() {
+                let alone = bits(&layer.forward_raw(&x.narrow(0, r, 1)?)?)?;
+                assert_eq!(row, &alone[0], "{codebook:?} {words}: row {r}");
+            }
+        }
+
+        let (experts, topk, hidden, inter, tokens) = (6, 2, 256, 384, 5);
+        let projection = |k: usize, n: usize, words: usize, seed: u32| -> Result<Exl3Experts> {
+            let parts = (0..experts)
+                .map(|e| {
+                    let (t, u, v) = random_linear(k, n, words, seed + 7 * e as u32)?;
+                    Ok((
+                        t.to_device(&device)?,
+                        u.to_device(&device)?,
+                        v.to_device(&device)?,
+                        Exl3Codebook::Mul1,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Exl3Experts::new_on_device(parts, DType::BF16)
+        };
+        let (gate, up, down) = (
+            projection(hidden, inter, 64, 500)?,
+            projection(hidden, inter, 64, 600)?,
+            projection(inter, hidden, 64, 700)?,
+        );
+        let xs = random_rows(tokens, hidden, 11)?
+            .to_dtype(DType::BF16)?
+            .to_device(&device)?;
+        let ids = (0..tokens * topk)
+            .map(|j| ((j * 5 + 2) % experts) as u32)
+            .collect::<Vec<_>>();
+        let ids = Tensor::from_vec(ids, (tokens, topk), &device)?;
+        let weights = (0..tokens * topk)
+            .map(|j| 0.25 + 0.1 * j as f32)
+            .collect::<Vec<_>>();
+        let weights = Tensor::from_vec(weights, (tokens, topk), &device)?;
+        let moe = |x: &Tensor, i: &Tensor, w: &Tensor| -> Result<Tensor> {
+            Ok(Exl3Experts::fused_silu_moe(&gate, &up, &down, x, i, w)?
+                .expect("the decode kernels take these shapes"))
+        };
+        let together = bits(&moe(&xs, &ids, &weights)?)?;
+        for (t, row) in together.iter().enumerate() {
+            let alone = bits(&moe(
+                &xs.narrow(0, t, 1)?,
+                &ids.narrow(0, t, 1)?,
+                &weights.narrow(0, t, 1)?,
+            )?)?;
+            assert_eq!(row, &alone[0], "experts: token {t}");
+        }
         Ok(())
     }
 
