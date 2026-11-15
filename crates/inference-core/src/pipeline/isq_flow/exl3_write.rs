@@ -21,8 +21,8 @@ use crate::pipeline::isq::Exl3WriteConfig;
 const DEFAULT_HEAD_BITS: f64 = 6.0;
 const DEFAULT_CODEBOOK: &str = "mul1";
 const HEAD: &str = "lm_head";
-// a MoE layer's router, kept in full precision as exllamav3 keeps it
-const ROUTER: &str = ".gate";
+// linears exllamav3 keeps in full precision: a MoE layer's router and the GDN's b and a
+const KEPT_DENSE: &[&str] = &[".gate", ".in_proj_b", ".in_proj_a", ".in_proj_ba"];
 const TIED_EMBEDDING: &str = "embed_tokens";
 const LAYERS: &str = ".layers.";
 const SHARED_INPUTS: &[(&str, &[&str])] = &[
@@ -377,8 +377,8 @@ fn write_resident(
     for (shard, (&(rest, layer), group)) in groups.iter().enumerate() {
         let group = group
             .iter()
-            .filter(|m| !m.key.ends_with(ROUTER))
             .copied()
+            .filter(|m| encoded(m))
             .collect::<Vec<_>>();
         for module in &group {
             module.ct.begin_track_hessian()?;
@@ -431,7 +431,7 @@ fn write_streamed(
         let group = layer
             .modules()
             .iter()
-            .filter(|m| !m.key.ends_with(ROUTER))
+            .filter(|m| encoded(m))
             .collect::<Vec<_>>();
         // each module's Hessian source: itself, or the first module reading the same input
         let mut first = HashMap::new();
@@ -533,6 +533,10 @@ fn write_shard(
 
 // every source tensor but the replaced weights (and every tensor of the replaced experts), a shard for each source
 // file
+fn encoded(module: &TrackedModule) -> bool {
+    !KEPT_DENSE.iter().any(|k| module.key.ends_with(k))
+}
+
 fn copy_unquantized(
     source: &Exl3Source<'_>,
     out: &Path,

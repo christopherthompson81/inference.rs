@@ -24,7 +24,11 @@ fn mtp_requested(config: &str) -> Result<bool> {
 }
 
 fn parse_qwen35_text_config(config: &str, moe: bool) -> Result<crate::qwen3_5::TextConfig> {
-    let cfg = crate::qwen3_5::TextConfig::from_json(config)?;
+    // a multimodal checkpoint's text model, loaded alone (an EXL3 write streams only text stacks)
+    let nested = serde_json::from_str::<serde_json::Value>(config)?
+        .get("text_config")
+        .map(|text| text.to_string());
+    let cfg = crate::qwen3_5::TextConfig::from_json(nested.as_deref().unwrap_or(config))?;
     cfg.check_experts(moe)?;
     cfg.validate()?;
     Ok(cfg)

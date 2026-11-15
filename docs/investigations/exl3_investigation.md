@@ -844,3 +844,198 @@ Since Run 22 (30B-A3B, step under nsys): 7.68 -> 5.03 ms.
 
 Size: the EXL3 kernel library 7.71 -> 8.01 MiB (the decode GEMV at 2-8 bpw and the two MoE kernels at 2-4 bpw, each
 codebook); baseline updated.
+
+## Run 28 - 2026-11-14 12:30
+
+Qwen3.6-35B-A3B next (the user's model; BF16 safetensors, `Qwen/Qwen3.6-35B-A3B`, 72 GB, downloading). Our converter
+streamed only the shared decoder: Qwen3.6 is the bespoke Qwen3.5 stack (Gated DeltaNet + attention + MoE, loaded as
+`Qwen3_5MoeForConditionalGeneration`), and the multimodal pipeline takes no EXL3 write. The user chose both routes:
+exllamav3's converter first (it has `qwen3_5` and `qwen3_5_mtp`), ours alongside.
+
+Ours:
+- the Qwen3.5 stack builds a layer through one `LayerBuild` (the constructor's loop and a rebuild on any device
+  share it) and implements `LayerStream` for plain stacks (RMS norms, no PLE, no QSA); a host load under
+  `stream_layers` builds no layers. A streamed attention layer runs on paged attention from its prompt mask (the
+  plain path needs a KV cache); a GDN layer from a fresh `GdnLayerCache` as a prefill.
+- an EXL3 write of a multimodal checkpoint loads its text model through the text loader named by
+  `text_config.model_type`, and the text loader reads a nested `text_config`.
+
+Qwen3.5-0.8B (dense hybrid) streamed at 4 bpw: every proxy error NaN past layer 0. Bisected by skipping swaps: only
+`linear_attn.in_proj_qkv`'s reconstruction broke the layer, with 14 NaN rows of 1024. Those rows are dead channels
+(every value 1.18e-37, the same rows of q and k): their rms underflows, so the encoder gives them a zero output
+scale, and the reconstruction's f16-rounding ratio `svh / sv` was 0 / 0. The stored trellis and scales were right
+(svh 0 decodes to 0); only the reconstruction the converter swaps in for the next layer's inputs was poisoned, so
+any model with dead channels was affected, streamed or not. The ratio is now 0 there (`dead_channels_reconstruct_as_zeros`).
+
+Also: a streamed (layerless) Qwen3.5 model panicked at serving setup reserving GDN deferred state (indexing empty
+layers); a layerless model reserves none.
+
+Result, 200 KB calibration slice, teacher-forced decode (README): BF16 5.50146, our streamed EXL3 4.0 5.72816
+(+4.1%; exllamav3's own Qwen3-0.6B 4.0 was +3.8% in Run 9). The output (multimodal config, EXL3 text weights, vision
+tower copied unquantized) loads and decodes through our engine. `--resident` fails on hybrid models ("Hybrid
+recurrent metadata is required"): the resident calibration drive never carried recurrent state, so hybrids convert
+streamed only.
+
+## Run 29 - 2026-11-14 14:55
+
+exllamav3 1.6.6's conversion of Qwen3.6-35B-A3B at `-b 4.0` (defaults: head 6 bpw, mul1 codebook): 2h 15m, 18.07
+GiB of tensors. Of that, routed experts 15.15 GiB, embeddings 0.95, attention/GDN/shared experts 0.71, head 0.36,
+MTP 0.40, vision tower 0.52 (6 bpw); text without vision or MTP 17.16 GiB (the IQ4_KSS recipe file is 18.15 GiB
+with its MTP block).
+
+Loads and decodes through our engine as is: the multimodal pipeline, vision tower dequantized to dense at load (81
+linears through `dense_linear_in`), routed experts through our MoE kernels.
+
+KLD against the recipe's BF16 base (`perplexity --kld-base bf16-wiki-c512-ch40.kld`, wikitext-2, 40 x 512):
+
+| | PPL (base 5.8237) | KLD mean | KLD p99 | same top-1 |
+|---|---|---|---|---|
+| exllamav3 EXL3 4.0 | 5.8694 | 0.02146 | 0.198 | 93.81% |
+| IQ4_KSS recipe (ik, from the recipe log) | | 0.0216 | | |
+
+Speed, `inference bench` 512-token prompt / 128-token decode, alternating in one session:
+
+| | prefill tok/s | decode tok/s |
+|---|---|---|
+| EXL3 4.0 | 1618, 1618 | 147.3, 147.4 |
+| IQ4_KSS GGUF | 4234, 4216 | 164.4, 163.3 |
+
+A first request after the conversion took 64 s and the first KLD chunk 51.7 s. Neither came back: a rerun of the
+server answered in 0.39 s, and a KLD rerun's first chunk took 1.4 s. The KLD run had been reading its 5 GB base file
+cold. Profiling also showed the dense vision-tower dequantize runs at load, not in the first pass.
+
+So EXL3 matches the GGUF recipe's quality in 1 GiB less memory, but decodes 10% slower and prefills 2.6x slower.
+Next: profile decode per kernel against the GGUF run.
+
+## Run 30 - 2026-11-14 15:05
+
+Where Run 29's decode loses, nsys over a 100-token request (kernel time a token, 7.05 ms in all):
+`exl3_gemv_int8_sq_kernel` 2.78 ms in 247 launches (11.3 us each), and the casts around it (`cast_f32_bf16`,
+`cast_bf16_f16`, ~250 apiece) 0.65 ms. Every GDN, attention and shared-expert linear is mul1 at 4 bpw, and mul1
+at <= 5 bpw still kept exllamav3's int8 GEMV. That gate predates our decode GEMV (Run 25), which decodes mul1 too;
+Qwen3-30B-A3B is 3INST, so it never met the gate.
+
+A/B with the gate overridden (temporary env, `inference bench` 512 / 128, alternating):
+
+```
+                       decode tok/s       teacher-forced decode PPL (README, 576 tokens)
+int8 GEMV (as was)     147.6 147.4        3.39687
+our GEMV               189.5 188.7        3.40265
+```
+
+The PPL moves by +0.17%, about what Run 24 saw between kernels on this short text. Our GEMV keeps f16
+activations where the int8 one quantized them. Now one row always takes our GEMV (fused q/k/v included); the int8
+gate holds only for 2-16 rows. The GPU test's int8 bound covers only m = 2.
+
+The GDN's `in_proj_qkv` and `in_proj_z` share an input but ran as two launches: they now go through `fused_group`
+(one two-job GEMV at one row) as gate/up and q/k/v do: 188.4 -> 192.6 tok/s. Kernel time a token is now 5.52 ms
+(before the qkv/z fusion): our GEMV 1.83 ms (188 launches), moe_a 0.76, moe_b 0.50, the head 0.49.
+
+Decode, then: EXL3 4.0 192.6 tok/s against IQ4_KSS's 164 (both without MTP), at KLD 0.0215 against 0.0216.
+
+Prefill is the gap now (1628 against 4234 tok/s). One 512-token forward under nsys: a 520 ms span with 340 ms of
+kernels. The MoE expert `exl3_mgemm` takes 126 ms (120 launches, 1.05 ms each), the dense `exl3_gemm` 77 ms (251,
+305 us), index selects 53 ms (`is_u32_f16` 120 x 352 us, `is_u32_f32` 150 x 71 us: the expert grouping's row
+gathers), copies and casts ~40 ms. The other ~180 ms is idle, while the host reads the router's picks to group rows
+by expert.
+
+## Run 31 - 2026-11-14 17:10
+
+Our streamed converter on Qwen3.6-35B-A3B, exllamav3's settings (`inference quantize exl3 --bits 4.0`, head 6, mul1,
+exllamav3's standard calibration text, 485K tokens in 473 chunks). A first try encoded the GDN's `in_proj_b` and
+`in_proj_a` (2048 -> 32, padded to 128). exllamav3 keeps them in BF16 (`qmap = None` for the GDN's b/a, split or
+fused), and a padded layer misses our decode GEMV. They now stay in full precision by name, as the router does. A
+width rule (narrower than 128 kept) broke the tiny OLMoE test, whose 64-wide k/v are meant to encode padded.
+
+1 h 50 min (158-163 s a layer), against exllamav3's 2 h 15 min. Text weights 17.155 GiB, the same as exllamav3's to
+the MiB. Ours copies the MTP block (1.57 GiB) and the vision tower (0.83) in BF16, where exllamav3 encodes them at
+the head rate (0.40, 0.52).
+
+```
+wikitext-2 40 x 512 against the BF16 base   PPL (base 5.8237)   KLD mean   KLD p99   same top-1
+exllamav3 4.0                               5.8694              0.02146    0.198     93.81%
+ours 4.0                                    5.8707              0.02210    0.217     93.57%
+IQ4_KSS (recipe)                                                0.0216
+
+inference bench 512 / 128, alternating      prefill tok/s       decode tok/s
+exllamav3 4.0                               1646, 1645          197.1, 197.0
+ours 4.0                                    1648, 1642          196.3, 196.4
+```
+
+Ours is 3% behind exllamav3 on KLD and level on speed. The 3% is not chased here: the calibration chunking
+differs (exllamav3 runs its rows at its own lengths), and Run 9 measured the same order of gap on Qwen3-0.6B.
+Not done: MTP and the vision tower are left in BF16 rather than encoded.
+
+## Run 32 - 2026-11-14 18:25
+
+Does exllamav3's all-experts calibration explain Run 31's KLD gap (ours 0.02210, exllamav3 0.02146)? exllamav3
+(`capture_pass_experts`) runs every calibration row through every expert for the Hessians. Ours uses only the
+rows the router sends each one: with top-8 of 256, about 15K of 512K tokens per expert on average, and far fewer
+for rare experts.
+
+The quick test used temporary switches (not committed; the patch is kept in the scratchpad). `TMP_ALL_EXPERTS`
+feeds each expert's gate/up Hessian every token, and its down Hessian its own activations on every token.
+`TMP_STOP_LAYER=10` encodes layers 0-9 only. The ten layers were spliced into a symlinked copy of our Run 31
+output, and the shards' tensor names and shapes checked equal. A control re-encoded the same layers with routed
+Hessians and only the encoder's per-tensor seed changed (`TMP_SEED_SALT`).
+
+```
+wikitext-2 40 x 512 vs the BF16 base       KLD mean   KLD p99   same top-1   PPL (base 5.8237)   s a layer
+ours (Run 31)                              0.02210    0.217     93.57%       5.8707              160
+layers 0-9 all-experts                     0.02197    0.209     93.75%       5.8896              213-230
+layers 0-9 reseeded only (control)         0.02200    0.222     93.77%       5.8741              159-166
+exllamav3                                  0.02146    0.198     93.81%       5.8694
+```
+
+Reseeding alone moves the mean KLD by 0.0001, the same as all-experts calibration. The all-experts p99 is lower
+(0.209 against the control's 0.222), but the control moved p99 by 0.005 itself. So on ten layers, the effect is not
+distinguishable from encoding noise. It is at most a small part of a 0.0006 gap. The proxy errors of the two runs
+cannot be compared: each grades against its own Hessian, and the routed run's few-token Hessians flatter rare
+experts.
+
+Not ruled out: calibration layout (exllamav3 runs 250 rows of 2048 tokens, ours 473 chunks of about 1024), the
+bf16 Hessian GEMM (#957), and all-experts calibration across all 40 layers, where a small per-layer effect could
+add up.
+The ~60 s a layer the test added is mostly the hack: 512 identical gate/up Hessians per chunk, where one shared
+Hessian (the shared expert's) would serve every expert, and a per-expert gather loop for the down Hessians.
+
+## Run 33 - 2026-11-14 19:40
+
+Run 32's gap, on Qwen3.5-0.8B: the same GDN + attention stack without experts, minutes a conversion, several
+seeds a setting. The base came from a BF16 GGUF (llama.cpp's `convert_hf_to_gguf.py`), with `llama-perplexity
+--kl-divergence-base`, wikitext-2 40 x 512 (BF16 PPL 16.60). Every conversion is 4.0 mul1, head 6, scored by our
+`perplexity --kld-base`.
+Temporary switches (not committed; the patch is kept in the scratchpad):
+- `TMP_SEED_SALT`: the per-tensor encoder seed.
+- `TMP_CAL_CHUNK`: the calibration chunk length.
+- `TMP_F16`: the calibration forward in f16. f32 can't run: the GDN's CUDA recurrence takes f16/bf16 only.
+- `TMP_CAL_TOKENS`: calibration token ids read from a file.
+
+exllamav3's seed, through a wrapper offsetting `make_quant_args`'s per-tensor seed.
+
+```
+KLD mean (3 seeds)                                   each                          mean     min. s
+ours, our calibration text, bf16                     0.02332 0.02260 0.02273       0.0229   151
+ours, 2048-token chunks                              0.02375 0.02308 0.02407       0.0236   146
+ours, calibration forward in f16                     0.02254 0.02223 0.02296       0.0226
+ours, exllamav3's exact 250 x 2048 rows              0.02265 0.02222 0.02236       0.0224
+exllamav3 1.6.6 (seed offsets 0, 1000, 2000)         0.02159 0.02269 0.02250       0.0223   230
+```
+
+exllamav3's first conversion was a lucky draw. Over three seeds it is level with ours on its own calibration rows
+(0.0223 against 0.0224), and either converter's seeds spread by about 0.001. Checked along the way, with the same
+calibration rows:
+- Per-tensor proxy errors equal exllamav3's within 2% in layers 0, 1, 12 and 23, and on the head (0.000100 /
+  0.000099). Each converter grades against its own Hessian, but with the same rows layer 0's Hessians differ only
+  by fp16 against bf16.
+- Every text tensor is at the same rate (4 bpw).
+- Both capture one pass per decoder layer, quantizing the whole layer before the next.
+- The only file difference that is not a marker shape: exllamav3 stores the GDN's `in_proj_a`/`in_proj_b` in F16,
+  ours BF16. Converted to F16, ours scores 0.02264 against 0.02265.
+
+What is left between the converters is the calibration text: about 0.0005, inside the seed spread but in the same
+direction across all three seeds. exllamav3's mix is weighted wiki 50, c4 20, code 20, multilingual 10, technical
+10, tiny 5, and random-token rows 20 (about 15% of rows). It builds whole-article rows with shuffled lines, and BOS
+on alternate articles. Ours is the same files taken in equal parts, as one stream. Some of that edge may be its wiki
+weight (37% of rows), which leans toward the wikitext eval. Run 31's Qwen3.6 gap (0.0221 against 0.0215, one seed
+each) fits the same reading: a seed draw plus the calibration mix.
