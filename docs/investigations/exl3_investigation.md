@@ -1268,3 +1268,41 @@ of Run 35. `experts_in_host_memory_match_experts_on_the_device` pins the same bi
 tokens.
 
 Next: a device cache of hot experts per layer, so hits read VRAM and only misses cross the bus.
+
+## Run 42 - 2026-11-15 01:40
+
+Step 2: the device cache (`exl3/host_cache.rs`). Each offloaded projection has:
+- `N` slots in VRAM (`--moe-expert-cache N`);
+- a host copy of its address table;
+- decayed use scores (0.9 a step);
+- a mapped routing record.
+
+Each fused MoE forward copies its picks into the record (a node decode graphs capture). `cache_step`, called from
+`offload_activity` as each step starts (outside any capture), does three things:
+- scores the last step's picks;
+- points the table at the slots whose copies have landed;
+- starts up to 16 copies (16 in flight at most) on a copy stream of its own.
+
+An expert replaces a cached one only past 1.5x its score. The evicted expert's entry points back at host memory, and
+an event recorded after that on the compute stream gates the copy that overwrites its slot. A new expert's entry
+points at its slot only once its copy's event has completed. So a kernel reads valid bytes either way, and the
+results are the same bits as on the device: `experts_in_host_memory_match_experts_on_the_device` now runs eight
+rounds with a 3-slot cache stepped between them, and asserts experts landed.
+
+```
+inference bench 512 / 128 (synthetic tokens), decode tok/s     cache 64   cache 256
+fills a step 1                                                 27.2       27.0
+fills a step 4                                                 38.3       42.8
+fills a step 16                                                39.7       68.8 (still warming within 128 tokens)
+
+real text (rtbench, 400 tokens), 16 fills          wiki     code     essay
+cache 64                                           50.5     41.6     38.0
+cache 128                                          98.8     77.5     65.8
+cache 256 (every expert)                           198.1    188.4    150.4
+no cache (Run 41)                                  22.2 (bench)
+GGUF IQ4_KSS, CPU misses, 128 / 64 slots (recipe Run 9): 95-103 / 56-62
+```
+
+At 128 slots EXL3 is near the GGUF's CPU-miss path. Below that the GGUF wins: its misses run at the CPU's memory
+bandwidth, these over PCIe 3 (~11 GB/s). The loader does not pick this for EXL3 itself (the planner is GGUF's);
+`--moe-expert-cache` asks for it.

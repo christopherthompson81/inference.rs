@@ -5,6 +5,10 @@
 #[cfg(feature = "cuda")]
 mod cuda;
 #[cfg(feature = "cuda")]
+mod host_cache;
+#[cfg(feature = "cuda")]
+pub use host_cache::cache_step;
+#[cfg(feature = "cuda")]
 pub mod encode;
 #[cfg(feature = "cuda")]
 pub(crate) mod ffi;
@@ -409,6 +413,7 @@ pub fn experts_b(
             parts,
             experts_vb.dtype(),
             &device,
+            experts_vb.moe_expert_cache().unwrap_or(0),
         )?));
     }
     #[cfg(feature = "cuda")]

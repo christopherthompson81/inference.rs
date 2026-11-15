@@ -517,6 +517,10 @@ impl Doorbell {
 
 /// Keeps the doorbell thread spinning: called as a step starts, so its first ring is answered at once.
 pub fn offload_activity() {
+    // EXL3 experts in host memory open and start their device cache's copies between steps
+    if let Err(e) = inference_quant::exl3::cache_step() {
+        tracing::warn!("EXL3 expert cache: {e}");
+    }
     let bell = doorbell();
     bell.activity.store(bell.now(), Ordering::Release);
     if let Some(thread) = bell.thread.get() {

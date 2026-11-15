@@ -898,6 +898,8 @@ pub struct Exl3Experts {
     device: Device,
     // the experts in page-locked host memory mapped into the device, which the kernels read over the bus
     host: Option<CudaSlice<u8>>,
+    // the hot ones of those in device slots
+    cache: Option<Arc<std::sync::Mutex<super::host_cache::HostCache>>>,
     // the device addresses of the trellises, then the `suh`s, then the `svh`s, as the kernel reads them
     tables: Tensor,
     codebook: Exl3Codebook,
@@ -1010,6 +1012,7 @@ impl Exl3Experts {
             experts: trellis.len(),
             device: device.clone(),
             host: None,
+            cache: None,
             trellis,
             suh,
             svh,
@@ -1023,11 +1026,13 @@ impl Exl3Experts {
     }
 
     /// `parts` (each expert's trellis, `suh`, `svh` and codebook, read on the host) copied into page-locked host
-    /// memory mapped into `device`: the kernels read the experts over the bus, so they take no device memory.
+    /// memory mapped into `device`: the kernels read the experts over the bus, the `slots` most used of them from a
+    /// device cache.
     pub fn new_in_host(
         parts: Vec<(Tensor, Tensor, Tensor, Exl3Codebook)>,
         dtype: DType,
         device: &Device,
+        slots: usize,
     ) -> Result<Self> {
         ffi::ensure_loaded().map_err(inference_tensor::Error::msg)?;
         let Device::Cuda(dev) = device else {
@@ -1077,7 +1082,21 @@ impl Exl3Experts {
         }
         drop(_guard);
         let tables = Tensor::from_vec(addresses, 3 * experts, device)?;
+        let cache = (slots > 0)
+            .then(|| {
+                super::host_cache::HostCache::new(
+                    dev,
+                    base,
+                    stride,
+                    [0, t_bytes, t_bytes + u_bytes],
+                    experts,
+                    slots,
+                    &tables,
+                )
+            })
+            .transpose()?;
         Ok(Self {
+            cache,
             trellis: Vec::new(),
             suh: Vec::new(),
             svh: Vec::new(),
@@ -1123,6 +1142,11 @@ impl Exl3Experts {
                 .any(|p| p.experts != experts || p.codebook != gate.codebook)
         {
             return Ok(None);
+        }
+        for p in [gate, up, down] {
+            if let Some(cache) = &p.cache {
+                cache.lock().expect("expert cache poisoned").record(ids)?;
+            }
         }
         if tokens > FUSED_MAX_TOKENS {
             let capturing = dev.cuda_stream().capture_status().map_err(inference_tensor::Error::wrap)?
@@ -2134,10 +2158,12 @@ mod tests {
         Ok(())
     }
 
-    // experts kept in host memory (read over the bus) give the bits the same experts give on the device: one token
-    // (the decode kernels), five (a verify's) and a hundred (the grouped prefill kernels)
+    // experts kept in host memory (read over the bus, or from their device cache as it fills and evicts) give the bits
+    // the same experts give on the device: one token (the decode kernels), five (a verify's) and a hundred (the grouped
+    // prefill kernels)
     #[test]
     fn experts_in_host_memory_match_experts_on_the_device() -> Result<()> {
+        const CACHE_SLOTS: usize = 3;
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIP: no CUDA device");
             return Ok(());
@@ -2175,18 +2201,21 @@ mod tests {
         );
         let device_layer = (on(&g)?, on(&u)?, on(&d)?);
         let host_layer = (
-            Exl3Experts::new_in_host(g, DType::BF16, &device)?,
-            Exl3Experts::new_in_host(u, DType::BF16, &device)?,
-            Exl3Experts::new_in_host(d, DType::BF16, &device)?,
+            Exl3Experts::new_in_host(g, DType::BF16, &device, CACHE_SLOTS)?,
+            Exl3Experts::new_in_host(u, DType::BF16, &device, CACHE_SLOTS)?,
+            Exl3Experts::new_in_host(d, DType::BF16, &device, CACHE_SLOTS)?,
         );
         let bits =
             |t: Tensor| -> Result<Vec<Vec<f32>>> { t.to_dtype(DType::F32)?.to_vec2::<f32>() };
-        for tokens in [1, 5, 100] {
-            let xs = random_rows(tokens, hidden, 13)?
+        // rounds with the cache's steps between them: experts land in slots and are evicted as the picks move
+        for (round, tokens) in [1, 5, 100, 1, 5, 1, 1, 5].into_iter().enumerate() {
+            crate::exl3::cache_step()?;
+            device.synchronize()?;
+            let xs = random_rows(tokens, hidden, 13 + round as u32)?
                 .to_dtype(DType::BF16)?
                 .to_device(&device)?;
             let ids = (0..tokens * topk)
-                .map(|j| ((j * 5 + 3) % experts) as u32)
+                .map(|j| ((j * 5 + 3 + round) % experts) as u32)
                 .collect::<Vec<_>>();
             let ids = Tensor::from_vec(ids, (tokens, topk), &device)?;
             let weights = (0..tokens * topk)
@@ -2200,9 +2229,14 @@ mod tests {
             assert_eq!(
                 bits(run(&host_layer)?)?,
                 bits(run(&device_layer)?)?,
-                "{tokens} tokens"
+                "round {round}: {tokens} tokens"
             );
         }
+        let cache = host_layer.0.cache.as_ref().expect("a cache of CACHE_SLOTS");
+        assert!(
+            cache.lock().unwrap().landed() > 0,
+            "no expert landed in the cache"
+        );
         Ok(())
     }
 
