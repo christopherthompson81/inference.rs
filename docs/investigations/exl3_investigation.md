@@ -1238,3 +1238,33 @@ single-token decode's bits:
 The EXL3 linears, q/k/v and experts already are (Run 38). Greedy output equal to plain decode would need all three
 bit-identical to their one-token forms (matching reduction orders in flash attention and the recurrence kernels):
 large, and it would only move which of a near-tied pair is picked. Not pursued.
+
+## Run 41 - 2026-11-15 00:55
+
+Toward Qwen3.8-Flash-Next on EXL3 (turboderp's quants: 1.66 bpw is 28.2 GiB of weights and an 18.5 GiB n-gram table;
+2.05 bpw 33.2 + 24.4), which does not fit 24 GB. Can EXL3 layers leave the GPU yet? A layer the device map puts on
+the CPU loads, but `linear_b`/`experts_b` decode it to a dense weight in the model's dtype. And any CPU layer turns
+PagedAttention off for the whole model:
+
+```
+Qwen3.6 EXL3 4.0, inference bench 512 / 64           prefill tok/s    decode tok/s
+all layers on the GPU                                3922             198
+-n "0:36" (layers 36-39 on the CPU, as bf16)         17.2 (29.8 s)    11.4
+```
+
+Keeping them quantized off the GPU, step 1: with `--moe-expert-cache`, a CUDA layer's EXL3 experts load into
+page-locked host memory mapped into the device (`Exl3Experts::new_in_host`): one allocation a projection, each
+expert's trellis, suh and svh 256-byte aligned. The address tables point there. The kernels (decode, verify,
+grouped prefill) read the address tables as before, so they are unchanged and read the experts over the bus: no
+dequantization, no CPU compute, and decode graphs and PagedAttention stay. No device cache yet.
+
+```
+Qwen3.6 EXL3 4.0, every layer's experts in host memory    prefill tok/s    decode tok/s    KLD (40 x 512)
+                                                          271              22.2            0.02214
+```
+
+Decode reads ~512 MB of experts a token (40 layers x 8 x 1.6 MB) in 45 ms: ~11 GB/s, PCIe 3 x16. KLD is in the band
+of Run 35. `experts_in_host_memory_match_experts_on_the_device` pins the same bits as on the device at 1, 5 and 100
+tokens.
+
+Next: a device cache of hot experts per layer, so hits read VRAM and only misses cross the bus.

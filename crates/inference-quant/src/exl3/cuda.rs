@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use half::f16;
 use inference_tensor::{CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 
-use super::{Exl3Codebook, dense_weight, ffi};
+use inference_tensor::cuda_backend::cudarc::driver::{CudaSlice, DevicePtr};
+
+use super::{Exl3Codebook, TILE, dense_weight, ffi};
 use crate::utils::slice_ptr;
 use crate::{
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, UnquantLinear,
@@ -885,10 +887,17 @@ impl QuantizedSerde for Exl3Layer {
 /// multi-matrix kernel: slot j takes its token's row times the expert its index names.
 #[derive(Debug)]
 pub struct Exl3Experts {
-    // per expert: `(in / 16, out / 16, words)` i16, f16 `suh` (in), f16 `svh` (out)
+    // per expert: `(in / 16, out / 16, words)` i16, f16 `suh` (in), f16 `svh` (out); empty when the experts live in
+    // host memory (`host`)
     trellis: Vec<Tensor>,
     suh: Vec<Tensor>,
     svh: Vec<Tensor>,
+    // every expert's trellis `(in / 16, out / 16, words)`
+    shape: [usize; 3],
+    experts: usize,
+    device: Device,
+    // the experts in page-locked host memory mapped into the device, which the kernels read over the bus
+    host: Option<CudaSlice<u8>>,
     // the device addresses of the trellises, then the `suh`s, then the `svh`s, as the kernel reads them
     tables: Tensor,
     codebook: Exl3Codebook,
@@ -909,6 +918,8 @@ const FUSED_MAX_SLOTS: usize = 256;
 const FUSED_ACT_SILU: i32 = 0;
 // 16 beat 32 (10%), 64 and 8 on a 256-expert prefill
 const GROUP_ROWS: usize = 16;
+// each expert's trellis, suh and svh start this many bytes apart in host memory, past any load the kernels make
+const HOST_ALIGN: usize = 256;
 // the grouped prefill kernels' rows a group (exl3_dgemv_instance_exl3.cu's GROUP_M)
 const GROUPED_KERNEL_ROWS: usize = 16;
 
@@ -995,6 +1006,10 @@ impl Exl3Experts {
         }
         let tables = Tensor::from_vec(addresses, 3 * trellis.len(), &device)?;
         Ok(Self {
+            shape: [dims[0], dims[1], dims[2]],
+            experts: trellis.len(),
+            device: device.clone(),
+            host: None,
             trellis,
             suh,
             svh,
@@ -1007,9 +1022,81 @@ impl Exl3Experts {
         })
     }
 
+    /// `parts` (each expert's trellis, `suh`, `svh` and codebook, read on the host) copied into page-locked host
+    /// memory mapped into `device`: the kernels read the experts over the bus, so they take no device memory.
+    pub fn new_in_host(
+        parts: Vec<(Tensor, Tensor, Tensor, Exl3Codebook)>,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        ffi::ensure_loaded().map_err(inference_tensor::Error::msg)?;
+        let Device::Cuda(dev) = device else {
+            inference_tensor::bail!("EXL3 experts in host memory serve a CUDA device");
+        };
+        let Some((first, _, _, codebook)) = parts.first() else {
+            inference_tensor::bail!("an EXL3 expert projection with no experts");
+        };
+        let (dims, codebook) = (first.dims().to_vec(), *codebook);
+        let [tk, tn, words] = <[usize; 3]>::try_from(dims.as_slice())
+            .map_err(|_| inference_tensor::Error::msg("an EXL3 trellis is three-dimensional"))?;
+        let (k, n) = (tk * TILE, tn * TILE);
+        let align = |bytes: usize| bytes.div_ceil(HOST_ALIGN) * HOST_ALIGN;
+        let (t_bytes, u_bytes, v_bytes) = (align(tk * tn * words * 2), align(k * 2), align(n * 2));
+        let stride = t_bytes + u_bytes + v_bytes;
+        // SAFETY: every expert's bytes are written below before any kernel reads them
+        let mapped = unsafe {
+            dev.cuda_stream()
+                .alloc_mapped_host::<u8>(parts.len() * stride)
+        }
+        .map_err(inference_tensor::Error::wrap)?;
+        let host = mapped.mapped_host_ptr().expect("mapped allocation");
+        // SAFETY: `host` spans the allocation just made, which nothing else references yet
+        let all = unsafe { std::slice::from_raw_parts_mut(host, parts.len() * stride) };
+        let stream = dev.cuda_stream();
+        let (base, _guard) = mapped.device_ptr(&stream);
+        let mut addresses = vec![0i64; 3 * parts.len()];
+        let experts = parts.len();
+        for (e, (t, u, v, cb)) in parts.into_iter().enumerate() {
+            if t.dims() != dims.as_slice() || cb != codebook {
+                inference_tensor::bail!(
+                    "EXL3 experts of one projection differ ({:?} {cb:?} against {dims:?} {codebook:?})",
+                    t.dims()
+                );
+            }
+            let at = e * stride;
+            let t = t.to_dtype(DType::I16)?.flatten_all()?.to_vec1::<i16>()?;
+            let u = u.to_dtype(DType::F16)?.flatten_all()?.to_vec1::<f16>()?;
+            let v = v.to_dtype(DType::F16)?.flatten_all()?.to_vec1::<f16>()?;
+            let mut bytes = |x: &[u8], to: usize| all[to..to + x.len()].copy_from_slice(x);
+            bytes(bytemuck_i16(&t), at);
+            bytes(bytemuck_f16(&u), at + t_bytes);
+            bytes(bytemuck_f16(&v), at + t_bytes + u_bytes);
+            addresses[e] = (base + at as u64) as i64;
+            addresses[experts + e] = (base + (at + t_bytes) as u64) as i64;
+            addresses[2 * experts + e] = (base + (at + t_bytes + u_bytes) as u64) as i64;
+        }
+        drop(_guard);
+        let tables = Tensor::from_vec(addresses, 3 * experts, device)?;
+        Ok(Self {
+            trellis: Vec::new(),
+            suh: Vec::new(),
+            svh: Vec::new(),
+            shape: [tk, tn, words],
+            experts,
+            device: device.clone(),
+            host: Some(mapped),
+            tables,
+            codebook,
+            dtype,
+            tuned: AtomicU8::new(0),
+            grouped_tuned: AtomicU8::new(0),
+            dgemv_ws: dgemv_workspace(device)?,
+        })
+    }
+
     fn dims(&self) -> (usize, usize, usize) {
-        let d = self.trellis[0].dims();
-        (d[0] * 16, d[1] * 16, d[2])
+        let [tk, tn, words] = self.shape;
+        (tk * 16, tn * 16, words)
     }
 
     /// A gated SiLU MoE layer's routed experts for a few tokens in exllamav3's two fused launches: `xs` `(tokens,
@@ -1028,12 +1115,12 @@ impl Exl3Experts {
         };
         let (tokens, topk) = ids.dims2()?;
         let ((hidden, inter, gu_words), (d_in, d_out, d_words)) = (gate.dims(), down.dims());
-        let experts = gate.trellis.len();
+        let experts = gate.experts;
         if up.dims() != gate.dims()
             || (d_in, d_out) != (inter, hidden)
             || [up, down]
                 .iter()
-                .any(|p| p.trellis.len() != experts || p.codebook != gate.codebook)
+                .any(|p| p.experts != experts || p.codebook != gate.codebook)
         {
             return Ok(None);
         }
@@ -1288,7 +1375,7 @@ impl Exl3Experts {
                 gp as *const i64,
                 up_ as *const i64,
                 dp as *const i64,
-                gate.trellis.len() as i32,
+                gate.experts as i32,
                 topk as i32,
                 hidden as i32,
                 inter as i32,
@@ -1325,7 +1412,7 @@ impl Exl3Experts {
             inference_tensor::bail!("EXL3 experts multiply on CUDA");
         };
         let (k, n, words) = self.dims();
-        let (slots, experts) = (ids.dim(0)?, self.trellis.len());
+        let (slots, experts) = (ids.dim(0)?, self.experts);
         let (x_s, x_l) = x.storage_and_layout();
         let (i_s, i_l) = ids.storage_and_layout();
         let (t_s, t_l) = self.tables.storage_and_layout();
@@ -1488,7 +1575,7 @@ impl Exl3Experts {
                 gp as *const i64,
                 upp as *const i64,
                 dp as *const i64,
-                gate.trellis.len() as i32,
+                gate.experts as i32,
                 hidden as i32,
                 inter as i32,
                 gu_words as i32,
@@ -1582,6 +1669,9 @@ impl Exl3Experts {
     }
 
     fn dense(&self, device: &Device) -> Result<Tensor> {
+        if self.host.is_some() {
+            inference_tensor::bail!("EXL3 experts kept in host memory have no dense form");
+        }
         let weights = (0..self.trellis.len())
             .map(|e| {
                 dense_weight(
@@ -1596,6 +1686,16 @@ impl Exl3Experts {
             .collect::<Result<Vec<_>>>()?;
         Tensor::stack(&weights, 0)
     }
+}
+
+fn bytemuck_i16(x: &[i16]) -> &[u8] {
+    // SAFETY: i16 has no padding and u8 no alignment, so its bytes are a valid u8 slice of twice the length
+    unsafe { std::slice::from_raw_parts(x.as_ptr().cast(), std::mem::size_of_val(x)) }
+}
+
+fn bytemuck_f16(x: &[f16]) -> &[u8] {
+    // SAFETY: as above, for f16
+    unsafe { std::slice::from_raw_parts(x.as_ptr().cast(), std::mem::size_of_val(x)) }
 }
 
 fn device_address<
@@ -1623,7 +1723,7 @@ impl QuantMethod for Exl3Experts {
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
-        self.dense(self.trellis[0].device())
+        self.dense(&self.device)
     }
 
     fn forward_raw(&self, _: &Tensor) -> Result<Tensor> {
@@ -1665,15 +1765,15 @@ impl QuantMethod for Exl3Experts {
     }
 
     fn dtype_and_device(&self) -> (DType, Device) {
-        (self.dtype, self.trellis[0].device().clone())
+        (self.dtype, self.device.clone())
     }
 
     fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
         let (k, n, _) = self.dims();
         Ok(plan_weight_isq(
             self.dtype,
-            self.trellis[0].device().clone(),
-            vec![self.trellis.len(), n, k],
+            self.device.clone(),
+            vec![self.experts, n, k],
             request,
             true,
         ))
@@ -1688,7 +1788,7 @@ impl QuantMethod for Exl3Experts {
         guard: QuantizeOntoGuard,
     ) -> Result<Arc<dyn QuantMethod>> {
         if dtype.is_none() && device.is_cuda() {
-            if device.same_device(self.trellis[0].device()) {
+            if device.same_device(&self.device) {
                 return Ok(self);
             }
             let parts = (0..self.trellis.len())
@@ -2030,6 +2130,78 @@ mod tests {
                 &weights.narrow(0, t, 1)?,
             )?)?;
             assert_eq!(row, &alone[0], "experts: token {t}");
+        }
+        Ok(())
+    }
+
+    // experts kept in host memory (read over the bus) give the bits the same experts give on the device: one token
+    // (the decode kernels), five (a verify's) and a hundred (the grouped prefill kernels)
+    #[test]
+    fn experts_in_host_memory_match_experts_on_the_device() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (experts, topk, hidden, inter) = (6, 2, 256, 384);
+        let parts = |k: usize,
+                     n: usize,
+                     seed: u32|
+         -> Result<Vec<(Tensor, Tensor, Tensor, Exl3Codebook)>> {
+            (0..experts)
+                .map(|e| {
+                    let (t, u, v) = random_linear(k, n, 64, seed + 7 * e as u32)?;
+                    Ok((t, u, v, Exl3Codebook::Mul1))
+                })
+                .collect()
+        };
+        let on = |p: &[(Tensor, Tensor, Tensor, Exl3Codebook)]| -> Result<Exl3Experts> {
+            let p = p
+                .iter()
+                .map(|(t, u, v, c)| {
+                    Ok((
+                        t.to_device(&device)?,
+                        u.to_device(&device)?,
+                        v.to_device(&device)?,
+                        *c,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Exl3Experts::new_on_device(p, DType::BF16)
+        };
+        let (g, u, d) = (
+            parts(hidden, inter, 800)?,
+            parts(hidden, inter, 900)?,
+            parts(inter, hidden, 1000)?,
+        );
+        let device_layer = (on(&g)?, on(&u)?, on(&d)?);
+        let host_layer = (
+            Exl3Experts::new_in_host(g, DType::BF16, &device)?,
+            Exl3Experts::new_in_host(u, DType::BF16, &device)?,
+            Exl3Experts::new_in_host(d, DType::BF16, &device)?,
+        );
+        let bits =
+            |t: Tensor| -> Result<Vec<Vec<f32>>> { t.to_dtype(DType::F32)?.to_vec2::<f32>() };
+        for tokens in [1, 5, 100] {
+            let xs = random_rows(tokens, hidden, 13)?
+                .to_dtype(DType::BF16)?
+                .to_device(&device)?;
+            let ids = (0..tokens * topk)
+                .map(|j| ((j * 5 + 3) % experts) as u32)
+                .collect::<Vec<_>>();
+            let ids = Tensor::from_vec(ids, (tokens, topk), &device)?;
+            let weights = (0..tokens * topk)
+                .map(|j| 0.2 + 0.05 * (j % 7) as f32)
+                .collect::<Vec<_>>();
+            let weights = Tensor::from_vec(weights, (tokens, topk), &device)?;
+            let run = |(g, u, d): &(Exl3Experts, Exl3Experts, Exl3Experts)| -> Result<Tensor> {
+                Ok(Exl3Experts::fused_silu_moe(g, u, d, &xs, &ids, &weights)?
+                    .expect("the kernels take these shapes"))
+            };
+            assert_eq!(
+                bits(run(&host_layer)?)?,
+                bits(run(&device_layer)?)?,
+                "{tokens} tokens"
+            );
         }
         Ok(())
     }

@@ -378,9 +378,17 @@ pub fn experts_b(
     proj: &str,
     experts_vb: &ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
+    let device = experts_vb.device().clone();
+    // a layer whose experts stay in host memory reads them there, kept quantized
+    let in_host = device.is_cuda() && experts_vb.moe_expert_cache().is_some();
+    let read_vb = if in_host {
+        experts_vb.clone().set_device(Device::Cpu)
+    } else {
+        experts_vb.clone()
+    };
     let mut parts = Vec::with_capacity(num_experts);
     for e in 0..num_experts {
-        let vb = experts_vb.pp(e).pp(proj);
+        let vb = read_vb.pp(e).pp(proj);
         let trellis = vb.get_unchecked_dtype("trellis", DType::I16)?;
         if trellis.dims().len() != 3 || trellis.dims()[..2] != [in_dim / TILE, out_dim / TILE] {
             inference_tensor::bail!(
@@ -395,7 +403,14 @@ pub fn experts_b(
         let svh = vb.get_unchecked_dtype("svh", DType::F32)?;
         parts.push((trellis, suh, svh, codebook));
     }
-    let device = experts_vb.device();
+    #[cfg(feature = "cuda")]
+    if in_host {
+        return Ok(Arc::new(Exl3Experts::new_in_host(
+            parts,
+            experts_vb.dtype(),
+            &device,
+        )?));
+    }
     #[cfg(feature = "cuda")]
     if device.is_cuda() {
         return Ok(Arc::new(Exl3Experts::new_on_device(
@@ -403,6 +418,7 @@ pub fn experts_b(
             experts_vb.dtype(),
         )?));
     }
+    let device = &device;
     let weights = parts
         .iter()
         .map(|(trellis, suh, svh, codebook)| {
