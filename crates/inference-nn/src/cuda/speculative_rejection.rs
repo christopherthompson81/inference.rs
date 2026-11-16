@@ -28,6 +28,10 @@ pub const SPARSE_REJECTION_STATUS_INVALID_TARGET: u32 = 3;
 pub const SPARSE_REJECTION_STATUS_INVALID_RNG: u32 = 4;
 pub const SPARSE_REJECTION_INVALID_VALUE: u32 = u32::MAX;
 pub const SPARSE_REJECTION_OUTCOME_WIDTH: usize = 3;
+// a categorical row's softmax sums run in this many chunks, at most SPEC_REJECTION_MAX_CHUNKS in the kernel
+const CATEGORICAL_CHUNKS: i32 = 128;
+// each chunk's (max, sum of exp relative to it)
+const CATEGORICAL_CHUNK_STAT_WIDTH: usize = 2;
 pub const SPARSE_REJECTION_MAX_Q_WIDTH: usize = 128;
 
 const OP: &str = "sparse_rejection_cuda";
@@ -438,6 +442,7 @@ impl InplaceOp1 for SparseRejectionKernelLaunch {
             match self.mode {
                 SparseRejectionMode::Categorical => ffi::sparse_rejection_categorical_f32(
                     self.target_ptr as *const f32,
+                    self.normalizers_ptr as *mut f32,
                     self.draft_ptr as *const u32,
                     self.q_ids_ptr as *const u32,
                     self.q_probs_ptr as *const f32,
@@ -452,6 +457,7 @@ impl InplaceOp1 for SparseRejectionKernelLaunch {
                     self.drafts,
                     self.vocab,
                     self.q_width,
+                    CATEGORICAL_CHUNKS,
                     stream.cu_stream() as i64,
                 ),
                 SparseRejectionMode::BoundedTopK { .. } => ffi::sparse_rejection_topk_f32(
@@ -1355,7 +1361,13 @@ fn sparse_rejection_cuda_device_with_outcomes(
                 input.inverse_temperatures,
             )?)
         }
-        _ => None,
+        // the categorical kernel writes its chunk stats here
+        SparseRejectionMode::Categorical => Some(Tensor::zeros(
+            shape.batch * shape.rows * CATEGORICAL_CHUNKS as usize * CATEGORICAL_CHUNK_STAT_WIDTH,
+            DType::F32,
+            input.target_logits.device(),
+        )?),
+        SparseRejectionMode::BoundedTopK { .. } => None,
     };
     let kernel_target = packed_target.as_ref().map_or_else(
         || input.target_logits.clone(),
@@ -1894,6 +1906,7 @@ mod tests {
         [
             bounded_topk_matches_cpu_reference,
             categorical_matches_cpu_reference,
+            categorical_matches_cpu_reference_over_a_wide_vocabulary,
             dense_rows_match_packed_inputs_and_survive_owner_drop,
             dense_rows_require_shared_ordered_tight_backing,
             nucleus_rows_match_full_width_top_k_and_fall_back_when_wide,
@@ -2219,6 +2232,111 @@ mod tests {
         );
         assert_eq!(case.run(&device)?, expected);
         Ok(())
+    }
+
+    // A target-sized vocabulary: the block's segments, the q ids subtracted across them and the walk of one segment.
+    fn categorical_matches_cpu_reference_over_a_wide_vocabulary() -> Result<()> {
+        const VOCAB: usize = 151_936;
+        const PEAKS: [u32; 2] = [1_234, 98_765];
+        const PEAK_LOGIT: f32 = 10.0;
+        const LOGIT_SPAN: f32 = 8.0;
+        const DRAW_MASS_TOLERANCE: f64 = 1e-5;
+        const Q_TAIL: usize = SPARSE_REJECTION_MAX_Q_WIDTH - PEAKS.len();
+        const Q_TAIL_STRIDE: u32 = 1_000;
+        skip_without_cuda!();
+        let device = Device::new_cuda(0)?;
+        let (batch, drafts) = (4, 3);
+        let mut state = 0x2545_f491_u32;
+        let target_logits = (0..batch * (drafts + 1) * VOCAB)
+            .map(|index| {
+                if PEAKS.contains(&((index % VOCAB) as u32)) {
+                    return PEAK_LOGIT;
+                }
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((state >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * LOGIT_SPAN
+            })
+            .collect();
+        // the peaks, then a tail spread over the vocabulary in descending id order
+        let q_row = PEAKS
+            .into_iter()
+            .chain(
+                (0..Q_TAIL as u32)
+                    .rev()
+                    .map(|slot| slot * Q_TAIL_STRIDE + 7),
+            )
+            .collect::<Vec<_>>();
+        let q_probs = [0.6, 0.3]
+            .into_iter()
+            .chain(std::iter::repeat_n(0.1 / Q_TAIL as f32, Q_TAIL))
+            .collect::<Vec<f32>>();
+        let case = HostCase {
+            batch,
+            drafts,
+            vocab: VOCAB,
+            q_width: q_row.len(),
+            target_logits,
+            draft_tokens: vec![PEAKS[0]; batch * drafts],
+            q_token_ids: q_row.repeat(batch * drafts),
+            q_probs: q_probs.repeat(batch * drafts),
+            inverse_temperatures: vec![1.0, 0.7, 1.0, 1.3],
+            target_top_k: vec![0; batch],
+            top_p: vec![0.0; batch],
+            min_p: vec![0.0; batch],
+            accept_uniforms: [[0.0, 0.999, 0.0], [0.0, 0.0, 0.999], [0.0; 3], [0.0; 3]].concat(),
+            sample_uniforms: vec![0.13, 0.58, 0.31, 0.97],
+            mode: SparseRejectionMode::Categorical,
+        };
+        let expected = reference(&case);
+        assert_eq!(
+            expected
+                .iter()
+                .map(|row| row.accepted_count)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 3]
+        );
+        let actual = case.run(&device)?;
+        for (sequence, (row, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                (row.accepted_count, row.status),
+                (expected.accepted_count, expected.status)
+            );
+            assert_draw_within(&case, sequence, row, DRAW_MASS_TOLERANCE);
+        }
+        Ok(())
+    }
+
+    // The draw's token spans its uniform's point of the distribution's f64 cumulative mass, within `tolerance`
+    // of the total: f32 sums over a wide vocabulary differ by summation order.
+    fn assert_draw_within(
+        case: &HostCase,
+        sequence: usize,
+        row: &SparseRejectionRow,
+        tolerance: f64,
+    ) {
+        let accepted = row.accepted_count as usize;
+        let target = target_distribution(case, sequence, accepted);
+        let weights = if accepted < case.drafts {
+            let q = q_distribution(case, sequence, accepted);
+            target
+                .iter()
+                .zip(q)
+                .map(|(p, q)| f64::from((p - q).max(0.0)))
+                .collect::<Vec<_>>()
+        } else {
+            target.iter().map(|p| f64::from(*p)).collect()
+        };
+        let total = weights.iter().sum::<f64>();
+        let point = f64::from(case.sample_uniforms[sequence]) * total;
+        let token = row.continuation as usize;
+        let before = weights[..token].iter().sum::<f64>();
+        let slack = tolerance * total;
+        assert!(
+            weights[token] > 0.0
+                && before - slack <= point
+                && point <= before + weights[token] + slack,
+            "sequence {sequence}: token {token} covers [{before}, {}], the draw is at {point}",
+            before + weights[token]
+        );
     }
 
     fn bounded_topk_matches_cpu_reference() -> Result<()> {

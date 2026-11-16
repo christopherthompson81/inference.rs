@@ -1218,6 +1218,7 @@ inference_tensor::kernel_library! {
         );
         pub fn sparse_rejection_categorical_f32(
             target_logits: *const f32,
+            chunk_stats: *mut f32,
             draft_tokens: *const u32,
             q_token_ids: *const u32,
             q_probs: *const f32,
@@ -1232,6 +1233,7 @@ inference_tensor::kernel_library! {
             drafts: i32,
             vocab: i32,
             q_width: i32,
+            chunks: i32,
             stream: i64,
         );
         pub fn sparse_rejection_topk_f32(

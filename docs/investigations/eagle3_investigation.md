@@ -118,3 +118,44 @@ AngelSlim (SpecForge)    225 / 202 / 159            1.91
 
 It loads at vLLM's default layers (2, 18, 33 of 36) and drafts. Its lower acceptance on these requests is the
 drafter's (other training data), not the format: the same code path serves both past the tensor prefix.
+
+## Run 7 - 2026-11-16 07:30
+
+**Question:** can temperature-only sampled verification (`sparse_rejection_categorical_f32_kernel`, 1.29 ms a step in
+Run 4) cost what the top-k path does? A general cost for every drafter: a request with no top-k / top-p (or a GGUF
+without a generation config) verifies this way.
+
+The kernel ran one 256-thread block per sequence. For each draft row it read the 152K-wide logits twice (max, then
+exp sum), then sampled the residual over thread-contiguous segments (uncoalesced) with one thread walking ~600 tokens;
+thread 0 also read the 128-wide q row slot by slot, in doubles, per draft, and insertion-sorted it on rejection.
+
+```
+ncu, wide-vocabulary test case (4 sequences, 3 drafts, vocab 151936), DRAM clocks, caches flushed
+q width 3                                          q width 128
+256 threads, two passes (master)       134 us
+1024 threads, one online pass          (in-model 593 us avg: q width 128 dominates)
++ chunk stats kernel, 128 chunks       18 + 22 us                   18 + 851 us
++ q staged, validated, sorted in block                              18 + 38 us
+```
+
+At 1024 threads in one block the kernel was instruction-bound on its SM (~20 instructions a vocabulary entry, 11
+cycles a warp issue), not memory-bound: the row sums had to leave the block. Now a first kernel computes each
+row's (max, exp sum) per chunk of 1187 tokens over 128 x rows blocks; the verify kernel combines a row's 128 partials,
+takes the residual's chunk masses as the chunk's exp sum less `min(p, q)` at its q tokens (a residual under 1e-5 of
+the chunk's mass is floored to zero: q covering it all), picks a chunk and walks only that one with a block scan. The
+q row is staged in shared memory and checked, normalized and sorted by the block.
+
+The wide case at q width 3 draws the same tokens as the old kernel; the bench below accepts exactly as master. The
+tiny-vocabulary case is exact against the CPU reference; the wide case is checked against f64 cumulative mass, since
+an f32 serial sum over 152K tokens lands 1-2 tokens off for both kernels.
+
+In-model (nsys, 100-token request): 7 us + 28 us a step against 1.29 ms. Same seeded requests, t=0.6 only, q4k
+drafter, no throttling:
+
+```
+                tok/s (three requests)     tokens a step
+master          227 / 194 / 190            2.29
+this change     255 / 216 / 212            2.29 (674 of 1563 accepted, same as master)
+```
+
+Temperature-only now runs as fast as Qwen3's top-k / top-p settings did in Run 4 (257 / 223 / 209).
