@@ -30,11 +30,13 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+mod eagle3;
 mod moe;
 mod mtp;
 pub mod qwen3_vl;
 mod stream;
 
+pub use eagle3::{EAGLE3_TAPS, Eagle3Config};
 pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SharedExpertSpec, SparseMoe};
 pub use mtp::{MtpBlock, MtpHead, MtpHeadParts, MtpSpec, StandardMtpBlock};
 
@@ -241,6 +243,8 @@ pub struct DecoderSpec {
     pub hidden_size: usize,
     /// The token embedding's width, when not `hidden_size`: a stack fed projected embeddings (Qwen3-TTS's predictor).
     pub embed_dim: Option<usize>,
+    /// The width q, k and v read, when not `hidden_size` (EAGLE-3's concatenated embedding and fused state).
+    pub attention_input_size: Option<usize>,
     pub intermediate_size: usize,
     pub num_heads: usize,
     pub num_kv_heads: usize,
@@ -854,13 +858,14 @@ impl AttentionBlock {
             ..
         } = *load;
         let (hidden, head_dim) = (spec.hidden_size, spec.head_dim);
+        let input = spec.attention_input_size.unwrap_or(hidden);
         let qc = &spec.quantization_config;
         let place = |name| mapper.set_device(layer_idx, vb.pp(name), loading_isq);
         let o_proj_name = spec.o_proj_name.unwrap_or(O_PROJ);
         let (q_size, kv_size) = (spec.num_heads * head_dim, spec.num_kv_heads * head_dim);
         let (qkv, o_proj, world_size, n_kv_groups) = if spec.fused_qkv {
             let qkv = spec.replicated_linear(
-                hidden,
+                input,
                 q_size + 2 * kv_size,
                 spec.qkv_bias,
                 place(spec.module_names.qkv_proj),
@@ -870,11 +875,11 @@ impl AttentionBlock {
             (QkvProj::Fused(qkv), o_proj, 1, n_kv_groups)
         } else {
             let q =
-                ColumnParallelLayer::new(hidden, q_size, qc, spec.qkv_bias, comm, place("q_proj"))?;
+                ColumnParallelLayer::new(input, q_size, qc, spec.qkv_bias, comm, place("q_proj"))?;
             let kv_shard = inference_quant::compute_kv_shard(spec.num_kv_heads, head_dim, comm)?;
             let kv = |name| {
                 ColumnParallelLayer::new_with_shard(
-                    hidden,
+                    input,
                     kv_size,
                     qc,
                     spec.qkv_bias,
@@ -1799,6 +1804,8 @@ pub struct CausalLm<A = AttentionBlock, F = Ffn> {
     max_seq_len: usize,
     cfg: ModelConfigMetadata,
     mtp: Option<Box<MtpHead>>,
+    eagle3: Option<Box<eagle3::Eagle3Drafter>>,
+    vocab_size: usize,
 }
 
 impl CausalLm {
@@ -1971,11 +1978,65 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
             max_seq_len: max_position_embeddings,
             cfg,
             mtp: None,
+            eagle3: None,
+            vocab_size: shape.vocab_size,
         })
     }
 
     pub fn get_input_embeddings(&self, input_ids: &Tensor) -> Result<Tensor> {
         self.stack.embed(input_ids)
+    }
+
+    // the head drafting now: an attached EAGLE-3 drafter, else the built-in MTP head when it is on
+    fn drafting(&self) -> Option<&dyn mtp::ChainHead> {
+        if let Some(eagle3) = self.eagle3.as_deref().filter(|e| e.head.n_predict() > 0) {
+            return Some(&eagle3.head);
+        }
+        self.mtp
+            .as_deref()
+            .filter(|mtp| mtp.n_predict() > 0)
+            .map(|mtp| mtp as &dyn mtp::ChainHead)
+    }
+
+    // an external `--mtp-model`, which on this stack is an EAGLE-3 drafter in the paged layer after the target's
+    fn attach_eagle3(
+        &mut self,
+        config: &crate::speculative::MtpConfig,
+    ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
+        let dir = config.resolve_path()?;
+        let Some(cfg) = Eagle3Config::peek(&dir)? else {
+            inference_tensor::bail!(
+                "`--mtp-model` {} is not an EAGLE-3 drafter, the only external drafter this model runs",
+                dir.display()
+            );
+        };
+        let n_predict = config.n_predict.unwrap_or(cfg.n_predict());
+        if n_predict == 0 {
+            inference_tensor::bail!("EAGLE-3 needs at least one draft token");
+        }
+        if let Some(mtp) = &mut self.mtp {
+            mtp.set_n_predict(0);
+        }
+        let mut drafter = eagle3::Eagle3Drafter::load(
+            &dir,
+            &cfg,
+            eagle3::Eagle3Target {
+                hidden_size: self.cfg.hidden_size,
+                num_layers: self.stack.layers.len(),
+                vocab_size: self.vocab_size,
+                kv_layer_idx: self.cfg.num_layers,
+                mapper: &*self.stack.mapper,
+                device: &self.stack.device,
+                dtype: self.stack.dtype,
+                isq: config.drafter_isq,
+            },
+        )?;
+        drafter.head.set_n_predict(n_predict);
+        self.eagle3 = Some(Box::new(drafter));
+        Ok(Some(crate::speculative::SpeculativeAttachInfo::mtp(
+            format!("EAGLE-3 {}", dir.display()),
+            n_predict,
+        )))
     }
 
     /// The token embedding, for a multimodal model that embeds its text tokens beside its media.
@@ -2057,13 +2118,35 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         after_layer: &dyn Fn(usize, Tensor) -> Result<Tensor>,
     ) -> Result<Tensor> {
         let cache = &mut self.cache.normal().0;
+        let eagle3 = self.eagle3.as_deref().filter(|e| e.head.n_predict() > 0);
+        let taps = std::sync::Mutex::new(Vec::new());
+        let hook = |i: usize, xs: Tensor| -> Result<Tensor> {
+            if let Some(slot) = eagle3.and_then(|e| e.taps().iter().position(|&t| t == i)) {
+                taps.lock()
+                    .expect("eagle3 taps poisoned")
+                    .push((slot, xs.clone()));
+            }
+            after_layer(i, xs)
+        };
         let xs = self
             .stack
-            .forward_hooked(xs, masks, Some(cache), ctx, after_layer)?;
+            .forward_hooked(xs, masks, Some(cache), ctx, &hook)?;
         let full = xs;
         let xs = ctx.logits(&full)?;
         if let Some(mtp) = &self.mtp {
             mtp.record(&full, &xs);
+        }
+        if let Some(eagle3) = eagle3 {
+            let mut taps = taps.into_inner().expect("eagle3 taps poisoned");
+            taps.sort_by_key(|(slot, _)| *slot);
+            let taps = taps
+                .into_iter()
+                .map(|(_, tap)| tap.to_device(&self.stack.device))
+                .collect::<Result<Vec<_>>>()?;
+            if taps.len() == EAGLE3_TAPS {
+                let fused = eagle3.fuse(&taps)?;
+                eagle3.head.record(&fused, &ctx.logits(&fused)?);
+            }
         }
         if self.option_head.is_some() {
             return Ok(xs);
@@ -2114,12 +2197,11 @@ impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin 
             if let Some(mtp) = &mut self.mtp {
                 mtp.set_n_predict(0);
             }
+            self.eagle3 = None;
             return Ok(None);
         };
         if !config.is_builtin() {
-            inference_tensor::bail!(
-                "this model drafts only with its own MTP head, not an external drafter"
-            );
+            return self.attach_eagle3(&config);
         }
         let Some(mtp) = &mut self.mtp else {
             inference_tensor::bail!(
@@ -2139,67 +2221,51 @@ impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin 
     }
 
     fn has_speculative_proposer(&self) -> bool {
-        self.mtp.as_ref().is_some_and(|mtp| mtp.n_predict() > 0)
+        self.drafting().is_some()
     }
 
     fn speculative_plan(
         &self,
         _batch_size: usize,
     ) -> Option<crate::speculative::SpeculativeBatchPlan> {
-        self.mtp
-            .as_ref()
-            .filter(|mtp| mtp.n_predict() > 0)
-            .map(|mtp| crate::speculative::SpeculativeBatchPlan::new(mtp.n_predict()))
+        self.drafting()
+            .map(|head| crate::speculative::SpeculativeBatchPlan::new(head.n_predict()))
     }
 
     fn take_speculative_graph_state(
         &self,
     ) -> Option<Box<dyn crate::speculative::SpeculativeGraphState>> {
-        self.mtp
-            .as_ref()
-            .filter(|mtp| mtp.n_predict() > 0)
-            .and_then(|mtp| mtp.take_graph_state())
+        self.drafting().and_then(|head| head.take_graph_state())
     }
 
     fn install_speculative_graph_state(
         &self,
         state: &dyn crate::speculative::SpeculativeGraphState,
     ) -> Result<()> {
-        match &self.mtp {
-            Some(mtp) if mtp.n_predict() > 0 => mtp.install(state),
-            _ => Ok(()),
-        }
+        self.drafting().map_or(Ok(()), |head| head.install(state))
     }
 
     fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
-        match &self.mtp {
-            Some(mtp) if mtp.n_predict() > 0 => mtp.target_hiddens(rows),
-            _ => Ok(None),
-        }
+        self.drafting()
+            .map_or(Ok(None), |head| head.target_hiddens(rows))
     }
 
     fn speculative_prefill(
         &mut self,
         ctx: crate::speculative::SpeculativePrefillCtx<'_>,
     ) -> Result<()> {
-        match &self.mtp {
-            Some(mtp) if mtp.n_predict() > 0 => {
-                mtp.prefill(&|tokens| self.stack.embed(tokens), ctx)
-            }
-            _ => Ok(()),
-        }
+        self.drafting().map_or(Ok(()), |head| {
+            head.prefill(&|tokens| self.stack.embed(tokens), ctx)
+        })
     }
 
     fn speculative_propose(
         &mut self,
         ctx: crate::speculative::SpeculativeProposeBatchCtx<'_>,
     ) -> Result<Option<crate::speculative::SpeculativeProposalBatch>> {
-        match &self.mtp {
-            Some(mtp) if mtp.n_predict() > 0 => {
-                mtp.propose(&|tokens| self.stack.embed(tokens), &*self.lm_head, ctx)
-            }
-            _ => Ok(None),
-        }
+        self.drafting().map_or(Ok(None), |head| {
+            head.propose(&|tokens| self.stack.embed(tokens), &*self.lm_head, ctx)
+        })
     }
 }
 

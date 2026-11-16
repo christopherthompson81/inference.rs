@@ -111,8 +111,19 @@ pub fn reserve_external_mtp_memory_with_runtime(
         return Ok(Some(cache_config));
     }
     let dtype = dtype.try_into_dtype(&[device])?;
-    #[cfg_attr(not(feature = "drafters"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(feature = "drafters", all(feature = "cuda", target_family = "unix"))),
+        allow(unused_mut)
+    )]
     let mut cache_config = cache_config;
+    // an EAGLE-3 drafter's one layer keeps its K/V in the target's blocks, beside the target's layers
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    if device.is_cuda()
+        && let Some(eagle3) =
+            inference_nn::decoder::Eagle3Config::peek(&resolve_mtp_path(mtp_config)?)?
+    {
+        cache_config = cache_config.with_auxiliary_layers(eagle3.auxiliary_layers());
+    }
     #[cfg(feature = "drafters")]
     let local_mtp = MtpConfig {
         model: Some(resolve_mtp_path(mtp_config)?.to_string_lossy().into_owned()),

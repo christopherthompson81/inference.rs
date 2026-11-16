@@ -68,6 +68,7 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
 | MTP | Qwen3.5 (dense and MoE), Qwen3.8, Qwen3.8-Flash-Next | Built into the checkpoint (`--mtp`), or a GGUF head file | Supported with paged attention |
 | MTP | ERNIE 4.5 MoE | Built into the checkpoint (`--mtp`) | Supported with paged attention |
 | DFlash / DFlash 2 / DSpark | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next | DFlash and DSpark draft checkpoints (`--mtp-model`) | Supported with paged attention |
+| EAGLE-3 | Llama, Qwen3 (dense and MoE) and the other models on the shared decoder | EAGLE-3 draft checkpoints (`--mtp-model`) | Supported with paged attention on CUDA |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
 
@@ -188,6 +189,29 @@ drafter, 5 layers of 8 KV heads, more than a q3 target cache), and the prefix ca
 target's blocks, so a cache hit needs no replay. These drafters don't use CUDA graphs yet. On the RTX 3090 Qwen3.8's
 DSpark drafter accepts 2.9-3.0 tokens per step on coding and review prompts against DFlash 2's 3.5, at about the
 same step time, so DFlash 2 stays the better choice where one exists.
+
+## EAGLE-3 (Llama, Qwen3)
+
+[EAGLE-3](https://arxiv.org/abs/2503.01840) drafters are one Llama layer trained per target. The layer reads the
+target's hidden states at three of its layers (fused by an `fc` projection), drafts one token at a time from its own
+reduced vocabulary, and chains its output into the next draft. Pass the drafter as `--mtp-model`. The SpecForge
+(`LlamaForCausalLMEagle3`), vLLM/AngelSlim (`Eagle3LlamaForCausalLM`), speculators (`Eagle3Speculator`) and
+yuhuili (one-layer `LlamaForCausalLM`) formats load. The target can be a safetensors or GGUF checkpoint:
+
+```bash
+inference serve --format gguf -m Qwen/Qwen3-8B-GGUF -f Qwen3-8B-Q4_K_M.gguf \
+  --mtp-model RedHatAI/Qwen3-8B-speculator.eagle3 --mtp-draft-isq q4k
+```
+
+The drafter's layer keeps its K/V in the target's paged cache, so EAGLE-3 needs paged attention on CUDA.
+`--mtp-n-predict` defaults to the drafter's recorded proposal length, else 3. `--mtp-draft-isq` quantizes the
+drafter's linears; its bf16 weights are read on every draft. The drafter shares the target's token embedding, so a
+drafter wider than its target (one that ships its own embedding) is refused at load.
+
+On an RTX 3090 with Qwen3-8B Q4_K_M and [RedHatAI/Qwen3-8B-speculator.eagle3](https://huggingface.co/RedHatAI/Qwen3-8B-speculator.eagle3)
+at 3 drafts, sampled chat with Qwen3's recommended settings (temperature 0.7, top-p 0.8, top-k 20) decoded at 209-257
+tok/s against 154-156 without it, at 2.3 tokens a step. A q4k drafter beat bf16 and q8_0 at the same acceptance. 2, 4
+and 5 drafts were no faster.
 
 ## Gemma 4
 

@@ -188,10 +188,41 @@ pub struct MtpHeadParts<B> {
     pub dtype: inference_tensor::DType,
 }
 
+/// How a head turns a token embedding and a hidden state into its block's input.
+enum MtpInput {
+    /// `projection(concat(norm(embedding), norm(hidden)))`, the MTP layout.
+    Projected {
+        embedding_norm: Norm,
+        hidden_norm: Norm,
+        projection: Arc<dyn QuantMethod>,
+    },
+    /// `concat(embedding, hidden)` as is, the block norming both halves itself (EAGLE-3).
+    Concat,
+}
+
+/// A drafter's own reduced vocabulary, read out over the target's: each target id gathers its draft id's logit, and
+/// an id outside the draft vocabulary the `-inf` column appended after it.
+pub struct DraftVocab {
+    /// `[target vocab]` U32 draft ids, `draft vocab` for an undraftable one.
+    pub gather: Tensor,
+    /// `[1, 1]` `-inf` in the logits' dtype.
+    pub floor: Tensor,
+}
+
+/// A head over `concat(embedding, hidden)` (EAGLE-3's): its block, final norm and own `lm_head` over `vocab`.
+pub struct MtpConcatParts<B> {
+    pub block: B,
+    pub final_norm: Norm,
+    pub lm_head: Arc<dyn QuantMethod>,
+    pub vocab: Option<DraftVocab>,
+    pub names: MtpSpec,
+    pub kv_layer_idx: usize,
+    pub device: Device,
+    pub dtype: inference_tensor::DType,
+}
+
 pub struct MtpHead<B: MtpBlock = StandardMtpBlock> {
-    embedding_norm: Norm,
-    hidden_norm: Norm,
-    projection: Arc<dyn QuantMethod>,
+    input: MtpInput,
     block: B,
     final_norm: Option<Norm>,
     names: MtpSpec,
@@ -202,8 +233,9 @@ pub struct MtpHead<B: MtpBlock = StandardMtpBlock> {
     dtype: inference_tensor::DType,
     placeholder_kv: Mutex<KvCache>,
     n_predict: usize,
-    // the target's `lm_head` at the drafts' own weight type; verification keeps the target's
+    // the target's `lm_head` at the drafts' own weight type, or a drafter's own head; verification keeps the target's
     draft_lm_head: Option<Arc<dyn QuantMethod>>,
+    draft_vocab: Option<DraftVocab>,
     capture: Mutex<Option<Capture>>,
     // the last prompt row's hidden state, whose next token is only known once it is sampled
     pending_tails: Mutex<HashMap<usize, (usize, Tensor)>>,
@@ -368,7 +400,7 @@ impl<B: MtpBlock> MtpHead<B> {
                 ctx.kv_cache,
                 ctx.paged_meta,
             )?;
-            step_logits = ctx.lm_head.forward(&draft.logits_hidden)?;
+            step_logits = self.draft_logits(ctx.lm_head, &draft.logits_hidden)?;
         }
         // [batch, n_predict] tokens, [batch, n_predict, K] supports
         let tokens = Tensor::stack(&tokens, 1)?;
@@ -393,9 +425,11 @@ impl<B: MtpBlock> MtpHead<B> {
 
     pub fn from_parts(parts: MtpHeadParts<B>) -> Self {
         Self {
-            embedding_norm: parts.embedding_norm,
-            hidden_norm: parts.hidden_norm,
-            projection: parts.projection,
+            input: MtpInput::Projected {
+                embedding_norm: parts.embedding_norm,
+                hidden_norm: parts.hidden_norm,
+                projection: parts.projection,
+            },
             block: parts.block,
             final_norm: parts.final_norm,
             mask_first_position: parts.names.mask_first_position,
@@ -407,6 +441,40 @@ impl<B: MtpBlock> MtpHead<B> {
             placeholder_kv: Mutex::new(KvCache::new_normal(PLACEHOLDER_KV_DIM, 1, 1)),
             n_predict: 0,
             draft_lm_head: None,
+            draft_vocab: None,
+            capture: Mutex::new(None),
+            pending_tails: Mutex::new(HashMap::new()),
+            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            graphs: Default::default(),
+        }
+    }
+
+    /// A head whose block reads `concat(embedding, hidden)` itself and drafts through its own `lm_head`.
+    pub fn concat(parts: MtpConcatParts<B>) -> Self {
+        let MtpConcatParts {
+            block,
+            final_norm,
+            lm_head,
+            vocab,
+            names,
+            kv_layer_idx,
+            device,
+            dtype,
+        } = parts;
+        Self {
+            input: MtpInput::Concat,
+            block,
+            final_norm: Some(final_norm),
+            mask_first_position: false,
+            names,
+            chain_normed: false,
+            kv_layer_idx,
+            device,
+            dtype,
+            placeholder_kv: Mutex::new(KvCache::new_normal(PLACEHOLDER_KV_DIM, 1, 1)),
+            n_predict: 0,
+            draft_lm_head: Some(lm_head),
+            draft_vocab: vocab,
             capture: Mutex::new(None),
             pending_tails: Mutex::new(HashMap::new()),
             #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -416,6 +484,21 @@ impl<B: MtpBlock> MtpHead<B> {
 
     pub fn block(&self) -> &B {
         &self.block
+    }
+
+    /// Draft logits over the target's vocabulary: through `lm_head`, then scattered from a reduced draft vocabulary.
+    fn draft_logits(&self, lm_head: &dyn QuantMethod, hidden: &Tensor) -> Result<Tensor> {
+        let logits = lm_head.forward(hidden)?;
+        let Some(vocab) = &self.draft_vocab else {
+            return Ok(logits);
+        };
+        let rows = logits.dim(0)?;
+        let floor = vocab
+            .floor
+            .to_dtype(logits.dtype())?
+            .broadcast_as((rows, 1))?
+            .contiguous()?;
+        Tensor::cat(&[&logits, &floor], 1)?.index_select(&vocab.gather, 1)
     }
 
     pub fn n_predict(&self) -> usize {
@@ -428,6 +511,9 @@ impl<B: MtpBlock> MtpHead<B> {
         lm_head: &Arc<dyn QuantMethod>,
         isq: Option<IsqType>,
     ) -> Result<()> {
+        if matches!(self.input, MtpInput::Concat) {
+            return Ok(());
+        }
         let device = lm_head.dtype_and_device().1;
         self.draft_lm_head = isq
             .map(|isq| {
@@ -594,13 +680,20 @@ impl<B: MtpBlock> MtpHead<B> {
             let keep = Tensor::from_vec(keep, (n, 1, 1), &self.device)?.to_dtype(embeds.dtype())?;
             embeds = embeds.broadcast_mul(&keep)?;
         }
-        let xs = self.projection.forward(&Tensor::cat(
-            &[
-                self.embedding_norm.forward(&embeds)?,
-                self.hidden_norm.forward(inputs.target_hidden)?,
-            ],
-            D::Minus1,
-        )?)?;
+        let xs = match &self.input {
+            MtpInput::Projected {
+                embedding_norm,
+                hidden_norm,
+                projection,
+            } => projection.forward(&Tensor::cat(
+                &[
+                    embedding_norm.forward(&embeds)?,
+                    hidden_norm.forward(inputs.target_hidden)?,
+                ],
+                D::Minus1,
+            )?)?,
+            MtpInput::Concat => Tensor::cat(&[&embeds, inputs.target_hidden], D::Minus1)?,
+        };
         let logit_rows = vec![(0, 1); n];
         let flash = FlashParams::empty(false);
         let mut ctx = ModelForwardContext::new(
@@ -810,7 +903,7 @@ impl<B: MtpBlock> MtpHead<B> {
                 let mut samples = Vec::with_capacity(n_predict);
                 let mut logits = Vec::with_capacity(n_predict);
                 for step in 0..n_predict {
-                    let step_logits = lm_head.forward(&draft.logits_hidden)?;
+                    let step_logits = self.draft_logits(lm_head, &draft.logits_hidden)?;
                     let vocab = step_logits.dim(D::Minus1)?;
                     let drafts = match &sampler {
                         Some(sampler) => {
@@ -904,7 +997,7 @@ impl<B: MtpBlock> MtpHead<B> {
         if draft.chain_hidden.device().is_vulkan()
             && ctx.sequences.iter().all(|seq| !seq.sampler().is_argmax())
         {
-            let first = lm_head.forward(&draft.logits_hidden)?;
+            let first = self.draft_logits(lm_head, &draft.logits_hidden)?;
             if ctx
                 .sequences
                 .iter()
@@ -937,7 +1030,7 @@ impl<B: MtpBlock> MtpHead<B> {
             let mut steps = Vec::with_capacity(n_predict);
             let mut logits = Vec::with_capacity(n_predict);
             for step in 0..n_predict {
-                let step_logits = lm_head.forward(&draft.logits_hidden)?;
+                let step_logits = self.draft_logits(lm_head, &draft.logits_hidden)?;
                 let drafts = step_logits
                     .argmax(D::Minus1)?
                     .to_dtype(inference_tensor::DType::U32)?;
@@ -999,7 +1092,7 @@ impl<B: MtpBlock> MtpHead<B> {
         let mut supports: Option<Vec<Vec<crate::sampler::RankedProbs>>> =
             Some((0..batch).map(|_| Vec::with_capacity(n_predict)).collect());
         for step in 0..n_predict {
-            let step_logits = lm_head.forward(&draft.logits_hidden)?;
+            let step_logits = self.draft_logits(lm_head, &draft.logits_hidden)?;
             let (drafts, step_supports) = crate::speculative::proposer::sample_ranked_draft_rows(
                 &step_logits,
                 ctx.sequences,
@@ -1068,14 +1161,68 @@ impl<B: MtpBlock> MtpHead<B> {
 
     /// The tensors ISQ leaves alone, under the stack's prefix.
     pub fn add_residual(&self, uvb_m: &UnVarBuilder) {
-        self.embedding_norm
-            .add_residual(&uvb_m.pp(self.names.embedding_norm));
-        self.hidden_norm
-            .add_residual(&uvb_m.pp(self.names.hidden_norm));
+        if let MtpInput::Projected {
+            embedding_norm,
+            hidden_norm,
+            ..
+        } = &self.input
+        {
+            embedding_norm.add_residual(&uvb_m.pp(self.names.embedding_norm));
+            hidden_norm.add_residual(&uvb_m.pp(self.names.hidden_norm));
+        }
         if let (Some(norm), Some(name)) = (&self.final_norm, self.names.final_norm) {
             norm.add_residual(&uvb_m.pp(name));
         }
         self.block.add_residual(uvb_m);
+    }
+}
+
+/// What a stack's drafting asks of its chained head, whatever the head's block.
+pub(super) trait ChainHead: Send + Sync {
+    fn n_predict(&self) -> usize;
+    fn take_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>>;
+    fn install(&self, state: &dyn SpeculativeGraphState) -> Result<()>;
+    fn target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>>;
+    fn prefill(
+        &self,
+        embed: &dyn Fn(&Tensor) -> Result<Tensor>,
+        ctx: SpeculativePrefillCtx<'_>,
+    ) -> Result<()>;
+    fn propose(
+        &self,
+        embed: &dyn Fn(&Tensor) -> Result<Tensor>,
+        lm_head: &dyn QuantMethod,
+        ctx: SpeculativeProposeBatchCtx<'_>,
+    ) -> Result<Option<SpeculativeProposalBatch>>;
+}
+
+impl<B: MtpBlock> ChainHead for MtpHead<B> {
+    fn n_predict(&self) -> usize {
+        MtpHead::n_predict(self)
+    }
+    fn take_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
+        MtpHead::take_graph_state(self)
+    }
+    fn install(&self, state: &dyn SpeculativeGraphState) -> Result<()> {
+        MtpHead::install(self, state)
+    }
+    fn target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
+        MtpHead::target_hiddens(self, rows)
+    }
+    fn prefill(
+        &self,
+        embed: &dyn Fn(&Tensor) -> Result<Tensor>,
+        ctx: SpeculativePrefillCtx<'_>,
+    ) -> Result<()> {
+        MtpHead::prefill(self, embed, ctx)
+    }
+    fn propose(
+        &self,
+        embed: &dyn Fn(&Tensor) -> Result<Tensor>,
+        lm_head: &dyn QuantMethod,
+        ctx: SpeculativeProposeBatchCtx<'_>,
+    ) -> Result<Option<SpeculativeProposalBatch>> {
+        MtpHead::propose(self, embed, lm_head, ctx)
     }
 }
 

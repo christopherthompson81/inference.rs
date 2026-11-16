@@ -8,6 +8,7 @@ mod bert_embedding_tiny;
 mod cohere_asr_tiny;
 mod decision_label_tiny;
 mod decision_tiny;
+mod eagle3_tiny;
 mod embedding_tiny;
 mod ernie4_5_tiny;
 mod falcon_h1_tiny;
