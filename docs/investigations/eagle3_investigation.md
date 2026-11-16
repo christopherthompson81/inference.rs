@@ -103,3 +103,18 @@ the card's summarization row.
 Left: target-side tap capture under multi-GPU device maps is untested (taps move to the head's device); Qwen3.5/3.6
 targets (their own tap path, DFlash's) and the specdrift variant's per-tap norms (`fcs.*`, `fc_norm`), gpt-oss
 (`norm_before_fc`), and an `eagle3` GGUF binding.
+
+## Run 6 - 2026-11-16 05:40
+
+**Question:** does the SpecForge layout (`midlayer.*`, pickled `pytorch_model.bin`, no layer ids in its config) load
+and draft? AngelSlim/Qwen3-8B_eagle3, q4k, Qwen3's recommended sampling. The memory reservation sized external
+drafters from safetensors only; a pickled one now reserves its size on disk.
+
+```
+                         tok/s (three requests)     tokens a step
+RedHat (speculators)     257 / 223 / 209            2.28
+AngelSlim (SpecForge)    225 / 202 / 159            1.91
+```
+
+It loads at vLLM's default layers (2, 18, 33 of 36) and drafts. Its lower acceptance on these requests is the
+drafter's (other training data), not the format: the same code path serves both past the tensor prefix.
