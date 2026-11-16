@@ -68,7 +68,7 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
 | MTP | Qwen3.5 (dense and MoE), Qwen3.8, Qwen3.8-Flash-Next | Built into the checkpoint (`--mtp`), or a GGUF head file | Supported with paged attention |
 | MTP | ERNIE 4.5 MoE | Built into the checkpoint (`--mtp`) | Supported with paged attention |
 | DFlash / DFlash 2 / DSpark | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next | DFlash and DSpark draft checkpoints (`--mtp-model`) | Supported with paged attention |
-| EAGLE-3 | Llama, Qwen3 (dense and MoE) and the other models on the shared decoder | EAGLE-3 draft checkpoints (`--mtp-model`) | Supported with paged attention on CUDA |
+| EAGLE-3 | Llama, Qwen3 (dense and MoE) and the other models on the shared decoder, Qwen3.5 / Qwen3.6 | EAGLE-3 draft checkpoints (`--mtp-model`) | Supported with paged attention on CUDA |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
 
@@ -190,13 +190,14 @@ target's blocks, so a cache hit needs no replay. These drafters don't use CUDA g
 DSpark drafter accepts 2.9-3.0 tokens per step on coding and review prompts against DFlash 2's 3.5, at about the
 same step time, so DFlash 2 stays the better choice where one exists.
 
-## EAGLE-3 (Llama, Qwen3)
+## EAGLE-3 (Llama, Qwen3, Qwen3.5 / Qwen3.6)
 
 [EAGLE-3](https://arxiv.org/abs/2503.01840) drafters are one Llama layer trained per target. The layer reads the
 target's hidden states at three of its layers (fused by an `fc` projection), drafts one token at a time from its own
 reduced vocabulary, and chains its output into the next draft. Pass the drafter as `--mtp-model`. The SpecForge
 (`LlamaForCausalLMEagle3`), vLLM/AngelSlim (`Eagle3LlamaForCausalLM`), speculators (`Eagle3Speculator`) and
-yuhuili (one-layer `LlamaForCausalLM`) formats load. The target can be a safetensors or GGUF checkpoint:
+yuhuili (one-layer `LlamaForCausalLM`) formats load, and EAGLE 3.1 drafters (`fc_norm`: an RMSNorm on each tap
+before `fc`; `norm_output`: chained drafts read the normed state). The target can be a safetensors or GGUF checkpoint:
 
 ```bash
 inference serve --format gguf -m Qwen/Qwen3-8B-GGUF -f Qwen3-8B-Q4_K_M.gguf \
@@ -212,6 +213,18 @@ On an RTX 3090 with Qwen3-8B Q4_K_M and [RedHatAI/Qwen3-8B-speculator.eagle3](ht
 at 3 drafts, sampled chat with Qwen3's recommended settings (temperature 0.7, top-p 0.8, top-k 20) decoded at 209-257
 tok/s against 154-156 without it, at 2.3 tokens a step. A q4k drafter beat bf16 and q8_0 at the same acceptance. 2, 4
 and 5 drafts were no faster.
+
+On Qwen3.6-35B-A3B (IQ4_KSS GGUF, all experts resident), three 400-token chat requests at temperature 0.6 decoded:
+
+| Drafter | tok/s | Tokens a step |
+| --- | --- | --- |
+| none | 200 / 200 / 200 | |
+| EAGLE-3 ([jiapingW/Qwen3.5-35B-A3B-Eagle3-Specforge](https://huggingface.co/jiapingW/Qwen3.5-35B-A3B-Eagle3-Specforge), q4k) | 257 / 243 / 226 | 2.38 |
+| EAGLE 3.1 ([Dogacel/specdrift-qwen3.6-35b-a3b-eagle3](https://huggingface.co/Dogacel/specdrift-qwen3.6-35b-a3b-eagle3), q4k) | 251 / 260 / 209 | 2.31 |
+| built-in MTP (`--mtp`, 2 drafts) | 277 / 241 / 207 | 2.47 |
+| DFlash 2 | 276 / 243 / 142 | 3.43 |
+
+EAGLE-3 held up best on the story request, where DFlash 2's longer blocks were mostly rejected.
 
 ## Gemma 4
 

@@ -17,6 +17,8 @@ mod decode_graphs;
 mod recording;
 #[path = "../support/tiny_drafter.rs"]
 mod tiny_drafter;
+#[path = "../support/tiny_eagle3.rs"]
+mod tiny_eagle3;
 #[path = "../support/traces.rs"]
 mod traces;
 
@@ -480,6 +482,50 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
         .map(|m| m.drafts)
         .sum();
     assert!(drafts > 0, "DFlash never drafted");
+    decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    Ok(())
+}
+
+// An EAGLE 3.1 drafter (per-tap norms, normed chain) over three of the tiny target's four layers, in its own vocabulary
+const EAGLE3: tiny_eagle3::Eagle3Shape = tiny_eagle3::Eagle3Shape {
+    hidden: HIDDEN,
+    heads: 2,
+    kv_heads: 1,
+    head_dim: GRAPH_HEAD_DIM,
+    intermediate: 128,
+    vocab: VOCAB,
+    draft_vocab: 64,
+    tap_layer_ids: [1, 2, 4],
+    eagle31: true,
+};
+const EAGLE3_N_PREDICT: usize = 2;
+
+// An EAGLE-3 drafter on the hybrid target drafts from its taps, the drafter's graphs replay, and greedy output holds.
+#[tokio::test]
+async fn hybrid_eagle3_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let drafter = tiny_eagle3::tiny_eagle3(&EAGLE3)?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(EAGLE3_N_PREDICT))
+        .build()
+        .await?;
+    let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_replayed(&counters);
+    decode_graphs::assert_component_replayed(&counters, MTP_COMPONENT);
+    let drafts: usize = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    assert!(drafts > 0, "EAGLE-3 never drafted");
     decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
     Ok(())
 }

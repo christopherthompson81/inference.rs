@@ -36,7 +36,7 @@ mod mtp;
 pub mod qwen3_vl;
 mod stream;
 
-pub use eagle3::{EAGLE3_TAPS, Eagle3Config};
+pub use eagle3::{EAGLE3_TAPS, Eagle3Config, Eagle3Drafter, Eagle3Target};
 pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SharedExpertSpec, SparseMoe};
 pub use mtp::{MtpBlock, MtpHead, MtpHeadParts, MtpSpec, StandardMtpBlock};
 

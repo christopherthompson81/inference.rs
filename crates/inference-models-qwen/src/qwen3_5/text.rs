@@ -1434,8 +1434,9 @@ pub struct Qwen3_5TextModel {
     bidirectional_prompt: bool,
     layers: Vec<DecoderLayer>,
     pub(super) layer_types: Vec<LayerType>,
-    mapper: Box<dyn DeviceMapper + Send + Sync>,
+    pub(super) mapper: Box<dyn DeviceMapper + Send + Sync>,
     lm_head: Arc<dyn QuantMethod>,
+    pub(super) vocab_size: usize,
     pub(super) cache: EitherCache,
     pub(super) cfg: ModelConfigMetadata,
     pub(super) device: Device,
@@ -1469,6 +1470,7 @@ pub struct Qwen3_5TextModel {
     joint_head: Option<super::joint_head::JointHead>,
     // External DFlash block-diffusion drafter, replacing the built-in MTP head when attached
     pub(super) dflash: Mutex<Option<Arc<inference_drafters::host::ExternalDrafter>>>,
+    pub(super) eagle3: Mutex<Option<Arc<crate::decoder::Eagle3Drafter>>>,
     pub(super) pending_prompt_tails:
         Mutex<std::collections::HashMap<usize, super::speculative::PendingPromptTail>>,
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -2009,6 +2011,7 @@ impl Qwen3_5TextModel {
             layers,
             layer_types: layer_types.clone(),
             lm_head,
+            vocab_size: cfg.vocab_size,
             cache: EitherCache::Hybrid(pipeline_cache),
             max_seq_len: cfg.supported_context_len(qsa.is_some()),
             qsa,
@@ -2036,6 +2039,7 @@ impl Qwen3_5TextModel {
             draft_lm_head: Mutex::new(None),
             joint_head,
             dflash: Mutex::new(None),
+            eagle3: Mutex::new(None),
             pending_prompt_tails: Mutex::new(std::collections::HashMap::new()),
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             mtp_graphs: Default::default(),

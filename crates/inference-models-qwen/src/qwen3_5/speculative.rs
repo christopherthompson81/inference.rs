@@ -378,6 +378,64 @@ impl Qwen3_5TextModel {
         self.dflash.lock().expect("dflash poisoned").clone()
     }
 
+    // an EAGLE-3 drafter in the paged layer after the target's own (and the MTP head's)
+    fn attach_eagle3(
+        &mut self,
+        config: &crate::speculative::MtpConfig,
+        dir: &std::path::Path,
+        cfg: &crate::decoder::Eagle3Config,
+    ) -> Result<Option<SpeculativeAttachInfo>> {
+        let n_predict = config.n_predict.unwrap_or(cfg.n_predict());
+        if n_predict == 0 {
+            inference_tensor::bail!("EAGLE-3 needs at least one draft token");
+        }
+        let mut drafter = crate::decoder::Eagle3Drafter::load(
+            dir,
+            cfg,
+            crate::decoder::Eagle3Target {
+                hidden_size: self.cfg.hidden_size,
+                num_layers: self.layer_types.len(),
+                vocab_size: self.vocab_size,
+                kv_layer_idx: self.cfg.num_layers,
+                mapper: &*self.mapper,
+                device: &self.device,
+                dtype: self.dtype,
+                isq: config.drafter_isq,
+            },
+        )?;
+        drafter.head.set_n_predict(n_predict);
+        let mut taps = drafter.taps().to_vec();
+        taps.sort_unstable();
+        self.set_dflash_tap_layers(taps);
+        self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
+        self.mtp_auto_depth.store(false, Ordering::Relaxed);
+        self.mtp_primary_depth.store(n_predict, Ordering::Relaxed);
+        self.set_store_spec_hidden(true);
+        *self.dflash.lock().expect("dflash poisoned") = None;
+        *self.eagle3.lock().expect("eagle3 poisoned") = Some(Arc::new(drafter));
+        Ok(Some(SpeculativeAttachInfo::mtp(
+            format!("EAGLE-3 {}", dir.display()),
+            n_predict,
+        )))
+    }
+
+    fn eagle3(&self) -> Option<Arc<crate::decoder::Eagle3Drafter>> {
+        self.eagle3.lock().expect("eagle3 poisoned").clone()
+    }
+
+    /// Records the fused taps of `capture` as the EAGLE-3 head's target states; false without a full set of taps.
+    fn record_eagle3(
+        drafter: &crate::decoder::Eagle3Drafter,
+        capture: Option<SpecCapture>,
+    ) -> Result<bool> {
+        let Some(capture) = capture.filter(|c| c.taps.len() == crate::decoder::EAGLE3_TAPS) else {
+            return Ok(false);
+        };
+        let fused = drafter.fuse_layer_ordered(&capture.taps)?;
+        drafter.head.record(&fused, &fused);
+        Ok(true)
+    }
+
     fn mtp_propose(
         &self,
         ctx: SpeculativeProposeBatchCtx<'_>,
@@ -730,9 +788,15 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             self.set_store_spec_hidden(false);
             self.set_dflash_tap_layers(Vec::new());
             *self.dflash.lock().expect("dflash poisoned") = None;
+            *self.eagle3.lock().expect("eagle3 poisoned") = None;
             return Ok(None);
         };
+        *self.eagle3.lock().expect("eagle3 poisoned") = None;
         if !config.is_builtin() {
+            let dir = config.resolve_path()?;
+            if let Some(cfg) = crate::decoder::Eagle3Config::peek(&dir)? {
+                return self.attach_eagle3(&config, &dir, &cfg);
+            }
             return self.attach_dflash(config, runtime);
         }
         if self.mtp.is_none() {
@@ -849,6 +913,9 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         if let Some(drafter) = self.dflash.lock().expect("dflash poisoned").as_ref() {
             return Some(drafter.plan(n, batch_size));
         }
+        if self.eagle3().is_some() {
+            return Some(SpeculativeBatchPlan::new(n).without_target_hiddens());
+        }
         Some(SpeculativeBatchPlan::new(n))
     }
 
@@ -923,6 +990,14 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             let max_n = self.mtp_n_predict();
             return drafter.propose(self, ctx, max_n, &self.device);
         }
+        if let Some(drafter) = self.eagle3() {
+            if !Self::record_eagle3(&drafter, self.last_spec_capture())? {
+                return Ok(None);
+            }
+            return drafter
+                .head
+                .propose(&|ids| self.embed_tokens(ids), &**self.lm_head(), ctx);
+        }
         self.mtp_propose(ctx)
     }
 
@@ -954,6 +1029,12 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         }
         if let Some(drafter) = self.drafter() {
             return drafter.prefill(self, ctx);
+        }
+        if let Some(drafter) = self.eagle3() {
+            if !Self::record_eagle3(&drafter, self.last_full_capture())? {
+                return Ok(());
+            }
+            return drafter.head.prefill(&|ids| self.embed_tokens(ids), ctx);
         }
         self.mtp_prefill(ctx)
     }

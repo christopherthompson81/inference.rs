@@ -147,6 +147,9 @@ pub fn reserve_external_mtp_memory_with_runtime(
             inference_nn::decoder::Eagle3Config::peek(&resolve_mtp_path(mtp_config)?)?
     {
         cache_config = cache_config.with_auxiliary_layers(eagle3.auxiliary_layers());
+        // a recurrent target rolls a rejected tail back from per-draft checkpoints
+        let drafts = mtp_config.n_predict.unwrap_or(eagle3.n_predict());
+        cache_config = cache_config.with_recurrent_checkpoint_lanes(drafts + 1)?;
     }
     #[cfg(feature = "drafters")]
     let local_mtp = MtpConfig {
