@@ -1549,6 +1549,9 @@ pub struct TextModel {
     final_logit_softcapping: Option<f64>,
     last_spec_hidden: Mutex<Option<Tensor>>,
     store_spec_hidden: AtomicBool,
+    // an attached EAGLE-3 drafter, fed the outputs of its tap layers each forward
+    eagle3: Option<Box<crate::decoder::Eagle3Drafter>>,
+    vocab_size: usize,
     image_token_id: Option<usize>,
     video_token_id: Option<usize>,
     bidirectional_attention: Gemma4BidirectionalAttention,
@@ -1880,6 +1883,8 @@ impl TextModel {
             final_logit_softcapping: cfg.final_logit_softcapping,
             last_spec_hidden: Mutex::new(None),
             store_spec_hidden: AtomicBool::new(false),
+            eagle3: None,
+            vocab_size: cfg.vocab_size,
             image_token_id,
             video_token_id,
             bidirectional_attention: cfg.bidirectional_attention(),
@@ -1929,6 +1934,36 @@ impl TextModel {
         if !store && let Ok(mut hidden) = self.last_spec_hidden.lock() {
             *hidden = None;
         }
+    }
+
+    pub fn set_eagle3(&mut self, drafter: Option<Box<crate::decoder::Eagle3Drafter>>) {
+        self.eagle3 = drafter;
+    }
+
+    /// The attached EAGLE-3 drafter, while it drafts.
+    pub fn eagle3(&self) -> Option<&crate::decoder::Eagle3Drafter> {
+        self.eagle3.as_deref().filter(|e| e.head.n_predict() > 0)
+    }
+
+    /// What an EAGLE-3 drafter attaches with: this model's widths, the paged layer after its own, its device.
+    pub fn eagle3_target(
+        &self,
+        isq: Option<inference_quant::IsqType>,
+    ) -> crate::decoder::Eagle3Target<'_> {
+        crate::decoder::Eagle3Target {
+            hidden_size: self.cfg.hidden_size,
+            num_layers: self.layers.len(),
+            vocab_size: self.vocab_size,
+            kv_layer_idx: self.cfg.num_layers,
+            mapper: &*self.mapper,
+            device: &self.device,
+            dtype: self.dtype,
+            isq,
+        }
+    }
+
+    pub fn lm_head(&self) -> &Arc<dyn QuantMethod> {
+        &self.lm_head
     }
 
     pub fn model_config_like(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
@@ -2282,14 +2317,21 @@ impl TextModel {
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
         let sliding_attention_mask = DeviceMappedMask::new(sliding_attention_mask, &*self.mapper)?;
 
-        let fast_prefill_tail = self.kv_sharing_fast_prefill_plan(
-            input_ids,
-            &context_lens,
-            ctx.seqlen_offsets(),
-            ctx.paged_input_metadata(),
-            has_bidirectional,
-            ctx.requires_full_prefill_queries(),
-        )?;
+        let drafting = self.eagle3();
+        let mut taps = Vec::new();
+        // a drafter's taps cover every row, so the shared layers' prefill may not narrow to the logits rows
+        let fast_prefill_tail = if drafting.is_some() {
+            None
+        } else {
+            self.kv_sharing_fast_prefill_plan(
+                input_ids,
+                &context_lens,
+                ctx.seqlen_offsets(),
+                ctx.paged_input_metadata(),
+                has_bidirectional,
+                ctx.requires_full_prefill_queries(),
+            )?
+        };
         let mut reduced_to_logits = false;
         let no_attention_mask = AttentionMask::None;
         let mut input_normed = None;
@@ -2395,6 +2437,12 @@ impl TextModel {
             )?;
             xs = layer_out;
             input_normed = next_normed;
+            if drafting.is_some_and(|e| e.taps().contains(&i)) {
+                taps.push(self.mapper.cast_nm_device(&xs, false)?);
+            }
+        }
+        if let Some(eagle3) = drafting {
+            eagle3.record_layer_ordered(&taps, |fused| ctx.logits(fused))?;
         }
         // back on the head's device in the model dtype, which CPU-mapped layers leave for F32
         let xs = if let Some(normed) = input_normed {

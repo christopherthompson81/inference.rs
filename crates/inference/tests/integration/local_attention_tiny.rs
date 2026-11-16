@@ -6,6 +6,7 @@ use std::path::Path;
 use inference::{
     Model, ModelDType, MultimodalModelBuilder, RequestBuilder, TextMessageRole, TextModelBuilder,
 };
+use inference_models_gemma::gemma4::{Gemma4Model, config::Gemma4Config};
 use inference_models_llama::llama4::{Llama4Config, Llama4Model};
 use inference_models_other::gpt_oss;
 use inference_nn::paged_attention::AttentionImplementation;
@@ -34,6 +35,9 @@ const GPT_OSS_LAYERS: usize = 2;
 // enough layers for an EAGLE-3 drafter's three distinct taps
 const GPT_OSS_EAGLE3_LAYERS: usize = 4;
 const EAGLE3_N_PREDICT: usize = 2;
+// sliding, sliding, sliding, global: the 31B's pattern cut to four layers
+const GEMMA4_LAYERS: usize = 4;
+const GEMMA4_HIDDEN: usize = 64;
 const GPT_OSS_HIDDEN: usize = 64;
 const GPT_OSS_EXPERT_INTER: usize = 64;
 const GPT_OSS_EXPERTS: usize = 2;
@@ -421,6 +425,106 @@ async fn a_gpt_oss_eagle3_drafter_keeps_paged_output() -> anyhow::Result<()> {
         .with_mtp_model(drafter.path().to_string_lossy(), Some(EAGLE3_N_PREDICT))
         .build()
         .await?;
+    let actual = traces(&drafting, Run::Paged).await?;
+    let drafts: usize = drafting
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    anyhow::ensure!(drafts > 0, "the EAGLE-3 drafter never drafted");
+    ensure_close(&actual, &plain)
+}
+
+// Gemma 4's 31B layout in miniature: sliding layers beside a global one with K as V and a proportional partial RoPE
+fn tiny_gemma4() -> anyhow::Result<tempfile::TempDir> {
+    let layer_types = (0..GEMMA4_LAYERS)
+        .map(|layer| {
+            if layer + 1 == GEMMA4_LAYERS {
+                "full_attention"
+            } else {
+                "sliding_attention"
+            }
+        })
+        .collect::<Vec<_>>();
+    let config = serde_json::json!({
+        "architectures": ["Gemma4ForConditionalGeneration"],
+        "model_type": "gemma4",
+        "tie_word_embeddings": true,
+        "text_config": {
+            "attention_bias": false,
+            "attention_k_eq_v": true,
+            "enable_moe_block": false,
+            "final_logit_softcapping": 30.0,
+            "global_head_dim": HEAD_DIM,
+            "head_dim": HEAD_DIM,
+            "hidden_activation": "gelu_pytorch_tanh",
+            "hidden_size": GEMMA4_HIDDEN,
+            "hidden_size_per_layer_input": 0,
+            "intermediate_size": 128,
+            "layer_types": layer_types,
+            "max_position_embeddings": 512,
+            "num_attention_heads": 2,
+            "num_global_key_value_heads": 1,
+            "num_hidden_layers": GEMMA4_LAYERS,
+            "num_key_value_heads": 1,
+            "num_kv_shared_layers": 0,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {
+                "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1000000.0, "rope_type": "proportional"},
+                "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+            },
+            "sliding_window": WINDOW,
+            "tie_word_embeddings": true,
+            "use_double_wide_mlp": false,
+            "vocab_size": VOCAB,
+            "vocab_size_per_layer_input": VOCAB
+        }
+    });
+    let cfg: Gemma4Config = serde_json::from_value(config.clone())?;
+    record(
+        &config,
+        &tokenizer()?,
+        GEMMA4_LAYERS,
+        &[],
+        HashMap::new(),
+        |vb, metadata| {
+            Gemma4Model::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
+        },
+    )
+}
+
+// An EAGLE-3 drafter over three of Gemma 4's layers drafts, and paged decode with it matches decode without it.
+#[tokio::test]
+async fn a_gemma4_eagle3_drafter_keeps_paged_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_gemma4()?;
+    let drafter = tiny_eagle3::tiny_eagle3(&tiny_eagle3::Eagle3Shape {
+        hidden: GEMMA4_HIDDEN,
+        heads: 2,
+        kv_heads: 1,
+        head_dim: HEAD_DIM,
+        intermediate: 2 * GEMMA4_HIDDEN,
+        vocab: VOCAB,
+        draft_vocab: 64,
+        tap_layer_ids: [1, 2, 4],
+        eagle31: false,
+    })?;
+    let build = |mtp: bool| {
+        let builder = MultimodalModelBuilder::new(checkpoint.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_paged_attn(paged_cache());
+        let builder = if mtp {
+            builder.with_mtp_model(drafter.path().to_string_lossy(), Some(EAGLE3_N_PREDICT))
+        } else {
+            builder
+        };
+        builder.build()
+    };
+    let plain = traces(&build(false).await?, Run::Paged).await?;
+    let drafting = build(true).await?;
     let actual = traces(&drafting, Run::Paged).await?;
     let drafts: usize = drafting
         .speculative_stats()?

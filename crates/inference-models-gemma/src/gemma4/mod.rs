@@ -1126,6 +1126,9 @@ impl SpeculativeGraphState for Gemma4SpecGraphState {
 
 impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     fn take_speculative_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
+        if let Some(eagle3) = self.language_model.eagle3() {
+            return eagle3.head.take_graph_state();
+        }
         self.language_model.take_spec_hidden().map(|hidden| {
             Box::new(Gemma4SpecGraphState { hidden }) as Box<dyn SpeculativeGraphState>
         })
@@ -1135,6 +1138,9 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
         &self,
         state: &dyn SpeculativeGraphState,
     ) -> inference_tensor::Result<()> {
+        if let Some(eagle3) = self.language_model.eagle3() {
+            return eagle3.head.install(state);
+        }
         let state = state
             .as_any()
             .downcast_ref::<Gemma4SpecGraphState>()
@@ -1149,6 +1155,7 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
         &mut self,
         config: SpeculativeConfig,
     ) -> inference_tensor::Result<Option<SpeculativeAttachInfo>> {
+        self.language_model.set_eagle3(None);
         let SpeculativeConfig::Mtp(config) = config else {
             *self.mtp.lock().expect("MTP mutex poisoned") = None;
             self.language_model.set_store_spec_hidden(false);
@@ -1159,6 +1166,17 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
                 "Gemma 4 has no built-in MTP head; pass an assistant model with `--mtp-model`."
             );
         };
+        // an EAGLE-3 drafter over the target's layers; anything else is an assistant model
+        let eagle3 = crate::decoder::Eagle3Drafter::attach(
+            &config,
+            self.language_model.eagle3_target(config.drafter_isq),
+        )?;
+        if let Some((drafter, info)) = eagle3 {
+            *self.mtp.lock().expect("MTP mutex poisoned") = None;
+            self.language_model.set_store_spec_hidden(false);
+            self.language_model.set_eagle3(Some(Box::new(drafter)));
+            return Ok(Some(info));
+        }
         let runtime = mtp::Gemma4MtpRuntime::load(
             config,
             &self.cfg.text_config,
@@ -1173,10 +1191,13 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     }
 
     fn has_speculative_proposer(&self) -> bool {
-        self.mtp.lock().is_ok_and(|mtp| mtp.is_some())
+        self.language_model.eagle3().is_some() || self.mtp.lock().is_ok_and(|mtp| mtp.is_some())
     }
 
     fn speculative_plan(&self, _batch_size: usize) -> Option<SpeculativeBatchPlan> {
+        if let Some(eagle3) = self.language_model.eagle3() {
+            return Some(SpeculativeBatchPlan::new(eagle3.head.n_predict()));
+        }
         self.mtp
             .lock()
             .ok()
@@ -1188,6 +1209,13 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
         &mut self,
         ctx: SpeculativeProposeBatchCtx<'_>,
     ) -> inference_tensor::Result<Option<SpeculativeProposalBatch>> {
+        if let Some(eagle3) = self.language_model.eagle3() {
+            return eagle3.head.propose(
+                &|ids| self.language_model.embed_tokens(ids),
+                &**self.language_model.lm_head(),
+                ctx,
+            );
+        }
         let embedder = |token: &Tensor| self.language_model.embed_tokens(token);
         let mut guard = self.mtp.lock().expect("MTP mutex poisoned");
         let Some(runtime) = guard.as_mut() else {
@@ -1196,10 +1224,20 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
         runtime.propose(ctx, Some(&embedder)).map(Some)
     }
 
+    fn speculative_prefill(
+        &mut self,
+        ctx: crate::speculative::SpeculativePrefillCtx<'_>,
+    ) -> inference_tensor::Result<()> {
+        self.eagle3_prefill(ctx)
+    }
+
     fn speculative_target_hiddens(
         &self,
         rows: &[(usize, usize)],
     ) -> inference_tensor::Result<Option<Tensor>> {
+        if let Some(eagle3) = self.language_model.eagle3() {
+            return eagle3.head.target_hiddens(rows);
+        }
         let hidden = self.language_model.last_spec_hidden().ok_or_else(|| {
             inference_tensor::Error::Msg(
                 "MTP target hidden state was not captured before proposal.".to_string(),
@@ -1244,6 +1282,21 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
                 Tensor::cat(&gathered, 0).map(Some)
             }
             shape => inference_tensor::bail!("MTP hidden state has unsupported shape {shape:?}"),
+        }
+    }
+}
+
+impl Gemma4Model {
+    // the EAGLE-3 head catches up over a prompt chunk; an assistant model reads the target's last hidden state only
+    fn eagle3_prefill(
+        &self,
+        ctx: crate::speculative::SpeculativePrefillCtx<'_>,
+    ) -> inference_tensor::Result<()> {
+        match self.language_model.eagle3() {
+            Some(eagle3) => eagle3
+                .head
+                .prefill(&|ids| self.language_model.embed_tokens(ids), ctx),
+            None => Ok(()),
         }
     }
 }

@@ -246,3 +246,32 @@ rows read 16 expert slots, ~12.6 distinct experts of 32 if routing were random, 
 across rows would save under a fifth. Per committed token that is ~5.4 experts read against plain's 4: on this
 bandwidth-bound card a sparse MoE with 4 of 32 experts active gains from drafting only at 1 draft (1-6%). The earlier
 "greedy 2.60 tokens a step, 447 tok/s" was the broken model repeating itself.
+
+## Run 10 - 2026-11-16 13:30
+
+**Question:** does Gemma 4 draft with EAGLE-3, and by how much on the dense 31B and the MoE 26B-A4B?
+
+Gemma 4 decoding was checked against llama.cpp first (gemma4_investigation.md Runs 1-2; the fixes there: KV sizing in
+the device map, CPU-spilled layers, BOS on raw prompts, text-only GGUF). Its text model now records an attached
+drafter's taps and its mixin drives the shared head ahead of an assistant model, which still loads as before. With a
+drafter attached the KV-sharing models' prefill keeps every row (its taps cover them all) rather than narrowing to the
+logits rows. Gemma scales its embeddings by sqrt(hidden); the drafter's `input_layernorm` is an RMSNorm, so the
+target's scaled embedding reads the same as the raw table.
+
+Drafters: RedHatAI/gemma-4-31B-it-speculator.eagle3 (taps 2, 30, 57) and RedHatAI/gemma-4-26B-A4B-it-speculator.eagle3
+(taps 2, 15, 27), Apache 2.0, speculators format, q4k. Targets: google's QAT q4_0 GGUFs, text file alone. e3bench,
+t=0.6, no throttling:
+
+```
+                              tok/s (three requests)     tokens a step   accepted
+31B  plain                     42 /  42 /  42
+31B  EAGLE-3, 3 drafts         74 /  67 /  57            2.20            40.0%
+26B  plain                    200 / 199 / 200
+26B  EAGLE-3, 3 drafts        195 / 200 / 167            2.01            33.7%
+26B  EAGLE-3, 1 draft         232 / 237 / 206            1.58            58.3%
+```
+
+Greedy, the 31B's ISO-8601 reply with the drafter matches plain decode for 149 tokens (mean |d logprob| 0.008, max
+0.133), then splits at a near tie the 4-row verify rounds the other way (plain: '    ' -0.53 / '        ' -0.89;
+drafting: '        ' -0.66 / '    ' -0.73). A tiny Gemma 4 (the 31B's layout in four layers: three sliding, one global
+with K as V and proportional partial RoPE) with a tiny drafter keeps paged decode's output.
