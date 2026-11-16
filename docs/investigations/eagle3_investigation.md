@@ -192,3 +192,57 @@ Both drafters work; neither is a clear win over the built-in head here. A drafte
 as one trained on 3.6. EAGLE-3's single chained layer degrades least on the story request, where DFlash 2's longer
 blocks lose most. Test: the tiny Qwen3.5 text target with a tiny EAGLE 3.1 drafter keeps the graph fixture's greedy
 traces, drafts, and replays the head's graphs.
+
+## Run 9 - 2026-11-16 10:30
+
+**Question:** does gpt-oss-20b draft with EAGLE-3, and is it faster?
+
+Drafter: RedHatAI/gpt-oss-20b-speculator.eagle3 (Apache 2.0, speculators format, `norm_before_fc`: one RMSNorm over
+the three concatenated taps, `input_norm.weight` 8640 wide, ahead of `fc`). gpt-oss runs on its own model file, not the
+shared decoder: it now records the drafter's taps in its forward and drives the shared head through the speculative
+mixin. Attach (loading, depth, the attach info) is one `Eagle3Drafter::attach` the shared decoder, Qwen3.5 and gpt-oss
+call. Target: ggml-org/gpt-oss-20b-GGUF MXFP4 (and openai/gpt-oss-20b safetensors for parity).
+
+Four problems on the way, three of them gpt-oss's own and older than this work:
+
+1. **Windowed verify rows (paged fattn).** The tiny gpt-oss test with a drafter matched plain decode for 21 steps,
+   then not (a window of 8; with a window of 512 it held). A new kernel case (head dim 64, f16, window 8 / 40, sinks,
+   3-row verify) failed by 1.05 max abs where the rows of one sequence straddle a block edge (lengths 33, 34, 66, 97
+   failed; 35, 64 passed), even with a window of 200 that never binds. The multi-row decode path runs a sequence's
+   verify rows as one causal block over the first row's table with the last row's length; a window's tables are cut
+   to each row's own blocks, so the last rows read past the first row's table. Windowed tables now stay per row.
+   Any drafter verifying on a sliding-window layer through this path was affected.
+2. **MXFP4 experts at verify width.** 3 drafts ran at 85-96 tok/s against 325 plain (as measured then, item 3 aside):
+   `mxfp4_moe_grouped_gemm_wmma_kernel` 0.28 ms a call, 48 a verify step, for 4 rows. Up to 8 tokens now take the
+   per-token GEMV (`mxfp4_moe_gemm`, whose grid already scales with tokens): 85-96 to 188-218 tok/s. A CUDA case now
+   checks both against the dequantized experts at gpt-oss's K (1, 4, 12 tokens).
+3. **gpt-oss ran one expert per token.** Output was nonsense on both the GGUF and the safetensors checkpoint
+   ("The capital of Germany is a city, but the city is ...", llama.cpp: "Berlin. The capital of Italy is Rome ...").
+   Per-layer comparison with transformers (MXFP4 dequantized, bf16, CPU): embeddings equal, layer 0's attention equal
+   (cos 1.0000 every row), router logits equal, MoE output cos 0.17-0.97 by row. Our gate_up output was
+   `[tokens, 1, 5760]`: the MoE hands its experts `[tokens, 1, hidden]` to broadcast over the top-k, and MXFP4's gather
+   read top-k from that middle dim, so only each token's first expert ran, at the full weight. The dense layers
+   broadcast it; MXFP4's gather now does too. After: GGUF and safetensors both decode llama.cpp's continuation token
+   for token. The tiny gpt-oss checkpoint loads its experts dense, which is why it never caught this.
+4. **Harmony stopped on its first token.** With the model fixed, every chat ended after `<|channel|>`: Harmony's
+   `<|channel|>`, `<|message|>`, `<|start|>` and `<|end|>` were end tokens. A Harmony turn now ends on `<|return|>` or
+   `<|call|>`, as llama.cpp and the checkpoint's generation config end it.
+
+Then, the same e3bench requests (t=0.6), MXFP4 GGUF:
+
+```
+                          tok/s (three requests)     tokens a step   accepted
+plain                     200 / 200 / 200
+EAGLE-3 q4k, 3 drafts     173 / 171 / 179            2.33            44.2%
+EAGLE-3 q8_0, 3 drafts    179 / 154 / 163            2.29            43.0%
+EAGLE-3 bf16, 3 drafts    151 / 151 / 157            2.29            43.0%
+EAGLE-3 q4k, 2 drafts     201 / 193 / 204            2.17            58.5%
+EAGLE-3 q4k, 1 draft      213 / 210 / 202            1.69            68.6%
+```
+
+Acceptance is the card's (k=3: 1.9-2.4). The step is what costs: nsys, 3 drafts, 14.3 ms a step, of which the MXFP4
+GEMV is 7.4 ms against 2.0 ms a plain token, at ~850-900 GB/s either way. A plain token reads its 4 experts; 4 verify
+rows read 16 expert slots, ~12.6 distinct experts of 32 if routing were random, so even a kernel sharing an expert
+across rows would save under a fifth. Per committed token that is ~5.4 experts read against plain's 4: on this
+bandwidth-bound card a sparse MoE with 4 of 32 experts active gains from drafting only at 1 draft (1-6%). The earlier
+"greedy 2.60 tokens a step, 447 tok/s" was the broken model repeating itself.

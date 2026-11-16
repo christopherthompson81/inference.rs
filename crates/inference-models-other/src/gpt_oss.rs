@@ -669,6 +669,8 @@ pub struct Model {
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     cfg: Config,
     cfg_metadata: ModelConfigMetadata,
+    // an attached EAGLE-3 drafter, fed the outputs of its tap layers each forward
+    eagle3: Option<Box<crate::decoder::Eagle3Drafter>>,
 }
 
 impl Model {
@@ -833,7 +835,12 @@ impl Model {
             mapper,
             cfg: cfg.clone(),
             cfg_metadata,
+            eagle3: None,
         })
+    }
+
+    fn drafting(&self) -> Option<&crate::decoder::Eagle3Drafter> {
+        self.eagle3.as_deref().filter(|e| e.head.n_predict() > 0)
     }
 
     fn inner_forward(
@@ -878,6 +885,8 @@ impl Model {
         let causal_mask = DeviceMappedMask::new(causal_mask, &*self.mapper)?;
         let sliding_mask = DeviceMappedMask::new(sliding_mask, &*self.mapper)?;
 
+        let drafting = self.drafting();
+        let mut taps = Vec::new();
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
 
@@ -893,6 +902,12 @@ impl Model {
             };
 
             xs = layer.forward(&xs, &layer_mask, &mut cache[i], i, ctx)?;
+            if drafting.is_some_and(|e| e.taps().contains(&i)) {
+                taps.push(self.mapper.cast_nm_device(&xs, false)?);
+            }
+        }
+        if let Some(eagle3) = drafting {
+            eagle3.record_layer_ordered(&taps, |fused| ctx.logits(fused))?;
         }
 
         xs = self.mapper.cast_nm_device(&xs, false)?;
@@ -935,7 +950,99 @@ impl IsqModel for Model {
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for Model {}
+// EAGLE-3 drafting through the shared head; gpt-oss ships no built-in one
+impl crate::speculative::SpeculativeTargetMixin for Model {
+    fn attach_speculative(
+        &mut self,
+        config: crate::speculative::SpeculativeConfig,
+    ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
+        self.eagle3 = None;
+        let crate::speculative::SpeculativeConfig::Mtp(config) = config else {
+            return Ok(None);
+        };
+        if config.is_builtin() {
+            inference_tensor::bail!(
+                "gpt-oss has no built-in MTP head; pass an EAGLE-3 drafter as `--mtp-model`"
+            );
+        }
+        let Some((drafter, info)) = crate::decoder::Eagle3Drafter::attach(
+            &config,
+            crate::decoder::Eagle3Target {
+                hidden_size: self.cfg.hidden_size,
+                num_layers: self.layers.len(),
+                vocab_size: self.cfg.vocab_size,
+                kv_layer_idx: self.cfg.num_hidden_layers,
+                mapper: &*self.mapper,
+                device: &self.device,
+                dtype: self.dtype,
+                isq: config.drafter_isq,
+            },
+        )?
+        else {
+            inference_tensor::bail!(
+                "`--mtp-model` {} is not an EAGLE-3 drafter, the only drafter gpt-oss runs",
+                config.resolve_path()?.display()
+            );
+        };
+        self.eagle3 = Some(Box::new(drafter));
+        Ok(Some(info))
+    }
+
+    fn has_speculative_proposer(&self) -> bool {
+        self.drafting().is_some()
+    }
+
+    fn speculative_plan(
+        &self,
+        _batch_size: usize,
+    ) -> Option<crate::speculative::SpeculativeBatchPlan> {
+        self.drafting()
+            .map(|e| crate::speculative::SpeculativeBatchPlan::new(e.head.n_predict()))
+    }
+
+    fn take_speculative_graph_state(
+        &self,
+    ) -> Option<Box<dyn crate::speculative::SpeculativeGraphState>> {
+        self.drafting().and_then(|e| e.head.take_graph_state())
+    }
+
+    fn install_speculative_graph_state(
+        &self,
+        state: &dyn crate::speculative::SpeculativeGraphState,
+    ) -> Result<()> {
+        self.drafting().map_or(Ok(()), |e| e.head.install(state))
+    }
+
+    fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
+        self.drafting()
+            .map_or(Ok(None), |e| e.head.target_hiddens(rows))
+    }
+
+    fn speculative_prefill(
+        &mut self,
+        ctx: crate::speculative::SpeculativePrefillCtx<'_>,
+    ) -> Result<()> {
+        self.drafting().map_or(Ok(()), |e| {
+            e.head.prefill(
+                &|ids| self.embed_tokens.embedding_forward(ids, self.dtype),
+                ctx,
+            )
+        })
+    }
+
+    fn speculative_propose(
+        &mut self,
+        ctx: crate::speculative::SpeculativeProposeBatchCtx<'_>,
+    ) -> Result<Option<crate::speculative::SpeculativeProposalBatch>> {
+        self.drafting().map_or(Ok(None), |e| {
+            e.head.propose(
+                &|ids| self.embed_tokens.embedding_forward(ids, self.dtype),
+                &*self.lm_head,
+                ctx,
+            )
+        })
+    }
+}
 
 impl NormalModel for Model {
     fn forward(

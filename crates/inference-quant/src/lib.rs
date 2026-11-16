@@ -2023,6 +2023,7 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     ///
     /// If `a` is (n_tokens, n_experts, cols), `self` weights are (n_experts, rows, cols),
     /// then the indices are (n_tokens, n_experts).
+    /// An `a` of (n_tokens, 1, cols) feeds each token's row to all of its experts.
     fn gather_forward(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
         if let Some(t) = self.quantized_act_type() {
             let original_ty = a.dtype();

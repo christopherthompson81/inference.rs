@@ -150,6 +150,12 @@ impl QuantMethod for MXFP4Layer {
     }
 
     fn gather_forward_raw(&self, x: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        // a (tokens, 1, cols) input is each token's one row for every selected expert, as the other layers take it
+        let x = &if x.rank() == 3 && x.dim(1)? == 1 && indices.dim(1)? > 1 {
+            x.squeeze(1)?
+        } else {
+            x.clone()
+        };
         #[cfg(feature = "cuda")]
         if matches!(x.device(), Device::Cuda(_)) && ffi::HAVE_MXFP4_GEMM_KERNELS {
             return ops::mxfp4_indexed_moe_gemm(
@@ -925,6 +931,80 @@ impl QuantizedSerde for MXFP4Layer {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "cuda")]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [cuda_expert_gather_matches_the_dequantized_experts]
+    );
+
+    // gpt-oss's hidden width and top-k over fewer, narrower experts: decode, verify and prefill token counts, through
+    // the GEMV and the grouped GEMM, against the CPU's dequantized experts
+    #[cfg(feature = "cuda")]
+    fn cuda_expert_gather_matches_the_dequantized_experts() -> Result<()> {
+        const EXPERTS: usize = 8;
+        const N: usize = 576;
+        const K: usize = 2880;
+        const TOPK: usize = 4;
+        // E8M0 exponents around 2^0
+        const SCALE_BASE: u8 = 124;
+        const SCALE_SPAN: u8 = 5;
+        const RELATIVE_TOLERANCE: f32 = 2e-2;
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let mut state = 0x9e37_79b9_u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state >> 8
+        };
+        let blocks = (0..EXPERTS * N * K / 2)
+            .map(|_| (next() & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let scales = (0..EXPERTS * N * K / MXFP4_BLOCK_SIZE)
+            .map(|_| SCALE_BASE + (next() % u32::from(SCALE_SPAN)) as u8)
+            .collect::<Vec<_>>();
+        let blocks = Tensor::from_vec(blocks, (EXPERTS, N, K / 2), &Device::Cpu)?;
+        let scales = Tensor::from_vec(scales, (EXPERTS, N, K / MXFP4_BLOCK_SIZE), &Device::Cpu)?;
+        let bias = Tensor::randn(0f32, 1., (EXPERTS, N), &Device::Cpu)?;
+        let cpu = MXFP4Layer::from_parts(blocks.clone(), scales.clone(), Some(bias.clone()));
+        let gpu = MXFP4Layer::from_parts(
+            blocks.to_device(&device)?,
+            scales.to_device(&device)?,
+            Some(bias.to_dtype(DType::BF16)?.to_device(&device)?),
+        );
+        for tokens in [1, 4, 12] {
+            let x = Tensor::randn(0f32, 0.1, (tokens, K), &Device::Cpu)?.to_dtype(DType::BF16)?;
+            let indices = (0..tokens)
+                .flat_map(|token| {
+                    (0..TOPK).map(move |slot| ((token * 3 + slot * 5) % EXPERTS) as u32)
+                })
+                .collect::<Vec<_>>();
+            let indices = Tensor::from_vec(indices, (tokens, TOPK), &Device::Cpu)?;
+            let expected = cpu.gather_forward_dequantize(&x.to_dtype(DType::F32)?, &indices)?;
+            let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+            // the rows as they are, and each token's row once for all its experts
+            for input in [x.clone(), x.unsqueeze(1)?] {
+                let actual = gpu
+                    .gather_forward(&input.to_device(&device)?, &indices.to_device(&device)?)?
+                    .to_dtype(DType::F32)?
+                    .to_device(&Device::Cpu)?;
+                assert_eq!(
+                    actual.dims(),
+                    expected.dims(),
+                    "{tokens} tokens, {:?}",
+                    input.dims()
+                );
+                let diff = (actual - &expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(
+                    diff <= RELATIVE_TOLERANCE * scale,
+                    "{tokens} tokens, {:?}: max abs diff {diff} against outputs up to {scale}",
+                    input.dims()
+                );
+            }
+        }
+        Ok(())
+    }
+
     const TEST_HIDDEN_SIZE: usize = 64;
     const TEST_VOCAB_SIZE: usize = 7;
 
@@ -985,6 +1065,18 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    // gpt-oss hands its experts each token's row once, (tokens, 1, cols), for all of the token's experts
+    #[test]
+    fn a_single_row_input_feeds_every_selected_expert() -> Result<()> {
+        let layer = stacked_test_layer()?;
+        let input = Tensor::randn(0f32, 1., (2, TEST_HIDDEN_SIZE), &Device::Cpu)?;
+        let indices = Tensor::from_vec(vec![0u32, 1, 1, 0], (2, 2), &Device::Cpu)?;
+        let expected = layer.gather_forward(&input, &indices)?;
+        let actual = layer.gather_forward(&input.unsqueeze(1)?, &indices)?;
+        assert_eq!(actual.dims(), &[2, 2, 4]);
+        assert_close(&actual, &expected, 0.0)
     }
 
     #[test]

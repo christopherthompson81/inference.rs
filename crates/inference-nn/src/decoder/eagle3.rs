@@ -44,6 +44,8 @@ const MIDLAYER_PROBE: &str = "midlayer.input_layernorm.weight";
 const FC: &str = "fc";
 // EAGLE 3.1's per-tap norms ahead of `fc`, vLLM's names
 const FC_NORMS: &str = "fcs";
+// the speculators library's one norm over the concatenated taps (`norm_before_fc`)
+const FC_INPUT_NORM: &str = "input_norm";
 const FINAL_NORM: &str = "norm";
 const LM_HEAD: &str = "lm_head";
 const D2T: &str = "d2t";
@@ -82,6 +84,7 @@ pub struct Eagle3Config {
     target_hidden_size: Option<usize>,
     norm_before_residual: bool,
     fc_norm: bool,
+    norm_before_fc: bool,
     norm_output: bool,
     n_predict: Option<usize>,
 }
@@ -115,9 +118,6 @@ impl Eagle3Config {
         }
         if !one_layer {
             inference_tensor::bail!("an EAGLE-3 drafter has one layer");
-        }
-        if flag(raw, "norm_before_fc") {
-            inference_tensor::bail!("EAGLE-3 drafters with `norm_before_fc` are not supported");
         }
         let need = |key: &str| {
             usize_field(layer, key).ok_or_else(|| msg(format!("the EAGLE-3 config has no `{key}`")))
@@ -188,6 +188,7 @@ impl Eagle3Config {
             target_hidden_size: usize_field(raw, "target_hidden_size"),
             norm_before_residual: flag(raw, "norm_before_residual"),
             fc_norm: flag(raw, "fc_norm"),
+            norm_before_fc: flag(raw, "norm_before_fc"),
             norm_output: flag(raw, "norm_output"),
             n_predict,
         }))
@@ -323,12 +324,18 @@ pub struct Eagle3Target<'a> {
     pub isq: Option<IsqType>,
 }
 
+// what `fc` reads: the taps as they are, each normed (EAGLE 3.1), or normed together
+enum FcInput {
+    Raw,
+    PerTap(Vec<Norm>),
+    Concat(Norm),
+}
+
 /// A loaded EAGLE-3 drafter: the chained head over its layer, and the fusion of the target's taps it reads.
 pub struct Eagle3Drafter {
     pub head: MtpHead<Eagle3Block>,
     fc: Arc<dyn QuantMethod>,
-    // one RMSNorm a tap when the drafter normalizes them before `fc`
-    fc_norms: Vec<Norm>,
+    fc_input: FcInput,
     taps: [usize; EAGLE3_TAPS],
 }
 
@@ -340,15 +347,19 @@ impl Eagle3Drafter {
 
     /// `fc(concat(taps))`, `[.., 3 * target hidden]` to the drafter's hidden.
     pub fn fuse(&self, taps: &[Tensor]) -> Result<Tensor> {
-        if self.fc_norms.is_empty() {
-            return self.fc.forward(&Tensor::cat(taps, D::Minus1)?);
-        }
-        let normed = taps
-            .iter()
-            .zip(&self.fc_norms)
-            .map(|(tap, norm)| norm.forward(tap))
-            .collect::<Result<Vec<_>>>()?;
-        self.fc.forward(&Tensor::cat(&normed, D::Minus1)?)
+        let fused = match &self.fc_input {
+            FcInput::Raw => Tensor::cat(taps, D::Minus1)?,
+            FcInput::PerTap(norms) => {
+                let normed = taps
+                    .iter()
+                    .zip(norms)
+                    .map(|(tap, norm)| norm.forward(tap))
+                    .collect::<Result<Vec<_>>>()?;
+                Tensor::cat(&normed, D::Minus1)?
+            }
+            FcInput::Concat(norm) => norm.forward(&Tensor::cat(taps, D::Minus1)?)?,
+        };
+        self.fc.forward(&fused)
     }
 
     /// As [`Eagle3Drafter::fuse`], over taps recorded in layer order.
@@ -361,6 +372,41 @@ impl Eagle3Drafter {
             .map(|tap| taps[layers.partition_point(|layer| layer < tap)].clone())
             .collect::<Vec<_>>();
         self.fuse(&ordered)
+    }
+
+    /// The EAGLE-3 drafter `config` names (`--mtp-model`), drafting `config.n_predict` or its own proposal length;
+    /// `None` when the directory holds another kind of drafter.
+    pub fn attach(
+        config: &crate::speculative::MtpConfig,
+        target: Eagle3Target<'_>,
+    ) -> Result<Option<(Self, crate::speculative::SpeculativeAttachInfo)>> {
+        let dir = config.resolve_path()?;
+        let Some(cfg) = Eagle3Config::peek(&dir)? else {
+            return Ok(None);
+        };
+        let n_predict = config.n_predict.unwrap_or(cfg.n_predict());
+        if n_predict == 0 {
+            inference_tensor::bail!("EAGLE-3 needs at least one draft token");
+        }
+        let mut drafter = Self::load(&dir, &cfg, target)?;
+        drafter.head.set_n_predict(n_predict);
+        let info = crate::speculative::SpeculativeAttachInfo::mtp(
+            format!("EAGLE-3 {}", dir.display()),
+            n_predict,
+        );
+        Ok(Some((drafter, info)))
+    }
+
+    /// Records `taps` (layer order) fused as the head's target states: every row, and the rows the logits read.
+    pub fn record_layer_ordered(
+        &self,
+        taps: &[Tensor],
+        logits_rows: impl FnOnce(&Tensor) -> Result<Tensor>,
+    ) -> Result<()> {
+        let fused = self.fuse_layer_ordered(taps)?;
+        let selected = logits_rows(&fused)?;
+        self.head.record(&fused, &selected);
+        Ok(())
     }
 
     pub fn load(dir: &Path, cfg: &Eagle3Config, target: Eagle3Target<'_>) -> Result<Self> {
@@ -486,12 +532,19 @@ impl Eagle3Drafter {
             false,
             vb.pp(FC),
         )?)?;
-        let fc_norms = if cfg.fc_norm {
-            (0..EAGLE3_TAPS)
-                .map(|tap| norm(vb.pp(FC_NORMS).pp(tap), target.hidden_size))
-                .collect::<Result<Vec<_>>>()?
+        let fc_input = if cfg.fc_norm {
+            FcInput::PerTap(
+                (0..EAGLE3_TAPS)
+                    .map(|tap| norm(vb.pp(FC_NORMS).pp(tap), target.hidden_size))
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        } else if cfg.norm_before_fc {
+            FcInput::Concat(norm(
+                vb.pp(FC_INPUT_NORM),
+                EAGLE3_TAPS * target.hidden_size,
+            )?)
         } else {
-            Vec::new()
+            FcInput::Raw
         };
         let draft_vocab = cfg.draft_vocab_size.unwrap_or(target.vocab_size);
         let lm_head =
@@ -521,7 +574,7 @@ impl Eagle3Drafter {
         Ok(Self {
             head,
             fc,
-            fc_norms,
+            fc_input,
             taps,
         })
     }
@@ -584,6 +637,7 @@ mod tests {
         });
         let speculators = serde_json::json!({
             "architectures": ["Eagle3Speculator"], "draft_vocab_size": 32000, "norm_before_residual": true,
+            "norm_before_fc": true,
             "speculators_config": {"proposal_methods": [{"speculative_tokens": 5}]},
             "transformer_layer_config": {
                 "hidden_size": 4096, "intermediate_size": 12288, "num_attention_heads": 32,
@@ -618,6 +672,7 @@ mod tests {
         assert_eq!((c.head_dim, c.num_kv_heads), (128, 32));
         let d = Eagle3Config::parse(&eagle31).unwrap().unwrap();
         assert!(d.fc_norm && d.norm_output && !a.fc_norm && !a.norm_output);
+        assert!(b.norm_before_fc && !a.norm_before_fc && !d.norm_before_fc);
         assert!(matches!(d.rope, RopeKind::Llama3 { theta, scaling: None } if theta == 1e7));
         assert!(Eagle3Config::parse(&base).unwrap().is_none());
     }

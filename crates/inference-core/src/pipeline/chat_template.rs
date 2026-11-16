@@ -25,15 +25,14 @@ const SUPPORTED_ALTERNATE_EOS: &[&str] = &[
     "<|im_end|>",      // Handle ChatML case
     "<end_of_turn>",   // Handle Gemma2 chat case
     "<|end_of_text|>", // Hermes
-    "<|end|>",         // Phi-3, Phi-3.5, Harmony
+    "<|end|>",         // Phi-3, Phi-3.5
     "<|eot_id|>",      // Llama 3
 ];
 
-const HARMONY_ALTERNATE_EOS: &[&str] = &[
-    "<|message|>", // Harmony
-    "<|start|>",   // Harmony
-    "<|channel|>", // Harmony
-];
+// a Harmony turn ends on its return or a tool call, as llama.cpp's and the checkpoints' generation configs end it;
+// its other markers, `<|end|>` (a message's end) among them, come mid-reply
+const HARMONY_EOS: &[&str] = &["<|return|>", "<|call|>"];
+const HARMONY_MESSAGE_END: &str = "<|end|>";
 
 pub fn calculate_eos_tokens(
     chat_template: &ChatTemplate,
@@ -53,7 +52,7 @@ pub fn calculate_eos_tokens(
         }
     }
     if chat_template.is_harmony_format() {
-        for alternate in HARMONY_ALTERNATE_EOS {
+        for alternate in HARMONY_EOS {
             if tokenizer.get_vocab(true).contains_key(*alternate)
                 && templates
                     .iter()
@@ -100,6 +99,9 @@ pub fn calculate_eos_tokens(
         }
     }
 
+    if chat_template.is_harmony_format() {
+        eos_tok_ids.retain(|tok| tok != HARMONY_MESSAGE_END);
+    }
     eos_tok_ids = eos_tok_ids.into_iter().dedup().collect::<Vec<_>>();
     bos_tok_ids = bos_tok_ids.into_iter().dedup().collect::<Vec<_>>();
 
@@ -392,6 +394,48 @@ mod tests {
         assert_eq!(
             calculate_eos_tokens(&template, None, &tokenizer).unwrap(),
             vec![1]
+        );
+    }
+
+    // a Harmony reply runs analysis, `<|end|>`, then its final message: only its return or a tool call ends it, even
+    // where the generation config (a GGUF's end-of-turn id) names `<|end|>`
+    #[test]
+    fn a_harmony_turn_ends_on_return_or_call_only() {
+        use ahash::AHashMap;
+        use tokenizers::models::wordlevel::WordLevel;
+
+        let markers = [
+            "<unk>",
+            "<|start|>",
+            "<|channel|>",
+            "<|message|>",
+            "<|end|>",
+            "<|return|>",
+            "<|call|>",
+        ];
+        let vocab = markers
+            .iter()
+            .enumerate()
+            .map(|(id, token)| (token.to_string(), u32::try_from(id).unwrap()))
+            .collect::<AHashMap<_, _>>();
+        let tokenizer = Tokenizer::new(
+            WordLevel::builder()
+                .vocab(vocab)
+                .unk_token("<unk>".to_string())
+                .build()
+                .unwrap(),
+        );
+        let template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "eos_token": "<|return|>",
+            "chat_template": "<|start|>assistant<|channel|>final<|message|>{{ x }}<|end|><|return|><|call|>"
+        }))
+        .unwrap();
+        let gen_conf: GenerationConfig =
+            serde_json::from_value(serde_json::json!({ "eos_token_id": [5, 4] })).unwrap();
+        assert!(template.is_harmony_format());
+        assert_eq!(
+            calculate_eos_tokens(&template, Some(&gen_conf), &tokenizer).unwrap(),
+            vec![5, 6]
         );
     }
 

@@ -378,20 +378,13 @@ impl Qwen3_5TextModel {
         self.dflash.lock().expect("dflash poisoned").clone()
     }
 
-    // an EAGLE-3 drafter in the paged layer after the target's own (and the MTP head's)
+    // an EAGLE-3 drafter in the paged layer after the target's own (and the MTP head's); `None` for another drafter
     fn attach_eagle3(
         &mut self,
         config: &crate::speculative::MtpConfig,
-        dir: &std::path::Path,
-        cfg: &crate::decoder::Eagle3Config,
     ) -> Result<Option<SpeculativeAttachInfo>> {
-        let n_predict = config.n_predict.unwrap_or(cfg.n_predict());
-        if n_predict == 0 {
-            inference_tensor::bail!("EAGLE-3 needs at least one draft token");
-        }
-        let mut drafter = crate::decoder::Eagle3Drafter::load(
-            dir,
-            cfg,
+        let Some((drafter, info)) = crate::decoder::Eagle3Drafter::attach(
+            config,
             crate::decoder::Eagle3Target {
                 hidden_size: self.cfg.hidden_size,
                 num_layers: self.layer_types.len(),
@@ -402,8 +395,11 @@ impl Qwen3_5TextModel {
                 dtype: self.dtype,
                 isq: config.drafter_isq,
             },
-        )?;
-        drafter.head.set_n_predict(n_predict);
+        )?
+        else {
+            return Ok(None);
+        };
+        let n_predict = drafter.head.n_predict();
         let mut taps = drafter.taps().to_vec();
         taps.sort_unstable();
         self.set_dflash_tap_layers(taps);
@@ -413,10 +409,7 @@ impl Qwen3_5TextModel {
         self.set_store_spec_hidden(true);
         *self.dflash.lock().expect("dflash poisoned") = None;
         *self.eagle3.lock().expect("eagle3 poisoned") = Some(Arc::new(drafter));
-        Ok(Some(SpeculativeAttachInfo::mtp(
-            format!("EAGLE-3 {}", dir.display()),
-            n_predict,
-        )))
+        Ok(Some(info))
     }
 
     fn eagle3(&self) -> Option<Arc<crate::decoder::Eagle3Drafter>> {
@@ -793,9 +786,8 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         };
         *self.eagle3.lock().expect("eagle3 poisoned") = None;
         if !config.is_builtin() {
-            let dir = config.resolve_path()?;
-            if let Some(cfg) = crate::decoder::Eagle3Config::peek(&dir)? {
-                return self.attach_eagle3(&config, &dir, &cfg);
+            if let Some(info) = self.attach_eagle3(&config)? {
+                return Ok(Some(info));
             }
             return self.attach_dflash(config, runtime);
         }
