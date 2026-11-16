@@ -105,8 +105,17 @@ impl QsaIndexer {
             )
         };
         let q_width = qsa.n_heads * qsa.head_dim;
-        // EXL3 stores the fused projection as a trellis
-        let projection = if ["weight", "trellis"]
+        // EXL3 stores the fused projection as a trellis; only it is asked, as a recording checkpoint holds any name
+        let exl3 = matches!(
+            cfg.quantization_config,
+            Some(inference_quant::QuantizedConfig::Exl3 { .. })
+        );
+        let names: &[&str] = if exl3 {
+            &["weight", "trellis"]
+        } else {
+            &["weight"]
+        };
+        let projection = if names
             .iter()
             .any(|name| vb.contains_tensor(&format!("index_qk_proj.{name}")))
         {

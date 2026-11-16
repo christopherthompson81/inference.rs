@@ -209,7 +209,12 @@ impl NgramTable {
                 rings: None,
             });
         }
-        if vb.contains_tensor("shard_0.trellis") {
+        // only an EXL3 conversion codes its table as rings; a recording checkpoint holds every name it is asked about
+        let exl3 = matches!(
+            cfg.quantization_config,
+            Some(inference_quant::QuantizedConfig::Exl3 { .. })
+        );
+        if exl3 && vb.contains_tensor("shard_0.trellis") {
             return Ok(Self {
                 shards: Vec::new(),
                 mapped: None,
