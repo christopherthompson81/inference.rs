@@ -159,3 +159,36 @@ this change     255 / 216 / 212            2.29 (674 of 1563 accepted, same as m
 ```
 
 Temperature-only now runs as fast as Qwen3's top-k / top-p settings did in Run 4 (257 / 223 / 209).
+
+## Run 8 - 2026-11-16 08:50
+
+**Question:** do Qwen3.5 / Qwen3.6 targets draft with EAGLE-3, and how do the available drafters compare with the
+built-in MTP head and DFlash 2 on Qwen3.6-35B-A3B?
+
+Qwen3.5 / Qwen3.6 run on their own text model, not the shared decoder, but already capture DFlash's taps (layer outputs,
+in layer order, over the logits' rows and over every prompt row). The EAGLE-3 head there is the shared `MtpHead`:
+attach sets the tap layers to the drafter's, and propose / prefill fuse the captured taps (reordered to the drafter's
+order), `record` them and call the head's own `propose` / `prefill`. Core now reserves `drafts + 1` recurrent
+checkpoint lanes for an EAGLE-3 drafter, as for DFlash, so a rejected tail on the GDN layers rolls back from lanes.
+
+Drafters for the 35B: jiapingW/Qwen3.5-35B-A3B-Eagle3-Specforge (MIT, plain EAGLE-3, trained on Qwen3.5-35B-A3B) and
+Dogacel/specdrift-qwen3.6-35b-a3b-eagle3 (no license given; local evaluation only), an EAGLE 3.1 drafter: `fc_norm`
+(`fcs.{0,1,2}.weight`, one RMSNorm a tap before `fc`, vLLM's layout) and `norm_output` (the chained hidden is the final
+norm's output: the head's existing `chain_normed`). Semantics from NVIDIA NeMo AutoModel's and AMD ATOM's EAGLE 3.1
+docs. PatchyTisa's caption drafter (M-RoPE, partial rotary) is still refused.
+
+Qwen3.6-35B-A3B-IQ4_KSS-mtp.gguf, `--pa-context-len 16384`, e3bench (t=0.6, seed 7), no throttling:
+
+```
+                              tok/s (three requests)     tokens a step   accepted
+plain                         200 / 200 / 200
+EAGLE-3 jiapingW q4k          257 / 243 / 226            2.38            46.0%
+EAGLE 3.1 specdrift q4k       251 / 260 / 209            2.31            43.8%
+built-in MTP (2 drafts)       277 / 241 / 207            2.47            73.3%
+DFlash 2 (default depth)      276 / 243 / 142            3.43            34.8%
+```
+
+Both drafters work; neither is a clear win over the built-in head here. A drafter trained on Qwen3.5 accepts as well
+as one trained on 3.6. EAGLE-3's single chained layer degrades least on the story request, where DFlash 2's longer
+blocks lose most. Test: the tiny Qwen3.5 text target with a tiny EAGLE 3.1 drafter keeps the graph fixture's greedy
+traces, drafts, and replays the head's graphs.

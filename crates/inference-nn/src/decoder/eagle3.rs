@@ -42,6 +42,8 @@ const MIDLAYER: &str = "midlayer";
 const LAYER0: &str = "layers.0";
 const MIDLAYER_PROBE: &str = "midlayer.input_layernorm.weight";
 const FC: &str = "fc";
+// EAGLE 3.1's per-tap norms ahead of `fc`, vLLM's names
+const FC_NORMS: &str = "fcs";
 const FINAL_NORM: &str = "norm";
 const LM_HEAD: &str = "lm_head";
 const D2T: &str = "d2t";
@@ -79,6 +81,8 @@ pub struct Eagle3Config {
     layer_ids: Option<Vec<usize>>,
     target_hidden_size: Option<usize>,
     norm_before_residual: bool,
+    fc_norm: bool,
+    norm_output: bool,
     n_predict: Option<usize>,
 }
 
@@ -112,10 +116,8 @@ impl Eagle3Config {
         if !one_layer {
             inference_tensor::bail!("an EAGLE-3 drafter has one layer");
         }
-        for unsupported in ["norm_before_fc", "fc_norm", "norm_output"] {
-            if flag(raw, unsupported) {
-                inference_tensor::bail!("EAGLE-3 drafters with `{unsupported}` are not supported");
-            }
+        if flag(raw, "norm_before_fc") {
+            inference_tensor::bail!("EAGLE-3 drafters with `norm_before_fc` are not supported");
         }
         let need = |key: &str| {
             usize_field(layer, key).ok_or_else(|| msg(format!("the EAGLE-3 config has no `{key}`")))
@@ -185,6 +187,8 @@ impl Eagle3Config {
             layer_ids,
             target_hidden_size: usize_field(raw, "target_hidden_size"),
             norm_before_residual: flag(raw, "norm_before_residual"),
+            fc_norm: flag(raw, "fc_norm"),
+            norm_output: flag(raw, "norm_output"),
             n_predict,
         }))
     }
@@ -323,6 +327,8 @@ pub struct Eagle3Target<'a> {
 pub struct Eagle3Drafter {
     pub head: MtpHead<Eagle3Block>,
     fc: Arc<dyn QuantMethod>,
+    // one RMSNorm a tap when the drafter normalizes them before `fc`
+    fc_norms: Vec<Norm>,
     taps: [usize; EAGLE3_TAPS],
 }
 
@@ -334,7 +340,27 @@ impl Eagle3Drafter {
 
     /// `fc(concat(taps))`, `[.., 3 * target hidden]` to the drafter's hidden.
     pub fn fuse(&self, taps: &[Tensor]) -> Result<Tensor> {
-        self.fc.forward(&Tensor::cat(taps, D::Minus1)?)
+        if self.fc_norms.is_empty() {
+            return self.fc.forward(&Tensor::cat(taps, D::Minus1)?);
+        }
+        let normed = taps
+            .iter()
+            .zip(&self.fc_norms)
+            .map(|(tap, norm)| norm.forward(tap))
+            .collect::<Result<Vec<_>>>()?;
+        self.fc.forward(&Tensor::cat(&normed, D::Minus1)?)
+    }
+
+    /// As [`Eagle3Drafter::fuse`], over taps recorded in layer order.
+    pub fn fuse_layer_ordered(&self, taps: &[Tensor]) -> Result<Tensor> {
+        let mut layers = self.taps;
+        layers.sort_unstable();
+        let ordered = self
+            .taps
+            .iter()
+            .map(|tap| taps[layers.partition_point(|layer| layer < tap)].clone())
+            .collect::<Vec<_>>();
+        self.fuse(&ordered)
     }
 
     pub fn load(dir: &Path, cfg: &Eagle3Config, target: Eagle3Target<'_>) -> Result<Self> {
@@ -460,6 +486,13 @@ impl Eagle3Drafter {
             false,
             vb.pp(FC),
         )?)?;
+        let fc_norms = if cfg.fc_norm {
+            (0..EAGLE3_TAPS)
+                .map(|tap| norm(vb.pp(FC_NORMS).pp(tap), target.hidden_size))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         let draft_vocab = cfg.draft_vocab_size.unwrap_or(target.vocab_size);
         let lm_head =
             isq(spec.replicated_linear(cfg.hidden_size, draft_vocab, false, vb.pp(LM_HEAD))?)?;
@@ -480,11 +513,17 @@ impl Eagle3Drafter {
                 dense_block: true,
                 mask_first_position: false,
             },
+            chain_normed: cfg.norm_output,
             kv_layer_idx,
             device: target.device.clone(),
             dtype: target.dtype,
         });
-        Ok(Self { head, fc, taps })
+        Ok(Self {
+            head,
+            fc,
+            fc_norms,
+            taps,
+        })
     }
 }
 
@@ -557,6 +596,12 @@ mod tests {
             "num_attention_heads": 32, "num_hidden_layers": 1, "max_position_embeddings": 2048,
             "draft_vocab_size": 32000
         });
+        let eagle31 = serde_json::json!({
+            "architectures": ["LlamaForCausalLMEagle3"], "hidden_size": 2048, "intermediate_size": 16384,
+            "num_attention_heads": 16, "num_key_value_heads": 2, "head_dim": 256, "num_hidden_layers": 1,
+            "max_position_embeddings": 262144, "rope_parameters": {"rope_theta": 10000000, "rope_type": "default"},
+            "draft_vocab_size": 32000, "fc_norm": true, "norm_output": true
+        });
         let base = serde_json::json!({
             "architectures": ["LlamaForCausalLM"], "hidden_size": 4096, "intermediate_size": 14336,
             "num_attention_heads": 32, "num_hidden_layers": 32, "max_position_embeddings": 2048
@@ -571,6 +616,9 @@ mod tests {
         assert_eq!(b.n_predict(), 5);
         let c = Eagle3Config::parse(&plain).unwrap().unwrap();
         assert_eq!((c.head_dim, c.num_kv_heads), (128, 32));
+        let d = Eagle3Config::parse(&eagle31).unwrap().unwrap();
+        assert!(d.fc_norm && d.norm_output && !a.fc_norm && !a.norm_output);
+        assert!(matches!(d.rope, RopeKind::Llama3 { theta, scaling: None } if theta == 1e7));
         assert!(Eagle3Config::parse(&base).unwrap().is_none());
     }
 
