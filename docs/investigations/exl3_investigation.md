@@ -1793,3 +1793,21 @@ room against recipe A's 0.0170) or the power limit (the user's setting).
 
 Kept: `the_tile_gemv_matches_the_gemm` (2 to 4 bpw at 2^25 weights, one and eight rows against the trellis GEMM);
 no test reached the tile path before, since the kernels' test shapes are below TILE_MIN_WEIGHTS.
+
+## Run 62 - 2026-11-16 03:30
+
+Question: is the DFlash verify step power-capped too, or is there kernel time left to win there (Run 61 measured
+plain decode only)? DFlash 2 x7, q3 KV, three sampled 800-token requests (code, explanation, code), power logged
+every 200 ms, no profiler (`dfpw.sh` in the scratchpad):
+
+```
+                 tok/s per request          busy samples   W     SM MHz   power-cap flag
+EXL3 4.0         195.1 / 160.7 / 222.3      63             355   1656     100%
+recipe A         224.2 / 167.1 / 225.4      61             347   1622     100%
+```
+
+The verify step is power-capped as well, all the time. Per-token energy is confounded by acceptance (each format
+drafts and accepts differently on the same seed), so the step is the cleaner measure: at the same cap, Run 55's
+GPU step times (29.52 against 27.89 ms) put EXL3's energy a step ~5.8% over recipe A's. ~4% of that is bytes (14.65
+against 14.06 GiB); the ~2% left (~0.5 ms a step) is the most that cutting instructions (trellis decode, rotations,
+split partials) could recover, and only if it cuts energy, not just time. Not pursued.
