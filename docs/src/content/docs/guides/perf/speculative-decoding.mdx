@@ -198,7 +198,9 @@ reduced vocabulary, and chains its output into the next draft. Pass the drafter 
 (`LlamaForCausalLMEagle3`), vLLM/AngelSlim (`Eagle3LlamaForCausalLM`), speculators (`Eagle3Speculator`) and
 yuhuili (one-layer `LlamaForCausalLM`) formats load, and EAGLE 3.1 drafters (`fc_norm`: an RMSNorm on each tap
 before `fc`; `norm_output`: chained drafts read the normed state) and speculators drafters with `norm_before_fc` (one
-RMSNorm over the concatenated taps). The target can be a safetensors or GGUF checkpoint:
+RMSNorm over the concatenated taps). llama.cpp's `eagle3` GGUFs load too: pass the `.gguf` file itself as
+`--mtp-model`, its weights kept in their stored types (`--mtp-draft-isq` still requantizes them). The target can be a
+safetensors or GGUF checkpoint:
 
 ```bash
 inference serve --format gguf -m Qwen/Qwen3-8B-GGUF -f Qwen3-8B-Q4_K_M.gguf \

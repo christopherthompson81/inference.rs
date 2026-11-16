@@ -24,6 +24,17 @@ const N_PREDICT: usize = 2;
 const MAX_LEN: usize = 16;
 // the verify step's rows run batched where plain decode runs them one by one
 const LOGPROB_TOLERANCE: f32 = 0.05;
+const SHAPE: tiny_eagle3::Eagle3Shape = tiny_eagle3::Eagle3Shape {
+    hidden: HIDDEN,
+    heads: HEADS,
+    kv_heads: KV_HEADS,
+    head_dim: HEAD_DIM,
+    intermediate: INTERMEDIATE,
+    vocab: VOCAB,
+    draft_vocab: DRAFT_VOCAB,
+    tap_layer_ids: TAP_LAYER_IDS,
+    eagle31: false,
+};
 const PROMPT: &str =
     "an EAGLE-3 drafter reads three of the target's layers and drafts in its own small vocabulary";
 
@@ -36,17 +47,7 @@ async fn an_eagle3_drafter_drafts_without_changing_greedy_output() -> anyhow::Re
     let checkpoint = support::tiny_llama_checkpoint_with(serde_json::json!({
         "num_hidden_layers": LAYERS
     }))?;
-    let drafter = tiny_eagle3::tiny_eagle3(&tiny_eagle3::Eagle3Shape {
-        hidden: HIDDEN,
-        heads: HEADS,
-        kv_heads: KV_HEADS,
-        head_dim: HEAD_DIM,
-        intermediate: INTERMEDIATE,
-        vocab: VOCAB,
-        draft_vocab: DRAFT_VOCAB,
-        tap_layer_ids: TAP_LAYER_IDS,
-        eagle31: false,
-    })?;
+    let drafter = tiny_eagle3::tiny_eagle3(&SHAPE)?;
     let builder = || -> anyhow::Result<TextModelBuilder> {
         Ok(TextModelBuilder::new(checkpoint.path().to_string_lossy())
             .with_dtype(ModelDType::BF16)
@@ -72,6 +73,53 @@ async fn an_eagle3_drafter_drafts_without_changing_greedy_output() -> anyhow::Re
     anyhow::ensure!(
         traces::close(&expected, &actual, LOGPROB_TOLERANCE),
         "drafting changed greedy decoding: {expected:?} vs {actual:?}"
+    );
+    Ok(())
+}
+
+// llama.cpp's GGUF of the same drafter (llama.cpp's names, permuted q/k, target-id `d2t`) loads, drafts and leaves
+// greedy decoding as the checkpoint does; how many steps draft follows scheduling, so only that both do is checked
+#[tokio::test]
+async fn a_gguf_drafter_drafts_as_its_checkpoint_does() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = support::tiny_llama_checkpoint_with(serde_json::json!({
+        "num_hidden_layers": LAYERS
+    }))?;
+    let drafter = tiny_eagle3::tiny_eagle3(&SHAPE)?;
+    let gguf = tiny_eagle3::tiny_eagle3_gguf(&SHAPE, drafter.path())?;
+    let run = |mtp: String| {
+        let checkpoint = checkpoint.path().to_string_lossy().into_owned();
+        async move {
+            let model = TextModelBuilder::new(checkpoint)
+                .with_dtype(ModelDType::BF16)
+                .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+                .with_mtp_model(mtp, Some(N_PREDICT))
+                .build()
+                .await?;
+            let request = RequestBuilder::from(
+                TextMessages::new().add_message(TextMessageRole::User, PROMPT),
+            );
+            let (trace, _) = traces::greedy(&model, request, MAX_LEN).await?;
+            let drafts: usize = model
+                .speculative_stats()?
+                .data
+                .iter()
+                .map(|m| m.drafts)
+                .sum();
+            anyhow::Ok((trace, drafts))
+        }
+    };
+    let (expected, drafts) = run(drafter.path().to_string_lossy().into_owned()).await?;
+    let (actual, gguf_drafts) = run(gguf.path().to_string_lossy().into_owned()).await?;
+    anyhow::ensure!(
+        drafts > 0 && gguf_drafts > 0,
+        "the GGUF drafter drafted {gguf_drafts} times, the checkpoint {drafts}"
+    );
+    anyhow::ensure!(
+        traces::close(&expected, &actual, LOGPROB_TOLERANCE),
+        "the GGUF drafter changed decoding: {expected:?} vs {actual:?}"
     );
     Ok(())
 }

@@ -2324,11 +2324,21 @@ fn modelopt_nvfp4(
 }
 
 /// Reads only the drafter's config when it identifies a DFlash checkpoint.
-pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
+// a drafter directory's config.json; `None` for a single-file drafter (an EAGLE-3 GGUF), which is no DFlash one
+fn drafter_config_text(config: &MtpConfig) -> Result<Option<String>> {
     let path = config.resolve_path()?;
-    let raw = fs::read_to_string(path.join("config.json")).map_err(|e| {
-        inference_tensor::Error::Msg(format!("failed to read MTP model config: {e}"))
-    })?;
+    if path.is_file() {
+        return Ok(None);
+    }
+    fs::read_to_string(path.join("config.json"))
+        .map(Some)
+        .map_err(|e| inference_tensor::Error::Msg(format!("failed to read MTP model config: {e}")))
+}
+
+pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
+    let Some(raw) = drafter_config_text(config)? else {
+        return Ok(None);
+    };
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
     if !config_names_dflash(&value) {
@@ -2385,9 +2395,9 @@ pub fn windowed_kv_cache_size_in_bytes(
     retained_prefixes: usize,
     page_size: usize,
 ) -> Result<usize> {
-    let path = config.resolve_path()?;
-    let raw = fs::read_to_string(path.join("config.json"))
-        .map_err(|err| inference_tensor::Error::msg(format!("failed to read MTP config: {err}")))?;
+    let Some(raw) = drafter_config_text(config)? else {
+        return Ok(0);
+    };
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
     if !config_names_dflash(&value) {
