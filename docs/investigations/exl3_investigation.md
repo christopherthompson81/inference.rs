@@ -1756,3 +1756,40 @@ fullwin.py: the first 1.11M characters of wikitext-2 test plus a question about 
 
 It fits with ~1.3 GiB to spare at peak. Recipe A's figures (23.2 GiB; 51 tok/s DFlash decode at 261K) are from
 October, not this session.
+
+## Run 61 - 2026-11-16 03:00
+
+Question: what is left in Qwen3.8 27B EXL3 decode (Run 55: plain step 22.10 ms against recipe A's 20.87, head 1.55
+against 1.23)? First candidate: the 6 bpw head. At 248,320 columns its split partials at one row (~10M floats) pass
+the 16 MB GEMV workspace, so it falls back to exllamav3's GEMM. The tile kernel needs no split there (1940 column
+groups), so it was extended to 5, 6 and 8 bpw (a k-tile's words staged through the warp's share of the reduction
+buffer to exllamav3's generic decode, two k-tiles prefetched). Temporary; patch kept in the scratchpad.
+
+```
+verify_gemv_times_by_rows, 5120 x 248320 6 bpw    1 row 1180.7 us (808 GB/s) -> 1094.2 (871)    8 rows 1182.6 -> 1184.3
+nsys over inference bench 512 / 128, head a step:  exllamav3 GEMM 1115 us    tile 1100 us
+nsys, DFlash 2 x7 sampled code request, head:      GEMM ~114 ms over the trace    tile 116 ms
+inference bench 512 / 128, alternating builds:     old 47.6 / 47.7 / 47.5    new 47.6 / 47.6 / 47.5 tok/s
+```
+
+Run 55's 1.55 ms head was not the in-model figure: the GEMM already reads the head at ~850 GB/s in the model, and
+the tile kernel only matches it. Reverted.
+
+Why no kernel saving shows up at all, power and clocks while decoding (bench 512 / 256, samples at >= 90% busy):
+
+```
+                 tok/s    W      SM MHz   mem MHz   throttle      J a token
+EXL3 4.0         47.4     349    1657     9501      0x4 (power)   7.4
+recipe A         50.6     353    1619     9501      0x4 (power)   7.0
+power.limit 370 W (default; max 390)
+```
+
+Plain decode, not only DFlash, runs at the 370 W software power cap for both formats, the memory clock at full rate
+and the SM clock pulled down. So tok/s follows energy per token, and a kernel that moves the same bytes sooner just
+lowers the clock: the head result above, and why item 2 of the list (the 1-row linears' ~0.8 ms against the
+GGUF's) cannot pay either. The 5% energy gap is close to the 4% more bytes EXL3 4.0 reads (14.65 against 14.06 GiB),
+so decode on this card is a question of bytes a token. The levers left are a smaller conversion (KLD 0.0133 has
+room against recipe A's 0.0170) or the power limit (the user's setting).
+
+Kept: `the_tile_gemv_matches_the_gemm` (2 to 4 bpw at 2^25 weights, one and eight rows against the trellis GEMM);
+no test reached the tile path before, since the kernels' test shapes are below TILE_MIN_WEIGHTS.
