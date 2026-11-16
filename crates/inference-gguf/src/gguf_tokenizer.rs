@@ -89,6 +89,7 @@ struct GgufTokenizerMetadata {
     bos: Option<u32>,
     eos: Option<u32>,
     unk: Option<u32>,
+    add_bos: bool,
 }
 
 impl GgufTokenizerMetadata {
@@ -108,6 +109,7 @@ impl GgufTokenizerMetadata {
             bos: metadata.get_option_value("bos_token_id")?,
             eos: metadata.get_option_value("eos_token_id")?,
             unk: metadata.get_option_value("unknown_token_id")?,
+            add_bos: metadata.get_option_value("add_bos_token")?.unwrap_or(false),
         };
         for (name, id) in [
             ("bos", result.bos),
@@ -141,7 +143,7 @@ const SPIECE_SPACE: char = '\u{2581}';
 /// The external `tokenizer` for a GGUF whose vocabulary is the same: id for id, apart from the padding llama.cpp's
 /// converter appends and its spelling of U+2581 as a space. Special tokens are named as the tokenizer spells them.
 pub fn validate_external_gguf_tokenizer(
-    tokenizer: Tokenizer,
+    mut tokenizer: Tokenizer,
     values: &HashMap<String, Value>,
 ) -> Result<GgufTokenizerConversion> {
     let metadata = GgufTokenizerMetadata::from_values(values)?;
@@ -163,6 +165,29 @@ pub fn validate_external_gguf_tokenizer(
             actual
         );
     }
+    // the GGUF's own BOS rule, which a base model's tokenizer.json may leave to its tokenizer class (Gemma 4's)
+    if metadata.add_bos
+        && let Some(bos) = metadata.bos
+        && !adds_bos(&tokenizer, bos)
+    {
+        let bos_token = metadata.tokens[bos as usize].clone();
+        let template = processors::template::TemplateProcessing::builder()
+            .try_single(format!("{bos_token}:0 $A:0"))
+            .map_err(anyhow::Error::msg)?
+            .try_pair(format!("{bos_token}:0 $A:0 $B:1"))
+            .map_err(anyhow::Error::msg)?
+            .special_tokens(vec![(bos_token, bos)])
+            .build()
+            .map_err(anyhow::Error::msg)?;
+        let template = processors::PostProcessorWrapper::Template(template);
+        let post = match tokenizer.get_post_processor().cloned() {
+            Some(existing) => processors::PostProcessorWrapper::Sequence(
+                processors::sequence::Sequence::new(vec![existing, template]),
+            ),
+            None => template,
+        };
+        tokenizer.with_post_processor(Some(post));
+    }
     let name = |id: Option<u32>| id.and_then(|id| tokenizer.id_to_token(id));
     Ok(GgufTokenizerConversion {
         bos: name(metadata.bos),
@@ -170,6 +195,21 @@ pub fn validate_external_gguf_tokenizer(
         unk: name(metadata.unk),
         tokenizer,
     })
+}
+
+// text whose encoding with special tokens shows whether the tokenizer adds a BOS of its own
+const BOS_PROBE: &str = "a";
+
+fn adds_bos(tokenizer: &Tokenizer, bos: u32) -> bool {
+    let ids = |special| {
+        tokenizer
+            .encode_fast(BOS_PROBE, special)
+            .map(|encoding| encoding.get_ids().to_vec())
+    };
+    match (ids(true), ids(false)) {
+        (Ok(with), Ok(without)) => with.len() > without.len() && with.first() == Some(&bos),
+        _ => false,
+    }
 }
 
 struct PropsGGUF {
@@ -1369,6 +1409,33 @@ mod tests {
         assert_eq!(conversion.bos.as_deref(), Some("a"));
         assert_eq!(conversion.eos.as_deref(), Some("<eos>"));
         assert_eq!(conversion.unk.as_deref(), Some("b"));
+    }
+
+    // a base model's tokenizer.json without its BOS (Gemma 4's leaves it to the tokenizer class) gets the GGUF's
+    #[test]
+    fn an_external_tokenizer_adds_the_bos_the_gguf_asks_for() {
+        let tokens = ["<eos>", "a", "b", "ab"];
+        let mut metadata = tokenizer_metadata(&tokens);
+        let without = validate_external_gguf_tokenizer(tokenizer_with_tokens(&tokens), &metadata)
+            .unwrap()
+            .tokenizer;
+        let text = without.encode_fast("ab", false).unwrap().get_ids().to_vec();
+        let with_bos = [&[1][..], &text].concat();
+        assert_eq!(without.encode_fast("ab", true).unwrap().get_ids(), text);
+        metadata.insert(
+            "tokenizer.ggml.add_bos_token".to_string(),
+            Value::Bool(true),
+        );
+        let with = validate_external_gguf_tokenizer(tokenizer_with_tokens(&tokens), &metadata)
+            .unwrap()
+            .tokenizer;
+        assert_eq!(with.encode_fast("ab", true).unwrap().get_ids(), with_bos);
+        assert_eq!(with.encode_fast("ab", false).unwrap().get_ids(), text);
+        // a tokenizer that already adds it keeps one
+        let again = validate_external_gguf_tokenizer(with, &metadata)
+            .unwrap()
+            .tokenizer;
+        assert_eq!(again.encode_fast("ab", true).unwrap().get_ids(), with_bos);
     }
 
     #[test]

@@ -250,11 +250,20 @@ fn cpu_apply_rotary_q(
     is_neox: bool,
 ) -> Result<Tensor> {
     let q = q.contiguous()?;
-    let cos = cos.contiguous()?;
-    let sin = sin.contiguous()?;
     let positions = positions.map(Tensor::contiguous).transpose()?;
     let position_storage_and_layout = positions.as_ref().map(Tensor::storage_and_layout);
     let positions = cpu_positions(&position_storage_and_layout)?;
+    // a layer mapped to the CPU computes in f32 beside tables kept in the model's dtype: convert the rows it reads
+    let (cos, sin) = if cos.dtype() == q.dtype() && sin.dtype() == q.dtype() {
+        (cos.contiguous()?, sin.contiguous()?)
+    } else {
+        let table_rows = cos.dim(0)?;
+        let rows = positions
+            .and_then(|positions| positions.iter().max())
+            .map_or(table_rows, |&max| (max as usize + 1).min(table_rows));
+        let convert = |table: &Tensor| table.narrow(0, 0, rows)?.to_dtype(q.dtype())?.contiguous();
+        (convert(cos)?, convert(sin)?)
+    };
 
     let (q_s, q_l) = q.storage_and_layout();
     let (cos_s, cos_l) = cos.storage_and_layout();
@@ -1498,5 +1507,33 @@ mod composite_tests {
                 true,
             )?,
         )
+    }
+
+    // a layer mapped to the CPU runs f32 activations against bf16 tables: the rows its positions read, converted
+    #[test]
+    fn f32_activations_rope_with_bf16_tables() -> Result<()> {
+        let x = ramp(&[BATCH, HEADS, SEQ_LEN, 16], 0.07, 0.1)?;
+        let (cos, sin) = (
+            ramp(&[CACHE_ROWS, 8], 0.11, 0.2)?.to_dtype(DType::BF16)?,
+            ramp(&[CACHE_ROWS, 8], 0.13, 0.5)?.to_dtype(DType::BF16)?,
+        );
+        let positions = Tensor::from_vec(
+            (0..(BATCH * SEQ_LEN) as u32).map(|i| (i * 3) % 7).collect(),
+            BATCH * SEQ_LEN,
+            &Device::Cpu,
+        )?;
+        for is_neox in [true, false] {
+            assert_close(
+                &super::cpu_apply_rotary_q(&x, &cos, &sin, Some(&positions), is_neox)?,
+                &super::cpu_apply_rotary_q(
+                    &x,
+                    &cos.to_dtype(DType::F32)?,
+                    &sin.to_dtype(DType::F32)?,
+                    Some(&positions),
+                    is_neox,
+                )?,
+            )?;
+        }
+        Ok(())
     }
 }

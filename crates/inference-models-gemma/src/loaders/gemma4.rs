@@ -498,19 +498,11 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         let cfg = Gemma4Config::from_json(config)?;
         let tc = &cfg.text_config;
 
-        let cfg = ModelConfigMetadata {
-            max_seq_len: tc.max_position_embeddings,
-            num_layers: tc.num_hidden_layers,
-            hidden_size: tc.hidden_size,
-            num_kv_heads: tc.num_key_value_heads,
-            num_attn_heads: tc.num_attention_heads,
-            sliding_window: Some(tc.sliding_window),
-            k_head_dim: tc.global_head_dim,
-            v_head_dim: tc.global_head_dim,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-
-        Ok(Box::new(cfg))
+        // the per-layer shapes the model allocates its cache with, at the device map's single-device width
+        Ok(Box::new(crate::gemma4::text::gemma4_kv_model_config(
+            tc,
+            &|_| Ok(1),
+        )?))
     }
 }
 

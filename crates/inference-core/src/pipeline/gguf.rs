@@ -140,10 +140,36 @@ fn preferred_hf_config(files: &[String]) -> Option<&'static str> {
     }
 }
 
+// a multimodal architecture whose text GGUF also loads alone
+const TEXT_ONLY_MULTIMODAL_ARCHITECTURE: &str = "gemma4";
+// the towers a text-only load leaves out of the base model's config
+const TOWER_CONFIGS: &[&str] = &["vision_config", "audio_config"];
+
 fn requires_multimodal_projector(architecture: &str) -> bool {
     PROJECTOR_REQUIRED_ARCHITECTURES
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(architecture))
+}
+
+// a text GGUF of a multimodal architecture that also loads alone (Gemma 4's), given without a projector
+fn is_text_only_multimodal(weights: &[PathBuf]) -> Result<bool> {
+    let archive = inference_quant::GgufArchive::open(weights)?;
+    Ok(matches!(
+        archive.metadata_value("general.architecture"),
+        Some(inference_tensor::quantized::gguf_file::Value::String(architecture))
+            if architecture == TEXT_ONLY_MULTIMODAL_ARCHITECTURE
+    ))
+}
+
+// a text-only load of a multimodal model: its config without the towers it has no weights for
+fn without_tower_configs(config: &str) -> Result<String> {
+    let mut value: serde_json::Value = serde_json::from_str(config)?;
+    if let Some(object) = value.as_object_mut() {
+        for key in TOWER_CONFIGS {
+            object.remove(*key);
+        }
+    }
+    Ok(serde_json::to_string(&value)?)
 }
 
 /// Loader for a GGUF model.
@@ -1084,6 +1110,14 @@ impl GGUFLoader {
             }
             _ => None,
         };
+        // the text half of Gemma 4 runs on its multimodal model without the towers
+        if architecture == TEXT_ONLY_MULTIMODAL_ARCHITECTURE {
+            return self.load_native_multimodal(NativeMultimodalLoadArgs {
+                paths,
+                mmproj_paths: &[],
+                options,
+            });
+        }
         if requires_multimodal_projector(architecture) {
             bail!(
                 "GGUF architecture `{architecture}` is supported only as a multimodal model. Pass \
@@ -1458,8 +1492,10 @@ impl GGUFLoader {
             }
             None => bail!("GGUF metadata is missing `general.architecture`"),
         };
-        let mmproj = inference_quant::GgufArchive::open_components(mmproj_paths)?;
-        archive.merge_components(mmproj)?;
+        if !mmproj_paths.is_empty() {
+            archive
+                .merge_components(inference_quant::GgufArchive::open_components(mmproj_paths)?)?;
+        }
         let archive = Arc::new(archive);
 
         let (loader_type, bindings, rope_pairing, synthesized_config) = match architecture.as_str()
@@ -1500,6 +1536,12 @@ impl GGUFLoader {
             bail!(
                 "multimodal GGUF architecture `{architecture}` requires its original `config.json`; pass `--tok-model-id <original-model-id>`"
             );
+        };
+        let config = if architecture == TEXT_ONLY_MULTIMODAL_ARCHITECTURE && mmproj_paths.is_empty()
+        {
+            without_tower_configs(&config)?
+        } else {
+            config
         };
         let config = prepare_native_multimodal_config(&loader_type, &config)?;
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
@@ -1616,7 +1658,11 @@ impl GGUFLoader {
         let config_missing = paths.get_config_filename().as_os_str().is_empty();
         let mut model_archive = inference_quant::GgufArchive::open(paths.get_weight_filenames())?;
         alias_decision_architecture(&mut model_archive)?;
-        let projector_archives = inference_quant::GgufArchive::open_components(mmproj_paths)?;
+        let projector_archives = if mmproj_paths.is_empty() {
+            Vec::new()
+        } else {
+            inference_quant::GgufArchive::open_components(mmproj_paths)?
+        };
         // its base models (an encoder's and a text model's) are not the repository the pair came from
         if config_missing && describes_own_config(&model_archive, &projector_archives) {
             return Ok(None);
@@ -1806,21 +1852,25 @@ impl Loader for GGUFLoader {
                 )?;
             }
         }
-        if let Some(mmproj_filenames) = self.mmproj_filenames.as_ref() {
-            let mmproj_paths = super::paths::get_paths_gguf(request(mmproj_filenames), None)?;
-            let inferred_paths = self.infer_multimodal_asset_paths(
-                &paths,
-                mmproj_paths.get_weight_filenames(),
-                &token_source,
-                silent,
-            )?;
+        let mmproj_paths = match self.mmproj_filenames.as_ref() {
+            Some(mmproj_filenames) => Some(
+                super::paths::get_paths_gguf(request(mmproj_filenames), None)?
+                    .get_weight_filenames()
+                    .to_vec(),
+            ),
+            None if is_text_only_multimodal(paths.get_weight_filenames())? => Some(Vec::new()),
+            None => None,
+        };
+        if let Some(mmproj_paths) = mmproj_paths {
+            let inferred_paths =
+                self.infer_multimodal_asset_paths(&paths, &mmproj_paths, &token_source, silent)?;
             let paths = inferred_paths
                 .as_ref()
                 .map(|paths| paths as &dyn ModelPaths)
                 .unwrap_or(&paths);
             return self.load_native_multimodal(NativeMultimodalLoadArgs {
                 paths,
-                mmproj_paths: mmproj_paths.get_weight_filenames(),
+                mmproj_paths: &mmproj_paths,
                 options,
             });
         }

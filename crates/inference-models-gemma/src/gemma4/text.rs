@@ -1365,8 +1365,52 @@ impl DecoderLayer {
 
 // TextModel
 
+/// Each layer's KV heads and head dims and which layers share a cache, `world_size(layer)` its tensor-parallel width;
+/// the device map sizes the cache by the same config the model allocates it with.
+pub(crate) fn gemma4_kv_model_config(
+    cfg: &Gemma4TextConfig,
+    world_size: &dyn Fn(usize) -> Result<usize>,
+) -> Result<Gemma4ModelConfigLike> {
+    let mut per_layer_num_kv_heads = Vec::with_capacity(cfg.num_hidden_layers);
+    let mut per_layer_head_dim = Vec::with_capacity(cfg.num_hidden_layers);
+    let mut owners = Vec::with_capacity(cfg.num_hidden_layers);
+    for layer_idx in 0..cfg.num_hidden_layers {
+        let is_sliding = is_sliding!(layer_idx, cfg);
+        let (head_dim, num_kv_heads) = if is_sliding {
+            (cfg.head_dim, cfg.num_key_value_heads)
+        } else {
+            (
+                cfg.global_head_dim,
+                cfg.num_global_key_value_heads
+                    .unwrap_or(cfg.num_key_value_heads),
+            )
+        };
+        per_layer_num_kv_heads.push((num_kv_heads / world_size(layer_idx)?).max(1));
+        per_layer_head_dim.push(head_dim);
+        owners.push(kv_shared_layer_index(cfg, layer_idx)?.unwrap_or(layer_idx));
+    }
+    let base = ModelConfigMetadata {
+        max_seq_len: cfg.max_position_embeddings,
+        num_layers: cfg.num_hidden_layers,
+        hidden_size: cfg.hidden_size,
+        num_attn_heads: cfg.num_attention_heads / world_size(0)?,
+        num_kv_heads: (cfg.num_key_value_heads / world_size(0)?).max(1),
+        sliding_window: Some(cfg.effective_sliding_window()),
+        k_head_dim: cfg.head_dim,
+        v_head_dim: cfg.head_dim,
+        kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
+    };
+    Ok(Gemma4ModelConfigLike {
+        base,
+        per_layer_num_kv_heads,
+        per_layer_k_head_dim: per_layer_head_dim.clone(),
+        per_layer_v_head_dim: per_layer_head_dim,
+        kv_cache_topology: KvCacheTopology::from_layer_owners(owners),
+    })
+}
+
 #[derive(Clone)]
-struct Gemma4ModelConfigLike {
+pub(crate) struct Gemma4ModelConfigLike {
     base: ModelConfigMetadata,
     per_layer_num_kv_heads: Vec<usize>,
     per_layer_k_head_dim: Vec<usize>,
@@ -1781,34 +1825,12 @@ impl TextModel {
             }
         }
 
-        let mut per_layer_num_kv_heads = Vec::with_capacity(cfg.num_hidden_layers);
-        let mut per_layer_k_head_dim = Vec::with_capacity(cfg.num_hidden_layers);
-        let mut per_layer_v_head_dim = Vec::with_capacity(cfg.num_hidden_layers);
-        let mut kv_cache_layer_owners = Vec::with_capacity(cfg.num_hidden_layers);
         let cache_types = (0..cfg.num_hidden_layers)
             .map(|layer_idx| {
-                let world_size = mapper.get_comm_for(layer_idx)?.world_size();
                 let is_sliding = is_sliding!(layer_idx, cfg);
-                let head_dim = if is_sliding {
-                    cfg.head_dim
-                } else {
-                    cfg.global_head_dim
-                };
-                let num_kv_heads = if is_sliding {
-                    cfg.num_key_value_heads
-                } else {
-                    cfg.num_global_key_value_heads
-                        .unwrap_or(cfg.num_key_value_heads)
-                };
-
-                per_layer_num_kv_heads.push((num_kv_heads / world_size).max(1));
-                per_layer_k_head_dim.push(head_dim);
-                per_layer_v_head_dim.push(head_dim);
                 if let Some(owner) = kv_shared_layer_index(cfg, layer_idx)? {
-                    kv_cache_layer_owners.push(owner);
                     Ok(NormalCacheType::Shared { owner })
                 } else if is_sliding {
-                    kv_cache_layer_owners.push(layer_idx);
                     if donor_layers.contains(&layer_idx) {
                         // Donor for shared layers: full cache so consumers see
                         // the entire sequence. SWA masking still applied via
@@ -1822,7 +1844,6 @@ impl TextModel {
                         })
                     }
                 } else {
-                    kv_cache_layer_owners.push(layer_idx);
                     Ok(NormalCacheType::Normal {
                         max_seq_len: cfg.max_position_embeddings,
                     })
@@ -1830,25 +1851,11 @@ impl TextModel {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let cfg_metadata = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
-            hidden_size: cfg.hidden_size,
-            num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
-            num_kv_heads: (cfg.num_key_value_heads / mapper.get_comm_for(0)?.world_size()).max(1),
-            sliding_window: Some(cfg.effective_sliding_window()),
-            k_head_dim: cfg.head_dim,
-            v_head_dim: cfg.head_dim,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-        let model_config: Arc<dyn ModelConfigLike + Send + Sync> =
-            Arc::new(Gemma4ModelConfigLike {
-                base: cfg_metadata.clone(),
-                per_layer_num_kv_heads,
-                per_layer_k_head_dim,
-                per_layer_v_head_dim,
-                kv_cache_topology: KvCacheTopology::from_layer_owners(kv_cache_layer_owners),
-            });
+        let model_config = gemma4_kv_model_config(cfg, &|layer_idx| {
+            Ok(mapper.get_comm_for(layer_idx)?.world_size())
+        })?;
+        let cfg_metadata = model_config.base.clone();
+        let model_config: Arc<dyn ModelConfigLike + Send + Sync> = Arc::new(model_config);
 
         Ok(Self {
             embed_tokens,
@@ -2389,10 +2396,11 @@ impl TextModel {
             xs = layer_out;
             input_normed = next_normed;
         }
+        // back on the head's device in the model dtype, which CPU-mapped layers leave for F32
         let xs = if let Some(normed) = input_normed {
-            normed.to_device(&self.device)?
+            self.mapper.cast_nm_device(&normed, false)?
         } else {
-            xs.to_device(&self.device)?.apply(&self.norm)?
+            self.mapper.cast_nm_device(&xs, false)?.apply(&self.norm)?
         };
         let xs = if reduced_to_logits {
             extract_logits(&xs, context_lens)?
@@ -2484,7 +2492,7 @@ impl TextModel {
             let positions = rope_positions.to_device(xs.device())?;
             xs = layer.forward_canvas(&xs, &positions, canvas_kv.get(i), &flash_params)?;
         }
-        let xs = xs.to_device(&self.device)?.apply(&self.norm)?;
+        let xs = self.mapper.cast_nm_device(&xs, false)?.apply(&self.norm)?;
         let mut logits = self.lm_head.forward(&xs)?;
         if let Some(cap) = self.final_logit_softcapping {
             logits = softcap(&logits, cap as f32)?;
