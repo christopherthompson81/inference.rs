@@ -68,7 +68,7 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
 | MTP | Qwen3.5 (dense and MoE), Qwen3.8, Qwen3.8-Flash-Next | Built into the checkpoint (`--mtp`), or a GGUF head file | Supported with paged attention |
 | MTP | ERNIE 4.5 MoE | Built into the checkpoint (`--mtp`) | Supported with paged attention |
 | DFlash / DFlash 2 / DSpark | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next | DFlash and DSpark draft checkpoints (`--mtp-model`) | Supported with paged attention |
-| EAGLE-3 | Llama, Qwen3 (dense and MoE) and the other models on the shared decoder, Qwen3.5 / Qwen3.6, gpt-oss | EAGLE-3 draft checkpoints (`--mtp-model`) | Supported with paged attention on CUDA |
+| EAGLE-3 | Llama, Qwen3 (dense and MoE) and the other models on the shared decoder, Qwen3.5 / Qwen3.6, gpt-oss, Gemma 4 | EAGLE-3 draft checkpoints (`--mtp-model`) | Supported with paged attention on CUDA |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
 
@@ -190,7 +190,7 @@ target's blocks, so a cache hit needs no replay. These drafters don't use CUDA g
 DSpark drafter accepts 2.9-3.0 tokens per step on coding and review prompts against DFlash 2's 3.5, at about the
 same step time, so DFlash 2 stays the better choice where one exists.
 
-## EAGLE-3 (Llama, Qwen3, Qwen3.5 / Qwen3.6, gpt-oss)
+## EAGLE-3 (Llama, Qwen3, Qwen3.5 / Qwen3.6, gpt-oss, Gemma 4)
 
 [EAGLE-3](https://arxiv.org/abs/2503.01840) drafters are one Llama layer trained per target. The layer reads the
 target's hidden states at three of its layers (fused by an `fc` projection), drafts one token at a time from its own
@@ -231,6 +231,18 @@ On gpt-oss-20b (MXFP4 GGUF) with [RedHatAI/gpt-oss-20b-speculator.eagle3](https:
 (q4k), the same requests decoded at 200 tok/s plain, 202-213 at `--mtp-n-predict 1`, 193-204 at 2 and 171-179 at 3,
 for 1.7, 2.2 and 2.3 tokens a step. Each verify row reads its own four of the 32 experts, so on a card bound by memory
 bandwidth deeper drafts cost more in expert reads than they save; pass `--mtp-n-predict 1` for gpt-oss.
+
+Gemma 4 (google's QAT q4_0 GGUFs, the text file alone) with RedHat's drafters (q4k), the same requests:
+
+| Target | Drafts | tok/s | Tokens a step |
+| --- | --- | --- | --- |
+| gemma-4-31B-it | none | 42 / 42 / 42 | |
+| gemma-4-31B-it | 3 ([RedHatAI/gemma-4-31B-it-speculator.eagle3](https://huggingface.co/RedHatAI/gemma-4-31B-it-speculator.eagle3)) | 74 / 67 / 57 | 2.20 |
+| gemma-4-26B-A4B-it | none | 200 / 199 / 200 | |
+| gemma-4-26B-A4B-it | 3 ([RedHatAI/gemma-4-26B-A4B-it-speculator.eagle3](https://huggingface.co/RedHatAI/gemma-4-26B-A4B-it-speculator.eagle3)) | 195 / 200 / 167 | 2.01 |
+| gemma-4-26B-A4B-it | 1 | 232 / 237 / 206 | 1.58 |
+
+As with gpt-oss, the sparse 26B-A4B gains only at one draft; the dense 31B gains at the drafter's own 3.
 
 ## Gemma 4
 
