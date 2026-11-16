@@ -2003,23 +2003,8 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         &mut self,
         config: &crate::speculative::MtpConfig,
     ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
-        let dir = config.resolve_path()?;
-        let Some(cfg) = Eagle3Config::peek(&dir)? else {
-            inference_tensor::bail!(
-                "`--mtp-model` {} is not an EAGLE-3 drafter, the only external drafter this model runs",
-                dir.display()
-            );
-        };
-        let n_predict = config.n_predict.unwrap_or(cfg.n_predict());
-        if n_predict == 0 {
-            inference_tensor::bail!("EAGLE-3 needs at least one draft token");
-        }
-        if let Some(mtp) = &mut self.mtp {
-            mtp.set_n_predict(0);
-        }
-        let mut drafter = eagle3::Eagle3Drafter::load(
-            &dir,
-            &cfg,
+        let Some((drafter, info)) = eagle3::Eagle3Drafter::attach(
+            config,
             eagle3::Eagle3Target {
                 hidden_size: self.cfg.hidden_size,
                 num_layers: self.stack.layers.len(),
@@ -2030,13 +2015,18 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
                 dtype: self.stack.dtype,
                 isq: config.drafter_isq,
             },
-        )?;
-        drafter.head.set_n_predict(n_predict);
+        )?
+        else {
+            inference_tensor::bail!(
+                "`--mtp-model` {} is not an EAGLE-3 drafter, the only external drafter this model runs",
+                config.resolve_path()?.display()
+            );
+        };
+        if let Some(mtp) = &mut self.mtp {
+            mtp.set_n_predict(0);
+        }
         self.eagle3 = Some(Box::new(drafter));
-        Ok(Some(crate::speculative::SpeculativeAttachInfo::mtp(
-            format!("EAGLE-3 {}", dir.display()),
-            n_predict,
-        )))
+        Ok(Some(info))
     }
 
     /// The token embedding, for a multimodal model that embeds its text tokens beside its media.

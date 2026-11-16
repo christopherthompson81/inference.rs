@@ -12,6 +12,8 @@ use inference_nn::paged_attention::AttentionImplementation;
 
 #[path = "../support/recording.rs"]
 mod recording;
+#[path = "../support/tiny_eagle3.rs"]
+mod tiny_eagle3;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 // Byte-level, so every character is a token: the prompt alone is several windows long.
@@ -29,6 +31,9 @@ const HEAD_DIM: usize = 64;
 const VOCAB: usize = 266;
 const WINDOW: usize = 8;
 const GPT_OSS_LAYERS: usize = 2;
+// enough layers for an EAGLE-3 drafter's three distinct taps
+const GPT_OSS_EAGLE3_LAYERS: usize = 4;
+const EAGLE3_N_PREDICT: usize = 2;
 const GPT_OSS_HIDDEN: usize = 64;
 const GPT_OSS_EXPERT_INTER: usize = 64;
 const GPT_OSS_EXPERTS: usize = 2;
@@ -108,9 +113,9 @@ fn record(
     recording::record_checkpoint_with_shapes(&files, num_layers, absent, shapes, build)
 }
 
-fn tiny_gpt_oss() -> anyhow::Result<tempfile::TempDir> {
+fn tiny_gpt_oss(layers: usize) -> anyhow::Result<tempfile::TempDir> {
     // Alternating from a sliding layer, as the released checkpoints do.
-    let layer_types = (0..GPT_OSS_LAYERS)
+    let layer_types = (0..layers)
         .map(|layer| ["sliding_attention", "full_attention"][layer % 2])
         .collect::<Vec<_>>();
     let config = serde_json::json!({
@@ -119,7 +124,7 @@ fn tiny_gpt_oss() -> anyhow::Result<tempfile::TempDir> {
         "vocab_size": VOCAB,
         "hidden_size": GPT_OSS_HIDDEN,
         "intermediate_size": GPT_OSS_EXPERT_INTER,
-        "num_hidden_layers": GPT_OSS_LAYERS,
+        "num_hidden_layers": layers,
         "num_attention_heads": 2,
         "num_key_value_heads": 1,
         "head_dim": HEAD_DIM,
@@ -144,14 +149,14 @@ fn tiny_gpt_oss() -> anyhow::Result<tempfile::TempDir> {
     });
     let cfg: gpt_oss::Config = serde_json::from_value(config.clone())?;
     // Reported absent so the experts load as split dense projections rather than packed MXFP4 blocks.
-    let packed = (0..GPT_OSS_LAYERS)
+    let packed = (0..layers)
         .map(|layer| format!("model.layers.{layer}.mlp.experts.gate_up_proj_blocks"))
         .collect::<Vec<_>>();
     let packed = packed.iter().map(String::as_str).collect::<Vec<_>>();
     let checkpoint = record(
         &config,
         &tokenizer()?,
-        GPT_OSS_LAYERS,
+        layers,
         &packed,
         HashMap::new(),
         |vb, metadata| {
@@ -378,7 +383,7 @@ fn ensure_close(gpu: &[Vec<Step>], cpu: &[Vec<Step>]) -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn gpt_oss_decodes_alike_on_cpu_and_gpu() -> anyhow::Result<()> {
-    let checkpoint = tiny_gpt_oss()?;
+    let checkpoint = tiny_gpt_oss(GPT_OSS_LAYERS)?;
     let cpu = traces(&gpt_oss(checkpoint.path(), Run::Cpu).await?, Run::Cpu).await?;
     let again = traces(&gpt_oss(checkpoint.path(), Run::Cpu).await?, Run::Cpu).await?;
     assert_eq!(cpu, again);
@@ -389,6 +394,42 @@ async fn gpt_oss_decodes_alike_on_cpu_and_gpu() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+// An EAGLE-3 drafter over three of the target's layers drafts, and paged decode with it matches decode without it.
+#[tokio::test]
+async fn a_gpt_oss_eagle3_drafter_keeps_paged_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_gpt_oss(GPT_OSS_EAGLE3_LAYERS)?;
+    let drafter = tiny_eagle3::tiny_eagle3(&tiny_eagle3::Eagle3Shape {
+        hidden: GPT_OSS_HIDDEN,
+        heads: 2,
+        kv_heads: 1,
+        head_dim: HEAD_DIM,
+        intermediate: 2 * GPT_OSS_HIDDEN,
+        vocab: VOCAB,
+        draft_vocab: 64,
+        tap_layer_ids: [1, 2, 4],
+        eagle31: false,
+    })?;
+    let plain = traces(&gpt_oss(checkpoint.path(), Run::Paged).await?, Run::Paged).await?;
+    let drafting = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F16)
+        .with_paged_attn(paged_cache())
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(EAGLE3_N_PREDICT))
+        .build()
+        .await?;
+    let actual = traces(&drafting, Run::Paged).await?;
+    let drafts: usize = drafting
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    anyhow::ensure!(drafts > 0, "the EAGLE-3 drafter never drafted");
+    ensure_close(&actual, &plain)
 }
 
 #[tokio::test]
