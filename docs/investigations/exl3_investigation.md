@@ -1739,3 +1739,75 @@ Qwen3.6 35B-A3B EXL3 4.0 (ours)
   KLD 0.02210 (Run 31) -> 0.02225, p99 0.2117, top-1 93.40%   (within Run 35's +-0.0007)
 EXL3 kernel library +0.09 MiB
 ```
+
+## Run 60 - 2026-11-16 02:00
+
+Question: does Qwen3.8 27B EXL3 4.0 serve the full window beside the DFlash 2 drafter, as recipe A does (262K, q3
+KV, drafter at q4k, 7 drafts: 23.2 GiB against the 23.5 GiB ceiling)?
+
+```
+serve --pa-context-len 262144 --pa-cache-type q3 --mtp-model <DFlash2> --mtp-n-predict 7 --mtp-draft-isq q4k
+  -m <exl3 4.0 ours>      (the vision tower loads on cuda[0] too)
+  8192 KV blocks of 32: 262,112 tokens; server 20,466 MiB at load
+fullwin.py: the first 1.11M characters of wikitext-2 test plus a question about its first article
+  prompt 256,146 tokens, answered correctly, wall 605 s (prefill 473 tok/s over the window), decode 67.2 tok/s at
+  that depth; device peak 22,164 MiB with the desktop's ~313 MiB (nvidia-smi each second), no throttle samples
+```
+
+It fits with ~1.3 GiB to spare at peak. Recipe A's figures (23.2 GiB; 51 tok/s DFlash decode at 261K) are from
+October, not this session.
+
+## Run 61 - 2026-11-16 03:00
+
+Question: what is left in Qwen3.8 27B EXL3 decode (Run 55: plain step 22.10 ms against recipe A's 20.87, head 1.55
+against 1.23)? First candidate: the 6 bpw head. At 248,320 columns its split partials at one row (~10M floats) pass
+the 16 MB GEMV workspace, so it falls back to exllamav3's GEMM. The tile kernel needs no split there (1940 column
+groups), so it was extended to 5, 6 and 8 bpw (a k-tile's words staged through the warp's share of the reduction
+buffer to exllamav3's generic decode, two k-tiles prefetched). Temporary; patch kept in the scratchpad.
+
+```
+verify_gemv_times_by_rows, 5120 x 248320 6 bpw    1 row 1180.7 us (808 GB/s) -> 1094.2 (871)    8 rows 1182.6 -> 1184.3
+nsys over inference bench 512 / 128, head a step:  exllamav3 GEMM 1115 us    tile 1100 us
+nsys, DFlash 2 x7 sampled code request, head:      GEMM ~114 ms over the trace    tile 116 ms
+inference bench 512 / 128, alternating builds:     old 47.6 / 47.7 / 47.5    new 47.6 / 47.6 / 47.5 tok/s
+```
+
+Run 55's 1.55 ms head was not the in-model figure: the GEMM already reads the head at ~850 GB/s in the model, and
+the tile kernel only matches it. Reverted.
+
+Why no kernel saving shows up at all, power and clocks while decoding (bench 512 / 256, samples at >= 90% busy):
+
+```
+                 tok/s    W      SM MHz   mem MHz   throttle      J a token
+EXL3 4.0         47.4     349    1657     9501      0x4 (power)   7.4
+recipe A         50.6     353    1619     9501      0x4 (power)   7.0
+power.limit 370 W (default; max 390)
+```
+
+Plain decode, not only DFlash, runs at the 370 W software power cap for both formats, the memory clock at full rate
+and the SM clock pulled down. So tok/s follows energy per token, and a kernel that moves the same bytes sooner just
+lowers the clock: the head result above, and why item 2 of the list (the 1-row linears' ~0.8 ms against the
+GGUF's) cannot pay either. The 5% energy gap is close to the 4% more bytes EXL3 4.0 reads (14.65 against 14.06 GiB),
+so decode on this card is a question of bytes a token. The levers left are a smaller conversion (KLD 0.0133 has
+room against recipe A's 0.0170) or the power limit (the user's setting).
+
+Kept: `the_tile_gemv_matches_the_gemm` (2 to 4 bpw at 2^25 weights, one and eight rows against the trellis GEMM);
+no test reached the tile path before, since the kernels' test shapes are below TILE_MIN_WEIGHTS.
+
+## Run 62 - 2026-11-16 03:30
+
+Question: is the DFlash verify step power-capped too, or is there kernel time left to win there (Run 61 measured
+plain decode only)? DFlash 2 x7, q3 KV, three sampled 800-token requests (code, explanation, code), power logged
+every 200 ms, no profiler (`dfpw.sh` in the scratchpad):
+
+```
+                 tok/s per request          busy samples   W     SM MHz   power-cap flag
+EXL3 4.0         195.1 / 160.7 / 222.3      63             355   1656     100%
+recipe A         224.2 / 167.1 / 225.4      61             347   1622     100%
+```
+
+The verify step is power-capped as well, all the time. Per-token energy is confounded by acceptance (each format
+drafts and accepts differently on the same seed), so the step is the cleaner measure: at the same cap, Run 55's
+GPU step times (29.52 against 27.89 ms) put EXL3's energy a step ~5.8% over recipe A's. ~4% of that is bytes (14.65
+against 14.06 GiB); the ~2% left (~0.5 ms a step) is the most that cutting instructions (trellis decode, rotations,
+split partials) could recover, and only if it cuts energy, not just time. Not pursued.

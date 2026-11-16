@@ -2117,6 +2117,52 @@ mod tests {
         Ok(())
     }
 
+    // the decode GEMV's tile kernel (matrices past TILE_MIN_WEIGHTS, 2 to 4 bpw) at one and eight rows, against the
+    // trellis GEMM's rows of the same input
+    #[test]
+    fn the_tile_gemv_matches_the_gemm() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        const GEMM_ROWS: usize = 32;
+        let (k, n) = (2048, 16384);
+        let mut ratios = Vec::new();
+        for (words, codebook, seed) in [
+            (32, Exl3Codebook::Mul1, 11),
+            (48, Exl3Codebook::ThreeInst, 12),
+            (64, Exl3Codebook::Mcg, 13),
+        ] {
+            let (t, u, v) = random_linear(k, n, words, seed)?;
+            let layer = Exl3Layer::new_on_device(
+                t.to_device(&device)?,
+                u.to_device(&device)?,
+                v.to_device(&device)?,
+                codebook,
+                None,
+                DType::F16,
+            )?;
+            let x = random_rows(GEMM_ROWS, k, seed + 30)?
+                .to_dtype(DType::F16)?
+                .to_device(&device)?;
+            let gemm = layer
+                .forward_raw(&x)?
+                .to_dtype(DType::F32)?
+                .to_device(&Device::Cpu)?;
+            for m in [1, 8] {
+                let actual = layer.forward_raw(&x.narrow(0, 0, m)?)?;
+                ratios.push((
+                    codebook,
+                    words,
+                    m,
+                    relative_error(&actual, &gemm.narrow(0, 0, m)?)?,
+                ));
+            }
+        }
+        assert!(ratios.iter().all(|r| r.3 < F16_BOUND), "{ratios:?}");
+        Ok(())
+    }
+
     // the experts against each slot's own reconstructed expert: shared rows (gate and up take one row per token) and
     // a row per slot (down), with repeated experts, at one and twelve tokens (the indexed kernel), forty and two hundred (grouped, then split past GROUP_ROWS)
     #[test]
