@@ -43,6 +43,8 @@ pub fn resolve_speculative_model(
     }
 }
 
+const PICKLE_EXTENSIONS: &[&str] = &["bin", "pt", "pth"];
+
 /// Returns a conservative runtime weight footprint for an external assistant checkpoint.
 pub fn external_weight_size_in_bytes(
     config: &MtpConfig,
@@ -52,19 +54,41 @@ pub fn external_weight_size_in_bytes(
         return Ok(0);
     }
     let path = resolve_mtp_path(config)?;
-    let mut weight_paths = fs::read_dir(&path)
+    let files = fs::read_dir(&path)
         .map_err(|err| {
             inference_tensor::Error::msg(format!("failed to list {}: {err}", path.display()))
         })?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
         .collect::<Vec<_>>();
-    weight_paths.sort();
+    let with_extension = |extensions: &[&str]| {
+        let mut paths = files
+            .iter()
+            .filter(|path| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| extensions.contains(&ext))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    };
+    let weight_paths = with_extension(&["safetensors"]);
+    // a pickled drafter (some EAGLE-3 checkpoints) reserves its size on disk
+    let pickled = || -> Option<usize> {
+        let bytes = with_extension(PICKLE_EXTENSIONS)
+            .iter()
+            .filter_map(|path| fs::metadata(path).ok())
+            .map(|meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
+            .fold(0usize, usize::saturating_add);
+        (bytes > 0).then_some(bytes)
+    };
     let bytes = crate::pipeline::checkpoint_runtime_size(&weight_paths, target_dtype)
         .map_err(inference_tensor::Error::msg)?
+        .or_else(pickled)
         .ok_or_else(|| {
             inference_tensor::Error::msg(format!(
-                "MTP model directory {} has no safetensors weights",
+                "MTP model directory {} has no safetensors or pickle weights",
                 path.display()
             ))
         })?;
@@ -111,8 +135,19 @@ pub fn reserve_external_mtp_memory_with_runtime(
         return Ok(Some(cache_config));
     }
     let dtype = dtype.try_into_dtype(&[device])?;
-    #[cfg_attr(not(feature = "drafters"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(feature = "drafters", all(feature = "cuda", target_family = "unix"))),
+        allow(unused_mut)
+    )]
     let mut cache_config = cache_config;
+    // an EAGLE-3 drafter's one layer keeps its K/V in the target's blocks, beside the target's layers
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    if device.is_cuda()
+        && let Some(eagle3) =
+            inference_nn::decoder::Eagle3Config::peek(&resolve_mtp_path(mtp_config)?)?
+    {
+        cache_config = cache_config.with_auxiliary_layers(eagle3.auxiliary_layers());
+    }
     #[cfg(feature = "drafters")]
     let local_mtp = MtpConfig {
         model: Some(resolve_mtp_path(mtp_config)?.to_string_lossy().into_owned()),
