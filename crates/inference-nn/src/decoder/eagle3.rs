@@ -11,6 +11,7 @@ use std::{
 };
 
 use inference_quant::{IsqType, QuantMethod, QuantizeOntoGuard, ShardedVarBuilder};
+use inference_tensor::quantized::gguf_file::Value as GgufValue;
 use inference_tensor::{D, DType, Device, Result, Tensor};
 use serde_json::Value;
 
@@ -54,6 +55,33 @@ const UNREAD: &[&str] = &["embed_tokens.weight", "t2d"];
 // the speculators library's proposal length, when the drafter names none
 const DEFAULT_DRAFTS: usize = 3;
 const DEFAULT_ROPE_THETA: f64 = 10_000.0;
+// llama.cpp's EAGLE-3 GGUF (`convert_hf_to_gguf.py` with `--target-model-dir`)
+const GGUF_EXTENSION: &str = "gguf";
+const GGUF_ARCHITECTURE: &str = "eagle3";
+const GGUF_DRAFT_HEAD: &str = "output.weight";
+// our name for each tensor, llama.cpp's for it; its token embedding (the target's copy) stays unread
+const GGUF_TENSORS: &[(&str, &str)] = &[
+    ("fc.weight", "fc.weight"),
+    ("input_norm.weight", "enc.output_norm.weight"),
+    ("norm.weight", "output_norm.weight"),
+    ("lm_head.weight", GGUF_DRAFT_HEAD),
+    ("layers.0.input_layernorm.weight", "blk.0.attn_norm.weight"),
+    ("layers.0.hidden_norm.weight", "blk.0.attn_norm_2.weight"),
+    (
+        "layers.0.post_attention_layernorm.weight",
+        "blk.0.ffn_norm.weight",
+    ),
+    ("layers.0.self_attn.q_proj.weight", "blk.0.attn_q.weight"),
+    ("layers.0.self_attn.k_proj.weight", "blk.0.attn_k.weight"),
+    ("layers.0.self_attn.v_proj.weight", "blk.0.attn_v.weight"),
+    (
+        "layers.0.self_attn.o_proj.weight",
+        "blk.0.attn_output.weight",
+    ),
+    ("layers.0.mlp.gate_proj.weight", "blk.0.ffn_gate.weight"),
+    ("layers.0.mlp.up_proj.weight", "blk.0.ffn_up.weight"),
+    ("layers.0.mlp.down_proj.weight", "blk.0.ffn_down.weight"),
+];
 
 fn msg(e: impl std::fmt::Display) -> inference_tensor::Error {
     inference_tensor::Error::msg(e.to_string())
@@ -61,6 +89,14 @@ fn msg(e: impl std::fmt::Display) -> inference_tensor::Error {
 
 fn usize_field(v: &Value, key: &str) -> Option<usize> {
     v.get(key)?.as_u64().map(|n| n as usize)
+}
+
+fn gguf_uint(value: &GgufValue) -> Option<usize> {
+    match *value {
+        GgufValue::I32(v) => usize::try_from(v).ok(),
+        GgufValue::I64(v) => usize::try_from(v).ok(),
+        ref v => v.to_u64().ok().and_then(|v| usize::try_from(v).ok()),
+    }
 }
 
 fn flag(v: &Value, key: &str) -> bool {
@@ -87,11 +123,16 @@ pub struct Eagle3Config {
     norm_before_fc: bool,
     norm_output: bool,
     n_predict: Option<usize>,
+    // a llama.cpp GGUF drafter: its file, its q/k rows in llama.cpp's adjacent-pair RoPE order
+    gguf: Option<std::path::PathBuf>,
 }
 
 impl Eagle3Config {
     /// The config of the drafter in `dir`, or `None` when it is not an EAGLE-3 drafter.
     pub fn peek(dir: &Path) -> Result<Option<Self>> {
+        if dir.extension().and_then(|e| e.to_str()) == Some(GGUF_EXTENSION) && dir.is_file() {
+            return Self::from_gguf(dir);
+        }
         let Ok(text) = fs::read_to_string(dir.join(CONFIG_FILE)) else {
             return Ok(None);
         };
@@ -191,6 +232,69 @@ impl Eagle3Config {
             norm_before_fc: flag(raw, "norm_before_fc"),
             norm_output: flag(raw, "norm_output"),
             n_predict,
+            gguf: None,
+        }))
+    }
+
+    /// A llama.cpp EAGLE-3 GGUF's config, from its `eagle3.*` metadata; `None` for another architecture.
+    fn from_gguf(path: &Path) -> Result<Option<Self>> {
+        let archive = inference_quant::GgufArchive::open([path])?;
+        let meta = |key: &str| archive.metadata_value(&format!("{GGUF_ARCHITECTURE}.{key}"));
+        if !matches!(archive.metadata_value("general.architecture"), Some(GgufValue::String(arch)) if arch == GGUF_ARCHITECTURE)
+        {
+            return Ok(None);
+        }
+        let uint = |key: &str| -> Result<usize> {
+            meta(key).and_then(gguf_uint).ok_or_else(|| {
+                msg(format!(
+                    "the EAGLE-3 GGUF has no `{GGUF_ARCHITECTURE}.{key}`"
+                ))
+            })
+        };
+        let float = |key: &str| {
+            meta(key).and_then(|v| v.to_f64().or_else(|_| v.to_f32().map(f64::from)).ok())
+        };
+        let flag = |key: &str| meta(key).and_then(|v| v.to_bool().ok()).unwrap_or(false);
+        let layer_ids = meta("target_layers")
+            .map(|ids| {
+                ids.to_vec()
+                    .map_err(msg)?
+                    .iter()
+                    .map(|id| {
+                        gguf_uint(id).ok_or_else(|| msg("EAGLE-3 GGUF layer ids are not integers"))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        // the draft head's rows
+        let draft_vocab_size = archive
+            .tensor_info(GGUF_DRAFT_HEAD)
+            .ok()
+            .and_then(|info| info.shape().first().copied());
+        let hidden_size = uint("embedding_length")?;
+        let num_heads = uint("attention.head_count")?;
+        Ok(Some(Self {
+            hidden_size,
+            intermediate_size: uint("feed_forward_length")?,
+            num_heads,
+            num_kv_heads: uint("attention.head_count_kv").unwrap_or(num_heads),
+            head_dim: uint("attention.key_length").unwrap_or(hidden_size / num_heads),
+            rms_norm_eps: float("attention.layer_norm_rms_epsilon").unwrap_or(1e-6),
+            rope: RopeKind::Llama3 {
+                theta: float("rope.freq_base").unwrap_or(DEFAULT_ROPE_THETA) as f32,
+                scaling: None,
+            },
+            max_position_embeddings: uint("context_length")?,
+            vocab_size: uint("vocab_size").ok(),
+            draft_vocab_size,
+            layer_ids,
+            target_hidden_size: uint("target_hidden_size").ok(),
+            norm_before_residual: flag("norm_before_residual"),
+            fc_norm: false,
+            norm_before_fc: flag("norm_before_fc"),
+            norm_output: false,
+            n_predict: None,
+            gguf: Some(path.to_path_buf()),
         }))
     }
 
@@ -434,29 +538,10 @@ impl Eagle3Drafter {
             );
         }
         let taps = cfg.tap_layers(target.num_layers)?;
-        let mut paths = fs::read_dir(dir)
-            .map_err(msg)?
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|path| {
-                path.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| WEIGHT_EXTENSIONS.contains(&e))
-            })
-            .collect::<Vec<_>>();
-        paths.sort();
-        if paths.is_empty() {
-            inference_tensor::bail!("no EAGLE-3 weights in {}", dir.display());
-        }
-        let vb = from_mmaped_safetensors(
-            paths,
-            Some(target.dtype),
-            target.device,
-            Vec::new(),
-            true,
-            None,
-            |name| !UNREAD.contains(&name.as_str()),
-            Arc::new(|_| DeviceForLoadTensor::Base),
-        )?;
+        let vb = match &cfg.gguf {
+            Some(path) => gguf_var_builder(path, target.device, target.dtype)?,
+            None => checkpoint_var_builder(dir, target.device, target.dtype)?,
+        };
         let kv_layer_idx = target.kv_layer_idx;
         let spec = DecoderSpec {
             vocab_size: target.vocab_size,
@@ -477,7 +562,9 @@ impl Eagle3Drafter {
             mlp: MlpKind::Gated,
             ..Default::default()
         };
-        let rope = Arc::new(spec.rope(&spec.rope, &vb, target.device, true, target.dtype)?);
+        // a GGUF's q/k rows are in llama.cpp's adjacent-pair order
+        let half_split = cfg.gguf.is_none();
+        let rope = Arc::new(spec.rope(&spec.rope, &vb, target.device, half_split, target.dtype)?);
         let comm = target.mapper.get_comm_for(kv_layer_idx)?;
         let load = LayerLoad {
             mapper: target.mapper,
@@ -550,7 +637,15 @@ impl Eagle3Drafter {
         let lm_head =
             isq(spec.replicated_linear(cfg.hidden_size, draft_vocab, false, vb.pp(LM_HEAD))?)?;
         let vocab = (draft_vocab != target.vocab_size)
-            .then(|| draft_vocab_map(&vb, draft_vocab, target.vocab_size, target.dtype))
+            .then(|| {
+                draft_vocab_map(
+                    draft_offsets(&vb, cfg.gguf.as_deref())?,
+                    draft_vocab,
+                    target.vocab_size,
+                    target.device,
+                    target.dtype,
+                )
+            })
             .transpose()?;
         let head = MtpHead::concat(MtpConcatParts {
             block,
@@ -580,17 +675,81 @@ impl Eagle3Drafter {
     }
 }
 
+// a checkpoint directory's safetensors or pickled weights
+fn checkpoint_var_builder(dir: &Path, device: &Device, dtype: DType) -> Result<ShardedVarBuilder> {
+    let mut paths = fs::read_dir(dir)
+        .map_err(msg)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| WEIGHT_EXTENSIONS.contains(&e))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    if paths.is_empty() {
+        inference_tensor::bail!("no EAGLE-3 weights in {}", dir.display());
+    }
+    from_mmaped_safetensors(
+        paths,
+        Some(dtype),
+        device,
+        Vec::new(),
+        true,
+        None,
+        |name| !UNREAD.contains(&name.as_str()),
+        Arc::new(|_| DeviceForLoadTensor::Base),
+    )
+}
+
+// a llama.cpp GGUF's tensors under our names, its linears kept in their quantized types
+fn gguf_var_builder(path: &Path, device: &Device, dtype: DType) -> Result<ShardedVarBuilder> {
+    let archive = Arc::new(inference_quant::GgufArchive::open([path])?);
+    let bindings = GGUF_TENSORS
+        .iter()
+        .filter(|(_, gguf)| archive.tensor_info(gguf).is_ok())
+        .map(|(ours, gguf)| {
+            (
+                (*ours).to_string(),
+                inference_quant::GgufTensorBinding::tensor(*gguf),
+            )
+        })
+        .collect::<inference_quant::GgufBindingMap>();
+    let source = Arc::new(inference_quant::GgufWeightSource::new(
+        archive, &bindings, dtype,
+    )?);
+    Ok(source.sharded_var_builder(device.clone()))
+}
+
 // each target id's draft id (`target = draft + d2t[draft]`), the floor's column past the draft vocabulary otherwise
+// the draft-to-target offsets: a checkpoint's `d2t` tensor, or a GGUF's, which llama.cpp stores as the target ids
+fn draft_offsets(vb: &ShardedVarBuilder, gguf: Option<&Path>) -> Result<Vec<i64>> {
+    let Some(path) = gguf else {
+        return vb
+            .get_unchecked_dtype(D2T, DType::I64)?
+            .to_device(&Device::Cpu)?
+            .to_vec1::<i64>();
+    };
+    let archive = inference_quant::GgufArchive::open([path])?;
+    let data = archive.tensor_data(D2T)?;
+    Ok(data
+        .bytes()
+        .as_chunks::<{ std::mem::size_of::<i64>() }>()
+        .0
+        .iter()
+        .map(|bytes| i64::from_le_bytes(*bytes))
+        .zip(0i64..)
+        .map(|(target, draft)| target - draft)
+        .collect())
+}
+
 fn draft_vocab_map(
-    vb: &ShardedVarBuilder,
+    d2t: Vec<i64>,
     draft_vocab: usize,
     target_vocab: usize,
+    device: &Device,
     dtype: DType,
 ) -> Result<DraftVocab> {
-    let d2t = vb
-        .get_unchecked_dtype(D2T, DType::I64)?
-        .to_device(&Device::Cpu)?
-        .to_vec1::<i64>()?;
     if d2t.len() != draft_vocab {
         inference_tensor::bail!(
             "the EAGLE-3 `d2t` has {} entries for a {draft_vocab}-token draft vocabulary",
@@ -616,7 +775,6 @@ fn draft_vocab_map(
     for (draft, &target) in ids.iter().enumerate() {
         gather[target as usize] = draft as u32;
     }
-    let device = vb.device();
     Ok(DraftVocab {
         gather: Tensor::from_vec(gather, target_vocab, device)?,
         floor: Tensor::from_vec(vec![f32::NEG_INFINITY], (1, 1), device)?.to_dtype(dtype)?,

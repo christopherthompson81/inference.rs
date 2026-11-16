@@ -275,3 +275,37 @@ Greedy, the 31B's ISO-8601 reply with the drafter matches plain decode for 149 t
 0.133), then splits at a near tie the 4-row verify rounds the other way (plain: '    ' -0.53 / '        ' -0.89;
 drafting: '        ' -0.66 / '    ' -0.73). A tiny Gemma 4 (the 31B's layout in four layers: three sliding, one global
 with K as V and proportional partial RoPE) with a tiny drafter keeps paged decode's output.
+
+## Run 11 - 2026-11-16 15:10
+
+**Question:** do llama.cpp's `eagle3` GGUFs load and draft as their checkpoints do?
+
+ggml-org/gpt-oss-20b-GGUF ships `eagle3-gpt-oss-20b-{BF16,Q8_0}.gguf` (llama.cpp's `convert_hf_to_gguf.py` with
+`--target-model-dir`; apparently RedHat's drafter, same `norm_before_fc` and layers 2, 12, 21). What the converter
+writes, from its source (`conversion/llama.py`, `gguf-py/gguf/constants.py`):
+
+- the config as `eagle3.*` metadata (`target_layers`, `target_hidden_size`, `norm_before_residual`, `norm_before_fc`,
+  the usual `embedding_length` / `attention.*` / `rope.freq_base`), the draft vocabulary as `output.weight`'s rows;
+- llama's tensor names, with `hidden_norm` as `attn_norm_2` and the `norm_before_fc` norm as `enc.output_norm`;
+- q/k rows permuted into llama.cpp's adjacent-pair RoPE order (`LlamaModel.permute`);
+- `d2t` as I64 target ids (each offset plus its draft id), not offsets.
+
+A `.gguf` `--mtp-model` now reads its config from that metadata and its weights through the GGUF weight source under
+our names (the linears keep their stored type), ropes adjacent pairs, and reads `d2t` from its bytes. DFlash's config
+probe and the drafter memory reservation took the path as a directory; a file is now no DFlash drafter and reserves its
+size.
+
+gpt-oss-20b MXFP4 target, 1 draft, e3bench (t=0.6):
+
+```
+                                        tok/s                 tokens a step   accepted
+RedHat safetensors, q4k (Run 9)          213 / 210 / 202      1.69            68.6%
+ggml-org GGUF Q8_0                       191 / 203 / 209      1.66            65.7%
+ggml-org GGUF Q8_0 -> q4k                198 / 199 / 210      1.67            66.7%
+ggml-org GGUF Q8_0, half-split RoPE      (wrong on purpose)   1.56            55.8%
+```
+
+The adjacent-pair RoPE is the right reading: the half-split one costs ten points of acceptance. A tiny drafter written
+as llama.cpp writes it (names, permuted q/k, target-id `d2t`, F32) loads, drafts as often as its checkpoint and keeps
+greedy decoding; a random tiny drafter's drafts are never accepted, so that test cannot see the RoPE order itself,
+which the run above does.

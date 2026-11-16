@@ -54,6 +54,13 @@ pub fn external_weight_size_in_bytes(
         return Ok(0);
     }
     let path = resolve_mtp_path(config)?;
+    // a single-file drafter (an EAGLE-3 GGUF) loads as it is stored
+    if path.is_file() {
+        let bytes = fs::metadata(&path)
+            .map_err(inference_tensor::Error::wrap)?
+            .len();
+        return Ok(usize::try_from(bytes).unwrap_or(usize::MAX));
+    }
     let files = fs::read_dir(&path)
         .map_err(|err| {
             inference_tensor::Error::msg(format!("failed to list {}: {err}", path.display()))
