@@ -2,6 +2,7 @@
 //!
 //! Supports multiple reasoning formats:
 //! - **Think tags**: `<think>...</think>` (DeepSeek R1, QwQ, SmolLM3)
+//! - **Seed think tags**: `<seed:think>...</seed:think>` (Seed-OSS)
 //! - **Channel tags**: `<|channel>thought\n...<channel|>` (Gemma 4)
 
 pub mod harmony;
@@ -39,5 +40,7 @@ pub enum ReasoningMode {
 
 /// Check if a template uses any reasoning format (think tags or channel tags).
 pub fn is_reasoning_template(template: &str) -> bool {
-    tag_based::is_think_tag_template(template) || tag_based::is_channel_tag_template(template)
+    tag_based::is_think_tag_template(template)
+        || tag_based::is_seed_think_template(template)
+        || tag_based::is_channel_tag_template(template)
 }

@@ -14,6 +14,8 @@ mod llama;
 mod mistral_nemo;
 mod qwen;
 
+pub(crate) use qwen::{SEED_TOOL_CALL_CLOSE, SEED_TOOL_CALL_OPEN};
+
 use anyhow::Result;
 use llguidance::api::TopLevelGrammar;
 
@@ -22,6 +24,8 @@ use crate::Tool;
 const REQUIRED_TOOL_CALL_CONTROL_TOKENS: &[&str] = &[
     "<tool_call>",
     "</tool_call>",
+    SEED_TOOL_CALL_OPEN,
+    SEED_TOOL_CALL_CLOSE,
     "<|python_tag|>",
     "[TOOL_CALLS]",
     "<tool_calls>",
@@ -39,6 +43,8 @@ pub enum ToolCallFormat {
     Atem,
     /// `<tool_call>{"name":"...","arguments":{...}}</tool_call>`
     Qwen,
+    /// `<seed:tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></seed:tool_call>`
+    Seed,
     /// `<|python_tag|>{"name":"...","parameters":{...}}`
     Llama,
     /// `<|tool_call_start|>[name(arg="value")]<|tool_call_end|>`
@@ -102,7 +108,8 @@ static PARSERS: std::sync::LazyLock<Vec<Box<dyn ToolFormatParser>>> =
             Box::new(gemma4::Gemma4Parser),
             Box::new(liquid::LiquidParser),
             Box::new(llama::LlamaParser),
-            Box::new(qwen::QwenParser),
+            Box::new(qwen::QwenParser::new(qwen::QWEN_WRAPPER)),
+            Box::new(qwen::QwenParser::new(qwen::SEED_WRAPPER)),
             Box::new(hunyuan::HunyuanParser),
             Box::new(mistral_nemo::MistralNemoParser),
             Box::new(deepseek::DeepSeekParser),
@@ -148,7 +155,7 @@ pub fn build_required_tool_call_grammar(
         }
     }
 
-    qwen::QwenParser.required_tool_call_grammar(tools)
+    qwen::tool_call_grammar(qwen::QWEN_WRAPPER, tools, true)
 }
 
 /// Wrapper tokens the tokenizer has as special tokens become token references in `grammar`; others stay text.
@@ -192,6 +199,9 @@ pub fn extract_model_specific_message(message: &str) -> Result<Option<(String, S
 fn strip_tool_call_segments(message: &str, format: ToolCallFormat) -> String {
     match format {
         ToolCallFormat::Qwen => strip_delimited_segments(message, "<tool_call>", "</tool_call>"),
+        ToolCallFormat::Seed => {
+            strip_delimited_segments(message, SEED_TOOL_CALL_OPEN, SEED_TOOL_CALL_CLOSE)
+        }
         ToolCallFormat::Gemma4 => strip_delimited_segments(message, "<|tool_call>", "<tool_call|>"),
         ToolCallFormat::DeepSeek => {
             strip_delimited_segments(message, "<｜tool▁call▁begin｜>", "<｜tool▁call▁end｜>")

@@ -271,6 +271,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::KimiLinear,
         build: build_kimi_linear,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::SeedOss,
+        build: build_seed_oss,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -1320,6 +1324,26 @@ fn build_qwen2(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     config.insert("use_sliding_window".into(), json!(pattern.is_some()));
     config.insert("max_window_layers".into(), json!(fields.num_hidden_layers));
     config.insert("layer_types".into(), json!(pattern));
+    Ok(JsonValue::Object(config))
+}
+
+// llama.cpp's converter writes no bias flags; the tensors say which projections carry one
+fn build_seed_oss(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    reject_unsupported_rope_scaling(metadata, "SeedOss")?;
+    let fields = StandardFields::read(metadata, None)?;
+    require_full_rotary(metadata, fields.head_dim)?;
+    let mut config = fields.rms_json();
+    config.remove("sliding_window");
+    config.insert("hidden_act".into(), json!("silu"));
+    config.insert("head_dim".into(), json!(fields.head_dim));
+    config.insert(
+        "attention_bias".into(),
+        json!(metadata.has_tensor_marker(".attn_q.bias")),
+    );
+    config.insert(
+        "attention_out_bias".into(),
+        json!(metadata.has_tensor_marker(".attn_output.bias")),
+    );
     Ok(JsonValue::Object(config))
 }
 
@@ -3734,7 +3758,7 @@ mod tests {
         pub use inference_models_other::{
             deepseek, ernie4_5, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
             hunyuan_v1_dense, hunyuan_v1_moe, jamba, kimi_linear, lfm2, mamba, mamba2, nemotron_h,
-            olmo, rwkv_hybrid, rwkv6, rwkv7, starcoder2,
+            olmo, rwkv_hybrid, rwkv6, rwkv7, seed_oss, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -4257,6 +4281,9 @@ mod tests {
             }
             NormalLoaderType::Olmoe => {
                 assert_deserializes(loader, config, models::olmo::OlmoeConfig::from_json)
+            }
+            NormalLoaderType::SeedOss => {
+                assert_deserializes(loader, config, models::seed_oss::Config::from_json)
             }
         }
     }

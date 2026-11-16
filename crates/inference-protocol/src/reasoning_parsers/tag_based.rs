@@ -17,6 +17,10 @@
 pub const THINK_OPEN_TAG: &str = "<think>";
 pub const THINK_CLOSE_TAG: &str = "</think>";
 
+/// Seed-OSS; `<seed:cot_budget_reflect>` markers inside stay reasoning text.
+pub const SEED_THINK_OPEN_TAG: &str = "<seed:think>";
+pub const SEED_THINK_CLOSE_TAG: &str = "</seed:think>";
+
 /// The bare channel token (used for template detection).
 pub const CHANNEL_OPEN_TOKEN: &str = "<|channel>";
 pub const CHANNEL_CLOSE_TOKEN: &str = "<channel|>";
@@ -73,6 +77,14 @@ impl TagReasoningContext {
     /// Create a TagReasoningContext for `<think>...</think>` tags.
     pub fn new_think_tags() -> Self {
         Self::with_tags(THINK_OPEN_TAG, THINK_CLOSE_TAG)
+    }
+
+    /// Starts inside the block when the prompt leaves one open, as the budget-0 generation prompt of some
+    /// Seed-OSS templates (`<seed:think><seed:cot_budget_reflect>`) does.
+    pub fn new_seed_think_tags(prompt: &str) -> Self {
+        let mut ctx = Self::with_tags(SEED_THINK_OPEN_TAG, SEED_THINK_CLOSE_TAG);
+        ctx.in_think_block = prompt.rfind(SEED_THINK_OPEN_TAG) > prompt.rfind(SEED_THINK_CLOSE_TAG);
+        ctx
     }
 
     /// Create a TagReasoningContext for Gemma 4 channel tags.
@@ -430,6 +442,10 @@ pub fn is_think_tag_template(template: &str) -> bool {
     template.contains(THINK_OPEN_TAG) && template.contains(THINK_CLOSE_TAG)
 }
 
+pub fn is_seed_think_template(template: &str) -> bool {
+    template.contains(SEED_THINK_OPEN_TAG) && template.contains(SEED_THINK_CLOSE_TAG)
+}
+
 /// Check if a chat template uses Gemma 4 channel tags.
 ///
 /// Returns true if the template contains both `<|channel>` and `<channel|>` markers.
@@ -457,6 +473,50 @@ mod tests {
             Some("The user greeted me. Respond warmly.")
         );
         assert_eq!(ctx.content().as_deref(), Some("Hello there!"));
+    }
+
+    #[test]
+    fn seed_budget_reflections_stay_in_reasoning() {
+        let mut ctx = TagReasoningContext::new_seed_think_tags("<seed:bos>assistant\n");
+        for chunk in [
+            "<seed:think>",
+            "Add the numbers.",
+            "<seed:cot_budget_reflect>I have used 129 tokens, and there are 383 tokens remaining.</seed:cot_budget_reflect>",
+            " Done.</seed:",
+            "think>",
+            "The sum is 4.",
+        ] {
+            ctx.process_bytes(chunk.as_bytes());
+        }
+        ctx.finalize();
+        assert_eq!(
+            ctx.reasoning_content().as_deref(),
+            Some(
+                "Add the numbers.<seed:cot_budget_reflect>I have used 129 tokens, and there are 383 tokens remaining.</seed:cot_budget_reflect> Done."
+            )
+        );
+        assert_eq!(ctx.content().as_deref(), Some("The sum is 4."));
+    }
+
+    #[test]
+    fn a_prompt_left_inside_a_seed_think_block_starts_in_reasoning() {
+        let open = "<seed:bos>assistant\n<seed:think><seed:cot_budget_reflect>";
+        let closed = "<seed:bos>assistant\n<seed:think>budget 0</seed:think>";
+        for (prompt, reasoning, content) in [
+            (open, Some("Budget 0.</seed:cot_budget_reflect>\n"), "Blue."),
+            (closed, None, "Budget 0.</seed:cot_budget_reflect>\nBlue."),
+        ] {
+            let mut ctx = TagReasoningContext::new_seed_think_tags(prompt);
+            ctx.process_bytes(b"Budget 0.</seed:cot_budget_reflect>\n");
+            ctx.process_bytes(if reasoning.is_some() {
+                b"</seed:think>Blue."
+            } else {
+                b"Blue."
+            });
+            ctx.finalize();
+            assert_eq!(ctx.reasoning_content().as_deref(), reasoning, "{prompt}");
+            assert_eq!(ctx.content().as_deref(), Some(content), "{prompt}");
+        }
     }
 
     #[test]

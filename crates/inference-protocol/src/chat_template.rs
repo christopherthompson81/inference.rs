@@ -12,8 +12,14 @@ use serde::Serialize;
 use crate::{
     Tool,
     request::{MessageContent, ReasoningEffort, resolve_reasoning_controls},
-    tools::ToolCallFormat,
+    tools::{
+        ToolCallFormat,
+        parsers::{SEED_TOOL_CALL_CLOSE, SEED_TOOL_CALL_OPEN},
+    },
 };
+
+/// The budget Seed-OSS's template reads as thinking off.
+const NO_THINKING_BUDGET: i64 = 0;
 
 #[derive(Debug, inference_json::FromJson, Serialize)]
 pub struct AddedTokensDecoder {
@@ -125,6 +131,12 @@ impl ChatTemplate {
     }
 
     /// Check if the template uses Gemma 4 channel-based reasoning tags.
+    pub fn uses_seed_think_tags(&self) -> bool {
+        self.get_template_contents()
+            .iter()
+            .any(|t| crate::reasoning_parsers::tag_based::is_seed_think_template(t))
+    }
+
     pub fn uses_channel_tags(&self) -> bool {
         self.get_template_contents()
             .iter()
@@ -289,6 +301,8 @@ fn template_tool_call_format(template: &str) -> Option<ToolCallFormat> {
         Some(ToolCallFormat::Hunyuan)
     } else if template.contains("<｜tool▁call▁begin｜>") {
         Some(ToolCallFormat::DeepSeek)
+    } else if template.contains(SEED_TOOL_CALL_OPEN) && template.contains(SEED_TOOL_CALL_CLOSE) {
+        Some(ToolCallFormat::Seed)
     } else if template.contains("<tool_call>") && template.contains("</tool_call>") {
         Some(ToolCallFormat::Qwen)
     } else {
@@ -641,6 +655,12 @@ pub fn apply_chat_template_to(
         .reasoning_effort
         .map(|effort| Value::from(effort.as_str()))
         .unwrap_or(Value::UNDEFINED);
+    // Seed-OSS reads thinking off as a zero budget; left undefined, its template thinks without one
+    let thinking_budget = if reasoning_controls.enable_thinking {
+        Value::UNDEFINED
+    } else {
+        Value::from(NO_THINKING_BUDGET)
+    };
 
     // Detect builtin tools from the tools list
     // Known builtin tools for GPT-OSS/Harmony format: "browser", "python"
@@ -678,6 +698,7 @@ pub fn apply_chat_template_to(
             enable_thinking => reasoning_controls.enable_thinking,
             reasoning_effort => &reasoning_effort_value,
             reasoning_strength => &reasoning_effort_value,
+            thinking_budget => &thinking_budget,
         })?
     } else {
         tmpl.render(context! {
@@ -692,6 +713,7 @@ pub fn apply_chat_template_to(
             enable_thinking => reasoning_controls.enable_thinking,
             reasoning_effort => &reasoning_effort_value,
             reasoning_strength => &reasoning_effort_value,
+            thinking_budget => &thinking_budget,
         })?
     };
 
@@ -873,6 +895,10 @@ mod tests {
             ("<｜tool▁call▁begin｜>function", ToolCallFormat::DeepSeek),
             ("<tool_call>{{ tool }}</tool_call>", ToolCallFormat::Qwen),
             (
+                "<seed:tool_call>{{ tool }}</seed:tool_call>",
+                ToolCallFormat::Seed,
+            ),
+            (
                 "<|start|>assistant<|channel|>commentary<|message|>",
                 ToolCallFormat::Harmony,
             ),
@@ -992,6 +1018,31 @@ mod tests {
         const { assert!(DEFAULT_ENABLE_THINKING) };
         assert_eq!(rendered, "<|think|><bos>hello");
         assert_eq!(rendered, enabled);
+    }
+
+    #[test]
+    fn thinking_off_is_a_zero_thinking_budget() {
+        let template = ChatTemplateValue(Either::Left(
+            "{% if thinking_budget is defined %}budget={{ thinking_budget }}{% else %}unbounded{% endif %}"
+                .to_string(),
+        ));
+        let render = |enable_thinking| {
+            apply_chat_template_to(
+                vec![user_text_message("hello")],
+                true,
+                enable_thinking,
+                None,
+                &template,
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .unwrap()
+        };
+        assert_eq!(render(None), "unbounded");
+        assert_eq!(render(Some(true)), "unbounded");
+        assert_eq!(render(Some(false)), "budget=0");
     }
 
     #[test]

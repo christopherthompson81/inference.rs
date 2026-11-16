@@ -307,6 +307,7 @@ class NormalLoaderType(str, Enum):
     OLMOE = "olmoe"
     LFM2 = "lfm2"
     LFM2_MOE = "lfm2_moe"
+    SEED_OSS = "seed_oss"
 
 
 class OpenAiCodeInterpreterContainerType(str, Enum):

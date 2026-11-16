@@ -54,6 +54,7 @@ mod paddleocr_vl;
 mod rwkv6;
 mod rwkv7;
 mod rwkv_hybrid;
+mod seed_oss;
 mod starcoder2;
 
 #[cfg(test)]
@@ -91,6 +92,7 @@ pub use paddleocr_vl::*;
 pub use rwkv_hybrid::*;
 pub use rwkv6::*;
 pub use rwkv7::*;
+pub use seed_oss::*;
 pub use starcoder2::*;
 
 inference_nn::boxed_loaders!(
@@ -120,6 +122,7 @@ inference_nn::boxed_loaders!(
     Olmo2Loader,
     OlmoLoader,
     OlmoeLoader,
+    SeedOssLoader,
     Starcoder2Loader,
 );
 inference_nn::boxed_loaders!(

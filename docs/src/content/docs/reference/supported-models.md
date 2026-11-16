@@ -79,6 +79,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `OlmoeForCausalLM` | OLMoE | <details><summary><code>allenai/OLMoE-1B-7B-0125-Instruct</code></summary><code>inference run -m allenai/OLMoE-1B-7B-0125-Instruct</code></details> |
 | `Lfm2ForCausalLM` | LFM2, LFM2.5 | <details><summary><code>LiquidAI/LFM2.5-1.2B-Instruct</code> (LFM2.5), <code>LiquidAI/LFM2-1.2B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-1.2B-Instruct</code><br><code>inference run -m LiquidAI/LFM2-1.2B</code></details> |
 | `Lfm2MoeForCausalLM` | LFM2 MoE, LFM2.5 MoE | <details><summary><code>LiquidAI/LFM2.5-8B-A1B</code> (LFM2.5), <code>LiquidAI/LFM2-8B-A1B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-8B-A1B</code><br><code>inference run -m LiquidAI/LFM2-8B-A1B</code></details> |
+| `SeedOssForCausalLM` | Seed-OSS | <details><summary><code>ByteDance-Seed/Seed-OSS-36B-Instruct</code></summary><code>inference run -m ByteDance-Seed/Seed-OSS-36B-Instruct</code></details> |
 
 ## Multimodal models
 
