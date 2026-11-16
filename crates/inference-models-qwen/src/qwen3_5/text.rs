@@ -1785,9 +1785,16 @@ impl Qwen3_5TextModel {
             })
             .transpose()?;
         let mapper = normal_loading_metadata.mapper;
-        // an EXL3 checkpoint stores its embedding as rings (`trellis`, `signs`) in place of the weight
+        // an EXL3 checkpoint stores its embedding as rings (`trellis`, `signs`) in place of the weight; only it is asked,
+        // since a recording checkpoint holds every name it is asked about
+        let exl3 = matches!(cfg.quantization_config, Some(QuantizedConfig::Exl3 { .. }));
+        let names: &[&str] = if exl3 {
+            &["weight", "trellis"]
+        } else {
+            &["weight"]
+        };
         let embedding_under = |prefix: &str| {
-            ["weight", "trellis"].iter().any(|name| {
+            names.iter().any(|name| {
                 layers::contains_tensor_or_uqff(&vb, &format!("{prefix}.embed_tokens.{name}"))
             })
         };
