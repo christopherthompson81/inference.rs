@@ -75,3 +75,29 @@ Raw text puts both engines far off (wikitext PPL 300-1900 for a 31B), and there 
 rounding. In chat form they agree: a 422-token prompt's 60-token reply on the 31B is equal token for token, mean
 |d logprob| 0.009, max 0.147. So the chat path (what a drafter serves) matches llama.cpp; which engine is nearer the
 model on raw text needs a transformers reference (bf16), not run here.
+
+## Run 3 - 2026-11-16 16:30
+
+**Question:** Run 2's raw-text disagreement (KLD ~0.12 between the engines): which of ours and llama.cpp's is nearer
+the model?
+
+Reference: transformers 5.19, google/gemma-4-31B-it in bf16 on the CPU, over the first 3 chunks of the wikitext base
+(c=512, first token swapped for BOS as llama-perplexity does), scored rows as llama-perplexity scores them; ours and
+llama.cpp's log-probs from their `--kl-divergence-base` files of the same chunks (`g4ref/` in the session scratchpad:
+a reader for that format, the reference, the comparison).
+
+```
+against transformers bf16 (3 chunks)     KLD mean   KLD median   same top-1   PPL
+transformers bf16                                                              10858
+llama.cpp q4_0                           1.194      0.660        60.5%          948
+ours q4_0                                1.275      0.724        59.1%          174
+```
+
+On raw wikitext the instruction-tuned 31B itself is lost (PPL ~10^4 in bf16), and there both q4_0 engines are as far
+from the reference as each other, KLD ~1.2: rounding swings a distribution this flat. Run 2's 0.12 between the engines
+is that, not a bug on either side; raw-text perplexity does not measure this model.
+
+In its chat form, the prompt both render (26 tokens, thinking on, `<bos><|turn>system\n<|think|>...`), transformers'
+greedy reply matches ours for 34 of 40 tokens and parts at "all colors (spectrum)" against our "all colors." —
+where llama.cpp's reply is ours too (Run 1: 43 tokens equal). The q4_0 weights part from bf16 there, in both engines.
+Gemma 4 decodes correctly.
