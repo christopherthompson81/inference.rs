@@ -181,11 +181,16 @@ async fn main() -> Result<()> {
                 model_builder = model_builder.with_calibration_file(calibration_file.clone());
             }
             if let Some(cache_type) = args.pa_cache_type {
-                model_builder = model_builder.with_paged_attn(
-                    PagedAttentionMetaBuilder::default()
-                        .with_paged_cache_type(cache_type)
-                        .build()?,
-                );
+                let mut paged =
+                    PagedAttentionMetaBuilder::default().with_paged_cache_type(cache_type);
+                if let Some(ctx) = args.llama_cpp_ctx {
+                    paged =
+                        paged.with_gpu_memory(MemoryGpuConfig::ContextSize(ctx + WINDOW_HEADROOM));
+                }
+                model_builder = model_builder.with_paged_attn(paged.build()?);
+            }
+            if let Some(experts) = args.moe_expert_cache {
+                model_builder = model_builder.with_moe_expert_cache(experts);
             }
             if let Some(tokens) = args.prefill_chunk {
                 model_builder = model_builder.with_max_prefill_chunk_tokens(tokens);

@@ -36,6 +36,8 @@ const LLAMA3_REGEX: &str = "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'
 pub const KIMI_K2_REGEX: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 const QWEN2_REGEX: &str = "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 const QWEN35_REGEX: &str = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+// Seed-Coder / Seed-OSS: Qwen2's split, but newlines never trail a punctuation run
+const SEED_CODER_REGEX: &str = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 // llama.cpp's falcon split: runs of punctuation, GPT-2's split, then digits in threes
 const FALCON_REGEXES: &[&str] = &[
     "[\\p{P}\\$\\+<=>\\^~\\|`]+",
@@ -682,6 +684,13 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
         "qwen35" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Qwen2,
             regexes: &[QWEN35_REGEX],
+            ignore_merges: false,
+            normalize_nfc: true,
+        },
+        // the tokenizer.json normalizes NFC; llama.cpp does not
+        "seed-coder" => BpePreTokenizerSpec {
+            kind: BpePreTokenizerKind::Qwen2,
+            regexes: &[SEED_CODER_REGEX],
             ignore_merges: false,
             normalize_nfc: true,
         },

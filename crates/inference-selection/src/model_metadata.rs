@@ -361,6 +361,11 @@ impl SupportedArch for NormalLoaderType {
                     ex!("LiquidAI/LFM2-8B-A1B", "LFM2"),
                 ],
             },
+            Self::SeedOss => ArchMetadata {
+                families: &["Seed-OSS"],
+                modalities: m,
+                examples: &[ex!("ByteDance-Seed/Seed-OSS-36B-Instruct")],
+            },
         }
     }
 }

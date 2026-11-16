@@ -10725,7 +10725,8 @@
           "ernie4.5moe",
           "olmoe",
           "lfm2",
-          "lfm2_moe"
+          "lfm2_moe",
+          "seed_oss"
         ]
       },
       "OpenAiCodeInterpreterAutoContainer": {

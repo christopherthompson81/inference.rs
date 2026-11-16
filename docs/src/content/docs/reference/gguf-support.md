@@ -59,6 +59,7 @@ Fine-tunes and model sizes within a family use the same entry.
 | Hunyuan MoE | `hunyuan-moe` |
 | LFM2 and LFM2.5 dense | `lfm2` |
 | LFM2 and LFM2.5 MoE | `lfm2moe` |
+| Seed-OSS | `seed_oss` |
 
 Some GGUF architectures cover more than one model family. Repository files and GGUF metadata are
 used together to select the family. For a standalone file that cannot be identified unambiguously,

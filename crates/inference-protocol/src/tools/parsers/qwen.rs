@@ -1,4 +1,4 @@
-//! Qwen tool call parser.
+//! Qwen tool call parser, and Seed-OSS's, which wraps the same XML body in `<seed:tool_call>`.
 //!
 //! Formats:
 //! `<tool_call>{"name":"...", "arguments":{...}}</tool_call>`
@@ -10,70 +10,110 @@ use regex::Regex;
 use serde_json::{Map, Value};
 use std::sync::OnceLock;
 
-use super::ToolFormatParser;
+use super::{ToolCallFormat, ToolFormatParser};
 use crate::Tool;
 
-static QWEN_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN_PARAMETER_REGEX: OnceLock<Regex> = OnceLock::new();
 
-pub struct QwenParser;
+pub(crate) const SEED_TOOL_CALL_OPEN: &str = "<seed:tool_call>";
+pub(crate) const SEED_TOOL_CALL_CLOSE: &str = "</seed:tool_call>";
 
-impl ToolFormatParser for QwenParser {
-    fn could_be_tool_call(&self, text: &str) -> bool {
-        text.contains("<tool_call>")
-    }
+/// The tags around each call and the format they mark.
+#[derive(Clone, Copy)]
+pub(crate) struct CallWrapper {
+    pub open: &'static str,
+    pub close: &'static str,
+    format: ToolCallFormat,
+}
 
-    fn format(&self) -> super::ToolCallFormat {
-        super::ToolCallFormat::Qwen
-    }
+pub(crate) const QWEN_WRAPPER: CallWrapper = CallWrapper {
+    open: "<tool_call>",
+    close: "</tool_call>",
+    format: ToolCallFormat::Qwen,
+};
 
-    fn tool_call_grammar(&self, tools: &[Tool], _text: &str) -> TopLevelGrammar {
-        crate::tools::grammar::build_json_format_grammar(
-            qwen_tool_call_lark(tools, false),
-            tools,
-            "arguments",
-            false,
-        )
-    }
+pub(crate) const SEED_WRAPPER: CallWrapper = CallWrapper {
+    open: SEED_TOOL_CALL_OPEN,
+    close: SEED_TOOL_CALL_CLOSE,
+    format: ToolCallFormat::Seed,
+};
 
-    fn required_tool_call_grammar(&self, tools: &[Tool]) -> TopLevelGrammar {
-        crate::tools::grammar::build_json_format_grammar(
-            qwen_tool_call_lark(tools, true),
-            tools,
-            "arguments",
-            false,
-        )
-    }
+pub struct QwenParser {
+    wrapper: CallWrapper,
+    call_re: Regex,
+}
 
-    fn parse(&self, message: &str) -> Result<Option<String>> {
-        let re = QWEN_REGEX
-            .get_or_init(|| Regex::new(r"(?s)<tool_call>(?P<inner>.*?)</tool_call>").unwrap());
-
-        if !re.is_match(message) {
-            Ok(None)
-        } else {
-            parse_qwen_tool_calls(message)
+impl QwenParser {
+    pub(crate) fn new(wrapper: CallWrapper) -> Self {
+        let pattern = format!(
+            "(?s){}(?P<inner>.*?){}",
+            regex::escape(wrapper.open),
+            regex::escape(wrapper.close)
+        );
+        Self {
+            wrapper,
+            call_re: Regex::new(&pattern).expect("escaped wrapper tags form a valid regex"),
         }
     }
 }
 
+impl ToolFormatParser for QwenParser {
+    fn could_be_tool_call(&self, text: &str) -> bool {
+        text.contains(self.wrapper.open)
+    }
+
+    fn format(&self) -> ToolCallFormat {
+        self.wrapper.format
+    }
+
+    fn tool_call_grammar(&self, tools: &[Tool], _text: &str) -> TopLevelGrammar {
+        tool_call_grammar(self.wrapper, tools, false)
+    }
+
+    fn required_tool_call_grammar(&self, tools: &[Tool]) -> TopLevelGrammar {
+        tool_call_grammar(self.wrapper, tools, true)
+    }
+
+    fn parse(&self, message: &str) -> Result<Option<String>> {
+        if !self.call_re.is_match(message) {
+            Ok(None)
+        } else {
+            self.parse_calls(message)
+        }
+    }
+}
+
+pub(crate) fn tool_call_grammar(
+    wrapper: CallWrapper,
+    tools: &[Tool],
+    include_wrapper: bool,
+) -> TopLevelGrammar {
+    crate::tools::grammar::build_json_format_grammar(
+        tool_call_lark(wrapper, tools, include_wrapper),
+        tools,
+        "arguments",
+        false,
+    )
+}
+
 // The wrappers are text here; `specialize_tool_call_grammar` makes them token references where the tokenizer has
 // them as special tokens (Qwen3.5/3.8 keep them ordinary added tokens)
-fn qwen_tool_call_lark(tools: &[Tool], include_wrapper: bool) -> String {
-    // Parallel calls arrive as consecutive <tool_call> blocks; Nemotron-H ends the last one with a newline before EOS
+fn tool_call_lark(wrapper: CallWrapper, tools: &[Tool], include_wrapper: bool) -> String {
+    let open = lark_string(wrapper.open);
+    let close = lark_string(wrapper.close);
+    // Parallel calls arrive as consecutive blocks; Nemotron-H ends the last one with a newline before EOS
+    let calls = format!(r#"(json_call | xml_call) ("\n"? {open} (json_call | xml_call))* "\n"?"#);
     let start = if include_wrapper {
-        r#"start: "<tool_call>" (json_call | xml_call) ("\n"? "<tool_call>" (json_call | xml_call))* "\n"?"#
+        format!("start: {open} {calls}")
     } else {
-        r#"start: (json_call | xml_call) ("\n"? "<tool_call>" (json_call | xml_call))* "\n"?"#
+        format!("start: {calls}")
     };
-    let json_call = r#"json_call: @json_body "</tool_call>""#;
-    let xml_end = r#""</tool_call>""#;
 
     format!(
         r#"{start}
-{json_call}
-xml_call: "\n"? xml_function ("\n"? xml_function)* "\n"? {xml_end}
+json_call: @json_body {close}
+xml_call: "\n"? xml_function ("\n"? xml_function)* "\n"? {close}
 {}
 xml_param_value: (xml_param_text | xml_param_lt)*
 xml_param_text: /[^<]+/
@@ -107,45 +147,44 @@ struct QwenToolCall {
     arguments: Value,
 }
 
-fn parse_qwen_tool_calls(message: &str) -> Result<Option<String>> {
-    let re = QWEN_REGEX
-        .get_or_init(|| Regex::new(r"(?s)<tool_call>(?P<inner>.*?)</tool_call>").unwrap());
+impl QwenParser {
+    fn parse_calls(&self, message: &str) -> Result<Option<String>> {
+        let mut xml_calls = Vec::new();
+        let mut json_calls = Vec::new();
 
-    let mut xml_calls = Vec::new();
-    let mut json_calls = Vec::new();
+        for caps in self.call_re.captures_iter(message) {
+            let inner = caps.name("inner").unwrap().as_str().trim();
+            if inner.is_empty() {
+                continue;
+            }
 
-    for caps in re.captures_iter(message) {
-        let inner = caps.name("inner").unwrap().as_str().trim();
-        if inner.is_empty() {
-            continue;
+            let parsed_xml = parse_qwen_xml_tool_call(inner)?;
+            if !parsed_xml.is_empty() {
+                xml_calls.extend(parsed_xml);
+                continue;
+            }
+
+            match serde_json::from_str::<Value>(inner) {
+                Ok(value) => json_calls.push(value),
+                Err(_) => return Ok(None),
+            }
         }
 
-        let parsed_xml = parse_qwen_xml_tool_call(inner)?;
-        if !parsed_xml.is_empty() {
-            xml_calls.extend(parsed_xml);
-            continue;
+        if !xml_calls.is_empty() {
+            return Ok(Some(
+                serde_json::to_string(&xml_calls).map_err(anyhow::Error::msg)?,
+            ));
         }
 
-        match serde_json::from_str::<Value>(inner) {
-            Ok(value) => json_calls.push(value),
-            Err(_) => return Ok(None),
+        match json_calls.len() {
+            0 => Ok(None),
+            1 => Ok(Some(
+                serde_json::to_string(&json_calls[0]).map_err(anyhow::Error::msg)?,
+            )),
+            _ => Ok(Some(
+                serde_json::to_string(&json_calls).map_err(anyhow::Error::msg)?,
+            )),
         }
-    }
-
-    if !xml_calls.is_empty() {
-        return Ok(Some(
-            serde_json::to_string(&xml_calls).map_err(anyhow::Error::msg)?,
-        ));
-    }
-
-    match json_calls.len() {
-        0 => Ok(None),
-        1 => Ok(Some(
-            serde_json::to_string(&json_calls[0]).map_err(anyhow::Error::msg)?,
-        )),
-        _ => Ok(Some(
-            serde_json::to_string(&json_calls).map_err(anyhow::Error::msg)?,
-        )),
     }
 }
 
@@ -278,13 +317,17 @@ fn lark_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{QwenParser, parse_qwen_tool_calls};
+    use super::{QWEN_WRAPPER, QwenParser, SEED_WRAPPER};
     use crate::tools::parsers::{ToolFormatParser, specialize_tool_call_grammar};
     use inference_mcp::{Function, ToolType};
     use serde_json::Value;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    fn qwen() -> QwenParser {
+        QwenParser::new(QWEN_WRAPPER)
+    }
 
     struct GreedyTokenizerEnv {
         trie: toktrie::TokTrie,
@@ -316,7 +359,7 @@ mod tests {
 
     #[test]
     fn parses_qwen_json_tool_call() {
-        let parsed = QwenParser
+        let parsed = qwen()
             .parse(r#"<tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>"#)
             .unwrap()
             .unwrap();
@@ -327,8 +370,9 @@ mod tests {
 
     #[test]
     fn parses_qwen_xml_tool_call() {
-        let parsed = parse_qwen_tool_calls(
-            r#"<tool_call>
+        let parsed = qwen()
+            .parse_calls(
+                r#"<tool_call>
 <function=get_weather>
 <parameter=locations>
 [{"country":"France","city":"Paris"}]
@@ -338,9 +382,9 @@ celsius
 </parameter>
 </function>
 </tool_call>"#,
-        )
-        .unwrap()
-        .unwrap();
+            )
+            .unwrap()
+            .unwrap();
 
         let value: Value = serde_json::from_str(&parsed).unwrap();
         assert_eq!(value[0]["name"], "get_weather");
@@ -353,8 +397,37 @@ celsius
     }
 
     #[test]
+    fn seed_wraps_the_xml_body_in_its_own_tags() {
+        let seed = QwenParser::new(SEED_WRAPPER);
+        let message = "Let me check.\n<seed:tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</seed:tool_call>";
+        assert!(seed.could_be_tool_call(message));
+        assert!(!qwen().could_be_tool_call(message));
+        assert_eq!(qwen().parse(message).unwrap(), None);
+        let value: Value = serde_json::from_str(&seed.parse(message).unwrap().unwrap()).unwrap();
+        assert_eq!(value[0]["name"], "get_weather");
+        assert_eq!(value[0]["arguments"]["city"], "Paris");
+
+        let (_, text) = super::super::extract_model_specific_message(message)
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "Let me check.\n");
+
+        let grammar = seed.required_tool_call_grammar(&[]);
+        let lark = grammar.grammars[0].lark_grammar.as_ref().unwrap();
+        assert!(
+            lark.starts_with(r#"start: "<seed:tool_call>" (json_call | xml_call)"#),
+            "{lark}"
+        );
+        assert!(
+            lark.contains(r#"json_call: @json_body "</seed:tool_call>""#),
+            "{lark}"
+        );
+        assert!(!lark.contains(r#""<tool_call>""#), "{lark}");
+    }
+
+    #[test]
     fn qwen_xml_values_keep_inner_whitespace() {
-        let parsed = parse_qwen_tool_calls(
+        let parsed = qwen().parse_calls(
             "<tool_call>\n<function=write_file>\n<parameter=content>\n    indented\n\n</parameter>\n</function>\n</tool_call>",
         )
         .unwrap()
@@ -365,8 +438,9 @@ celsius
 
     #[test]
     fn parses_multiple_qwen_xml_tool_calls() {
-        let parsed = parse_qwen_tool_calls(
-            r#"<tool_call>
+        let parsed = qwen()
+            .parse_calls(
+                r#"<tool_call>
 <function=get_weather>
 <parameter=city>Tokyo</parameter>
 </function>
@@ -375,9 +449,9 @@ celsius
 <parameter=timezone>Asia/Tokyo</parameter>
 </function>
 </tool_call>"#,
-        )
-        .unwrap()
-        .unwrap();
+            )
+            .unwrap()
+            .unwrap();
 
         let value: Value = serde_json::from_str(&parsed).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 2);
@@ -387,17 +461,18 @@ celsius
 
     #[test]
     fn parses_qwen_xml_code_with_less_than() {
-        let parsed = parse_qwen_tool_calls(
-            r#"<tool_call>
+        let parsed = qwen()
+            .parse_calls(
+                r#"<tool_call>
 <function=inference_execute_python>
 <parameter=code>
 print(1 < 2)
 </parameter>
 </function>
 </tool_call>"#,
-        )
-        .unwrap()
-        .unwrap();
+            )
+            .unwrap()
+            .unwrap();
 
         let value: Value = serde_json::from_str(&parsed).unwrap();
         assert_eq!(value[0]["name"], "inference_execute_python");
@@ -425,7 +500,7 @@ print(1 < 2)
             },
         };
 
-        let grammar = QwenParser.tool_call_grammar(&[tool], "");
+        let grammar = qwen().tool_call_grammar(&[tool], "");
         let lark = grammar.grammars[0].lark_grammar.as_ref().unwrap();
         assert!(lark.contains("\"<parameter=code>\" \"\\n\"? xml_param_value \"</parameter>\""));
         assert!(!lark.contains("\"\\n</parameter>\""));
@@ -498,7 +573,7 @@ print(1 < 2)
                 strict: None,
             },
         };
-        let mut grammar = QwenParser.required_tool_call_grammar(&[tool]);
+        let mut grammar = qwen().required_tool_call_grammar(&[tool]);
         let trie = wrapper_token_trie();
         let start_token = trie.get_special_token("<tool_call>").unwrap();
         let env: toktrie::TokEnv = Arc::new(GreedyTokenizerEnv { trie });
@@ -539,7 +614,7 @@ print(1 < 2)
                 strict: None,
             },
         };
-        let mut grammar = QwenParser.tool_call_grammar(&[tool], "<tool_call>");
+        let mut grammar = qwen().tool_call_grammar(&[tool], "<tool_call>");
         let trie = wrapper_token_trie();
         specialize_tool_call_grammar(&mut grammar, &trie);
         let start_token = trie.get_special_token("<tool_call>").unwrap();
