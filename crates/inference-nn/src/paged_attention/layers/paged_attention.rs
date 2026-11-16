@@ -2240,9 +2240,11 @@ impl PagedAttention {
             return Ok(None);
         }
         // a sequence's verify rows go as one causal block over its table, so each K/V tile loads once for all
-        // of them, not once per row; a chunked window's full lengths stay per row
+        // of them, not once per row; a chunked window's full lengths stay per row, and so do a window's tables,
+        // each cut to its own row's blocks
         let rows = ctx.dims.seq_len;
-        let per_sequence = (rows > 1 && ctx.sdpa_params.chunk.is_none())
+        let windowed_tables = !ctx.use_full && ctx.input_metadata.full_block_tables.is_some();
+        let per_sequence = (rows > 1 && ctx.sdpa_params.chunk.is_none() && !windowed_tables)
             .then(|| -> Result<_> {
                 let seqs = query.dim(0)? / rows;
                 let width = block_table.dim(1)?;

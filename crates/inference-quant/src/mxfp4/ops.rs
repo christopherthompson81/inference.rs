@@ -295,12 +295,16 @@ fn mxfp4_grouped_moe_gemm(
     output.reshape((num_tokens, topk, n))
 }
 
+// Up to this many tokens (a decode step, a speculative verify) run the per-token GEMV: the grouped tensor-core
+// GEMM's tiles cost more than they save on so few rows
+const MXFP4_MOE_GEMV_MAX_TOKENS: usize = 8;
+
 /// Perform MXFP4 indexed MoE GEMM: for each (token, expert_slot), compute input @ weight[expert].T + bias[expert]
 ///
-/// For prefill (num_tokens > 1), uses a fused CUDA kernel that discovers tokens per expert
+/// For prefill (more than `MXFP4_MOE_GEMV_MAX_TOKENS` tokens), uses a fused CUDA kernel that discovers tokens per expert
 /// on-GPU and does tiled GEMM with indirect I/O (WMMA tensor cores when available).
 /// Falls back to Rust-side grouped GEMM when shared memory requirements exceed the device limit.
-/// For decode (num_tokens == 1), uses the per-token scalar kernel.
+/// For decode and verify rows, uses the per-token scalar kernel.
 ///
 /// Args:
 ///   input: [num_tokens, K] or [num_tokens, topk, K] in f16/bf16
@@ -377,11 +381,12 @@ pub fn mxfp4_indexed_moe_gemm(
     };
     let needed_smem = token_list_bytes + base_smem;
     let max_smem = unsafe { ffi::mxfp4_get_max_smem_optin() } as usize;
-    let use_fused = num_tokens > 1 && needed_smem <= max_smem;
+    let grouped = num_tokens > MXFP4_MOE_GEMV_MAX_TOKENS;
+    let use_fused = grouped && needed_smem <= max_smem;
 
     // If the fused kernel doesn't fit in shared memory, fall back to Rust-side grouped GEMM
     // which calls mxfp4_matmul per expert (still uses WMMA tensor cores, just not fused).
-    if num_tokens > 1 && !use_fused {
+    if grouped && !use_fused {
         return mxfp4_grouped_moe_gemm(
             &input,
             &weight,

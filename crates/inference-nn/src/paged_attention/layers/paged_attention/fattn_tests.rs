@@ -265,6 +265,7 @@ inference_tensor::gpu_cases!(
         f32_caches_fall_back_to_the_gather,
         gather_decode_refuses_graph_capture,
         multi_token_decode_matches_a_reference,
+        verify_rows_in_a_window_with_sinks_match_a_reference,
         prefix_prefill_over_a_cached_prefix,
         prefix_prefill_over_a_quantized_cache_matches_attention_over_its_values,
         prefix_prefill_with_a_window_and_without_causality,
@@ -446,6 +447,30 @@ fn multi_token_decode_matches_a_reference() -> Result<()> {
         chunk: None,
         gather: false,
     })
+}
+
+// A speculative verify's rows on a windowed layer with sinks (gpt-oss), the window under a block and verify rows
+// straddling block edges
+fn verify_rows_in_a_window_with_sinks_match_a_reference() -> Result<()> {
+    for block_size in [16, 32] {
+        for window in [8, 40] {
+            check(Case {
+                head_dim: 64,
+                heads: (N_HEAD, N_HEAD_KV),
+                block_size,
+                cache_dtype: DType::F16,
+                full_lens: &[5, 33, 34, 35, 64, 66, 97],
+                query_len: 3,
+                model_window: Some(window),
+                layer_window: Some(window),
+                softcap: None,
+                sinks: true,
+                chunk: None,
+                gather: false,
+            })?;
+        }
+    }
+    Ok(())
 }
 
 // A speculative verify's rows over a quantized cache, one causal block per sequence, with and without a window
