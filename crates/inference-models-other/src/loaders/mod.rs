@@ -27,6 +27,7 @@ mod deepseek_family;
 mod ernie4_5;
 mod exaone;
 mod exaone4;
+mod exaone_moe;
 mod falcon_h1;
 mod glm4;
 mod glm4_moe;
@@ -66,6 +67,7 @@ pub use bert::*;
 pub use deepseek::*;
 pub use ernie4_5::*;
 pub use exaone::*;
+pub use exaone_moe::*;
 pub use exaone4::*;
 pub use falcon_h1::*;
 pub use glm4::*;
@@ -107,6 +109,7 @@ inference_nn::boxed_loaders!(
     Ernie4_5MoeLoader,
     ExaoneLoader,
     Exaone4Loader,
+    ExaoneMoeLoader,
     FalconH1Loader,
     JambaLoader,
     KimiLinearLoader,

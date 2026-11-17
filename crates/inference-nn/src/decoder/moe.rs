@@ -19,6 +19,10 @@ pub const BLOCK_SPARSE_MOE: &str = "block_sparse_moe";
 const ROUTER: &str = "gate";
 const SHARED_EXPERT_GATE: &str = "shared_expert_gate";
 const SELECTION_BIAS: (&str, &str) = ("moe_statics", "e_score_correction_bias");
+// DeepSeek V3's selection bias, a flat `[experts]` vector beside the router
+const MLP_SELECTION_BIAS: &str = "e_score_correction_bias";
+// DeepSeek V3 divides by the weights' sum plus this
+const SIGMOID_NORM_MIN: f32 = 1e-20;
 // sparsemixer routes each token to two experts by construction
 const SPARSE_MIXER_EXPERTS: usize = 2;
 
@@ -32,12 +36,21 @@ pub enum MoeRouting {
     /// ERNIE 4.5: the router and a per-expert selection bias (`moe_statics.e_score_correction_bias`) in f32; the top
     /// `k` of softmax plus bias, weighed by their softmax renormalized over a sum clamped at `norm_min`.
     BiasedTopK { k: usize, norm_min: f32 },
+    /// DeepSeek V3's (K-EXAONE's): the f32 router's sigmoid scores, the top `k` of scores plus a flat
+    /// `e_score_correction_bias`, weighed by their scores, renormalized when asked, times `scale`.
+    SigmoidBiasedTopK {
+        k: usize,
+        renormalize: bool,
+        scale: f32,
+    },
 }
 
 impl MoeRouting {
     fn experts_per_token(self) -> usize {
         match self {
-            Self::TopK { k, .. } | Self::BiasedTopK { k, .. } => k,
+            Self::TopK { k, .. }
+            | Self::BiasedTopK { k, .. }
+            | Self::SigmoidBiasedTopK { k, .. } => k,
             Self::SparseMixer { .. } => SPARSE_MIXER_EXPERTS,
         }
     }
@@ -127,21 +140,32 @@ impl SparseMoe {
         load: &LayerLoad<'_>,
         vb: ShardedVarBuilder,
     ) -> Result<Self> {
-        let router = if let MoeRouting::BiasedTopK { .. } = spec.routing {
+        let router = if let MoeRouting::BiasedTopK { .. } | MoeRouting::SigmoidBiasedTopK { .. } =
+            spec.routing
+        {
             let router_vb = vb
                 .pp(ROUTER)
                 .set_device(load.device.clone())
                 .set_dtype(DType::F32);
             let gate = layers::linear_no_bias(hidden_size, spec.num_experts, router_vb)?;
-            let bias = vb
-                .pp(SELECTION_BIAS.0)
-                .set_device(load.device.clone())
-                .get_with_hints_dtype(
+            let bias_vb = vb.clone().set_device(load.device.clone());
+            let bias = if let MoeRouting::BiasedTopK { .. } = spec.routing {
+                bias_vb.pp(SELECTION_BIAS.0).get_with_hints_dtype(
                     (1, spec.num_experts),
                     SELECTION_BIAS.1,
                     Default::default(),
                     DType::F32,
-                )?;
+                )?
+            } else {
+                bias_vb
+                    .get_with_hints_dtype(
+                        spec.num_experts,
+                        MLP_SELECTION_BIAS,
+                        Default::default(),
+                        DType::F32,
+                    )?
+                    .reshape((1, spec.num_experts))?
+            };
             Router::F32 { gate, bias }
         } else if spec.quantized_router {
             Router::Quantized(inference_quant::linear_no_bias(
@@ -274,6 +298,30 @@ impl SparseMoe {
                 )?;
                 (topk.values, topk.indices)
             }
+            MoeRouting::SigmoidBiasedTopK {
+                k,
+                renormalize,
+                scale,
+            } => {
+                let Router::F32 { bias, .. } = &self.router else {
+                    inference_tensor::bail!("sigmoid biased top-k routing without its f32 router");
+                };
+                let topk = crate::ops::moe_router_topk(
+                    &logits,
+                    MoeRouterTopKConfig {
+                        top_k: k,
+                        score_function: MoeRouterScoreFunction::Sigmoid,
+                        selected_weight: MoeRouterSelectedWeight::Score,
+                        renormalize,
+                        norm_min: SIGMOID_NORM_MIN,
+                        output_scale: scale,
+                        logit_clip: None,
+                    },
+                    Some(bias),
+                    None,
+                )?;
+                (topk.values, topk.indices)
+            }
         };
         let Some(shared_expert) = &self.shared_expert else {
             return self
@@ -308,8 +356,15 @@ impl SparseMoe {
             Router::Plain { gate, .. } => uvb.pp(ROUTER).add(gate),
             Router::F32 { gate, bias } => {
                 uvb.pp(ROUTER).add(gate);
-                uvb.pp(SELECTION_BIAS.0)
-                    .add_tensor(SELECTION_BIAS.1, bias.clone());
+                if let MoeRouting::SigmoidBiasedTopK { .. } = self.routing {
+                    uvb.add_tensor(
+                        MLP_SELECTION_BIAS,
+                        bias.flatten_all().expect("a contiguous bias"),
+                    );
+                } else {
+                    uvb.pp(SELECTION_BIAS.0)
+                        .add_tensor(SELECTION_BIAS.1, bias.clone());
+                }
             }
             Router::Quantized(_) => {}
         }

@@ -366,6 +366,11 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[ex!("LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct")],
             },
+            Self::ExaoneMoe => ArchMetadata {
+                families: &["K-EXAONE"],
+                modalities: m,
+                examples: &[ex!("LGAI-EXAONE/K-EXAONE-236B-A23B")],
+            },
             Self::Exaone4 => ArchMetadata {
                 families: &["EXAONE 4.0"],
                 modalities: m,
