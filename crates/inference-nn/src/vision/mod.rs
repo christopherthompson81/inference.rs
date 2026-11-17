@@ -2,6 +2,8 @@ pub mod clip;
 pub mod llava_tiling;
 pub mod mrope;
 pub mod multimodal_layout;
+pub mod qwen2_5_vl;
 pub mod qwen3_vl;
+pub mod qwen_vl;
 pub mod radio;
 pub mod siglip;

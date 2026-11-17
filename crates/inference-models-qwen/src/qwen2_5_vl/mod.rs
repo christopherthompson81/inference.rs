@@ -2,14 +2,13 @@
 
 use std::sync::Arc;
 
+use crate::vision::qwen2_5_vl::Qwen2_5VLVisionModel;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::{Result, Tensor};
-use vision::Qwen2_5VLVisionModel;
 
 use crate::qwen2vl::{QwenVlModel, QwenVlVision};
 
 pub mod config;
-pub mod vision;
 
 pub use config::Config;
 

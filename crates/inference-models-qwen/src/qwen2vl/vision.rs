@@ -3,7 +3,7 @@ use std::sync::Arc;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::{D, Result, Tensor};
 
-use crate::qwen_vl_vision::{
+use crate::vision::qwen_vl::{
     MlpKind, NormKind, PatchEmbed, PatchMerger, TowerShape, VisionBlock, VisionRotaryEmbedding,
     block_diagonal_mask, item_cu_seqlens, tower_residual_tensors,
 };

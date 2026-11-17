@@ -41,7 +41,6 @@ pub mod qwen3_vl_moe;
 mod qwen_vl_inputs;
 #[cfg(test)]
 mod qwen_vl_tests;
-mod qwen_vl_vision;
 pub mod vibevoice_asr;
 
 inference_nn::json_config!(
