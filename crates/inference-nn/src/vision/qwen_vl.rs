@@ -20,7 +20,7 @@ const ROPE_THETA: f32 = 10000.;
 
 /// The tower's geometry, as each model's vision config names it.
 #[derive(Clone, Copy)]
-pub(crate) struct TowerShape {
+pub struct TowerShape {
     pub in_channels: usize,
     pub hidden_size: usize,
     pub num_heads: usize,
@@ -30,12 +30,12 @@ pub(crate) struct TowerShape {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum NormKind {
+pub enum NormKind {
     Layer,
     Rms,
 }
 
-pub(crate) enum VisionNorm {
+pub enum VisionNorm {
     Layer(LayerNorm),
     Rms(RmsNorm),
 }
@@ -67,7 +67,7 @@ impl ToTensors for VisionNorm {
     }
 }
 
-pub(crate) struct PatchEmbed {
+pub struct PatchEmbed {
     proj: Conv3dNoBias,
     shape: TowerShape,
 }
@@ -120,7 +120,7 @@ impl PatchEmbed {
     }
 }
 
-pub(crate) enum VisionMlp {
+pub enum VisionMlp {
     // https://github.com/huggingface/transformers/blob/a769ed45e17c44fd17b85c025863c4e4f2f73634/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py#L314
     Plain {
         fc1: Arc<dyn QuantMethod>,
@@ -138,7 +138,7 @@ pub(crate) enum VisionMlp {
 
 /// Which MLP a block has, with its hidden width and activation.
 #[derive(Clone, Copy)]
-pub(crate) enum MlpKind {
+pub enum MlpKind {
     Plain { hidden_dim: usize, act: Activation },
     Gated { hidden_dim: usize, act: Activation },
 }
@@ -303,7 +303,7 @@ impl VisionAttention {
 }
 
 // https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py#L418
-pub(crate) struct VisionBlock {
+pub struct VisionBlock {
     norm1: VisionNorm,
     norm2: VisionNorm,
     mlp: VisionMlp,
@@ -353,7 +353,7 @@ impl VisionBlock {
     }
 }
 
-pub(crate) struct PatchMerger {
+pub struct PatchMerger {
     ln_q: VisionNorm,
     mlp0: Linear,
     mlp2: Linear,
@@ -404,7 +404,7 @@ impl PatchMerger {
 }
 
 /// Each patch's 2D rotary angles, the merge windows' patches kept together.
-pub(crate) struct VisionRotaryEmbedding {
+pub struct VisionRotaryEmbedding {
     inv_freq: Tensor,
     spatial_merge_size: usize,
 }
@@ -458,7 +458,7 @@ impl VisionRotaryEmbedding {
 }
 
 /// Where each item's patches start and end in the tower's sequence, `0` first.
-pub(crate) fn item_cu_seqlens(grid_thw: &Tensor) -> Result<Vec<usize>> {
+pub fn item_cu_seqlens(grid_thw: &Tensor) -> Result<Vec<usize>> {
     let grid_thw = grid_thw.to_device(&Device::Cpu)?;
     Ok((grid_thw.i((.., 1))? * grid_thw.i((.., 2))?)?
         .repeat_interleave_flat(grid_thw.i((.., 0))?.to_vec1::<u32>()?)?
@@ -473,7 +473,7 @@ pub(crate) fn item_cu_seqlens(grid_thw: &Tensor) -> Result<Vec<usize>> {
 }
 
 /// Attention within each `cu_seqlens` span only; none when one span covers the sequence.
-pub(crate) fn block_diagonal_mask(
+pub fn block_diagonal_mask(
     cu_seqlens: &[usize],
     seq_len: usize,
     dtype: DType,
@@ -493,7 +493,7 @@ pub(crate) fn block_diagonal_mask(
     Ok(Some(mask))
 }
 
-pub(crate) fn tower_residual_tensors(
+pub fn tower_residual_tensors(
     patch_embed: &PatchEmbed,
     blocks: &[VisionBlock],
     merger: &PatchMerger,
