@@ -249,3 +249,37 @@ from history.
 
 Decision: the commit, measured-choice and review logic is not kept (no gain over fixed 7 for added state); 11 and 15
 stay as opt-in auto-depth candidates, and fixed 7 stays DSpine's default.
+
+## Run 13 - 2026-11-17 13:30
+
+**Question:** per step, can the drafts' own confidence size the verify (draft 15, verify 7 or 15), following the
+within-reply swings Run 12 found?
+
+The reference's dynamic verification maps each row's confidence (sampled: the largest probability of the candidate
+distribution the row's pick was drawn from) per depth to an acceptance probability (its shipped logit calibration for
+this drafter: one scale 0.361, an offset per depth) and allocates a token budget across a batch's prefixes; for one
+sequence that budget is a fixed width, so per-step sizing for a lone stream is new. Offline first: 2,632 steps at
+depth 15 logged with their row confidences and accepted counts (throwaway logging, graphs off), replayed under every
+policy exactly (drafts are causal), with phase-timed costs (drafter 4.54 ms at 8 rows, 5.64 at 16; verify 23.3 / 27.5):
+
+```
+fixed 7 114.6   fixed 15 106.5   per-step oracle 123.9   calibrated confidence 118.7 (any width) / 118.5 (7 or 15)
+uncalibrated 117.2
+```
+
+Built on a local branch (`exp/dspine-confidence`): the driver stages a shorter uniform proposal, the drafter host
+reads the sparse proposals' row maxima, and a policy verifies the width maximizing expected tokens minus the running
+rate times that width's measured step period (both widths precaptured, stalls rejected against the fastest period;
+batches and greedy rows draft and verify the default 7). Greedy matched fixed 7 (140.8 vs 139.6, identical output).
+Sampled, one seed: 130.5 / 125.8 against 124.1 / 122.9. But a lone fixed-7 run repeats its text exactly while the
+sized runs sample different text (drafting 15 rows draws the sampling stream differently: code accepted 3.07 in one
+run and 3.87 in the next), so over three request seeds each (18 requests per run):
+
+```
+fixed 7 124.0 / 120.2   confidence-sized 120.1 / 118.0
+```
+
+No gain; the one-seed win was the trajectories. Unmodeled in the replay, and a likely cost: reading the confidences
+on the host each step makes the CPU wait for the drafter before staging the verify, which the fixed path overlaps.
+Not kept. On this target no depth policy tried (Runs 10-13) beats fixed 7 drafts: the payoff curve is flat around 7,
+and whatever adapts pays about what the adaptation finds.
