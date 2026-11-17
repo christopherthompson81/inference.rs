@@ -75,3 +75,23 @@ Tool call (one `get_weather` tool), thinking off and on: `get_weather({"city":"L
 result sent back the reply gives Lyon at 17 degrees with light rain (342 prompt tokens).
 
 EXAONE 4.0 decodes correctly.
+
+## Run 3 - 2026-11-16 18:15
+
+**Question:** does EXAONE 3.5 (LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct; a Llama decoder under `transformer.h.N.attn.attention`,
+llama3 RoPE, tied embeddings) decode as llama.cpp does, from its `exaone` GGUF (Q8_0, 2.6 GiB) and its checkpoint?
+
+The GGUF's tensors carry llama.cpp's standard names; they are renamed to the checkpoint's as Qwen 1's are (one table
+per loader), `rope_freqs` under the stack's root. Its `exaone` pre-tokenizer is llama.cpp's starcoder split.
+
+```
+greedy chat (thinking n/a)  prompt 30 tokens on both; 91 of 91 equal (the last the end of turn), max |d logprob| 0.153
+
+wikitext-2 test, c=512, 20 chunks, against llama-perplexity --kl-divergence-base (Q8_0)
+                          PPL ours   PPL llama.cpp   KLD mean   median    p99      same top-1
+ours, the GGUF            12.3913    12.3770         0.00145    0.00072   0.0133   98.00%
+ours, the bf16 checkpoint 12.4020                    0.00199    0.00113   0.0174   96.98%
+```
+
+The engines agree at the level other models do (Run 1's 1.2B is the outlier, its own spread). EXAONE 3.5 decodes
+correctly.

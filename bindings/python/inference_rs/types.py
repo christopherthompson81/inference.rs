@@ -307,6 +307,7 @@ class NormalLoaderType(str, Enum):
     OLMOE = "olmoe"
     LFM2 = "lfm2"
     LFM2_MOE = "lfm2_moe"
+    EXAONE = "exaone"
     EXAONE4 = "exaone4"
     SEED_OSS = "seed_oss"
 

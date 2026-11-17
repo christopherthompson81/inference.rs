@@ -234,6 +234,7 @@ macro_rules! normal_loader_table {
             Olmoe { cli: "olmoe", hf: "OlmoeForCausalLM", model_type: "olmoe", loader: OlmoeLoader, feature: "models-other" },
             Lfm2 { cli: "lfm2", hf: "Lfm2ForCausalLM", model_type: "lfm2", loader: Lfm2Loader, feature: "models-other" },
             Lfm2Moe { cli: "lfm2_moe", hf: "Lfm2MoeForCausalLM", model_type: "lfm2_moe", loader: Lfm2Loader, feature: "models-other" },
+            Exaone { cli: "exaone", hf: "ExaoneForCausalLM", model_type: "exaone", loader: ExaoneLoader, feature: "models-other" },
             Exaone4 { cli: "exaone4", hf: "Exaone4ForCausalLM", model_type: "exaone4", loader: Exaone4Loader, feature: "models-other" },
             SeedOss { cli: "seed_oss", hf: "SeedOssForCausalLM", model_type: "seed_oss", loader: SeedOssLoader, feature: "models-other" },
         }

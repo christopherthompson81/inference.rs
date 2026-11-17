@@ -154,7 +154,9 @@ AllenAI's OLMo 1 (`OlmoForCausalLM`, e.g. `allenai/OLMo-1B-0724-hf`), OLMo 2 (`O
 
 ## EXAONE
 
-LG AI Research's EXAONE 4.0 (`Exaone4ForCausalLM`, e.g. `LGAI-EXAONE/EXAONE-4.0-32B` and `LGAI-EXAONE/EXAONE-4.0-1.2B`) loads through auto-detection, from safetensors or from llama.cpp's `exaone4` GGUFs, with the 32B's sliding-window layers beside its NoPE global ones. Its template thinks only when asked; inference.rs asks by default (`enable_thinking` on), so pass `enable_thinking: false` for the template's own default. Reasoning (`<think>`) and tool calls (`<tool_call>` JSON) come back split as for Qwen.
+LG AI Research's EXAONE 3.0 and 3.5 (`ExaoneForCausalLM`, e.g. `LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct`) load through auto-detection, from safetensors (no `trust_remote_code` needed) or from llama.cpp's `exaone` GGUFs.
+
+EXAONE 4.0 (`Exaone4ForCausalLM`, e.g. `LGAI-EXAONE/EXAONE-4.0-32B` and `LGAI-EXAONE/EXAONE-4.0-1.2B`) loads the same way (safetensors or llama.cpp's `exaone4` GGUFs), with the 32B's sliding-window layers beside its NoPE global ones. Its template thinks only when asked; inference.rs asks by default (`enable_thinking` on), so pass `enable_thinking: false` for the template's own default. Reasoning (`<think>`) and tool calls (`<tool_call>` JSON) come back split as for Qwen.
 
 ## Seed-OSS
 
