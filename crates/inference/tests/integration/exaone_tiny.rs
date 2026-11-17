@@ -1,5 +1,6 @@
-//! Tiny random-weight EXAONE 4.0 checkpoints load through their Hugging Face class and generate: the 32B's layout
-//! (sliding layers beside NoPE global ones) and the 1.2B's (no window, RoPE on every layer, tied embeddings).
+//! Tiny random-weight EXAONE checkpoints load through their Hugging Face classes and generate: EXAONE 4.0 in the 32B's
+//! layout (sliding layers beside NoPE global ones) and the 1.2B's (no window, RoPE on every layer, tied embeddings),
+//! and EXAONE 3.5 under its checkpoint's names.
 
 use std::{collections::HashMap, path::Path};
 
@@ -61,9 +62,35 @@ fn config(sliding: bool, tied: bool) -> serde_json::Value {
     })
 }
 
-async fn loads_and_generates(config: serde_json::Value) -> anyhow::Result<()> {
-    let spec = serde_json::from_value::<inference_models_other::exaone4::Config>(config.clone())?
-        .decoder_spec()?;
+fn exaone3_config() -> serde_json::Value {
+    serde_json::json!({
+        "architectures": ["ExaoneForCausalLM"],
+        "model_type": "exaone",
+        "hidden_size": 32,
+        "intermediate_size": 48,
+        "vocab_size": 266,
+        "num_layers": LAYERS,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "max_position_embeddings": 512,
+        "layer_norm_epsilon": 1e-5,
+        "rope_theta": 1000000.0,
+        "rope_scaling": {
+            "factor": 8.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0,
+            "original_max_position_embeddings": 64, "rope_type": "llama3"
+        },
+        "activation_function": "silu",
+        "tie_word_embeddings": true,
+    })
+}
+
+async fn loads_and_generates(
+    config: serde_json::Value,
+    spec: inference_nn::decoder::DecoderSpec,
+    expected: &[&str],
+    unexpected: &str,
+) -> anyhow::Result<()> {
     let staging = tempfile::tempdir()?;
     let config_path = staging.path().join("config.json");
     std::fs::write(&config_path, config.to_string())?;
@@ -79,10 +106,10 @@ async fn loads_and_generates(config: serde_json::Value) -> anyhow::Result<()> {
         &files,
         LAYERS,
         // llama.cpp's precomputed llama3 factors; a safetensors checkpoint has none
-        &["model.rope_freqs.weight"],
+        &["model.rope_freqs.weight", "transformer.rope_freqs.weight"],
         HashMap::new(),
         |vb, metadata| {
-            inference_models_other::exaone4::Model::new(
+            inference_nn::decoder::CausalLm::new(
                 &spec,
                 vb,
                 true,
@@ -96,14 +123,10 @@ async fn loads_and_generates(config: serde_json::Value) -> anyhow::Result<()> {
         dir.path().join("model.safetensors"),
         &inference_tensor::Device::Cpu,
     )?;
-    for name in [
-        "model.layers.0.self_attn.q_norm.weight",
-        "model.layers.0.post_attention_layernorm.weight",
-        "model.layers.0.post_feedforward_layernorm.weight",
-    ] {
-        anyhow::ensure!(tensors.contains_key(name), "no {name}");
+    for name in expected {
+        anyhow::ensure!(tensors.contains_key(*name), "no {name}");
     }
-    anyhow::ensure!(!tensors.contains_key("model.layers.0.input_layernorm.weight"));
+    anyhow::ensure!(!tensors.contains_key(unexpected), "{unexpected} loaded");
 
     let model = TextModelBuilder::new(dir.path().to_string_lossy())
         .with_dtype(ModelDType::F32)
@@ -137,9 +160,46 @@ async fn exaone4_sliding_and_windowless_layouts_load_and_generate() -> anyhow::R
     assert!(windowless.no_rope_layers.is_empty());
 
     for (sliding, tied) in [(true, false), (false, true)] {
-        loads_and_generates(config(sliding, tied))
-            .await
-            .map_err(|error| anyhow::anyhow!("sliding {sliding}: {error}"))?;
+        let config = config(sliding, tied);
+        let spec =
+            serde_json::from_value::<inference_models_other::exaone4::Config>(config.clone())?
+                .decoder_spec()?;
+        loads_and_generates(
+            config,
+            spec,
+            &[
+                "model.layers.0.self_attn.q_norm.weight",
+                "model.layers.0.post_attention_layernorm.weight",
+                "model.layers.0.post_feedforward_layernorm.weight",
+            ],
+            "model.layers.0.input_layernorm.weight",
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("sliding {sliding}: {error}"))?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn exaone3_loads_under_its_checkpoint_names_and_generates() -> anyhow::Result<()> {
+    let config = exaone3_config();
+    let spec = serde_json::from_value::<inference_models_other::exaone::Config>(config.clone())?
+        .decoder_spec()?;
+    loads_and_generates(
+        config,
+        spec,
+        &[
+            "transformer.wte.weight",
+            "transformer.ln_f.weight",
+            "transformer.h.0.ln_1.weight",
+            "transformer.h.0.ln_2.weight",
+            "transformer.h.0.attn.attention.q_proj.weight",
+            "transformer.h.0.attn.attention.out_proj.weight",
+            "transformer.h.0.mlp.c_fc_0.weight",
+            "transformer.h.0.mlp.c_fc_1.weight",
+            "transformer.h.0.mlp.c_proj.weight",
+        ],
+        "lm_head.weight",
+    )
+    .await
 }

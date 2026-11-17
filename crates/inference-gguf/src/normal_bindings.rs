@@ -81,10 +81,15 @@ pub fn build_normal_bindings(
         )?;
     }
     bind_composite_tensors(archive, loader, architecture, block_count, &mut bindings)?;
-    if matches!(loader, NormalLoaderType::Qwen) {
+    let checkpoint_names = match loader {
+        NormalLoaderType::Qwen => Some(QWEN1_RENAMES),
+        NormalLoaderType::Exaone => Some(EXAONE_RENAMES),
+        _ => None,
+    };
+    if let Some(renames) = checkpoint_names {
         return Ok(bindings
             .iter()
-            .map(|(name, binding)| (qwen1_name(name), binding.clone()))
+            .map(|(name, binding)| (transformer_h_name(name, renames), binding.clone()))
             .collect());
     }
     if matches!(loader, NormalLoaderType::FalconH1) {
@@ -637,7 +642,8 @@ fn falcon_h1_name(name: &str) -> String {
     renamed
 }
 
-// Qwen 1 keeps its checkpoint's names (`transformer.h.N.attn.c_attn`), where the bindings above write Llama's
+// Qwen 1 and EXAONE 3 keep their checkpoints' names (`transformer.h.N.attn.c_attn`), where the bindings above write
+// Llama's
 const QWEN1_RENAMES: &[(&str, &str)] = &[
     (".input_layernorm.", ".ln_1."),
     (".post_attention_layernorm.", ".ln_2."),
@@ -648,7 +654,17 @@ const QWEN1_RENAMES: &[(&str, &str)] = &[
     (".mlp.down_proj.", ".mlp.c_proj."),
 ];
 
-fn qwen1_name(name: &str) -> String {
+const EXAONE_RENAMES: &[(&str, &str)] = &[
+    (".input_layernorm.", ".ln_1."),
+    (".post_attention_layernorm.", ".ln_2."),
+    (".self_attn.o_proj.", ".attn.attention.out_proj."),
+    (".self_attn.", ".attn.attention."),
+    (".mlp.gate_proj.", ".mlp.c_fc_0."),
+    (".mlp.up_proj.", ".mlp.c_fc_1."),
+    (".mlp.down_proj.", ".mlp.c_proj."),
+];
+
+fn transformer_h_name(name: &str, renames: &[(&str, &str)]) -> String {
     if let Some(rest) = name.strip_prefix("model.embed_tokens.") {
         return format!("transformer.wte.{rest}");
     }
@@ -656,10 +672,13 @@ fn qwen1_name(name: &str) -> String {
         return format!("transformer.ln_f.{rest}");
     }
     let Some(rest) = name.strip_prefix("model.layers.") else {
-        return name.to_string();
+        // the stack's own tensors (llama3's `rope_freqs`) sit under its root
+        return name
+            .strip_prefix("model.")
+            .map_or_else(|| name.to_string(), |rest| format!("transformer.{rest}"));
     };
     let mut renamed = format!("transformer.h.{rest}");
-    for (from, to) in QWEN1_RENAMES {
+    for (from, to) in renames {
         renamed = renamed.replace(from, to);
     }
     renamed

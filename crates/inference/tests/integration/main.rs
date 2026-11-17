@@ -11,7 +11,7 @@ mod decision_tiny;
 mod eagle3_tiny;
 mod embedding_tiny;
 mod ernie4_5_tiny;
-mod exaone4_tiny;
+mod exaone_tiny;
 mod falcon_h1_tiny;
 mod gemma3_tiny;
 mod gguf_embedding_tiny;

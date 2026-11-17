@@ -276,6 +276,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         build: build_seed_oss,
     },
     NormalConfigBuilder {
+        loader: NormalLoaderType::Exaone,
+        build: build_exaone,
+    },
+    NormalConfigBuilder {
         loader: NormalLoaderType::Exaone4,
         build: build_exaone4,
     },
@@ -1348,6 +1352,25 @@ fn build_seed_oss(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         "attention_out_bias".into(),
         json!(metadata.has_tensor_marker(".attn_output.bias")),
     );
+    Ok(JsonValue::Object(config))
+}
+
+// EXAONE 3's checkpoint config spells the layer count, eps and activation its own way
+fn build_exaone(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let fields = StandardFields::read(metadata, Some(DEFAULT_ROPE_THETA))?;
+    require_full_rotary(metadata, fields.head_dim)?;
+    let mut config = fields.rms_json();
+    for (from, to) in [
+        ("num_hidden_layers", "num_layers"),
+        ("rms_norm_eps", "layer_norm_epsilon"),
+    ] {
+        let value = config.remove(from).expect("rms_json writes it");
+        config.insert(to.into(), value);
+    }
+    config.remove("sliding_window");
+    config.insert("activation_function".into(), json!("silu"));
+    config.insert("head_dim".into(), json!(fields.head_dim));
+    config.insert("rope_scaling".into(), llama_rope_scaling(metadata)?);
     Ok(JsonValue::Object(config))
 }
 
@@ -3773,7 +3796,7 @@ mod tests {
         pub use inference_models_gemma::{gemma, gemma2};
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
-            deepseek, ernie4_5, exaone4, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss,
+            deepseek, ernie4_5, exaone, exaone4, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss,
             granite, hunyuan_v1_dense, hunyuan_v1_moe, jamba, kimi_linear, lfm2, mamba, mamba2,
             nemotron_h, olmo, rwkv_hybrid, rwkv6, rwkv7, seed_oss, starcoder2,
         };
@@ -4304,6 +4327,9 @@ mod tests {
             }
             NormalLoaderType::Exaone4 => {
                 assert_deserializes(loader, config, models::exaone4::Config::from_json)
+            }
+            NormalLoaderType::Exaone => {
+                assert_deserializes(loader, config, models::exaone::Config::from_json)
             }
         }
     }

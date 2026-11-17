@@ -703,8 +703,8 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
                 normalize_nfc: false,
             }
         }
-        // Granite 3.x / 4.1 convert as refact: llama.cpp splits it exactly as starcoder
-        "starcoder" | "smollm" | "refact" => BpePreTokenizerSpec {
+        // Granite 3.x / 4.1 convert as refact and EXAONE 3 as exaone: llama.cpp splits both exactly as starcoder
+        "starcoder" | "smollm" | "refact" | "exaone" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Starcoder,
             regexes: &["\\p{N}", GPT2_REGEX],
             ignore_merges: false,
