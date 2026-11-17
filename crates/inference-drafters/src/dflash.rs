@@ -54,8 +54,8 @@ const DEFAULT_BLOCK_SIZE: usize = 16;
 // under the user's cache directory: a quantized drafter's weights, so a restart skips quantizing them (~6 s at q4k)
 const DRAFTER_CACHE_DIR: &str = "inference-rs/drafters";
 pub const DEFAULT_MAX_DRAFTS: usize = 7;
-// depths an autotuned DFlash drafter chooses between, up to its n_predict
-pub const AUTO_DEPTHS: [usize; 3] = [3, 5, 7];
+// depths an autotuned DFlash drafter chooses between, up to its n_predict (DSpine's 15-draft block reaches 11 and 15)
+pub const AUTO_DEPTHS: [usize; 5] = [3, 5, 7, 11, 15];
 const DSPARK_MARKOV_HEAD_TYPE: &str = "vanilla";
 const DSPINE: &str = "DSpine";
 // Eager forwards use this cache; CUDA graphs derive RoPE from their replayed position inputs.

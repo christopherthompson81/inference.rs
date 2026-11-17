@@ -187,3 +187,65 @@ The 16-row step is now about 32.5 ms (greedy math: 8.75 tokens at 269 tok/s) aga
 8 rows. Depth 15 wins where drafts are accepted deep (the word problem, +18% greedy) and loses on code and review, so
 7 stays the default; a per-step depth choice (`--mtp-auto-depth`, which picks among 3, 5 and 7 for DFlash drafters)
 extended to DSpine's 11 and 15 would take each where it pays.
+
+## Run 10 - 2026-11-17 11:40
+
+**Question:** does `--mtp-auto-depth` take DSpine to its best depth per workload, with 11 and 15 as candidates?
+
+`AUTO_DEPTHS` gained 11 and 15 (DFlash 2's block caps it at 7, so its candidates stay 3, 5, 7). A six-prompt bench
+(word problem, Python, a C explainer, algebra, Rust, an essay; 700 tokens; `bench.py` and `abrun.sh` in the
+scratchpad), sampled at the card's settings, servers alternated so the card's warming falls on both:
+
+```
+sampled total tok/s     fixed 7 124.1 / 123.6   fixed 15 108.8   auto (3,5,7,11,15) 122.0
+```
+
+Greedy totals moved 8% between two fixed-7 servers as the card warmed (140 / 130), so greedy is a sanity check only;
+sampled seeds repeat exactly, so sampled per-prompt numbers compare across runs.
+
+## Run 11 - 2026-11-17 12:10
+
+**Question:** if a turn's workload holds, does exploring for its first steps and then committing (no probes, no
+switches; ±25% drift over 8 steps reopens) beat continuous tuning?
+
+```
+sampled total   fixed 7 123.9 / 123.5   committed 130.6 / 123.1
+greedy (fresh)  fixed 7 139.9           committed 138.3
+```
+
+Per prompt it committed too deep where the population curve (pooled over prompts, the word problem's deep hits
+dominating it) misjudged a sequence: depth 13.6 on algebra, 8.75 on code. Measured instead: drafts are causal, so a
+step drafted at depth D tells what any depth up to D would have committed (`min(accepted, d) + 1`); a lone sequence
+now explores at the deepest depth and commits to the best measured tokens per measured step time. That committed
+deep everywhere (average depth 12-14, the essay at 1.4 accepted included): 20 drift resets in six prompts, set off by
+sampling noise ("expected 2.0, realized 3.27"), each costing 32 steps at depth 15. With the drift window at a 32-step
+half-life, ±50% and 32 steps' wait: 121.9 / 122.2 against 123.9 / 122.4.
+
+## Run 12 - 2026-11-17 12:35
+
+**Question:** with a long-run review (measuring every depth up to the committed one while committed, moving
+shallower every 32 steps on a 5% margin), and at 2,000-token replies, does the committed regime pay?
+
+```
+700 tokens, sampled total   fixed 7 124.2 / 123.2   committed + review 124.0 / 124.5
+2,000 tokens, sampled       code 176 / 176 vs 151 / 152   algebra 147 / 140 vs 155 / 141   review 118 vs 118
+```
+
+Code stayed at depth 13 and lost 14% while accepting the same per step (3.95 vs 3.96). The commit log shows why: one
+code reply's acceptance swings between regimes every 30-60 steps, each a real shift of 50% or more:
+
+```
+commit 15 expecting 6.96, realized 3.44 -> explore; commit 7 expecting 2.95, realized 4.59 -> explore;
+commit 11 expecting 4.82, realized 7.30 -> explore; commit 15 expecting 6.63, realized 3.76 -> explore; ...
+```
+
+Implication: on this target a turn is not one workload at the scale depth matters. Boilerplate the drafter nails and
+novel logic alternate within a reply, so a turn-level commitment is stale before it is made, and re-exploring each
+shift costs more than it finds. Depths 3-7 cost about the same step (27.6-28.9 ms) and 11-15 about 15-20% more, so
+the payoff curve is flat and fixed 7 already captures most of it. A decision fast enough to follow these shifts would
+have to be per step, from the drafts themselves: the reference's dynamic verification sizes each verify from the
+refinement's own confidence (`_serial_table` / `_serial_chain` WITH_CONFIDENCE, `sglang_dspine/verification`), not
+from history.
+
+Decision: the commit, measured-choice and review logic is not kept (no gain over fixed 7 for added state); 11 and 15
+stay as opt-in auto-depth candidates, and fixed 7 stays DSpine's default.
