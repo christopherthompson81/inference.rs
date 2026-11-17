@@ -62,6 +62,7 @@ Fine-tunes and model sizes within a family use the same entry.
 | Seed-OSS | `seed_oss` |
 | EXAONE 3.0 and 3.5 | `exaone` |
 | EXAONE 4.0 | `exaone4` |
+| K-EXAONE | `exaone-moe` |
 
 Some GGUF architectures cover more than one model family. Repository files and GGUF metadata are
 used together to select the family. For a standalone file that cannot be identified unambiguously,

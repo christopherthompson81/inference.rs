@@ -280,6 +280,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         build: build_exaone,
     },
     NormalConfigBuilder {
+        loader: NormalLoaderType::ExaoneMoe,
+        build: build_exaone_moe,
+    },
+    NormalConfigBuilder {
         loader: NormalLoaderType::Exaone4,
         build: build_exaone4,
     },
@@ -1378,8 +1382,13 @@ fn build_exaone(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
 fn build_exaone4(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     let fields = StandardFields::read(metadata, Some(DEFAULT_ROPE_THETA))?;
     require_full_rotary(metadata, fields.head_dim)?;
-    // the pattern also covers EXAONE 4.5's MTP block, past the decoder's layers
-    let blocks = metadata.required_usize("block_count")?;
+    // EXAONE 4.5's pattern also covers its MTP block, past the decoder's layers; K-EXAONE's stops at the decoder's
+    let blocks = match metadata.value("attention.sliding_window_pattern") {
+        Some(GgufValue::Array(values)) if values.len() == fields.num_hidden_layers => {
+            fields.num_hidden_layers
+        }
+        _ => metadata.required_usize("block_count")?,
+    };
     let layer_types = fields
         .sliding_window
         .map(|_| -> SynthesisResult<Vec<&str>> {
@@ -1403,6 +1412,62 @@ fn build_exaone4(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     config.insert("head_dim".into(), json!(fields.head_dim));
     config.insert("rope_scaling".into(), llama_rope_scaling(metadata)?);
     config.insert("layer_types".into(), json!(layer_types.transpose()?));
+    Ok(JsonValue::Object(config))
+}
+
+// K-EXAONE: EXAONE 4's attention fields under transformers' MoE names; llama.cpp keeps no MTP layer type, which
+// the checkpoints give as full attention
+fn build_exaone_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let JsonValue::Object(mut config) = build_exaone4(metadata)? else {
+        unreachable!("build_exaone4 builds an object");
+    };
+    let nextn = metadata
+        .optional_usize("nextn_predict_layers")?
+        .unwrap_or(0);
+    let shared = metadata.optional_usize("expert_shared_count")?.unwrap_or(0);
+    for (key, value) in [
+        (
+            "num_experts",
+            json!(metadata.required_usize("expert_count")?),
+        ),
+        (
+            "num_experts_per_tok",
+            json!(metadata.required_usize("expert_used_count")?),
+        ),
+        (
+            "moe_intermediate_size",
+            json!(metadata.required_usize("expert_feed_forward_length")?),
+        ),
+        ("num_shared_experts", json!(shared)),
+        (
+            "norm_topk_prob",
+            json!(
+                metadata
+                    .optional_bool("expert_weights_norm")?
+                    .unwrap_or(true)
+            ),
+        ),
+        (
+            "routed_scaling_factor",
+            json!(
+                metadata
+                    .optional_f64("expert_weights_scale")?
+                    .unwrap_or(1.0)
+            ),
+        ),
+        (
+            "first_k_dense_replace",
+            json!(
+                metadata
+                    .optional_usize("leading_dense_block_count")?
+                    .unwrap_or(0)
+            ),
+        ),
+        ("num_nextn_predict_layers", json!(nextn)),
+        ("mtp_layer_types", json!(vec!["full_attention"; nextn])),
+    ] {
+        config.insert(key.into(), value);
+    }
     Ok(JsonValue::Object(config))
 }
 
@@ -3815,9 +3880,9 @@ mod tests {
         pub use inference_models_gemma::{gemma, gemma2};
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
-            deepseek, ernie4_5, exaone, exaone4, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss,
-            granite, hunyuan_v1_dense, hunyuan_v1_moe, jamba, kimi_linear, lfm2, mamba, mamba2,
-            nemotron_h, olmo, rwkv_hybrid, rwkv6, rwkv7, seed_oss, starcoder2,
+            deepseek, ernie4_5, exaone, exaone_moe, exaone4, falcon_h1, glm4, glm4_moe,
+            glm4_moe_lite, gpt_oss, granite, hunyuan_v1_dense, hunyuan_v1_moe, jamba, kimi_linear,
+            lfm2, mamba, mamba2, nemotron_h, olmo, rwkv_hybrid, rwkv6, rwkv7, seed_oss, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -3911,6 +3976,7 @@ mod tests {
                 | NormalLoaderType::GraniteMoeSwa
                 | NormalLoaderType::Olmoe
                 | NormalLoaderType::Ernie4_5Moe
+                | NormalLoaderType::ExaoneMoe
                 | NormalLoaderType::NemotronH
                 | NormalLoaderType::NemotronHPuzzle
         )
@@ -4350,6 +4416,9 @@ mod tests {
             NormalLoaderType::Exaone => {
                 assert_deserializes(loader, config, models::exaone::Config::from_json)
             }
+            NormalLoaderType::ExaoneMoe => {
+                assert_deserializes(loader, config, models::exaone_moe::Config::from_json)
+            }
         }
     }
 
@@ -4652,6 +4721,39 @@ mod tests {
         );
         let error = synthesize_normal_config_value(&qwen3, &metadata, &tensors).unwrap_err();
         assert!(error.to_string().contains("layer policy"));
+    }
+
+    #[test]
+    fn exaone_sliding_patterns_cover_the_decoder_with_or_without_the_mtp_block() {
+        let loader = NormalLoaderType::ExaoneMoe;
+        let pattern = |sliding: &[bool]| {
+            GgufValue::Array(sliding.iter().copied().map(GgufValue::Bool).collect())
+        };
+        for sliding in [
+            &[true, true, true, false][..],
+            &[true, true, true, false, true][..],
+        ] {
+            let (architecture, mut metadata, tensors) = default_fixture(&loader);
+            insert_u32(&mut metadata, architecture, "block_count", 5);
+            insert_u32(&mut metadata, architecture, "nextn_predict_layers", 1);
+            insert_u32(&mut metadata, architecture, "attention.sliding_window", 128);
+            metadata.insert(
+                format!("{}.attention.sliding_window_pattern", architecture.as_str()),
+                pattern(sliding),
+            );
+            let config = synthesize_normal_config_value(&loader, &metadata, &tensors).unwrap();
+            assert_eq!(
+                config["layer_types"],
+                json!([
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ]),
+                "a {}-entry pattern",
+                sliding.len()
+            );
+        }
     }
 
     #[test]

@@ -160,6 +160,8 @@ EXAONE 4.0 (`Exaone4ForCausalLM`, e.g. `LGAI-EXAONE/EXAONE-4.0-32B` and `LGAI-EX
 
 EXAONE 4.5 (`Exaone4_5_ForConditionalGeneration`, e.g. `LGAI-EXAONE/EXAONE-4.5-33B`) adds image and video input: Qwen2.5-VL's vision tower with GQA beside the EXAONE 4.0 text stack. It loads from safetensors, or from its `exaone4` GGUF with the `exaone4_5` projector (`--mmproj`, `--tok-model-id LGAI-EXAONE/EXAONE-4.5-33B` for its config and processor). Its template thinks unless `enable_thinking: false`. `--mtp` drafts with its built-in MTP layer, which was trained on reasoning: with thinking on one draft a step runs about 1.5x plain decode, with thinking off it accepts almost nothing and slows decoding. It needs every layer on the GPU (PagedAttention): on a 24 GB card the IQ4_XS GGUF with the projector fits, Q4_K_M does not.
 
+K-EXAONE (`ExaoneMoeForCausalLM`, e.g. `LGAI-EXAONE/K-EXAONE-236B-A23B`) loads the same way (safetensors or llama.cpp's `exaone-moe` GGUFs): EXAONE 4's attention in pre-norm layers over 128 experts with sigmoid routing and a shared expert. At 236B it needs its experts in host memory on one GPU (`--moe-expert-cache`). `--mtp` drafts with its MTP layer.
+
 ## Seed-OSS
 
 ByteDance's Seed-OSS (`SeedOssForCausalLM`, e.g. `ByteDance-Seed/Seed-OSS-36B-Instruct`) loads through auto-detection, from safetensors or from llama.cpp's `seed_oss` GGUFs. Its reasoning (`<seed:think>...</seed:think>`) comes back as `reasoning_content`, the `<seed:cot_budget_reflect>` notes its template asks for included, and its `<seed:tool_call>` calls as tool calls. Turning thinking off (`enable_thinking: false` or `reasoning_effort: "none"`) renders the template with `thinking_budget` 0, its no-reasoning mode.

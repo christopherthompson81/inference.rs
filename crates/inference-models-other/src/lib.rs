@@ -1,4 +1,4 @@
-//! Models from other families: BERT-family, Nomic BERT, ModernBERT and NeoBERT encoders, DeepSeek 2/3, ERNIE 4.5 (dense and MoE), EXAONE 3.x and 4.0, GLM-4 and its MoE variants, GPT-OSS, Granite, Hunyuan, LFM2, Seed-OSS and StarCoder2 text models, and LFM2-VL and PaddleOCR-VL.
+//! Models from other families: BERT-family, Nomic BERT, ModernBERT and NeoBERT encoders, DeepSeek 2/3, ERNIE 4.5 (dense and MoE), EXAONE 3.x and 4.0, K-EXAONE, GLM-4 and its MoE variants, GPT-OSS, Granite, Hunyuan, LFM2, Seed-OSS and StarCoder2 text models, and LFM2-VL and PaddleOCR-VL.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::serde_default_fn;
@@ -19,6 +19,7 @@ pub mod ernie4_5;
 mod ernie4_5_tests;
 pub mod exaone;
 pub mod exaone4;
+pub mod exaone_moe;
 pub mod falcon_h1;
 pub mod glm4;
 pub mod glm4_moe;
@@ -98,6 +99,7 @@ inference_nn::json_config!(
     paddleocr_vl::config::Config,
     seed_oss::Config,
     exaone::Config,
+    exaone_moe::Config,
     rwkv6::Config,
     rwkv7::Config,
     rwkv_hybrid::ArwkvConfig,

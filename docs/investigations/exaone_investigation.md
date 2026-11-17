@@ -179,3 +179,56 @@ plain                               38.5
 Drafted output parts from plain at near ties (164 of 382 and 82 of 297 tokens equal; the splits 0.04 apart), as
 batched verify rows round apart from one-by-one decode. EXAONE 4.5's MTP works as the references describe; it pays
 only while the model thinks, so `--mtp` suits thinking requests and costs speed on others.
+
+## Run 6 - 2026-11-16 22:40
+
+**Question:** does K-EXAONE (mradermacher/K-EXAONE-236B-A23B-i1-GGUF, i1-IQ3_XS, 90.2 GiB) run as llama.cpp does?
+
+The file holds more than the 24 GiB card, so ours keeps the experts in host memory (20 a layer cached on the GPU, the
+CPU running the rest) and llama.cpp runs with `--cpu-moe`. Its `sliding_window_pattern` lists the 48 decoder layers
+only, where EXAONE 4.5's also covers the MTP block; the config builder took the block count and refused the file, and
+now takes either length.
+
+Greedy chat, the sky prompt (24 tokens thinking off, 22 on, the same on both):
+
+```
+ours, KV cache auto (q3: the plan quantizes it when experts leave the GPU)
+thinking off    14 of 160 equal, max |d logprob| 0.146; ours ' although' -1.18, llama.cpp ' which' -0.73
+thinking on     23 of 240 equal, max |d logprob| 0.244
+ours, --pa-cache-type none (bf16)
+thinking off    119 of 160 equal, max |d logprob| 0.107; step 119 a near tie (' because the' -0.876 / '.' -1.050)
+thinking on     24 of 240 equal, max |d logprob| 0.027; step 24 a near tie (' it' -0.676 / ' it has' -0.721)
+```
+
+The early split was the q3 cache alone; with the model's dtype the engines part only at near ties.
+
+KLD, wikitext-2 test, c=512, 20 chunks, against llama-perplexity's base (experts on the GPU through its op offload),
+our KV cache bf16:
+
+```
+                                              PPL      KLD mean   median    p99      same top-1
+llama.cpp, the base's own run                 14.4694
+ours, 20 experts a layer cached               14.7832  0.03752    0.00853   0.469    91.71%
+ours, 4 cached (most experts on the CPU)      14.8113  0.04217    0.00975   0.487    91.00%
+llama.cpp --cpu-moe --no-op-offload           14.7158  0.03980    0.01019            91.18%
+```
+
+(The example prints the base's PPL from its stored log-probs, 14.0444; llama-perplexity's own count gives 14.4694.)
+0.0375 is far above ERNIE 4.5 21B's 0.0011, but llama.cpp against itself, only its expert kernels moved from the GPU
+to the CPU, spreads as far: at IQ3_XS this model's routing turns rounding into different experts. Ours sits inside
+that spread. A first run with `--kl-divergence --n-cpu-moe 44` scored KLD 0 exactly: op offload copies host experts
+to the GPU for large batches, so it ran the base's kernels.
+
+MTP (`--mtp --mtp-n-predict 1`, bf16 cache):
+
+```
+                  accepted        decode tok/s
+plain                             3.6-4.1
+thinking off      61 of 96 (64%)  3.6
+thinking on       97 of 140 (69%) 3.9
+```
+
+Unlike EXAONE 4.5's head, K-EXAONE's drafts without thinking too. It buys nothing here: decode is bound by reading
+experts from host memory, and a verify step's two rows touch more of them. Drafted output parts from plain at near
+ties (step 4, 0.05 apart; step 104, 0.03), the batched verify rounding of Run 5. The MTP layer is NoPE, as the
+config's `mtp_layer_types` gives it (llama.cpp does not run the `nextn` block).

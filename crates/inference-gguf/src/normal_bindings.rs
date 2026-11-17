@@ -81,6 +81,9 @@ pub fn build_normal_bindings(
         )?;
     }
     bind_composite_tensors(archive, loader, architecture, block_count, &mut bindings)?;
+    if matches!(loader, NormalLoaderType::ExaoneMoe) {
+        bind_root_mtp(archive, loader, architecture, block_count, &mut bindings)?;
+    }
     let checkpoint_names = match loader {
         NormalLoaderType::Qwen => Some(QWEN1_RENAMES),
         NormalLoaderType::Exaone => Some(EXAONE_RENAMES),
@@ -642,6 +645,59 @@ fn falcon_h1_name(name: &str) -> String {
     renamed
 }
 
+// llama.cpp's `nextn` block after the stack, under the checkpoint's root-level `mtp.*` (K-EXAONE's)
+const ROOT_MTP_TENSORS: &[(&str, &str)] = &[
+    ("nextn.eh_proj.weight", "mtp.fc.weight"),
+    ("nextn.enorm.weight", "mtp.pre_fc_norm_embedding.weight"),
+    ("nextn.hnorm.weight", "mtp.pre_fc_norm_hidden.weight"),
+    ("nextn.shared_head_norm.weight", "mtp.norm.weight"),
+];
+
+fn bind_root_mtp(
+    archive: &GgufArchive,
+    loader: &NormalLoaderType,
+    architecture: CanonicalGgufArchitecture,
+    block_count: usize,
+    bindings: &mut GgufBindingMap,
+) -> Result<()> {
+    let block = format!("blk.{block_count}.");
+    let mut layer = GgufBindingMap::new();
+    for name in archive.tensors().keys() {
+        let Some(rest) = name.strip_prefix(&block) else {
+            continue;
+        };
+        if let Some((_, target)) = ROOT_MTP_TENSORS.iter().find(|(source, _)| *source == rest) {
+            let binding = GgufTensorBinding::tensor(name);
+            let binding = if rest.contains("norm") {
+                norm_binding(architecture, name, binding)
+            } else {
+                binding
+            };
+            bindings.insert((*target).to_string(), binding);
+            continue;
+        }
+        if let Some((index, role, suffix)) = parse_block_tensor(name) {
+            bind_block_tensor(
+                archive,
+                loader,
+                architecture,
+                index,
+                role,
+                suffix,
+                name,
+                &mut layer,
+            )?;
+        }
+    }
+    let stack_layer = format!("model.layers.{block_count}.");
+    for (name, binding) in layer.iter() {
+        if let Some(rest) = name.strip_prefix(&stack_layer) {
+            bindings.insert(format!("mtp.layers.0.{rest}"), binding.clone());
+        }
+    }
+    Ok(())
+}
+
 // Qwen 1 and EXAONE 3 keep their checkpoints' names (`transformer.h.N.attn.c_attn`), where the bindings above write
 // Llama's
 const QWEN1_RENAMES: &[(&str, &str)] = &[
@@ -878,6 +934,7 @@ fn bind_block_tensor(
                 format!("{p}.feed_forward.expert_bias")
             }
             NormalLoaderType::Ernie4_5Moe => format!("{p}.mlp.moe_statics.e_score_correction_bias"),
+            NormalLoaderType::ExaoneMoe => format!("{p}.mlp.e_score_correction_bias"),
             _ => format!("{p}.mlp.gate.e_score_correction_bias"),
         }),
         "attn_q_a" => Some(format!("{p}.self_attn.q_a_proj.{suffix}")),

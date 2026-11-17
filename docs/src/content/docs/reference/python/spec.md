@@ -728,6 +728,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.LFM2` | `'lfm2'` |
 | `NormalLoaderType.LFM2_MOE` | `'lfm2_moe'` |
 | `NormalLoaderType.EXAONE` | `'exaone'` |
+| `NormalLoaderType.EXAONE_MOE` | `'exaone_moe'` |
 | `NormalLoaderType.EXAONE4` | `'exaone4'` |
 | `NormalLoaderType.SEED_OSS` | `'seed_oss'` |
 

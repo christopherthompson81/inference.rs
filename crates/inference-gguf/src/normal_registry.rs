@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 56;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 49;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 57;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -45,6 +45,7 @@ pub enum CanonicalGgufArchitecture {
     SeedOss,
     Exaone,
     Exaone4,
+    ExaoneMoe,
     NemotronH,
     NemotronHMoe,
     FalconH1,
@@ -99,6 +100,7 @@ impl CanonicalGgufArchitecture {
             Self::SeedOss => "seed_oss",
             Self::Exaone => "exaone",
             Self::Exaone4 => "exaone4",
+            Self::ExaoneMoe => "exaone-moe",
             Self::NemotronH => "nemotron_h",
             Self::NemotronHMoe => "nemotron_h_moe",
             Self::FalconH1 => "falcon-h1",
@@ -163,6 +165,7 @@ impl FromStr for CanonicalGgufArchitecture {
             "seed_oss" => Ok(Self::SeedOss),
             "exaone" => Ok(Self::Exaone),
             "exaone4" => Ok(Self::Exaone4),
+            "exaone-moe" => Ok(Self::ExaoneMoe),
             "nemotron_h" => Ok(Self::NemotronH),
             "nemotron_h_moe" => Ok(Self::NemotronHMoe),
             "falcon-h1" => Ok(Self::FalconH1),
@@ -572,6 +575,7 @@ const LFM2_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Lfm2Moe];
 const SEED_OSS_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::SeedOss];
 const EXAONE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Exaone];
 const EXAONE4_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Exaone4];
+const EXAONE_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::ExaoneMoe];
 
 pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
     GgufSchema {
@@ -964,6 +968,14 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: NO_REQUIREMENTS,
         required_tensors: NO_REQUIREMENTS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::ExaoneMoe,
+        compatible_loaders: EXAONE_MOE_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: MOE_METADATA,
+        required_tensors: MOE_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     GgufSchema {
@@ -1412,6 +1424,15 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
         loader: NormalLoaderType::Exaone,
         architectures: &[CanonicalGgufArchitecture::Exaone],
         layouts: &[GgufLayout::Direct],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::ExaoneMoe,
+        architectures: &[CanonicalGgufArchitecture::ExaoneMoe],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+        ],
     },
     NativeModelAdapter {
         loader: NormalLoaderType::Exaone4,

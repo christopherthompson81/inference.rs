@@ -80,6 +80,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `Lfm2ForCausalLM` | LFM2, LFM2.5 | <details><summary><code>LiquidAI/LFM2.5-1.2B-Instruct</code> (LFM2.5), <code>LiquidAI/LFM2-1.2B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-1.2B-Instruct</code><br><code>inference run -m LiquidAI/LFM2-1.2B</code></details> |
 | `Lfm2MoeForCausalLM` | LFM2 MoE, LFM2.5 MoE | <details><summary><code>LiquidAI/LFM2.5-8B-A1B</code> (LFM2.5), <code>LiquidAI/LFM2-8B-A1B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-8B-A1B</code><br><code>inference run -m LiquidAI/LFM2-8B-A1B</code></details> |
 | `ExaoneForCausalLM` | EXAONE 3.0, EXAONE 3.5 | <details><summary><code>LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct</code></summary><code>inference run -m LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct</code></details> |
+| `ExaoneMoeForCausalLM` | K-EXAONE | <details><summary><code>LGAI-EXAONE/K-EXAONE-236B-A23B</code></summary><code>inference run -m LGAI-EXAONE/K-EXAONE-236B-A23B</code></details> |
 | `Exaone4ForCausalLM` | EXAONE 4.0 | <details><summary><code>LGAI-EXAONE/EXAONE-4.0-1.2B</code></summary><code>inference run -m LGAI-EXAONE/EXAONE-4.0-1.2B</code></details> |
 | `SeedOssForCausalLM` | Seed-OSS | <details><summary><code>ByteDance-Seed/Seed-OSS-36B-Instruct</code></summary><code>inference run -m ByteDance-Seed/Seed-OSS-36B-Instruct</code></details> |
 
