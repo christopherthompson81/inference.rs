@@ -11,6 +11,7 @@
 /// | LLaVA-NeXT                   | `llava-hf/llava-v1.6-mistral-7b-hf`                     |
 /// | LFM2.5-VL                    | `LiquidAI/LFM2.5-VL-450M`                                |
 /// | PaddleOCR-VL                 | `PaddlePaddle/PaddleOCR-VL-1.6`                          |
+/// | DeepSeek-OCR                 | `deepseek-ai/DeepSeek-OCR`                               |
 /// | Idefics2                     | `HuggingFaceM4/idefics2-8b-chatty`                      |
 /// | Idefics3                     | `HuggingFaceM4/Idefics3-8B-Llama3`                      |
 /// | Qwen2-VL                     | `Qwen/Qwen2-VL-2B-Instruct`                             |

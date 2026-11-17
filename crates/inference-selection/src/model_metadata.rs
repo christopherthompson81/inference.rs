@@ -413,6 +413,11 @@ impl SupportedArch for MultimodalLoaderType {
                 modalities: &[Text, Audio],
                 examples: &[ex!("ibm-granite/granite-speech-4.1-2b")],
             },
+            Self::DeepseekOcr => ArchMetadata {
+                families: &["DeepSeek-OCR"],
+                modalities: &[Text, Vision],
+                examples: &[ex!("deepseek-ai/DeepSeek-OCR")],
+            },
             Self::Granite4Vision => ArchMetadata {
                 families: &["Granite 4 Vision"],
                 modalities: &[Text, Vision],

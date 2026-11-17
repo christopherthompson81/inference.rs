@@ -10610,6 +10610,7 @@
           "idefics2",
           "llava_next",
           "llava",
+          "deepseek_ocr",
           "granite4_vision",
           "nemotron_transcribe",
           "nemotron_omni",

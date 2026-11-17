@@ -622,6 +622,7 @@ impl SpeechPipeline {
                 audio_transcriber: None,
                 prompt_activation_bytes_per_token: None,
                 bf16_matmuls: false,
+                output_special_tokens: false,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
             cfg,

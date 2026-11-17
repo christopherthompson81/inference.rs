@@ -1221,6 +1221,7 @@ impl TranscriptionPipeline {
                 audio_transcriber: None,
                 prompt_activation_bytes_per_token: None,
                 bf16_matmuls,
+                output_special_tokens: false,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
             sessions: HashMap::new(),

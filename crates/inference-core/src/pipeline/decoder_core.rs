@@ -76,6 +76,7 @@ pub(crate) struct DecoderCoreArgs<'a> {
     pub switch_adapters: Option<Arc<crate::adapter::SwitchAdapters>>,
     pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
     pub audio_transcriber: Option<inference_nn::loaders::AudioTranscriber>,
+    pub output_special_tokens: bool,
     pub prompt_activation_bytes_per_token: Option<usize>,
 }
 
@@ -180,6 +181,7 @@ impl DecoderCore {
                 audio_transcriber: args.audio_transcriber,
                 prompt_activation_bytes_per_token: args.prompt_activation_bytes_per_token,
                 bf16_matmuls: false,
+                output_special_tokens: args.output_special_tokens,
                 prompt_chunk_tokens,
             }),
             tokenizer: args.tokenizer.into(),

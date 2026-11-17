@@ -131,6 +131,7 @@ impl Config {
             image_size: self.vision_config.image_size,
             patch_size: self.vision_config.patch_size,
             hidden_act: ClipActivation::QuickGelu,
+            fused_qkv: false,
         }
     }
 }

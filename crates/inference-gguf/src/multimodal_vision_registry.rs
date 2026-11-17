@@ -3,13 +3,8 @@ use inference_quant::{GgufArchive, GgufBindingMap};
 
 use inference_nn::loaders::MultimodalLoaderType;
 
-#[cfg(any(test, feature = "models-gemma"))]
 use super::{
-    gemma3_bindings::build_gemma3_bindings,
-    gemma3n_bindings::build_gemma3n_bindings,
-    meralion2_bindings::{build_meralion2_bindings, synthesize_meralion2_config},
-};
-use super::{
+    deepseek_ocr_bindings::{self, build_deepseek_ocr_bindings, synthesize_deepseek_ocr_config},
     glm_asr_bindings::{self, build_glm_asr_bindings, synthesize_glm_asr_config},
     granite_multimodal_bindings::{
         self, build_granite_speech_bindings, build_granite4_vision_bindings,
@@ -36,10 +31,17 @@ use super::{
     ultravox_bindings::{self, build_ultravox_bindings, synthesize_ultravox_config},
     voxtral_bindings::{self, build_voxtral_bindings, synthesize_voxtral_config},
 };
+#[cfg(any(test, feature = "models-gemma"))]
+use super::{
+    gemma3_bindings::build_gemma3_bindings,
+    gemma3n_bindings::build_gemma3n_bindings,
+    meralion2_bindings::{build_meralion2_bindings, synthesize_meralion2_config},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeMultimodalGgufFamily {
     AudioFlamingo3,
+    DeepseekOcr,
     Gemma3,
     Gemma3n,
     GlmAsr,
@@ -94,6 +96,7 @@ pub fn describes_own_config(architecture: &str, projector: &str) -> bool {
         family_from_names(architecture, Some(projector)),
         Ok(Some(
             NativeMultimodalGgufFamily::AudioFlamingo3
+                | NativeMultimodalGgufFamily::DeepseekOcr
                 | NativeMultimodalGgufFamily::GlmAsr
                 | NativeMultimodalGgufFamily::MERaLiON2
                 | NativeMultimodalGgufFamily::NemotronOmni
@@ -110,6 +113,7 @@ impl NativeMultimodalGgufFamily {
     fn loader_type(self) -> MultimodalLoaderType {
         match self {
             Self::AudioFlamingo3 => MultimodalLoaderType::AudioFlamingo3,
+            Self::DeepseekOcr => MultimodalLoaderType::DeepseekOcr,
             Self::Gemma3 => MultimodalLoaderType::Gemma3,
             Self::Gemma3n => MultimodalLoaderType::Gemma3n,
             Self::GlmAsr => MultimodalLoaderType::GlmAsr,
@@ -135,6 +139,7 @@ impl NativeMultimodalGgufFamily {
     fn synthesize_config(self, archive: &GgufArchive) -> Result<Option<String>> {
         match self {
             Self::AudioFlamingo3 => synthesize_audio_flamingo3_config(archive).map(Some),
+            Self::DeepseekOcr => synthesize_deepseek_ocr_config(archive).map(Some),
             Self::GlmAsr => synthesize_glm_asr_config(archive).map(Some),
             #[cfg(any(test, feature = "models-gemma"))]
             Self::MERaLiON2 => synthesize_meralion2_config(archive).map(Some),
@@ -152,8 +157,9 @@ impl NativeMultimodalGgufFamily {
     fn rope_pairing(self) -> RopePairing {
         match self {
             // llama.cpp's Ernie 4.5 converter keeps q/k in Hugging Face's half-split order
-            // llama.cpp's qwen2 converter keeps q/k half-split too
+            // llama.cpp's qwen2 converter keeps q/k half-split too, and DeepSeek-OCR's text ropes NeoX-style
             Self::AudioFlamingo3
+            | Self::DeepseekOcr
             | Self::Gemma3
             | Self::Gemma3n
             | Self::Lfm2Vl
@@ -190,6 +196,7 @@ impl NativeMultimodalGgufFamily {
                 bail!("GGUF Gemma 3 models are not built in; enable the `models-gemma` feature")
             }
             Self::AudioFlamingo3 => build_audio_flamingo3_bindings(archive),
+            Self::DeepseekOcr => build_deepseek_ocr_bindings(archive),
             Self::GlmAsr => build_glm_asr_bindings(archive),
             Self::Granite4Vision => build_granite4_vision_bindings(archive),
             Self::GraniteSpeech => build_granite_speech_bindings(archive),
@@ -211,7 +218,12 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 21] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 22] = [
+    (
+        deepseek_ocr_bindings::PROJECTOR,
+        deepseek_ocr_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::DeepseekOcr,
+    ),
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
     (

@@ -22,6 +22,8 @@ macro_rules! processor_factory {
     };
 }
 
+#[cfg(feature = "models-other")]
+pub(crate) mod deepseek_ocr;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3;
 #[cfg(feature = "models-gemma")]

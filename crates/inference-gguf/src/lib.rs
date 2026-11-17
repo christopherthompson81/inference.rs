@@ -1,6 +1,7 @@
 pub mod audiocpp;
 pub mod base_model;
 mod chat_template;
+pub mod deepseek_ocr_bindings;
 pub mod embedding_gguf;
 #[cfg(any(test, feature = "models-gemma"))]
 pub mod gemma3_bindings;

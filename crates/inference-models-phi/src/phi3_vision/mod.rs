@@ -131,6 +131,7 @@ pub struct ImageEmbedding {
 
 pub const PHI3V_CLIP_CONFIG: ClipConfig = ClipConfig {
     hidden_act: clip::Activation::QuickGelu,
+    fused_qkv: false,
     hidden_size: 1024,
     image_size: 336,
     intermediate_size: 4096,
