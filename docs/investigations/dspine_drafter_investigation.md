@@ -283,3 +283,24 @@ No gain; the one-seed win was the trajectories. Unmodeled in the replay, and a l
 on the host each step makes the CPU wait for the drafter before staging the verify, which the fixed path overlaps.
 Not kept. On this target no depth policy tried (Runs 10-13) beats fixed 7 drafts: the payoff curve is flat around 7,
 and whatever adapts pays about what the adaptation finds.
+
+## Run 14 - 2026-11-17 14:10
+
+**Question:** with Run 13's seeded method, how does DSpine compare with DFlash 2 at 7 drafts (both q4k)?
+
+`abrun.sh` per drafter, alternated twice; sampled over request seeds 11-13 (18 requests, 700 tokens), greedy once per
+prompt. Each seeded run repeats its text exactly, so the two rounds differ only by clocks.
+
+```
+                 sampled tok/s (accepted/step)                               greedy tok/s (accepted/step)
+           math   code   review algebra rust   essay  TOTAL        math   code   review algebra rust   essay  TOTAL
+DSpine     223    128    110    160     118    86     125.5/123.4  225    181    117    185     141    86     140.5/140.3
+           (5.32) (2.62) (2.10) (3.50)  (2.33) (1.43)              (5.17) (3.90) (2.18) (4.03)  (2.83) (1.34)
+DFlash 2   220    130    113    177     111    92     126.5/127.7  228    187    108    197     134    98     143.8/143.7
+           (5.08) (2.60) (2.18) (4.00)  (2.06) (1.54)              (5.19) (3.99) (1.89) (4.30)  (2.59) (1.65)
+```
+
+DFlash 2 leads by about 2% sampled and 2.4% greedy at the same depth; per prompt it is a split (DSpine ahead on math
+and rust, DFlash 2 on algebra and essay). Run 2's one-seed DSpine lead on sampled code (154 vs 133) was trajectory.
+DSpine's case is its deeper block, and Runs 10-13 found no way to make 15 drafts pay on this card, so DFlash 2 stays
+the recommended drafter for this target here; DSpine is the option where verify rows are cheaper (a faster card).
