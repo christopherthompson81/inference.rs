@@ -86,7 +86,6 @@ pub(crate) use loaders::MultimodalProcessorFactory;
 pub use loaders::Qwen2Loader;
 #[cfg(feature = "models-other")]
 pub use loaders::Starcoder2Loader;
-pub(crate) use loaders::checkpoint_runtime_size;
 pub use loaders::{
     AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
     DeviceMappedModelLoader, DiffusionLoaderType, DiffusionModel, DiffusionModelLoader,
@@ -102,6 +101,7 @@ pub use loaders::{
 };
 #[cfg(feature = "models-phi")]
 pub use loaders::{Phi2Loader, Phi3Loader, Phi3VLoader};
+pub(crate) use loaders::{checkpoint_runtime_size, checkpoint_runtime_size_where};
 pub(crate) use step::start_decoding_prompt_rows;
 #[allow(clippy::too_many_arguments)]
 pub fn get_device_layers_for_loader(

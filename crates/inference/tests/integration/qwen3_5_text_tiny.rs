@@ -605,6 +605,59 @@ async fn hybrid_dspark_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
     Ok(())
 }
 
+// A windowed DSpine drafter, its code writes and serial refinement inside the drafter's decode graph, keeps greedy
+// output; a sampled request drafts from its candidate distributions.
+#[tokio::test]
+async fn hybrid_dspine_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let drafter = tiny_drafter::tiny_dspine(
+        &DRAFTER_TARGET,
+        serde_json::json!({
+            "block_size": DFLASH_BLOCK,
+            "layer_types": ["sliding_attention", "sliding_attention"],
+            "sliding_window": DFLASH_WINDOW,
+        }),
+    )?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(DFLASH_BLOCK - 1))
+        .build()
+        .await?;
+    let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_component_replayed(&counters, DFLASH_COMPONENT);
+    decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    let drafts = |model: &Model| -> anyhow::Result<usize> {
+        Ok(model
+            .speculative_stats()?
+            .data
+            .iter()
+            .map(|m| m.drafts)
+            .sum())
+    };
+    let greedy_drafts = drafts(&model)?;
+    assert!(greedy_drafts > 0, "DSpine never drafted");
+    let sampled = model
+        .send_chat_request(
+            RequestBuilder::new()
+                .add_message(TextMessageRole::User, decode_graphs::GRAPH_PROMPTS[0])
+                .set_sampler_temperature(1.0)
+                .set_sampler_max_len(GRAPH_MAX_LEN),
+        )
+        .await?;
+    assert_eq!(sampled.usage.completion_tokens, GRAPH_MAX_LEN);
+    assert!(
+        drafts(&model)? > greedy_drafts,
+        "DSpine never drafted a sampled request"
+    );
+    Ok(())
+}
+
 // A full-attention DSpark drafter, the published shape, drafts on the eager path and greedy output holds.
 async fn hybrid_dspark_with_full_attention_keeps_greedy_output() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {

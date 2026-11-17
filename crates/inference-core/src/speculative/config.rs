@@ -99,11 +99,28 @@ pub fn external_weight_size_in_bytes(
                 path.display()
             ))
         })?;
-    // the drafter quantizes each projection as it loads, so a set weight type is what stays resident
-    Ok(match config.drafter_isq {
-        Some(isq) => bytes / isq.pack_factor(target_dtype).max(1),
-        None => bytes,
-    })
+    // the drafter quantizes each projection as it loads, so a set weight type is what stays resident; what it keeps
+    // at the model dtype (DSpine's code bridge) stays whole
+    let Some(isq) = config.drafter_isq else {
+        return Ok(bytes);
+    };
+    #[cfg(feature = "drafters")]
+    let kept = match super::dflash::peek_config(&MtpConfig {
+        model: Some(path.to_string_lossy().into_owned()),
+        ..config.clone()
+    })? {
+        Some(dflash) => {
+            crate::pipeline::checkpoint_runtime_size_where(&weight_paths, target_dtype, |name| {
+                dflash.stays_unquantized(name)
+            })
+            .map_err(inference_tensor::Error::msg)?
+            .unwrap_or(0)
+        }
+        None => 0,
+    };
+    #[cfg(not(feature = "drafters"))]
+    let kept = 0;
+    Ok(kept + (bytes - kept) / isq.pack_factor(target_dtype).max(1))
 }
 
 /// Adds an external assistant's runtime weight footprint to a paged-cache memory reservation.

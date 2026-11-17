@@ -7,7 +7,8 @@
 //! a rejected tail needs no drafter rollback. DFlash 2 adds two-tap grouped dynamic convolutions
 //! around each sublayer and a candidate path selector over the top-k logits per position.
 //! DSpark (DeepSpec, SpecForge) drafts from every row, anchor included, and chains a low-rank Markov bias keyed on
-//! the previous pick across the block.
+//! the previous pick across the block. DSpine (`crate::dspine`) adds a code write after every layer and drafts by a
+//! serial refinement of the last write over the head's top-k candidates.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -26,6 +27,8 @@ use inference_tensor::{
 };
 
 use inference_nn::kv_cache::PagedAuxiliaryPrefixState;
+
+use crate::dspine::{BridgeStash, DSpineHead, DSpineKeys, DSpineSpec, SecondPass, TailInputs};
 use inference_nn::layers::{RmsNorm, YarnRopeConfig, yarn_inv_freq_and_attention_factor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_nn::paged_attention::AuxiliaryPagedLayers;
@@ -54,6 +57,7 @@ pub const DEFAULT_MAX_DRAFTS: usize = 7;
 // depths an autotuned DFlash drafter chooses between, up to its n_predict
 pub const AUTO_DEPTHS: [usize; 3] = [3, 5, 7];
 const DSPARK_MARKOV_HEAD_TYPE: &str = "vanilla";
+const DSPINE: &str = "DSpine";
 // Eager forwards use this cache; CUDA graphs derive RoPE from their replayed position inputs.
 const ROPE_CACHE_LEN: usize = 65536;
 const MASK_CACHE_CAP: usize = 64;
@@ -205,7 +209,10 @@ fn dflash_prefix_replay(
 
 /// Whether an `architectures` entry names a drafter this module loads: DFlash, DFlash 2 or DSpark.
 pub fn is_dflash_architecture(name: &str) -> bool {
-    name.contains("DFlash") || name.contains("Dflash") || name.contains("DSpark")
+    name.contains("DFlash")
+        || name.contains("Dflash")
+        || name.contains("DSpark")
+        || name.contains(DSPINE)
 }
 
 fn config_names_dflash(value: &serde_json::Value) -> bool {
@@ -262,6 +269,8 @@ pub struct DFlashConfig {
     pub draft_vocab_size: Option<usize>,
     #[serde(default)]
     pub dflash_config: DFlashSpecificConfig,
+    // DSpine: the serial refinement table, beside `dflash_config.selected_prefix_last_write_refine`
+    pub code_bridge_second_pass: Option<SecondPass>,
 }
 
 pub struct DFlashLoadTarget<'a> {
@@ -279,6 +288,17 @@ impl DFlashConfig {
 
     fn is_dspark(&self) -> bool {
         self.architectures.iter().any(|a| a.contains("DSpark"))
+    }
+
+    fn is_dspine(&self) -> bool {
+        self.architectures.iter().any(|a| a.contains(DSPINE))
+    }
+
+    /// Whether a checkpoint tensor loads at the model dtype under a drafter weight type (DSpine's code bridge).
+    pub fn stays_unquantized(&self, tensor: &str) -> bool {
+        self.is_dspine()
+            && tensor.starts_with(crate::dspine::BRIDGE_PREFIX)
+            && tensor != crate::dspine::CODEBOOK
     }
 
     /// The first noise row that drafts: DSpark's row j predicts position j + 1, DFlash's row j predicts position j.
@@ -1129,6 +1149,13 @@ pub struct DFlashSamplingInputs<'a> {
     pub uniforms: &'a [f32],
 }
 
+/// A draft block's normed rows `[batch, drafts, hidden]` at its drafting positions, with DSpine's last-write stash
+/// over the same rows.
+pub struct DraftHidden {
+    pub rows: Tensor,
+    stash: Option<BridgeStash>,
+}
+
 pub enum DFlashProposalBatch {
     Tokens(Vec<Vec<u32>>),
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -1433,6 +1460,7 @@ impl DFlashCudaGraphOutput {
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 struct DFlashWindowedForward<'a> {
     noise_embedding: &'a Tensor,
+    anchors: Option<&'a Tensor>,
     q_cos: &'a Tensor,
     q_sin: &'a Tensor,
     batch: usize,
@@ -1468,6 +1496,7 @@ pub struct DFlashDraftModel {
     block_size: usize,
     draft_row_offset: usize,
     markov: Option<MarkovHead>,
+    dspine: Option<DSpineHead>,
     // a full-attention drafter keeps its layers in the target's paged cache, from this layer index on
     full_attention: bool,
     paged_first_layer: Option<usize>,
@@ -1564,9 +1593,8 @@ impl DFlashCudaGraphBuffers {
             output_candidate_ids,
             output_candidate_probs,
         ) = if key.selector_mode == DFlashSelectorMode::Sampling {
-            let selector = model
-                .selector
-                .as_ref()
+            let top_k = model
+                .candidate_top_k()
                 .expect("sampling graph key requires a selector");
             let inverse_temperatures = rows
                 .selector_inverse_temperatures
@@ -1588,12 +1616,12 @@ impl DFlashCudaGraphBuffers {
                     device,
                 )?)?),
                 Some(Var::zeros(
-                    (key.batch_bucket, key.block - 1, selector.top_k),
+                    (key.batch_bucket, key.block - 1, top_k),
                     DType::U32,
                     device,
                 )?),
                 Some(Var::zeros(
-                    (key.batch_bucket, key.block - 1, selector.top_k),
+                    (key.batch_bucket, key.block - 1, top_k),
                     DType::F32,
                     device,
                 )?),
@@ -2682,6 +2710,41 @@ impl DFlashDraftModel {
             Some(weight) => gguf_nvfp4_linear(&[weight], device)?.0,
             None => linears.linear("fc", || vb_host.pp("fc").get((hidden, fc_cols), "weight"))?,
         };
+        let dspine_spec = cfg
+            .is_dspine()
+            .then(|| -> Result<DSpineSpec> {
+                if cfg
+                    .draft_vocab_size
+                    .is_some_and(|draft| draft != cfg.vocab_size)
+                {
+                    inference_tensor::bail!(
+                        "DSpine drafts over a reduced vocabulary, which is unsupported"
+                    );
+                }
+                let json: serde_json::Value =
+                    serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
+                let keys: DSpineKeys =
+                    serde_json::from_value(json.get("dflash_config").cloned().unwrap_or_default())
+                        .map_err(inference_tensor::Error::msg)?;
+                DSpineSpec::from_config(
+                    &keys,
+                    cfg.code_bridge_second_pass.as_ref(),
+                    cfg.num_hidden_layers,
+                )
+            })
+            .transpose()?;
+        // the codebook is only gathered by row, so it takes the drafter's weight type like a token embedding
+        let dspine_codebook = dspine_spec
+            .as_ref()
+            .map(|spec| {
+                linears.linear(crate::dspine::CODEBOOK, || {
+                    vb_host.get(
+                        (cfg.vocab_size, spec.bridge.code_size),
+                        crate::dspine::CODEBOOK,
+                    )
+                })
+            })
+            .transpose()?;
         linears.finish();
         let mask_embedding = vb_host
             .pp("embed_tokens")
@@ -2712,7 +2775,21 @@ impl DFlashDraftModel {
         let markov = markov_rank
             .map(|rank| MarkovHead::load(vb.pp("markov_head"), cfg.vocab_size, rank, device))
             .transpose()?;
+        let dspine = dspine_spec
+            .zip(dspine_codebook)
+            .map(|(spec, codebook)| {
+                DSpineHead::load(&vb, spec, codebook, hidden, cfg.num_hidden_layers, device)
+            })
+            .transpose()?;
         let selector_capability = match selector.as_ref() {
+            // DSpine samples with tensor ops; the sparse proposals it returns are CUDA-only
+            None if dspine.is_some() => {
+                if cfg!(feature = "cuda") && device.is_cuda() {
+                    Ok(())
+                } else {
+                    Err("probabilistic DSpine drafting needs a CUDA device".to_string())
+                }
+            }
             None => Err("a DFlash2 checkpoint with a candidate selector is required".to_string()),
             #[cfg(feature = "cuda")]
             Some(selector) => selector.configured_cuda_capability(device.is_cuda(), dtype),
@@ -2749,6 +2826,7 @@ impl DFlashDraftModel {
             block_size: cfg.block_size(),
             draft_row_offset: cfg.draft_row_offset(),
             markov,
+            dspine,
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             full_attention: cfg.auxiliary_paged_layers().is_some(),
             #[cfg(not(all(feature = "cuda", target_family = "unix")))]
@@ -2858,12 +2936,9 @@ impl DFlashDraftModel {
         let Some(pool) = &self.windowed_pool else {
             return Ok(());
         };
-        let use_selector = self.selector.is_some();
-        if use_selector
-            && self
-                .selector
-                .as_ref()
-                .expect("selector checked above")
+        let use_selector = self.has_selector();
+        if let Some(selector) = &self.selector
+            && selector
                 .configured_cuda_capability(self.device.is_cuda(), self.dtype)
                 .is_err()
         {
@@ -3015,12 +3090,9 @@ impl DFlashDraftModel {
             ) else {
                 return Ok(None);
             };
-            let use_selector = self.selector.is_some();
-            if use_selector
-                && self
-                    .selector
-                    .as_ref()
-                    .expect("selector checked above")
+            let use_selector = self.has_selector();
+            if let Some(selector) = &self.selector
+                && selector
                     .configured_cuda_capability(self.device.is_cuda(), self.dtype)
                     .is_err()
             {
@@ -3323,15 +3395,28 @@ impl DFlashDraftModel {
     }
 
     pub fn kind(&self) -> &'static str {
-        match (&self.markov, &self.selector) {
-            (Some(_), _) => "DSpark",
-            (None, Some(_)) => "DFlash2",
-            (None, None) => "DFlash",
+        match (&self.markov, &self.selector, &self.dspine) {
+            (Some(_), ..) => "DSpark",
+            (None, Some(_), _) => "DFlash2",
+            (None, None, Some(_)) => DSPINE,
+            (None, None, None) => "DFlash",
+        }
+    }
+
+    /// Whether drafts come from a path over per-row candidates (DFlash 2's selector, DSpine's refinement), which can
+    /// also sample with their distributions.
+    // the candidates per draft row a selecting drafter samples over
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn candidate_top_k(&self) -> Option<usize> {
+        match (&self.selector, &self.dspine) {
+            (Some(selector), _) => Some(selector.top_k),
+            (None, Some(head)) => Some(head.head_topk()),
+            (None, None) => None,
         }
     }
 
     pub fn has_selector(&self) -> bool {
-        self.selector.is_some()
+        self.selector.is_some() || self.dspine.is_some()
     }
 
     pub fn draft_sampling_method(&self) -> MtpDraftSamplingMethod {
@@ -3801,9 +3886,10 @@ impl DFlashDraftModel {
         &self,
         seq_ids: &[usize],
         noise_embedding: &Tensor,
+        anchors: Option<&Tensor>,
         start_positions: &[usize],
         paged: DFlashPagedCache<'_>,
-    ) -> Result<Tensor> {
+    ) -> Result<DraftHidden> {
         let (batch, block, _) = noise_embedding.dims3()?;
         let (block_tables, width, slots, kv_lens) = {
             let mut manager = inference_nn::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
@@ -3863,6 +3949,7 @@ impl DFlashDraftModel {
         let scale = 1f32 / (self.head_dim as f32).sqrt();
         let hs = self.run_draft_layers(
             noise_embedding,
+            anchors,
             &q_cos,
             &q_sin,
             DraftAttentionLayout::TokensFirst,
@@ -3900,8 +3987,7 @@ impl DFlashDraftModel {
                 out.reshape((batch, block, self.num_heads * self.head_dim))
             },
         )?;
-        let hs = self.norm.forward(&hs)?;
-        hs.narrow(1, self.draft_row_offset, block - self.draft_row_offset)
+        self.draft_rows(hs, block)
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -3974,10 +4060,13 @@ impl DFlashDraftModel {
         &self,
         seq_ids: &[usize],
         noise_embedding: &Tensor,
+        anchors: &[u32],
         start_positions: &[usize],
         paged: Option<DFlashPagedCache<'_>>,
-    ) -> Result<Tensor> {
+    ) -> Result<DraftHidden> {
         let (b, block, _) = noise_embedding.dims3()?;
+        let anchors = self.bridge_anchors(anchors)?;
+        let anchors = anchors.as_ref();
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if self.uses_paged_kv() {
             let paged = paged.ok_or_else(|| {
@@ -3985,13 +4074,26 @@ impl DFlashDraftModel {
                     "a paged DFlash drafter needs the target's paged cache",
                 )
             })?;
-            return self.draft_hidden_paged(seq_ids, noise_embedding, start_positions, paged);
+            return self.draft_hidden_paged(
+                seq_ids,
+                noise_embedding,
+                anchors,
+                start_positions,
+                paged,
+            );
         }
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         let _ = paged;
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if self.windowed_pool.is_some() {
-            return self.draft_hidden_windowed(seq_ids, noise_embedding, start_positions, b, block);
+            return self.draft_hidden_windowed(
+                seq_ids,
+                noise_embedding,
+                anchors,
+                start_positions,
+                b,
+                block,
+            );
         }
         let cache = self.ctx_cache.lock().expect("dflash cache poisoned");
         let mut lens = Vec::with_capacity(b);
@@ -4078,6 +4180,7 @@ impl DFlashDraftModel {
         let groups = self.num_heads / self.num_kv_heads;
         let hs = self.run_draft_layers(
             noise_embedding,
+            anchors,
             &q_cos,
             &q_sin,
             DraftAttentionLayout::HeadsFirst,
@@ -4109,19 +4212,19 @@ impl DFlashDraftModel {
             },
         )?;
 
-        let hs = self.norm.forward(&hs)?;
-        hs.narrow(1, self.draft_row_offset, block - self.draft_row_offset)
+        self.draft_rows(hs, block)
     }
 
     #[allow(clippy::cast_possible_truncation)]
     fn run_draft_layers<F>(
         &self,
         noise_embedding: &Tensor,
+        anchors: Option<&Tensor>,
         q_cos: &Tensor,
         q_sin: &Tensor,
         attention_layout: DraftAttentionLayout,
         mut attention: F,
-    ) -> Result<Tensor>
+    ) -> Result<(Tensor, Option<BridgeStash>)>
     where
         F: FnMut(usize, &DFlashLayer, &Tensor, &Tensor, &Tensor) -> Result<Tensor>,
     {
@@ -4129,6 +4232,7 @@ impl DFlashDraftModel {
         let q_size = self.num_heads * self.head_dim;
         let kv_size = self.num_kv_heads * self.head_dim;
         let mut hs = noise_embedding.to_dtype(self.dtype)?;
+        let mut stash = None;
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let residual = &hs;
             let mut x = layer.input_layernorm.forward(&hs)?;
@@ -4247,8 +4351,39 @@ impl DFlashDraftModel {
                 out = conv.finish(&out, &kernel)?;
             }
             hs = (residual + out)?;
+            if let Some(head) = &self.dspine {
+                let anchors = anchors.ok_or_else(|| {
+                    inference_tensor::Error::msg("a DSpine draft needs its blocks' anchors")
+                })?;
+                let (written, layer_stash) = head.write(&hs, anchors, layer_idx)?;
+                hs = written;
+                stash = layer_stash.or(stash);
+            }
         }
-        Ok(hs)
+        Ok((hs, stash))
+    }
+
+    // the final norm over the drafting rows, the bridge's stash narrowed alike
+    fn draft_rows(
+        &self,
+        (hs, stash): (Tensor, Option<BridgeStash>),
+        block: usize,
+    ) -> Result<DraftHidden> {
+        let (start, len) = (self.draft_row_offset, block - self.draft_row_offset);
+        Ok(DraftHidden {
+            rows: self.norm.forward(&hs)?.narrow(1, start, len)?,
+            stash: stash
+                .map(|stash| stash.narrow_rows(start, len))
+                .transpose()?,
+        })
+    }
+
+    // the anchors `[batch]` a DSpine bridge codes its first rows by
+    fn bridge_anchors(&self, anchors: &[u32]) -> Result<Option<Tensor>> {
+        self.dspine
+            .as_ref()
+            .map(|_| Tensor::from_vec(anchors.to_vec(), (anchors.len(),), &self.device))
+            .transpose()
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -4256,10 +4391,11 @@ impl DFlashDraftModel {
         &self,
         seq_ids: &[usize],
         noise_embedding: &Tensor,
+        anchors: Option<&Tensor>,
         start_positions: &[usize],
         batch: usize,
         block: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<DraftHidden> {
         let attention_batch = {
             let pool = self
                 .windowed_pool
@@ -4303,6 +4439,7 @@ impl DFlashDraftModel {
         };
         self.draft_hidden_windowed_tensors(DFlashWindowedForward {
             noise_embedding,
+            anchors,
             q_cos: &q_cos,
             q_sin: &q_sin,
             batch,
@@ -4313,9 +4450,13 @@ impl DFlashDraftModel {
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
-    fn draft_hidden_windowed_tensors(&self, forward: DFlashWindowedForward<'_>) -> Result<Tensor> {
+    fn draft_hidden_windowed_tensors(
+        &self,
+        forward: DFlashWindowedForward<'_>,
+    ) -> Result<DraftHidden> {
         let DFlashWindowedForward {
             noise_embedding,
+            anchors,
             q_cos,
             q_sin,
             batch,
@@ -4335,6 +4476,7 @@ impl DFlashDraftModel {
             - metadata.cumulative_kv_lens.narrow(0, 0, batch)?)?;
         let hs = self.run_draft_layers(
             noise_embedding,
+            anchors,
             q_cos,
             q_sin,
             DraftAttentionLayout::TokensFirst,
@@ -4376,8 +4518,7 @@ impl DFlashDraftModel {
                 out.reshape((batch, block, self.num_heads * self.head_dim))
             },
         )?;
-        let hs = self.norm.forward(&hs)?;
-        hs.narrow(1, self.draft_row_offset, block - self.draft_row_offset)
+        self.draft_rows(hs, block)
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -4406,8 +4547,10 @@ impl DFlashDraftModel {
         let q_cos = q_cos.reshape((key.batch_bucket, key.block, self.head_dim / 2))?;
         let q_sin = q_sin.reshape((key.batch_bucket, key.block, self.head_dim / 2))?;
         let metadata = buffers.metadata();
-        let hidden = self.draft_hidden_windowed_tensors(DFlashWindowedForward {
+        let anchors = buffers.anchors.as_detached_tensor();
+        let drafted = self.draft_hidden_windowed_tensors(DFlashWindowedForward {
             noise_embedding: &noise,
+            anchors: Some(&anchors),
             q_cos: &q_cos,
             q_sin: &q_sin,
             batch: key.batch_bucket,
@@ -4415,11 +4558,54 @@ impl DFlashDraftModel {
             attention_batch,
             metadata: &metadata,
         })?;
+        if let (Some(head), Some(stash)) = (&self.dspine, &drafted.stash) {
+            return match key.selector_mode {
+                DFlashSelectorMode::Sampling => {
+                    let (tokens, candidate_ids, candidate_probs) = head.sample(
+                        &TailInputs {
+                            rows: &drafted.rows,
+                            stash,
+                            anchors: &anchors,
+                            norm: &self.norm,
+                            lm_head: &**lm_head,
+                        },
+                        &buffers
+                            .selector_inverse_temperatures
+                            .as_ref()
+                            .expect("sampling graph requires inverse temperatures")
+                            .as_detached_tensor(),
+                        &buffers
+                            .selector_uniforms
+                            .as_ref()
+                            .expect("sampling graph requires uniforms")
+                            .as_detached_tensor(),
+                    )?;
+                    Ok(DFlashCudaGraphOutput {
+                        tokens: tokens.contiguous()?,
+                        candidate_ids: Some(candidate_ids.contiguous()?),
+                        candidate_probs: Some(candidate_probs.contiguous()?),
+                    })
+                }
+                _ => Ok(DFlashCudaGraphOutput {
+                    tokens: head
+                        .greedy(&TailInputs {
+                            rows: &drafted.rows,
+                            stash,
+                            anchors: &anchors,
+                            norm: &self.norm,
+                            lm_head: &**lm_head,
+                        })?
+                        .contiguous()?,
+                    candidate_ids: None,
+                    candidate_probs: None,
+                }),
+            };
+        }
+        let hidden = drafted.rows;
         let mut logits = lm_head.forward(&hidden)?;
         if (self.output_multiplier - 1.0).abs() > f64::EPSILON {
             logits = (logits * self.output_multiplier)?;
         }
-        let anchors = buffers.anchors.as_detached_tensor();
         match key.selector_mode {
             DFlashSelectorMode::Disabled => Ok(DFlashCudaGraphOutput {
                 tokens: self.pick_greedy(&logits, &anchors)?.contiguous()?,
@@ -4467,11 +4653,12 @@ impl DFlashDraftModel {
 
     pub fn finish_proposals(
         &self,
-        hidden: &Tensor,
+        drafted: &DraftHidden,
         anchors: &[u32],
         sampling: Option<DFlashSamplingInputs<'_>>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> Result<DFlashProposalBatch> {
+        let hidden = &drafted.rows;
         let (batch, positions, _) = hidden.dims3()?;
         if anchors.len() != batch {
             inference_tensor::bail!("DFlash anchors do not match draft rows");
@@ -4481,6 +4668,9 @@ impl DFlashDraftModel {
                 || sampling.uniforms.len() != batch * positions)
         {
             inference_tensor::bail!("DFlash selector sampling inputs do not match draft rows");
+        }
+        if let (Some(head), Some(stash)) = (&self.dspine, &drafted.stash) {
+            return self.dspine_proposals(head, drafted, stash, anchors, sampling, lm_head);
         }
         let mut logits = lm_head.forward(hidden)?;
         if (self.output_multiplier - 1.0).abs() > f64::EPSILON {
@@ -4543,6 +4733,64 @@ impl DFlashDraftModel {
             }
         };
         Ok(DFlashProposalBatch::Tokens(tokens_per_seq))
+    }
+
+    fn dspine_proposals(
+        &self,
+        head: &DSpineHead,
+        drafted: &DraftHidden,
+        stash: &BridgeStash,
+        anchors: &[u32],
+        sampling: Option<DFlashSamplingInputs<'_>>,
+        lm_head: &Arc<dyn QuantMethod>,
+    ) -> Result<DFlashProposalBatch> {
+        let batch = drafted.rows.dim(0)?;
+        let anchors = Tensor::from_vec(anchors.to_vec(), (batch,), &self.device)?;
+        if let Some(sampling) = sampling {
+            #[cfg(feature = "cuda")]
+            {
+                let positions = drafted.rows.dim(1)?;
+                let (tokens, candidate_ids, candidate_probs) = head.sample(
+                    &TailInputs {
+                        rows: &drafted.rows,
+                        stash,
+                        anchors: &anchors,
+                        norm: &self.norm,
+                        lm_head: &**lm_head,
+                    },
+                    &Tensor::from_vec(
+                        sampling.inverse_temperatures.to_vec(),
+                        (batch,),
+                        &self.device,
+                    )?,
+                    &Tensor::from_vec(
+                        sampling.uniforms.to_vec(),
+                        (batch, positions),
+                        &self.device,
+                    )?,
+                )?;
+                return Ok(DFlashProposalBatch::DeviceSparse {
+                    tokens,
+                    candidate_ids,
+                    candidate_probs,
+                });
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = sampling;
+                inference_tensor::bail!(
+                    "probabilistic DSpine drafting is unavailable: this build returns sparse proposals on CUDA only"
+                );
+            }
+        }
+        let tokens = head.greedy(&TailInputs {
+            rows: &drafted.rows,
+            stash,
+            anchors: &anchors,
+            norm: &self.norm,
+            lm_head: &**lm_head,
+        })?;
+        Ok(DFlashProposalBatch::Tokens(tokens.to_vec2::<u32>()?))
     }
 
     /// Greedy drafts `[batch, drafts]` without a selector: DSpark chains its Markov bias, DFlash takes the argmax.

@@ -2814,7 +2814,8 @@ fn run_speculative_transition_commit_case(
 fn speculative_transition_commit_matches_prefix_replay_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
-    for seq_len in [4, 8] {
+    // past 8 rows the fused verify takes its wide variant: 12 leaves warps a partial second row, 16 fills it
+    for seq_len in [4, 8, 12, 16] {
         for activation_dtype in [DType::F16, DType::BF16] {
             for state_dtype in [DType::F32, DType::BF16, DType::F16] {
                 for tiled_v_heads in [false, true] {
@@ -2875,7 +2876,7 @@ fn run_speculative_transition_stage_case(
     }
 
     let batch_size = 4;
-    let max_rows = 8;
+    let max_rows = 16;
     let capacity = 7;
     let num_k_heads = 2;
     let num_v_heads = 4;
@@ -3119,7 +3120,7 @@ fn run_speculative_transition_stage_case(
 fn speculative_transition_stage_is_slot_indexed_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
-    for seq_len in [4, 8] {
+    for seq_len in [4, 8, 16] {
         for activation_dtype in [DType::F16, DType::BF16] {
             run_speculative_transition_stage_case(&dev, seq_len, activation_dtype)?;
         }

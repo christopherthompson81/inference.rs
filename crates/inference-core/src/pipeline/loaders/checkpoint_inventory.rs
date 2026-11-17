@@ -83,6 +83,15 @@ pub(crate) fn checkpoint_runtime_size(
     paths: &[PathBuf],
     target_dtype: DType,
 ) -> Result<Option<usize>> {
+    checkpoint_runtime_size_where(paths, target_dtype, |_| true)
+}
+
+/// As [`checkpoint_runtime_size`], over the tensors `keep` names only.
+pub(crate) fn checkpoint_runtime_size_where(
+    paths: &[PathBuf],
+    target_dtype: DType,
+    keep: impl Fn(&str) -> bool,
+) -> Result<Option<usize>> {
     if paths.is_empty()
         || paths
             .iter()
@@ -98,6 +107,7 @@ pub(crate) fn checkpoint_runtime_size(
     safetensors
         .tensors()
         .into_iter()
+        .filter(|(name, _)| keep(name))
         .try_fold(0usize, |total, (name, view)| {
             total
                 .checked_add(runtime_tensor_bytes(&name, &view, target_dtype)?)

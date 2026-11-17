@@ -512,6 +512,7 @@ impl ExternalDrafter {
             let hidden = drafter.draft_hidden_batch(
                 ctx.seq_ids,
                 &noise,
+                ctx.sampled_tokens,
                 ctx.base_lens,
                 dflash_paged_cache(drafter, &ctx.cache),
             )?;

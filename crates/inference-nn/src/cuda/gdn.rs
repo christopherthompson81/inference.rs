@@ -48,7 +48,8 @@ const GDN_DECODE_INPUT_ALIGNMENT: usize = 8;
 pub const GDN_SPEC_COMMIT_MAX_K: usize = 256;
 pub const GDN_SPEC_CHECKPOINT_MAX_CONV_WIDTH: usize = 16;
 pub const GDN_SPEC_CHECKPOINT_MAX_K: usize = 256;
-pub const GDN_SPEC_FUSED_MAX_TOKENS: usize = 8;
+// verify rows the transition log covers (a 16-row DSpine block); `gdn_common.cuh` keeps the same
+pub const GDN_SPEC_FUSED_MAX_TOKENS: usize = 16;
 pub const GDN_CHANNEL_BLOCK_SIZE: usize = 256;
 pub const GDN_DEFERRED_DECODE_MIN_BATCH: usize = 8;
 pub const GDN_DEFERRED_STATE_DEPTH: usize = 4;
