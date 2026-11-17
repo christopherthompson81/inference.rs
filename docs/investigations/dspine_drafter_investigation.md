@@ -335,3 +335,31 @@ oracle placement stays under chain 7's rate. The drafter's second guess is rarel
 is a distribution miss (a third of the time outside the top 16), not a near miss a sibling would catch. Greedy not
 measured (greedy proposals carry no candidates). Tree verification is not worth the GDN work on this target and card;
 only a cheaper wide verify (rows 9-16 near free) would make the longer block pay.
+
+## Run 16 - 2026-11-17 15:45
+
+**Question:** where do rows 9-16 cost time in a DSpine step, and is the cost power or kernels?
+
+`nsys profile -t cuda --cuda-graph-trace=node` around a DSpine serve at 7 and at 15 drafts (greedy, the Rust prompt,
+a 64-token warm-up then 600 tokens), kernels grouped by graph and name per launch (`wide/brk.py`, scratchpad), with
+`nvidia-smi` sampling power, clocks and throttle reasons every 100 ms. Per launch, 112 vs 176 steps:
+
+```
+verify graph 23.65 -> 27.52 ms (+3.87)          drafter graph 3.96 -> 4.68 ms (+0.72)
+  IQ4_KS matvec (384 calls)  17.91 -> 20.38  +2.47    Q4_K matvecs (20)        1.32 -> 1.61  +0.29
+  GDN recurrence (48)         1.56 ->  2.59  +1.03    head over 16 rows (Q6_K) 1.40 -> 1.57  +0.17 (tc -> MMQ)
+  head Q6_K (tc -> MMQ)       1.40 ->  1.59  +0.19    rest                                    +0.26
+  attention (quant decode -> flash ext)  0.76 -> 0.61  -0.15
+  rest (quantize, GLU, norms, cuBLAS bf16 for 48 small projections)  +0.33
+power 340 / 347 W, SM 1679 / 1644 MHz, SW power cap (0x4) active in every sample of both
+```
+
+The cap is on throughout but the clock moves only 2%, so the 16-row cost is mostly the kernels' own extra work: the
+IQ4_KS matvec reads its 12 GB at about 670 GB/s at 8 rows and 590 at 16 (the second half's mma and activation loads in
+the inner loop), and the GDN recurrence walks its 16 tokens serially (32 -> 54 us a layer, so about half of it is the
+state load and store). Plausible recoveries: a third to a half of the matvec delta, part of the recurrence with a
+chunked form, the tall Q6_K head on tensor cores at 16 rows; about 2 ms of the 5.3. That puts depth 15 at about 32 ms
+a step: 3.634 sampled tokens against chain 7's 3.223 in 28.9 ms is 113.6 against 111.6 tok/s, about +2% (more where
+acceptance runs deep), and the cap may take part of whatever a faster matvec saves. Not worth the kernel work for one
+stream; a 16-row matvec gain would also serve two speculating sequences (2 x 8 rows), which is the stronger reason to
+revisit it.
