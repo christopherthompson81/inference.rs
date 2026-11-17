@@ -616,6 +616,7 @@ impl MultimodalLoader {
                     Arc::new(decision)
                 }),
             audio_transcriber: self.inner.audio_transcriber(&config),
+            output_special_tokens: self.inner.output_special_tokens(&config),
             prompt_activation_bytes_per_token: self
                 .inner
                 .prompt_activation_bytes_per_token(&config)?,

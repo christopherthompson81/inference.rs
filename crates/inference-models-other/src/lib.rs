@@ -14,6 +14,7 @@ pub mod deepseek;
 pub mod deepseek_family;
 #[cfg(test)]
 mod deepseek_family_tests;
+pub mod deepseek_ocr;
 pub mod ernie4_5;
 #[cfg(test)]
 mod ernie4_5_tests;
@@ -78,6 +79,7 @@ inference_nn::json_config!(
     neo_bert::Config,
     nomic_bert::Config,
     deepseek::DeepSeekConfig,
+    deepseek_ocr::config::Config,
     ernie4_5::Config,
     ernie4_5::MoeConfig,
     glm4::Config,

@@ -199,6 +199,8 @@ pub struct MultimodalData {
     pub cached_num_crops: Option<Vec<usize>>,
     pub cached_img_thw: Option<Tensor>,
     pub cached_vid_thw: Option<Tensor>,
+    /// A processor's preprocessed media in its own form, when the fields above cannot hold it.
+    pub cached_media: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
     /// What the model's tower made of the sequence's media before its prompt was expanded
     /// (`MultimodalModel::encode_prompt_media`), in the model's own form.
     pub encoded_media: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
@@ -235,6 +237,7 @@ impl MultimodalData {
             cached_num_crops: None,
             cached_img_thw: None,
             cached_vid_thw: None,
+            cached_media: None,
             encoded_media: None,
             rope_img_grid_thw: None,
             rope_vid_grid_thw: None,
@@ -396,6 +399,7 @@ impl MultimodalData {
         self.cached_num_crops = None;
         self.cached_img_thw = None;
         self.cached_vid_thw = None;
+        self.cached_media = None;
         self.encoded_media = None;
     }
 

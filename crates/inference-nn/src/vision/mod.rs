@@ -6,4 +6,5 @@ pub mod qwen2_5_vl;
 pub mod qwen3_vl;
 pub mod qwen_vl;
 pub mod radio;
+pub mod sam;
 pub mod siglip;

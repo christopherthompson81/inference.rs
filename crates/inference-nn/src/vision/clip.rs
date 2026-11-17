@@ -59,6 +59,9 @@ pub struct ClipConfig {
     pub patch_size: usize,
     #[serde(default = "d_act")]
     pub hidden_act: Activation,
+    /// One `qkv_proj` in place of `q_proj`, `k_proj` and `v_proj` (DeepSeek-OCR's CLIP-L).
+    #[serde(default)]
+    pub fused_qkv: bool,
 }
 
 // https://github.com/huggingface/transformers/blob/f6fa0f0bf0796ac66f201f23bdb8585de1609add/src/transformers/models/clip/modeling_clip.py#L112
@@ -125,10 +128,19 @@ impl Module for ClipVisionEmbeddings {
 }
 
 #[derive(Clone, Debug)]
+enum QkvProjections {
+    Split {
+        q_proj: Arc<dyn QuantMethod>,
+        k_proj: Arc<dyn QuantMethod>,
+        v_proj: Arc<dyn QuantMethod>,
+    },
+    // DeepSeek-OCR's CLIP-L keeps one `qkv_proj`
+    Fused(Arc<dyn QuantMethod>),
+}
+
+#[derive(Clone, Debug)]
 struct ClipAttention {
-    k_proj: Arc<dyn QuantMethod>,
-    v_proj: Arc<dyn QuantMethod>,
-    q_proj: Arc<dyn QuantMethod>,
+    qkv: QkvProjections,
     out_proj: Arc<dyn QuantMethod>,
     head_dim: usize,
     scale: f64,
@@ -139,17 +151,30 @@ impl ClipAttention {
     fn new(vs: ShardedVarBuilder, c: &ClipConfig) -> Result<Self> {
         let hidden_size = c.hidden_size;
         let num_attention_heads = c.num_attention_heads;
-        let k_proj = inference_quant::linear(hidden_size, hidden_size, &None, vs.pp("k_proj"))?;
-        let v_proj = inference_quant::linear(hidden_size, hidden_size, &None, vs.pp("v_proj"))?;
-        let q_proj = inference_quant::linear(hidden_size, hidden_size, &None, vs.pp("q_proj"))?;
+        let qkv = if c.fused_qkv {
+            QkvProjections::Fused(inference_quant::linear(
+                hidden_size,
+                3 * hidden_size,
+                &None,
+                vs.pp("qkv_proj"),
+            )?)
+        } else {
+            // k, v, q: the order recorded fixtures draw their weights in
+            let k_proj = inference_quant::linear(hidden_size, hidden_size, &None, vs.pp("k_proj"))?;
+            let v_proj = inference_quant::linear(hidden_size, hidden_size, &None, vs.pp("v_proj"))?;
+            let q_proj = inference_quant::linear(hidden_size, hidden_size, &None, vs.pp("q_proj"))?;
+            QkvProjections::Split {
+                q_proj,
+                k_proj,
+                v_proj,
+            }
+        };
         let out_proj = inference_quant::linear(hidden_size, hidden_size, &None, vs.pp("out_proj"))?;
         let head_dim = hidden_size / num_attention_heads;
         let scale = (head_dim as f64).powf(-0.5);
 
         Ok(ClipAttention {
-            k_proj,
-            v_proj,
-            q_proj,
+            qkv,
             out_proj,
             head_dim,
             scale,
@@ -166,8 +191,21 @@ impl ClipAttention {
     fn forward(&self, xs: &Tensor, causal_attention_mask: &AttentionMask) -> Result<Tensor> {
         let (bsz, seq_len, hidden_size) = xs.dims3()?;
 
-        let (query_states, key_states, value_states) =
-            crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
+        let (query_states, key_states, value_states) = match &self.qkv {
+            QkvProjections::Split {
+                q_proj,
+                k_proj,
+                v_proj,
+            } => crate::ops::qkv_projections(xs, &**q_proj, &**k_proj, &**v_proj)?,
+            QkvProjections::Fused(qkv) => {
+                let qkv = qkv.forward(xs)?;
+                (
+                    qkv.narrow(D::Minus1, 0, hidden_size)?,
+                    qkv.narrow(D::Minus1, hidden_size, hidden_size)?,
+                    qkv.narrow(D::Minus1, 2 * hidden_size, hidden_size)?,
+                )
+            }
+        };
         let query_states = (query_states * self.scale)?;
         let proj_shape = (bsz * self.num_attention_heads, seq_len, self.head_dim);
         let query_states = self
@@ -281,6 +319,33 @@ impl ClipEncoder {
         Ok(ClipEncoder { layers })
     }
 
+    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+        let uvb = UnVarBuilder::new();
+        for (i, layer) in self.layers.iter().enumerate() {
+            let uvb_l = uvb.pp("layers").pp(i);
+            uvb_l.pp("layer_norm1").add(&layer.layer_norm1);
+            uvb_l.pp("layer_norm2").add(&layer.layer_norm2);
+            let uvb_mlp = uvb_l.pp("mlp");
+            uvb_mlp.pp("fc1").add(&layer.mlp.fc1);
+            uvb_mlp.pp("fc2").add(&layer.mlp.fc2);
+            let uvb_attn = uvb_l.pp("self_attn");
+            match &layer.self_attn.qkv {
+                QkvProjections::Split {
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                } => {
+                    uvb_attn.pp("q_proj").add(q_proj);
+                    uvb_attn.pp("k_proj").add(k_proj);
+                    uvb_attn.pp("v_proj").add(v_proj);
+                }
+                QkvProjections::Fused(qkv) => uvb_attn.pp("qkv_proj").add(qkv),
+            }
+            uvb_attn.pp("out_proj").add(&layer.self_attn.out_proj);
+        }
+        uvb.to_safetensors()
+    }
+
     pub fn forward_get_hidden_states(
         &self,
         xs: &Tensor,
@@ -353,27 +418,7 @@ impl ClipVisionTransformer {
                 .add(&self.embeddings.patch_embedding);
         }
 
-        // encoder
-        {
-            let uvb_enc = uvb.pp("encoder");
-
-            for (i, layer) in self.encoder.layers.iter().enumerate() {
-                let uvb_l = uvb_enc.pp("layers").pp(i);
-
-                uvb_l.pp("layer_norm1").add(&layer.layer_norm1);
-                uvb_l.pp("layer_norm2").add(&layer.layer_norm2);
-
-                let uvb_mlp = uvb_l.pp("mlp");
-                uvb_mlp.pp("fc1").add(&layer.mlp.fc1);
-                uvb_mlp.pp("fc2").add(&layer.mlp.fc2);
-
-                let uvb_attn = uvb_l.pp("self_attn");
-                uvb_attn.pp("q_proj").add(&layer.self_attn.q_proj);
-                uvb_attn.pp("k_proj").add(&layer.self_attn.k_proj);
-                uvb_attn.pp("v_proj").add(&layer.self_attn.v_proj);
-                uvb_attn.pp("out_proj").add(&layer.self_attn.out_proj);
-            }
-        }
+        uvb.pp("encoder").extend(self.encoder.residual_tensors());
 
         uvb.to_safetensors()
     }

@@ -617,6 +617,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.IDEFICS2` | `'idefics2'` |
 | `MultimodalLoaderType.LLAVA_NEXT` | `'llava_next'` |
 | `MultimodalLoaderType.LLAVA` | `'llava'` |
+| `MultimodalLoaderType.DEEPSEEK_OCR` | `'deepseek_ocr'` |
 | `MultimodalLoaderType.GRANITE4_VISION` | `'granite4_vision'` |
 | `MultimodalLoaderType.NEMOTRON_TRANSCRIBE` | `'nemotron_transcribe'` |
 | `MultimodalLoaderType.NEMOTRON_OMNI` | `'nemotron_omni'` |

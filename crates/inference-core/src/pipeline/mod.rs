@@ -834,6 +834,8 @@ pub struct GeneralMetadata {
     /// Whether the model's large CPU f32 matmuls may take bf16 inputs (`inference_tensor::cpu::with_bf16_matmuls`):
     /// set by a loader for a model measured to hold its outputs under them, f32 otherwise.
     pub bf16_matmuls: bool,
+    /// Special tokens are part of the reply's text (`MultimodalModelLoader::output_special_tokens`).
+    pub output_special_tokens: bool,
 }
 
 impl GeneralMetadata {

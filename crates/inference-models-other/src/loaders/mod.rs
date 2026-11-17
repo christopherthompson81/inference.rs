@@ -24,6 +24,7 @@ use crate::paddleocr_vl::{PaddleOcrVlModel, config::Config as PaddleOcrVlConfig}
 mod bert;
 mod deepseek;
 mod deepseek_family;
+mod deepseek_ocr;
 mod ernie4_5;
 mod exaone;
 mod exaone4;
@@ -65,6 +66,7 @@ mod sizing_tests;
 
 pub use bert::*;
 pub use deepseek::*;
+pub use deepseek_ocr::*;
 pub use ernie4_5::*;
 pub use exaone::*;
 pub use exaone_moe::*;
@@ -135,7 +137,8 @@ inference_nn::boxed_loaders!(
     Starcoder2Loader,
 );
 inference_nn::boxed_loaders!(
-    MultimodalModelLoader: Granite4VisionLoader,
+    MultimodalModelLoader: DeepseekOcrLoader,
+    Granite4VisionLoader,
     GraniteSpeechLoader,
     Lfm2VlLoader,
     NemotronOmniLoader,

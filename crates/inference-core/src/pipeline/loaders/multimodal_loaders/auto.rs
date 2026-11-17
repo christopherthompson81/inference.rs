@@ -93,6 +93,10 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
             .audio_transcriber(config)
     }
 
+    fn output_special_tokens(&self, config: &str) -> bool {
+        Self::get_loader(config).is_ok_and(|loader| loader.output_special_tokens(config))
+    }
+
     fn aligns_with_own_tokenizer(&self, config: &str) -> bool {
         Self::get_loader(config).is_ok_and(|loader| loader.aligns_with_own_tokenizer(config))
     }

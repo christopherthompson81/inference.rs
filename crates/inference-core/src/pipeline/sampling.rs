@@ -219,7 +219,10 @@ pub(crate) async fn finish_or_add_toks_to_seq(
     // Include special tokens when tool calling is active (so tool parsers can see
     // delimiters like <tool_call>, [TOOL_CALLS], <|python_tag|>) or when think tag
     // mode is enabled (so <think>/<\/think> delimiters are visible in the output).
-    let include_special = seq.tool_call_state.is_some() || seq.needs_special_tokens();
+    let stops = matches!(is_done, Some(StopReason::Eos | StopReason::StopTok(_)));
+    let include_special = seq.tool_call_state.is_some()
+        || seq.needs_special_tokens()
+        || (metadata.output_special_tokens && !stops);
     let completion_bytes = tok_env
         .tok_trie()
         .decode_ext(&[logprobs.token], include_special);

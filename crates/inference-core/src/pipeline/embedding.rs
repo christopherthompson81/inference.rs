@@ -477,6 +477,7 @@ impl EmbeddingLoader {
                     audio_transcriber: None,
                     prompt_activation_bytes_per_token: None,
                     bf16_matmuls: false,
+                    output_special_tokens: false,
                 }),
                 mapper: pipeline_mapper,
                 modules,

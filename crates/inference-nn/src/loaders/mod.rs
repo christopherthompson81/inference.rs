@@ -378,6 +378,11 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
     fn audio_transcriber(&self, _config: &str) -> Option<AudioTranscriber> {
         None
     }
+    /// The tokenizer's special tokens are part of the model's answer (DeepSeek-OCR's layout and table tags), so the
+    /// reply keeps them, all but the token that stops it.
+    fn output_special_tokens(&self, _config: &str) -> bool {
+        false
+    }
     /// How to sample frames when decoding video inputs for this model.
     fn video_frame_sampling(&self, _config: &str) -> VideoFrameSampling {
         VideoFrameSampling::default()

@@ -208,6 +208,7 @@ class MultimodalLoaderType(str, Enum):
     IDEFICS2 = "idefics2"
     LLAVA_NEXT = "llava_next"
     LLAVA = "llava"
+    DEEPSEEK_OCR = "deepseek_ocr"
     GRANITE4_VISION = "granite4_vision"
     NEMOTRON_TRANSCRIBE = "nemotron_transcribe"
     NEMOTRON_OMNI = "nemotron_omni"
