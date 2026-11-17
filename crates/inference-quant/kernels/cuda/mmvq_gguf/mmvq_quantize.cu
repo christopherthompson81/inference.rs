@@ -4,6 +4,8 @@
 
 // input rows mmvq_tc.cuh's activation layout holds (the mma's B columns)
 #define MMVQ_TC_QUANTIZE_ROWS 8
+// one half's bytes per 32-value block: 32 lanes' int2 fragments, 8 rows' f32 scales and int32 sums
+#define MMVQ_TC_QUANTIZE_HALF_BYTES (32 * 8 + 8 * 4 + 8 * 4)
 
 extern "C" __global__ void
 mmvq_gguf_quantize_q8_1_bf16(const __nv_bfloat16 *__restrict__ x,
@@ -161,7 +163,11 @@ static __global__ void mmvq_tc_quantize(const src_t *__restrict__ x, void *__res
   const int k = threadIdx.x;
   const int nb = gridDim.x;
   const int col = ib * QK8_1 + k;
-  const float xi = (row < num_rows && col < kx) ? tc_quantize_load(x[(int64_t)row * kx + col]) : 0.0f;
+  // each 8-row half of the rows in its own layout, the second right after the first
+  const int input_row = blockIdx.y * MMVQ_TC_QUANTIZE_ROWS + row;
+  vy = (char *)vy + (int64_t)blockIdx.y * nb * MMVQ_TC_QUANTIZE_HALF_BYTES;
+  const float xi =
+      (input_row < num_rows && col < kx) ? tc_quantize_load(x[(int64_t)input_row * kx + col]) : 0.0f;
   const float amax = warp_reduce_max_f32(fabsf(xi));
   const float d = amax / 127.0f;
   __shared__ int8_t q[MMVQ_TC_QUANTIZE_ROWS][QK8_1];
@@ -186,7 +192,7 @@ static __global__ void mmvq_tc_quantize(const src_t *__restrict__ x, void *__res
 
 template <typename src_t>
 static void launch_mmvq_tc_quantize(const void *x, void *vy, int kx, int num_rows, void *stream) {
-  const dim3 grid((kx + QK8_1 - 1) / QK8_1, 1, 1);
+  const dim3 grid((kx + QK8_1 - 1) / QK8_1, (num_rows + MMVQ_TC_QUANTIZE_ROWS - 1) / MMVQ_TC_QUANTIZE_ROWS, 1);
   const dim3 block(QK8_1, MMVQ_TC_QUANTIZE_ROWS, 1);
   mmvq_tc_quantize<src_t><<<grid, block, 0, static_cast<cudaStream_t>(stream)>>>((const src_t *)x, vy, kx,
                                                                                  num_rows);

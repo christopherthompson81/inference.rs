@@ -67,7 +67,7 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
 | MTP | Gemma 4 | Gemma 4 assistant checkpoints (`--mtp-model`) | Supported with paged attention |
 | MTP | Qwen3.5 (dense and MoE), Qwen3.8, Qwen3.8-Flash-Next | Built into the checkpoint (`--mtp`), or a GGUF head file | Supported with paged attention |
 | MTP | ERNIE 4.5 MoE | Built into the checkpoint (`--mtp`) | Supported with paged attention |
-| DFlash / DFlash 2 / DSpark | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next | DFlash and DSpark draft checkpoints (`--mtp-model`) | Supported with paged attention |
+| DFlash / DFlash 2 / DSpark / DSpine | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next | DFlash, DSpark and DSpine draft checkpoints (`--mtp-model`) | Supported with paged attention |
 | EAGLE-3 | Llama, Qwen3 (dense and MoE) and the other models on the shared decoder, Qwen3.5 / Qwen3.6, gpt-oss, Gemma 4 | EAGLE-3 draft checkpoints (`--mtp-model`) | Supported with paged attention on CUDA |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
@@ -189,6 +189,27 @@ drafter, 5 layers of 8 KV heads, more than a q3 target cache), and the prefix ca
 target's blocks, so a cache hit needs no replay. These drafters don't use CUDA graphs yet. On the RTX 3090 Qwen3.8's
 DSpark drafter accepts 2.9-3.0 tokens per step on coding and review prompts against DFlash 2's 3.5, at about the
 same step time, so DFlash 2 stays the better choice where one exists.
+
+## DSpine (Qwen3.8)
+
+DSpine drafters (Tencent) are DFlash drafters whose every layer ends in a code write, passing each row's predicted
+predecessor features to the next row, and whose drafts come from a serial refinement of the last write over the
+target head's top 16 candidates per row. Pass one as `--mtp-model`; inference.rs detects it from `architectures`
+(`DSpineDraftModel`):
+
+```bash
+inference serve -m Qwen/Qwen3.8-27B --quant 4 \
+  --mtp-model tencent/Qwen3.8-27B-DSpine-b16 --mtp-draft-isq q4k
+```
+
+Drafting is probabilistic on CUDA (each draft drawn from the refinement's candidate distribution at the request's
+temperature) and greedy elsewhere or with `--mtp-draft-sampling greedy`. `--mtp-draft-isq` quantizes the code
+bridge's token codebook with the projections (at `q4k` it accepts as BF16 does, for 350 MB less); the rest of the
+bridge stays at the model's dtype. The default depth is 7 drafts, up to the trained 15 with `--mtp-n-predict`. On the
+RTX 3090 with a 4-bit GGUF target, 7 drafts accept about as DFlash 2's do; 15 accept more per step (7.75 of 15 on a
+word problem) for a step about 20% longer, which pays where drafts are accepted deep (a word problem 269 against 228
+tok/s) and not on code or review text, where 7 stays faster. Not supported: the terminal token residual, reduced draft vocabularies,
+and the reference's confidence-based dynamic verification.
 
 ## EAGLE-3 (Llama, Qwen3, Qwen3.5 / Qwen3.6, gpt-oss, Gemma 4)
 

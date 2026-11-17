@@ -1,11 +1,16 @@
-// Tensor-core matvec for 1-8 input rows over a tile-ordered weight: a warp multiplies 16 weight rows by every
-// input row's int8 activations (mmvq_tc_quantize) with one mma per 32 values, so each weight tile is read and
-// decoded once whatever the row count (sm_80+). After ExLlamaV3's exl3_gemv_kernel.
+// Tensor-core matvec for 1-16 input rows over a tile-ordered weight: a warp multiplies 16 weight rows by every
+// input row's int8 activations (mmvq_tc_quantize) with one mma per 32 values and 8 input rows, so each weight tile
+// is read and decoded once whatever the row count (sm_80+). After ExLlamaV3's exl3_gemv_kernel.
 
 #include "mmvq_rows.cuh"
 
 // weight rows one warp's mma covers
 #define MMVQ_TC_ROWS 16
+// input rows one mma covers; 9-16 rows take a second mma per weight fragment, over activations quantized as a second
+// 8-row half right after the first
+#define MMVQ_TC_HALF_ROWS 8
+// mmvq_tc_quantize's bytes per 32-value block of one half: 32 lanes' int2 fragments, 8 rows' f32 scales and sums
+#define MMVQ_TC_HALF_BLOCK_BYTES (WARP_SIZE * 8 + 8 * 4 + 8 * 4)
 
 // Tile-ordered IQ4_KS (`iq4_ks_tiled`), the bytes of 16 rows regrouped so a warp reads the mma's A fragments with
 // coalesced word loads: per 16-row group, the rows' f32 scales (64 bytes), then per 256-value superblock its block
@@ -34,8 +39,8 @@ static __device__ __forceinline__ int2 tc_decode_iq4k_lo(uint32_t q4) {
   return make_int2(__byte_perm(a3, a4, 0x6420), __byte_perm(a3, a4, 0x7531));
 }
 
-// KSPLIT warps splitting K, GROUPS row groups per warp, PREFETCH blocks prefetched ahead
-template <typename dst_t, int KSPLIT, int GROUPS, int PREFETCH>
+// KSPLIT warps splitting K, GROUPS row groups per warp, PREFETCH blocks prefetched ahead, HALVES 8-row input halves
+template <typename dst_t, int KSPLIT, int GROUPS, int PREFETCH, int HALVES>
 static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
     mmvq_tc_iq4_ks_kernel(const char *__restrict__ vx, const void *__restrict__ vy, dst_t *__restrict__ dst,
                            const int ncols_x, const int nrows_x, const int stride_col_dst, const int b_size) {
@@ -49,9 +54,15 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
   const int64_t group_bytes = MMVQ_TC_GROUP_HEADER + (int64_t)nsb * MMVQ_TC_SB_BYTES;
   const int ngroups = (nrows_x + MMVQ_TC_ROWS - 1) / MMVQ_TC_ROWS;
   const int rg0 = blockIdx.x * GROUPS;
-  const int2 *yq = (const int2 *)vy;
-  const float2 *yd = (const float2 *)(yq + (int64_t)nb * WARP_SIZE);
-  const int2 *ys = (const int2 *)(yd + (int64_t)nb * (WARP_SIZE / 8));
+  const int2 *yq[HALVES];
+  const float2 *yd[HALVES];
+  const int2 *ys[HALVES];
+#pragma unroll
+  for (int h = 0; h < HALVES; ++h) {
+    yq[h] = (const int2 *)((const char *)vy + (int64_t)h * nb * MMVQ_TC_HALF_BLOCK_BYTES);
+    yd[h] = (const float2 *)(yq[h] + (int64_t)nb * WARP_SIZE);
+    ys[h] = (const int2 *)(yd[h] + (int64_t)nb * (WARP_SIZE / 8));
+  }
 
   const char *gp[GROUPS];
   float sa[GROUPS], sb[GROUPS];
@@ -82,14 +93,17 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
 
   // block ib's activations, the same for every row group: B fragment, row scales and row sums
   struct Act {
-    int2 bq;
-    float2 dy;
-    int2 xs;
+    int2 bq[HALVES];
+    float2 dy[HALVES];
+    int2 xs[HALVES];
   };
   auto load_act = [&](int ib, Act &a) {
-    a.bq = yq[(int64_t)ib * WARP_SIZE + lane];
-    a.dy = yd[(int64_t)ib * (WARP_SIZE / 8) + t];
-    a.xs = ys[(int64_t)ib * (WARP_SIZE / 8) + t];
+#pragma unroll
+    for (int h = 0; h < HALVES; ++h) {
+      a.bq[h] = yq[h][(int64_t)ib * WARP_SIZE + lane];
+      a.dy[h] = yd[h][(int64_t)ib * (WARP_SIZE / 8) + t];
+      a.xs[h] = ys[h][(int64_t)ib * (WARP_SIZE / 8) + t];
+    }
   };
 
   uint32_t pf[PREFETCH][GROUPS][3];
@@ -101,7 +115,7 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
       load_act(i0 + d, pa[d]);
     }
 
-  float acc[GROUPS][4] = {};
+  float acc[GROUPS][HALVES][4] = {};
   for (int ib0 = 0; ib0 < n_blocks; ib0 += PREFETCH) {
 #pragma unroll
     for (int d = 0; d < PREFETCH; ++d) {
@@ -109,9 +123,7 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
       if (i >= n_blocks) break;
       // used straight from the ring slot, which is refilled once this block's math is issued
       uint32_t (&w)[GROUPS][3] = pf[d];
-      const int2 bq = pa[d].bq;
-      const float2 dy = pa[d].dy;
-      const int2 xs = pa[d].xs;
+      const Act &act = pa[d];
 #pragma unroll
       for (int n = 0; n < GROUPS; ++n) {
         // the scale bytes of rows g and g + 8 sit in the words lanes with t = g / 4 and (g + 8) / 4 loaded
@@ -123,17 +135,22 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
         const int2 vb = tc_decode_iq4k_lo(w[n][1]);
         const int hia = (sca & 1) * MMVQ_TC_IQ4K_HI_OFFSET;
         const int hib = (scb & 1) * MMVQ_TC_IQ4K_HI_OFFSET;
-        int c[4] = {hia * xs.x, hia * xs.y, hib * xs.x, hib * xs.y};
-        asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-            "{%0, %1, %2, %3};"
-            : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-            : "r"(va.x), "r"(vb.x), "r"(va.y), "r"(vb.y), "r"(bq.x), "r"(bq.y));
         const float da = sa[n] * ((sca & 254) - 127);
         const float db = sb[n] * ((scb & 254) - 127);
-        acc[n][0] += da * dy.x * (float)c[0];
-        acc[n][1] += da * dy.y * (float)c[1];
-        acc[n][2] += db * dy.x * (float)c[2];
-        acc[n][3] += db * dy.y * (float)c[3];
+#pragma unroll
+        for (int h = 0; h < HALVES; ++h) {
+          const int2 xs = act.xs[h];
+          const float2 dy = act.dy[h];
+          int c[4] = {hia * xs.x, hia * xs.y, hib * xs.x, hib * xs.y};
+          asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+              "{%0, %1, %2, %3};"
+              : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+              : "r"(va.x), "r"(vb.x), "r"(va.y), "r"(vb.y), "r"(act.bq[h].x), "r"(act.bq[h].y));
+          acc[n][h][0] += da * dy.x * (float)c[0];
+          acc[n][h][1] += da * dy.y * (float)c[1];
+          acc[n][h][2] += db * dy.x * (float)c[2];
+          acc[n][h][3] += db * dy.y * (float)c[3];
+        }
       }
       if (i + PREFETCH < n_blocks) {
         load_groups(i0 + i + PREFETCH, pf[d]);
@@ -142,33 +159,38 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
     }
   }
 
-  __shared__ float red[KSPLIT][GROUPS][4][WARP_SIZE];
+  __shared__ float red[KSPLIT][GROUPS][HALVES][4][WARP_SIZE];
 #pragma unroll
   for (int n = 0; n < GROUPS; ++n)
 #pragma unroll
-    for (int k = 0; k < 4; ++k) red[warp][n][k][lane] = acc[n][k];
+    for (int h = 0; h < HALVES; ++h)
+#pragma unroll
+      for (int k = 0; k < 4; ++k) red[warp][n][h][k][lane] = acc[n][h][k];
   __syncthreads();
   // warp n of the first GROUPS sums row group n
   if (warp >= GROUPS) return;
   const int n = warp;
-  float s[4];
-#pragma unroll
-  for (int k = 0; k < 4; ++k) {
-    s[k] = 0.0f;
-#pragma unroll
-    for (int w2 = 0; w2 < KSPLIT; ++w2) s[k] += red[w2][n][k][lane];
-  }
   const int ra = (rg0 + n) * MMVQ_TC_ROWS + g;
   const int rb = ra + 8;
-  const int c0 = 2 * t;
-  const int c1 = 2 * t + 1;
-  if (ra < nrows_x) {
-    if (c0 < b_size) dst[c0 * stride_col_dst + ra] = from_float<dst_t>(s[0]);
-    if (c1 < b_size) dst[c1 * stride_col_dst + ra] = from_float<dst_t>(s[1]);
-  }
-  if (rb < nrows_x) {
-    if (c0 < b_size) dst[c0 * stride_col_dst + rb] = from_float<dst_t>(s[2]);
-    if (c1 < b_size) dst[c1 * stride_col_dst + rb] = from_float<dst_t>(s[3]);
+#pragma unroll
+  for (int h = 0; h < HALVES; ++h) {
+    float s[4];
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      s[k] = 0.0f;
+#pragma unroll
+      for (int w2 = 0; w2 < KSPLIT; ++w2) s[k] += red[w2][n][h][k][lane];
+    }
+    const int c0 = h * MMVQ_TC_HALF_ROWS + 2 * t;
+    const int c1 = c0 + 1;
+    if (ra < nrows_x) {
+      if (c0 < b_size) dst[c0 * stride_col_dst + ra] = from_float<dst_t>(s[0]);
+      if (c1 < b_size) dst[c1 * stride_col_dst + ra] = from_float<dst_t>(s[1]);
+    }
+    if (rb < nrows_x) {
+      if (c0 < b_size) dst[c0 * stride_col_dst + rb] = from_float<dst_t>(s[2]);
+      if (c1 < b_size) dst[c1 * stride_col_dst + rb] = from_float<dst_t>(s[3]);
+    }
   }
 #else
   __trap();
@@ -181,8 +203,13 @@ static void launch_mmvq_tc_cfg(const void *vx, const void *vy, void *dst, int nc
   const int ngroups = (nrows_x + MMVQ_TC_ROWS - 1) / MMVQ_TC_ROWS;
   const dim3 grid((ngroups + GROUPS - 1) / GROUPS, 1, 1);
   const dim3 block(WARP_SIZE, KSPLIT, 1);
-  mmvq_tc_iq4_ks_kernel<dst_t, KSPLIT, GROUPS, PREFETCH><<<grid, block, 0, stream>>>(
-      (const char *)vx, vy, (dst_t *)dst, ncols_x, nrows_x, stride_col_dst, b_size);
+  if (b_size > MMVQ_TC_HALF_ROWS) {
+    mmvq_tc_iq4_ks_kernel<dst_t, KSPLIT, GROUPS, PREFETCH, 2><<<grid, block, 0, stream>>>(
+        (const char *)vx, vy, (dst_t *)dst, ncols_x, nrows_x, stride_col_dst, b_size);
+  } else {
+    mmvq_tc_iq4_ks_kernel<dst_t, KSPLIT, GROUPS, PREFETCH, 1><<<grid, block, 0, stream>>>(
+        (const char *)vx, vy, (dst_t *)dst, ncols_x, nrows_x, stride_col_dst, b_size);
+  }
 }
 
 // The (KSPLIT, GROUPS, PREFETCH) shapes fast_mmvq times per weight shape at load: wide groups win on tall weights, one
@@ -191,6 +218,16 @@ template <typename dst_t>
 static void launch_mmvq_tc_iq4_ks(const void *vx, const void *vy, void *dst, int ncols_x, int nrows_x,
                                    int stride_col_dst, int b_size, int cfg, void *stream) {
   cudaStream_t s = static_cast<cudaStream_t>(stream);
+  // two input halves double the accumulators and the activations in flight: more row groups per warp, a shallower
+  // prefetch (RTX 3090 at 16 rows: FFN up 8x4x1, down 8x4x2, ssm_out 8x2x2)
+  if (b_size > MMVQ_TC_HALF_ROWS) {
+    switch (cfg) {
+    case 1: launch_mmvq_tc_cfg<dst_t, 8, 4, 1>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
+    case 2: launch_mmvq_tc_cfg<dst_t, 8, 4, 2>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
+    case 3: launch_mmvq_tc_cfg<dst_t, 8, 2, 2>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
+    default: launch_mmvq_tc_cfg<dst_t, 8, 2, 4>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
+    }
+  }
   switch (cfg) {
   case 1: launch_mmvq_tc_cfg<dst_t, 8, 1, 6>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); break;
   case 2: launch_mmvq_tc_cfg<dst_t, 8, 4, 2>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); break;

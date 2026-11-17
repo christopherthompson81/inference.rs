@@ -2,8 +2,28 @@
 
 // Adapted from vLLM revision c8438a3d40168ce1d9eade0dc15ccbe5d27adb68.
 // Copyright contributors to the vLLM project; Apache-2.0. See third_party/flashinfer_gdn.
+// The fused verify's dynamic shared memory for up to MAX_TOKENS verify rows: the state chunk, then per row its
+// query, key, value and output, decay and beta, then the pending rows a direct-transition step applies first.
+__host__ __device__ constexpr size_t gdn_align16(size_t bytes) {
+  return (bytes + 15) & ~(size_t)15;
+}
+
+template <typename T, typename StateT, bool DIRECT_TRANSITIONS, int MAX_TOKENS>
+__host__ __device__ constexpr size_t gdn_spec_fused_shared_bytes() {
+  constexpr size_t K = GDN_DECODE_VALUE_MAJOR_K;
+  constexpr size_t V = GDN_DECODE_VALUE_MAJOR_V;
+  constexpr size_t PENDING = DIRECT_TRANSITIONS ? MAX_TOKENS : 1;
+  return gdn_align16(sizeof(StateT) * GDN_SPEC_FUSED_VALUE_CHUNK * K) +
+         2 * gdn_align16(sizeof(float) * MAX_TOKENS * K) +
+         2 * gdn_align16(sizeof(T) * MAX_TOKENS * V) +
+         2 * gdn_align16(sizeof(float) * MAX_TOKENS) +
+         gdn_align16(sizeof(float) * PENDING * (DIRECT_TRANSITIONS ? K : 1)) +
+         gdn_align16(sizeof(float) * PENDING * (DIRECT_TRANSITIONS ? V : 1)) +
+         gdn_align16(sizeof(float) * PENDING);
+}
+
 template <typename T, typename StateT, bool PAIRED_REDUCTIONS,
-          bool DIRECT_TRANSITIONS>
+          bool DIRECT_TRANSITIONS, int MAX_TOKENS>
 __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
     void gdn_speculative_recurrence_rmsnorm_gate_value_major_128_kernel(
         const T *__restrict__ mixed_qkv, const T *__restrict__ b,
@@ -130,21 +150,36 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
       gdn_spec_checkpoint_base(active_slot, checkpoint_lanes);
   const size_t transition_row_base = (size_t)batch_idx * seq_len;
 
-  __shared__ __align__(16) StateT shared_state[GDN_SPEC_FUSED_VALUE_CHUNK][K];
-  __shared__ float shared_query[GDN_SPEC_FUSED_MAX_TOKENS][K];
-  __shared__ float shared_key[GDN_SPEC_FUSED_MAX_TOKENS][K];
-  __shared__ T shared_value[GDN_SPEC_FUSED_MAX_TOKENS][V];
-  __shared__ T shared_output[GDN_SPEC_FUSED_MAX_TOKENS][V];
-  __shared__ float shared_decay[GDN_SPEC_FUSED_MAX_TOKENS];
-  __shared__ float shared_beta[GDN_SPEC_FUSED_MAX_TOKENS];
-  __shared__ float shared_pending_key
-      [DIRECT_TRANSITIONS ? GDN_SPEC_FUSED_MAX_TOKENS : 1]
-      [DIRECT_TRANSITIONS ? K : 1];
-  __shared__ float shared_pending_delta
-      [DIRECT_TRANSITIONS ? GDN_SPEC_FUSED_MAX_TOKENS : 1]
-      [DIRECT_TRANSITIONS ? V : 1];
-  __shared__ float shared_pending_decay
-      [DIRECT_TRANSITIONS ? GDN_SPEC_FUSED_MAX_TOKENS : 1];
+  constexpr int PENDING = DIRECT_TRANSITIONS ? MAX_TOKENS : 1;
+  constexpr int PENDING_K = DIRECT_TRANSITIONS ? K : 1;
+  constexpr int PENDING_V = DIRECT_TRANSITIONS ? V : 1;
+  extern __shared__ __align__(16) unsigned char gdn_spec_fused_shared[];
+  unsigned char *cursor = gdn_spec_fused_shared;
+  auto carve = [&cursor](size_t bytes) {
+    unsigned char *start = cursor;
+    cursor += gdn_align16(bytes);
+    return start;
+  };
+  auto shared_state = reinterpret_cast<StateT(*)[K]>(
+      carve(sizeof(StateT) * GDN_SPEC_FUSED_VALUE_CHUNK * K));
+  auto shared_query =
+      reinterpret_cast<float(*)[K]>(carve(sizeof(float) * MAX_TOKENS * K));
+  auto shared_key =
+      reinterpret_cast<float(*)[K]>(carve(sizeof(float) * MAX_TOKENS * K));
+  auto shared_value =
+      reinterpret_cast<T(*)[V]>(carve(sizeof(T) * MAX_TOKENS * V));
+  auto shared_output =
+      reinterpret_cast<T(*)[V]>(carve(sizeof(T) * MAX_TOKENS * V));
+  auto shared_decay =
+      reinterpret_cast<float *>(carve(sizeof(float) * MAX_TOKENS));
+  auto shared_beta =
+      reinterpret_cast<float *>(carve(sizeof(float) * MAX_TOKENS));
+  auto shared_pending_key = reinterpret_cast<float(*)[PENDING_K]>(
+      carve(sizeof(float) * PENDING * PENDING_K));
+  auto shared_pending_delta = reinterpret_cast<float(*)[PENDING_V]>(
+      carve(sizeof(float) * PENDING * PENDING_V));
+  auto shared_pending_decay =
+      reinterpret_cast<float *>(carve(sizeof(float) * PENDING));
 
   uint32_t pending_epoch = 0;
   int pending_rows = 0;
@@ -207,8 +242,8 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
     }
   }
 
-  if (warp < seq_len) {
-    const int position = warp;
+  for (int position = warp; position < seq_len;
+       position += GDN_SPEC_FUSED_WARPS) {
     const T *row =
         mixed_qkv + ((size_t)batch_idx * seq_len + position) * conv_dim;
     float4 query =
@@ -262,8 +297,8 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
     const bool key_leader =
         tiled_v_heads ? value_head < num_k_heads
                       : value_head % values_per_group == 0;
-    if (key_leader && warp < seq_len) {
-      const int position = warp;
+    for (int position = warp; key_leader && position < seq_len;
+         position += GDN_SPEC_FUSED_WARPS) {
 #pragma unroll
       for (int i = 0; i < 4; i++) {
         const int key = lane * 4 + i;
@@ -274,8 +309,8 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
                       key] = shared_key[position][key];
       }
     }
-    if (warp < seq_len && lane == 0) {
-      const int position = warp;
+    for (int position = warp; lane == 0 && position < seq_len;
+         position += GDN_SPEC_FUSED_WARPS) {
       pending_decay[((size_t)active_slot * max_pending_rows + position) *
                         num_v_heads +
                     value_head] = shared_decay[position];
@@ -284,8 +319,8 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
     const bool key_leader =
         tiled_v_heads ? value_head < num_k_heads
                       : value_head % values_per_group == 0;
-    if (key_leader && warp < seq_len) {
-      const int position = warp;
+    for (int position = warp; key_leader && position < seq_len;
+         position += GDN_SPEC_FUSED_WARPS) {
 #pragma unroll
       for (int i = 0; i < 4; i++) {
         const int key = lane * 4 + i;
@@ -295,8 +330,8 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
                        key] = shared_key[position][key];
       }
     }
-    if (warp < seq_len && lane == 0) {
-      const int position = warp;
+    for (int position = warp; lane == 0 && position < seq_len;
+         position += GDN_SPEC_FUSED_WARPS) {
       transition_decay[(transition_row_base + position) * num_v_heads +
                        value_head] = shared_decay[position];
     }
@@ -500,8 +535,8 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
     }
   }
 
-  if (warp < seq_len) {
-    const int position = warp;
+  for (int position = warp; position < seq_len;
+       position += GDN_SPEC_FUSED_WARPS) {
     float output_values[4];
     float sum_square = 0.0f;
 #pragma unroll
@@ -1406,10 +1441,25 @@ void launch_gdn_speculative_recurrence_checkpoints(
         sizeof(StateT) < sizeof(float) ||
         grid_blocks <= GDN_SPEC_FUSED_PAIR_LOW_GRID_MAX ||
         grid_blocks >= GDN_SPEC_FUSED_PAIR_HIGH_GRID_MIN;
-#define GDN_LAUNCH_SPEC_RECURRENCE(PAIRED, DIRECT)                           \
-  gdn_speculative_recurrence_rmsnorm_gate_value_major_128_kernel<           \
-      T, StateT, PAIRED, DIRECT><<<fused_grid, GDN_SPEC_FUSED_THREADS, 0,    \
-                                   stream>>>(                               \
+    // verifies past the short variant's rows (a 16-row DSpine block) take the wide one, past 48 KB of shared memory
+    const int fused_rows =
+        direct_transitions && max_pending_rows > seq_len ? max_pending_rows
+                                                         : seq_len;
+    if (fused_rows > GDN_SPEC_FUSED_MAX_TOKENS) {
+      return;
+    }
+#define GDN_LAUNCH_SPEC_RECURRENCE_ROWS(PAIRED, DIRECT, ROWS)                \
+  {                                                                         \
+    auto kernel = gdn_speculative_recurrence_rmsnorm_gate_value_major_128_kernel< \
+        T, StateT, PAIRED, DIRECT, ROWS>;                                   \
+    constexpr size_t shared_bytes =                                         \
+        gdn_spec_fused_shared_bytes<T, StateT, DIRECT, ROWS>();             \
+    if (shared_bytes > GDN_STATIC_SHARED_LIMIT) {                           \
+      cudaFuncSetAttribute(kernel,                                          \
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,     \
+                           (int)shared_bytes);                              \
+    }                                                                       \
+    kernel<<<fused_grid, GDN_SPEC_FUSED_THREADS, shared_bytes, stream>>>(   \
       mixed_qkv, b, a, a_log, dt_bias, state_pool, output,                 \
       quantized_output, output_scales, scale_stride_m, scale_layout,        \
       active_slots,                                                        \
@@ -1419,7 +1469,16 @@ void launch_gdn_speculative_recurrence_checkpoints(
       max_pending_rows, pending_capacity, b_stride_b, b_stride_s,            \
       b_stride_h, a_stride_b, a_stride_s, a_stride_h, gate_stride_b,         \
       gate_stride_s, gate_stride_h, gate_stride_v, batch_size, seq_len,      \
-      num_k_heads, num_v_heads, checkpoint_lanes, tiled_v_heads, norm_eps)
+      num_k_heads, num_v_heads, checkpoint_lanes, tiled_v_heads, norm_eps);  \
+  }
+#define GDN_LAUNCH_SPEC_RECURRENCE(PAIRED, DIRECT)                           \
+  if (fused_rows <= GDN_SPEC_FUSED_SHORT_TOKENS) {                          \
+    GDN_LAUNCH_SPEC_RECURRENCE_ROWS(PAIRED, DIRECT,                         \
+                                    GDN_SPEC_FUSED_SHORT_TOKENS)            \
+  } else {                                                                  \
+    GDN_LAUNCH_SPEC_RECURRENCE_ROWS(PAIRED, DIRECT,                         \
+                                    GDN_SPEC_FUSED_MAX_TOKENS)              \
+  }
     if (direct_transitions) {
       if (paired_reductions) {
         GDN_LAUNCH_SPEC_RECURRENCE(true, true);
@@ -1432,6 +1491,7 @@ void launch_gdn_speculative_recurrence_checkpoints(
       GDN_LAUNCH_SPEC_RECURRENCE(false, false);
     }
 #undef GDN_LAUNCH_SPEC_RECURRENCE
+#undef GDN_LAUNCH_SPEC_RECURRENCE_ROWS
     return;
   }
 

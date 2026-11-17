@@ -7,6 +7,7 @@ mod normal_loaders;
 pub use crate::device_map::AutoDeviceMapParams;
 pub(crate) use checkpoint_inventory::{
     CheckpointDeviceMapSizes, checkpoint_device_map_sizes, checkpoint_runtime_size,
+    checkpoint_runtime_size_where,
 };
 use inference_nn::loaders::NonMappedSubModel;
 pub use inference_nn::loaders::{AutoDeviceMapQuantization, DeviceMappedModelLoader};

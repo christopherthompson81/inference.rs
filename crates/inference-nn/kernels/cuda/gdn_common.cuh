@@ -292,7 +292,13 @@ constexpr int GDN_SPEC_CHECKPOINT_WARPS = 4;
 constexpr int GDN_SPEC_CHECKPOINT_VALUES_PER_WARP =
     GDN_SPEC_CHECKPOINT_VALUE_TILE / GDN_SPEC_CHECKPOINT_WARPS;
 
-constexpr int GDN_SPEC_FUSED_MAX_TOKENS = 8;
+// verify rows a speculative step's transition log covers: DSpine's 16-row block
+constexpr int GDN_SPEC_FUSED_MAX_TOKENS = 16;
+
+// the fused verify's short variant, whose shared memory fits two blocks per SM
+constexpr int GDN_SPEC_FUSED_SHORT_TOKENS = 8;
+
+constexpr size_t GDN_STATIC_SHARED_LIMIT = 48 * 1024;
 
 constexpr int GDN_SPEC_FUSED_THREADS = 256;
 
