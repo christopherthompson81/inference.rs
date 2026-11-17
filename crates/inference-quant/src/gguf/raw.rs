@@ -1176,6 +1176,7 @@ mod tests {
             cuda_kernels_match_the_dequantized_weight,
             grouped_mmq_reads_raw_expert_stacks,
             indexed_mmvq_matches_the_dequantized_experts,
+            a_tall_q6k_weight_past_eight_rows_takes_mmq,
             row_major_tensor_core_matvecs_match_a_dense_matmul,
             tiled_iq4_ks_matches_the_row_major_weight,
             tiled_matvecs_share_one_inputs_quantized_activations
@@ -1253,13 +1254,14 @@ mod tests {
             assert!(diff.to_scalar::<f32>()? < 1e-6);
 
             let gpu = GgufRawMatMul::new(tiled, None);
-            for batch in [1, 2, 3, 5, 8, 33] {
+            // past 8 rows the matvec takes a second activation half: 9 and 12 leave it partial, 16 fills it
+            for batch in [1, 2, 3, 5, 8, 9, 12, 16, 33] {
                 let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
                 let expected = xs.matmul(&weight.t()?)?;
                 for dtype in [DType::F32, DType::BF16, DType::F16] {
                     let xs = xs.to_dtype(dtype)?.to_device(&cuda)?;
                     let mut outputs = vec![gpu.forward(&xs)?];
-                    if batch <= super::super::fast_mmvq::MMVQ_MAX_BATCH {
+                    if batch <= super::super::fast_mmvq::TENSOR_CORE_MAX_ROWS {
                         for cfg in 0..super::super::fast_mmvq::TILED_CONFIGS {
                             outputs.push(super::super::fast_mmvq::tiled_plain(&gpu.w, &xs, cfg)?);
                         }
@@ -1301,7 +1303,7 @@ mod tests {
                 let weight = cpu.dequantize(&Device::Cpu)?;
                 let storage = QStorage::from_data(cpu.data()?, &cuda, ty)?;
                 let gpu = QTensor::new(storage, (ROWS, cols))?;
-                for batch in 1..=super::super::fast_mmvq::MMVQ_MAX_BATCH {
+                for batch in 1..=super::super::fast_mmvq::TENSOR_CORE_MAX_ROWS {
                     let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
                     let expected = xs.matmul(&weight.t()?)?;
                     for dtype in [DType::F32, DType::BF16, DType::F16] {
@@ -1321,13 +1323,42 @@ mod tests {
         Ok(())
     }
 
+    // A Q6_K weight past the wide tensor-core matvec's rows (a vocabulary head) at 9-16 input rows: the dispatcher hands
+    // it to MMQ rather than refusing it
+    #[cfg(feature = "cuda")]
+    fn a_tall_q6k_weight_past_eight_rows_takes_mmq() -> Result<()> {
+        const ROWS: usize = 70_000;
+        const COLS: usize = 256;
+        const BATCH: usize = 12;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        use inference_tensor::quantized::{GgmlDType, QStorage, QTensor};
+        let dense = Tensor::randn(0f32, 1f32, (ROWS, COLS), &Device::Cpu)?;
+        let cpu = QTensor::quantize(&dense, GgmlDType::Q6K)?;
+        let weight = cpu.dequantize(&Device::Cpu)?;
+        let gpu = QTensor::new(
+            QStorage::from_data(cpu.data()?, &cuda, GgmlDType::Q6K)?,
+            (ROWS, COLS),
+        )?;
+        assert!(super::super::fast_mmvq::prefers_mmvq(GgufType::Q6K, BATCH));
+        let xs = Tensor::randn(0f32, 1f32, (BATCH, COLS), &Device::Cpu)?;
+        let actual =
+            super::super::fast_mmvq::plain(&gpu, &xs.to_dtype(DType::BF16)?.to_device(&cuda)?)?;
+        let similarity = cosine(&actual.to_device(&Device::Cpu)?, &xs.matmul(&weight.t()?)?)?;
+        assert!(similarity > 0.999, "cosine {similarity}");
+        Ok(())
+    }
+
     // Inside a shared-input scope back-to-back tiled matvecs on one input reuse its quantized activations; another input,
     // or the same one after the scope, quantizes again
     #[cfg(feature = "cuda")]
     fn tiled_matvecs_share_one_inputs_quantized_activations() -> Result<()> {
         const ROWS: usize = 64;
         const COLS: usize = 2560;
-        const BATCH: usize = 8;
+        // two activation halves, the second partial
+        const BATCH: usize = 13;
         let Ok(cuda) = Device::new_cuda(0) else {
             eprintln!("SKIP: no CUDA device");
             return Ok(());

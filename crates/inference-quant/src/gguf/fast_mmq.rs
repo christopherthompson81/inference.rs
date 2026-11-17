@@ -1823,7 +1823,8 @@ mod bench {
         "blk.0.ssm_out.weight",
         "output.weight",
     ];
-    const MAX_ROWS: usize = 8;
+    // decode, 1-8 row verifies, and the 9-16 row ones only the tensor-core matvec takes past dp4a's 8
+    const ROWS: [usize; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16];
     const WARMUP: usize = 5;
     const ITERS: usize = 50;
 
@@ -1866,10 +1867,15 @@ mod bench {
             let tiled = crate::gguf::raw::RawGgufTensor::can_tile(ty, &dims, &dev)
                 .then(|| crate::gguf::raw::RawGgufTensor::tiled(&dims, data.bytes(), &dev))
                 .transpose()?;
-            for rows in 1..=MAX_ROWS {
+            for rows in ROWS {
                 let xs =
                     Tensor::randn(0f32, 1., (rows, in_features), &dev)?.to_dtype(DType::BF16)?;
-                let mmvq = time(&dev, || fast_mmvq::plain(&weight, &xs))?;
+                let mmvq =
+                    if rows <= fast_mmvq::MMVQ_MAX_BATCH || fast_mmvq::has_tensor_core_rows(ty) {
+                        time(&dev, || fast_mmvq::plain(&weight, &xs))?
+                    } else {
+                        f64::NAN
+                    };
                 let mmq = time(&dev, || plain(&weight, &xs))?;
                 let one = *base.get_or_insert(mmvq);
                 let tiled_us = match &tiled {
@@ -1936,7 +1942,7 @@ mod bench {
                 let dense = Tensor::randn(0f32, 1., (out_features, in_features), &dev)?;
                 let weight = QTensor::quantize(&dense, ty)?;
                 drop(dense);
-                for rows in [1, 8] {
+                for rows in [1, 8, 16] {
                     let xs = Tensor::randn(0f32, 1., (rows, in_features), &dev)?
                         .to_dtype(DType::BF16)?;
                     let mmq = time(&dev, || plain(&weight, &xs))?;

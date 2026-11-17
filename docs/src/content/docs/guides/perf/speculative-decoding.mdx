@@ -206,9 +206,9 @@ Drafting is probabilistic on CUDA (each draft drawn from the refinement's candid
 temperature) and greedy elsewhere or with `--mtp-draft-sampling greedy`. `--mtp-draft-isq` quantizes the code
 bridge's token codebook with the projections (at `q4k` it accepts as BF16 does, for 350 MB less); the rest of the
 bridge stays at the model's dtype. The default depth is 7 drafts, up to the trained 15 with `--mtp-n-predict`. On the
-RTX 3090 with a 4-bit GGUF target, 7 drafts accept about as DFlash 2's do; 15 accept more per step (7.5 of 15 on a
-word problem) but the 16-row verify leaves the target's small-batch matvec kernels, which cover 8 rows, so steps take
-about 40% longer and 7 stays faster there. Not supported: the terminal token residual, reduced draft vocabularies,
+RTX 3090 with a 4-bit GGUF target, 7 drafts accept about as DFlash 2's do; 15 accept more per step (7.75 of 15 on a
+word problem) for a step about 20% longer, which pays where drafts are accepted deep (a word problem 269 against 228
+tok/s) and not on code or review text, where 7 stays faster. Not supported: the terminal token residual, reduced draft vocabularies,
 and the reference's confidence-based dynamic verification.
 
 ## EAGLE-3 (Llama, Qwen3, Qwen3.5 / Qwen3.6, gpt-oss, Gemma 4)

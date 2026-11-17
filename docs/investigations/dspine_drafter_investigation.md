@@ -132,3 +132,58 @@ master   220.3 / 179.4 / 103.7   221.3 / 179.1 / 103.6
 ```
 
 Identical outputs and acceptance; the gap to Run 2 is the card's thermal state, not the kernel.
+
+## Run 8 - 2026-11-17 10:10
+
+**Question:** can the target's small-batch matmuls take 9-16 rows, so a 16-row verify costs about what an 8-row one
+does?
+
+Recipe A is 12 of its 14 GB IQ4_KS (tile-ordered at load), the rest Q4_K, Q6_K (the head) and Q5_K. For 2-8 rows
+those take the tensor-core matvec (`mmvq_tc`, int8 `mma.m16n8k32`, the batch as the mma's 8 B columns), which reads
+and decodes each weight fragment once for every row; past 8 rows everything fell to MMQ. The matvecs now take a second
+8-row half: the activations quantize as two 8-row layouts back to back and each decoded weight fragment feeds an mma
+per half. `GGUF_BENCH_FILE=... small_batch_mmvq_vs_mmq` (bench extended to 9, 12, 16 rows), first with the 8-row
+tuned config:
+
+```
+                  8 rows tc    16 rows tc (tuned at 8)   16 rows best config   16 rows MMQ
+ffn_up 17408x5120   64.6 us       94.2                      77.4                 107.8
+ffn_down 5120x17408 63.9         111.5                      76.2                 104.8
+attn_qkv 10240x5120 39.0          47.4                      46.0                  60.5
+ssm_out 5120x6144   25.3          29.9                      29.5                  43.4
+head Q6_K 248320x5120 1397       ~2250 (cfg 1)             1578                 1546
+```
+
+End to end at 15 drafts, with that first cut, the step got slower (about 41 ms against 38 on MMQ): the config tuned at
+8 rows is often the worst at 16, and the head lost. So the IQ4_KS tuning now times one and two halves separately, the
+two-half variant gets its own shapes (more row groups per warp and a shallower prefetch, since two halves double the
+accumulators and activations in flight: of (8,2,4), (8,4,1), (8,4,2), (8,2,2) and others swept, those four cover the
+best per shape), row-major Q4_K and Q6_K take fixed wide configs from `row_major_tc_shapes` at 16 rows, and Q6_K past
+64K rows (the head) stays on MMQ. A Q6_K head at 9-16 rows had also reached `fast_mmvq::plain`, which refused rows
+past 8 instead of handing them to MMQ; it now falls back (`a_tall_q6k_weight_past_eight_rows_takes_mmq`).
+
+```
+16 rows, tuned   ffn_up 75.2   ffn_down 76.2   attn_qkv 42.3   ssm_out 29.2   (vs 8 rows +8 to +19%, vs MMQ -25 to -37%)
+Q4_K 16 rows     6144x5120 34.2 vs MMQ 46.9   5120x4096 23.1 vs 34.8   34816x5120 154 vs 198   5120x25600 144 vs 161
+```
+
+Tests: the tiled IQ4_KS and row-major Q4_K / Q6_K matvecs against dense matmuls at 9, 12 and 16 rows for every
+config and dtype, a 13-row shared-input scope; with the second half's activations read from the first the Q4_K case
+fails at 9 rows (cosine 0.906).
+
+## Run 9 - 2026-11-17 10:25
+
+**Question:** with 9-16 row matvecs, where does DSpine's trained depth land?
+
+```
+                 sampled tok/s               greedy: accepted/step, tok/s
+                 math   code   review        math        code        review
+DSpine 15        235    130     85           7.75 269    3.90 151    2.66 113
+DSpine 11        212    119    112           6.95 255    3.61 148    2.61 116
+DSpine 7         240    154    101           5.17 228    3.90 181    2.18 117
+```
+
+The 16-row step is now about 32.5 ms (greedy math: 8.75 tokens at 269 tok/s) against about 38 ms before and 27 ms at
+8 rows. Depth 15 wins where drafts are accepted deep (the word problem, +18% greedy) and loses on code and review, so
+7 stays the default; a per-step depth choice (`--mtp-auto-depth`, which picks among 3, 5 and 7 for DFlash drafters)
+extended to DSpine's 11 and 15 would take each where it pays.
