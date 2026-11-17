@@ -275,6 +275,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::SeedOss,
         build: build_seed_oss,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Exaone4,
+        build: build_exaone4,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -1344,6 +1348,19 @@ fn build_seed_oss(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         "attention_out_bias".into(),
         json!(metadata.has_tensor_marker(".attn_output.bias")),
     );
+    Ok(JsonValue::Object(config))
+}
+
+// The converter writes llama3 scaling as a `rope_freqs` tensor, which leaves the scaling null
+fn build_exaone4(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let fields = StandardFields::read(metadata, Some(DEFAULT_ROPE_THETA))?;
+    require_full_rotary(metadata, fields.head_dim)?;
+    let layer_types = qwen2_layer_types(metadata, &fields)?;
+    let mut config = fields.rms_json();
+    config.insert("hidden_act".into(), json!("silu"));
+    config.insert("head_dim".into(), json!(fields.head_dim));
+    config.insert("rope_scaling".into(), llama_rope_scaling(metadata)?);
+    config.insert("layer_types".into(), json!(layer_types));
     Ok(JsonValue::Object(config))
 }
 
@@ -3756,9 +3773,9 @@ mod tests {
         pub use inference_models_gemma::{gemma, gemma2};
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
-            deepseek, ernie4_5, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
-            hunyuan_v1_dense, hunyuan_v1_moe, jamba, kimi_linear, lfm2, mamba, mamba2, nemotron_h,
-            olmo, rwkv_hybrid, rwkv6, rwkv7, seed_oss, starcoder2,
+            deepseek, ernie4_5, exaone4, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss,
+            granite, hunyuan_v1_dense, hunyuan_v1_moe, jamba, kimi_linear, lfm2, mamba, mamba2,
+            nemotron_h, olmo, rwkv_hybrid, rwkv6, rwkv7, seed_oss, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -4284,6 +4301,9 @@ mod tests {
             }
             NormalLoaderType::SeedOss => {
                 assert_deserializes(loader, config, models::seed_oss::Config::from_json)
+            }
+            NormalLoaderType::Exaone4 => {
+                assert_deserializes(loader, config, models::exaone4::Config::from_json)
             }
         }
     }

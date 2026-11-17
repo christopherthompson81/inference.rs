@@ -694,13 +694,15 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
             ignore_merges: false,
             normalize_nfc: true,
         },
-        // granite-docling and olmo share llama.cpp's GPT-2 case
-        "gpt-2" | "phi-2" | "modern-bert" | "granite-docling" | "olmo" => BpePreTokenizerSpec {
-            kind: BpePreTokenizerKind::Gpt2,
-            regexes: &[GPT2_REGEX],
-            ignore_merges: false,
-            normalize_nfc: false,
-        },
+        // granite-docling, olmo and exaone4 share llama.cpp's GPT-2 case
+        "gpt-2" | "phi-2" | "modern-bert" | "granite-docling" | "olmo" | "exaone4" => {
+            BpePreTokenizerSpec {
+                kind: BpePreTokenizerKind::Gpt2,
+                regexes: &[GPT2_REGEX],
+                ignore_merges: false,
+                normalize_nfc: false,
+            }
+        }
         // Granite 3.x / 4.1 convert as refact: llama.cpp splits it exactly as starcoder
         "starcoder" | "smollm" | "refact" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Starcoder,

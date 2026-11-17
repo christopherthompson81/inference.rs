@@ -152,6 +152,10 @@ Nemotron-H text models (`NemotronHForCausalLM`, e.g. `nvidia/NVIDIA-Nemotron-3-N
 
 AllenAI's OLMo 1 (`OlmoForCausalLM`, e.g. `allenai/OLMo-1B-0724-hf`), OLMo 2 (`Olmo2ForCausalLM`), Olmo 3 (`Olmo3ForCausalLM`, whose sliding-window layers take plain RoPE beside YaRN full ones) and OLMoE (`OlmoeForCausalLM`) load through auto-detection, from safetensors or from llama.cpp's GGUFs (`olmo`, `olmo2`, `olmoe`). The original pre-HF OLMo 1 checkpoints (`OLMoForCausalLM`, `model.transformer.blocks.*`) are not supported; use their `-hf` conversions.
 
+## EXAONE
+
+LG AI Research's EXAONE 4.0 (`Exaone4ForCausalLM`, e.g. `LGAI-EXAONE/EXAONE-4.0-32B` and `LGAI-EXAONE/EXAONE-4.0-1.2B`) loads through auto-detection, from safetensors or from llama.cpp's `exaone4` GGUFs, with the 32B's sliding-window layers beside its NoPE global ones. Its template thinks only when asked; inference.rs asks by default (`enable_thinking` on), so pass `enable_thinking: false` for the template's own default. Reasoning (`<think>`) and tool calls (`<tool_call>` JSON) come back split as for Qwen.
+
 ## Seed-OSS
 
 ByteDance's Seed-OSS (`SeedOssForCausalLM`, e.g. `ByteDance-Seed/Seed-OSS-36B-Instruct`) loads through auto-detection, from safetensors or from llama.cpp's `seed_oss` GGUFs. Its reasoning (`<seed:think>...</seed:think>`) comes back as `reasoning_content`, the `<seed:cot_budget_reflect>` notes its template asks for included, and its `<seed:tool_call>` calls as tool calls. Turning thinking off (`enable_thinking: false` or `reasoning_effort: "none"`) renders the template with `thinking_budget` 0, its no-reasoning mode.
