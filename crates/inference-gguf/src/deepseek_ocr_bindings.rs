@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use inference_quant::{GgufArchive, GgufBindingMap};
+use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 use inference_tensor::quantized::gguf_file::Value;
 use serde_json::json;
 
 use super::multimodal_binding_utils::{
     TensorInventory, bind, bind_required, bind_required_linear, bind_required_linears, map_usize,
-    validate_architecture, validate_projector,
+    projector_type, validate_architecture,
 };
 use super::whisper_audio_bindings::token_id;
 
@@ -15,18 +15,29 @@ const FAMILY: &str = "DeepSeek-OCR";
 const IMAGE_TOKEN: &str = "<image>";
 pub const TEXT_ARCHITECTURE: &str = "deepseek2-ocr";
 pub const PROJECTOR: &str = "deepseekocr";
+/// DeepSeek-OCR-2's: SAM read by the Qwen2 query encoder.
+pub const PROJECTOR_2: &str = "deepseekocr2";
+// the query table OCR-2's projector carries for the global view
+const GLOBAL_QUERIES: &str = "v.resample_query_1024.weight";
+const VIEW_SEPARATOR: &str = "v.view_seperator";
 // llama.cpp keeps these fixed for the projector type (`global_attn_indices`, the global view, tile counts)
 const SAM_GLOBAL_LAYERS: [usize; 4] = [2, 5, 8, 11];
 const GLOBAL_VIEW: usize = 1024;
 const DEFAULT_MAX_TILES: usize = 9;
+const OCR2_DEFAULT_MAX_TILES: usize = 6;
 // CLIP-L/14 at 224, which the mmproj describes only by width, heads and depth
 const CLIP_IMAGE_SIZE: usize = 224;
 const CLIP_PATCH_SIZE: usize = 14;
 
-/// llama.cpp's DeepSeek-OCR: the non-MLA DeepSeek-V2 text stack, then the SAM and CLIP towers and the projector.
+/// llama.cpp's DeepSeek-OCR and OCR-2: the non-MLA DeepSeek-V2 text stack, then SAM, CLIP (OCR) or the query
+/// encoder (OCR-2), and the projector.
 pub fn build_deepseek_ocr_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_architecture(archive, TEXT_ARCHITECTURE)?;
-    validate_projector(archive, PROJECTOR)?;
+    let projector =
+        projector_type(archive)?.context("GGUF vision projector metadata is required")?;
+    if ![PROJECTOR, PROJECTOR_2].contains(&projector) {
+        bail!("expected a `{PROJECTOR}` or `{PROJECTOR_2}` vision projector, found `{projector}`");
+    }
     build_from_inventory(&TensorInventory::from_archive(archive))
 }
 
@@ -34,19 +45,32 @@ fn build_from_inventory(inventory: &TensorInventory<'_>) -> Result<GgufBindingMa
     let mut bindings = GgufBindingMap::new();
     bind_text(inventory, &mut bindings)?;
     bind_sam(inventory, &mut bindings)?;
-    bind_clip(inventory, &mut bindings)?;
+    if inventory.contains(GLOBAL_QUERIES) {
+        bind_query_encoder(inventory, &mut bindings)?;
+    } else {
+        bind_clip(inventory, &mut bindings)?;
+        bind_required(
+            inventory,
+            &mut bindings,
+            "model.image_newline",
+            "v.image_newline",
+        )?;
+    }
     bind_required_linear(
         inventory,
         &mut bindings,
         "model.projector.layers",
         "mm.model.fc",
     )?;
-    for (native, source) in [
-        ("model.image_newline", "v.image_newline"),
-        ("model.view_seperator", "v.view_seperator"),
-    ] {
-        bind_required(inventory, &mut bindings, native, source)?;
-    }
+    // newer converters store it as (1, n)
+    let separator = inventory.shape(VIEW_SEPARATOR)?.iter().product();
+    bindings.insert(
+        "model.view_seperator".to_string(),
+        GgufTensorBinding::Reshape {
+            input: Box::new(GgufTensorBinding::tensor(VIEW_SEPARATOR)),
+            dims: vec![separator],
+        },
+    );
     Ok(bindings)
 }
 
@@ -216,6 +240,47 @@ fn bind_clip(inventory: &TensorInventory<'_>, bindings: &mut GgufBindingMap) -> 
     Ok(())
 }
 
+fn bind_query_encoder(
+    inventory: &TensorInventory<'_>,
+    bindings: &mut GgufBindingMap,
+) -> Result<()> {
+    let root = "model.qwen2_model";
+    for layer in inventory.require_layers("v.blk.", FAMILY)? {
+        bind_required_linears(
+            inventory,
+            bindings,
+            &format!("{root}.model.model.layers.{layer}"),
+            &format!("v.blk.{layer}"),
+            &[
+                ("input_layernorm", "ln1"),
+                ("post_attention_layernorm", "ln2"),
+                ("self_attn.q_proj", "attn_q"),
+                ("self_attn.k_proj", "attn_k"),
+                ("self_attn.v_proj", "attn_v"),
+                ("self_attn.o_proj", "attn_out"),
+                ("mlp.gate_proj", "ffn_gate"),
+                ("mlp.up_proj", "ffn_up"),
+                ("mlp.down_proj", "ffn_down"),
+            ],
+        )?;
+    }
+    bind_required_linear(
+        inventory,
+        bindings,
+        &format!("{root}.model.model.norm"),
+        "v.post_ln",
+    )?;
+    for side in ["768", "1024"] {
+        bind_required_linear(
+            inventory,
+            bindings,
+            &format!("{root}.query_{side}"),
+            &format!("v.resample_query_{side}"),
+        )?;
+    }
+    Ok(())
+}
+
 fn map_f32(metadata: &HashMap<String, Value>, key: &str) -> Result<f32> {
     match metadata.get(key) {
         Some(Value::F32(value)) => Ok(*value),
@@ -256,10 +321,40 @@ fn deepseek_ocr_config(
     let [n_embed, input_dim] = projector[..] else {
         bail!("{FAMILY} projector `mm.model.fc.weight` must be 2D, not {projector:?}");
     };
-    let max_tiles =
-        map_usize(metadata, "clip.vision.preproc_max_tiles").unwrap_or(DEFAULT_MAX_TILES);
+    let ocr2 = shapes.contains_key(GLOBAL_QUERIES);
+    let max_tiles = map_usize(metadata, "clip.vision.preproc_max_tiles").unwrap_or(if ocr2 {
+        OCR2_DEFAULT_MAX_TILES
+    } else {
+        DEFAULT_MAX_TILES
+    });
+    let vision = |key: &str| map_usize(metadata, &format!("clip.vision.{key}"));
+    let (architecture, reader_name, reader) = if ocr2 {
+        (
+            "DeepseekOCR2ForCausalLM",
+            "qwen2-0-5b",
+            json!({
+                "dim": vision("embedding_length")?,
+                "layers": vision("block_count")?,
+                "heads": vision("attention.head_count")?,
+                "kv_heads": vision("attention.head_count_kv")?,
+                "intermediate_size": vision("feed_forward_length")?,
+            }),
+        )
+    } else {
+        (
+            "DeepseekOCRForCausalLM",
+            "clip-l-14-224",
+            json!({
+                "heads": vision("attention.head_count")?,
+                "image_size": CLIP_IMAGE_SIZE,
+                "layers": vision("block_count")?,
+                "patch_size": CLIP_PATCH_SIZE,
+                "width": vision("embedding_length")?,
+            }),
+        )
+    };
     let config = json!({
-        "architectures": ["DeepseekOCRForCausalLM"],
+        "architectures": [architecture],
         "language_config": {
             "vocab_size": text("vocab_size")?,
             "hidden_size": text("embedding_length")?,
@@ -281,13 +376,7 @@ fn deepseek_ocr_config(
         "vision_config": {
             "image_size": GLOBAL_VIEW,
             "width": {
-                "clip-l-14-224": {
-                    "heads": map_usize(metadata, "clip.vision.attention.head_count")?,
-                    "image_size": CLIP_IMAGE_SIZE,
-                    "layers": map_usize(metadata, "clip.vision.block_count")?,
-                    "patch_size": CLIP_PATCH_SIZE,
-                    "width": map_usize(metadata, "clip.vision.embedding_length")?,
-                },
+                reader_name: reader,
                 "sam_vit_b": {
                     "downsample_channels": [out_channels("v.sam.net_2.weight")?, out_channels("v.sam.net_3.weight")?],
                     "global_attn_indexes": SAM_GLOBAL_LAYERS,
@@ -307,8 +396,6 @@ fn deepseek_ocr_config(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-
-    use inference_quant::GgufTensorBinding;
 
     use super::*;
     use crate::multimodal_binding_utils::binding_sources;
@@ -429,7 +516,6 @@ mod tests {
                 "model.vision_model.transformer.layers.0.self_attn.qkv_proj.weight",
                 "v.blk.0.attn_qkv.weight",
             ),
-            ("model.view_seperator", "v.view_seperator"),
         ] {
             assert_eq!(
                 bindings.get(native),
@@ -437,5 +523,120 @@ mod tests {
                 "{native}"
             );
         }
+        assert_eq!(
+            bindings.get("model.view_seperator"),
+            Some(&GgufTensorBinding::Reshape {
+                input: Box::new(GgufTensorBinding::tensor("v.view_seperator")),
+                dims: vec![8],
+            })
+        );
+    }
+
+    // OCR-2's projector: the query encoder's layers, norm and tables in place of CLIP's tower and the newline
+    fn ocr2_inventory() -> Vec<(String, Vec<usize>)> {
+        let mut tensors = tensor_inventory();
+        tensors.retain(|(name, _)| {
+            !(name.starts_with("v.blk.")
+                || name.starts_with("v.class_embd")
+                || name.starts_with("v.patch_embd")
+                || name.starts_with("v.position_embd")
+                || name.starts_with("v.pre_ln")
+                || name == "v.image_newline")
+        });
+        for (name, shape) in &mut tensors {
+            if name == VIEW_SEPARATOR {
+                *shape = vec![1, 8];
+            }
+        }
+        for role in [
+            "ln1", "ln2", "attn_q", "attn_k", "attn_v", "attn_out", "ffn_gate", "ffn_up",
+            "ffn_down",
+        ] {
+            tensors.push((format!("v.blk.0.{role}.weight"), vec![8, 8]));
+        }
+        for role in ["attn_q", "attn_k", "attn_v"] {
+            tensors.push((format!("v.blk.0.{role}.bias"), vec![8]));
+        }
+        tensors.push(("v.post_ln.weight".to_string(), vec![8]));
+        tensors.push(("v.resample_query_768.weight".to_string(), vec![144, 8]));
+        tensors.push((GLOBAL_QUERIES.to_string(), vec![256, 8]));
+        tensors
+    }
+
+    #[test]
+    fn maps_the_ocr2_query_encoder_and_names_it_in_the_config() {
+        let tensors = ocr2_inventory();
+        let inventory = TensorInventory::new(
+            tensors
+                .iter()
+                .map(|(name, shape)| (name.as_str(), shape.as_slice())),
+        );
+        let bindings = build_from_inventory(&inventory).unwrap();
+        let expected = tensors
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(binding_sources(&bindings), expected);
+        for (native, source) in [
+            (
+                "model.qwen2_model.model.model.layers.0.self_attn.k_proj.bias",
+                "v.blk.0.attn_k.bias",
+            ),
+            (
+                "model.qwen2_model.model.model.layers.0.mlp.gate_proj.weight",
+                "v.blk.0.ffn_gate.weight",
+            ),
+            (
+                "model.qwen2_model.model.model.norm.weight",
+                "v.post_ln.weight",
+            ),
+            ("model.qwen2_model.query_1024.weight", GLOBAL_QUERIES),
+        ] {
+            assert_eq!(
+                bindings.get(native),
+                Some(&GgufTensorBinding::tensor(source)),
+                "{native}"
+            );
+        }
+        assert!(bindings.get("model.image_newline").is_none());
+
+        let text = |key: &str| format!("{TEXT_ARCHITECTURE}.{key}");
+        let mut metadata = HashMap::new();
+        for (key, value) in [
+            (text("vocab_size"), 8),
+            (text("embedding_length"), 8),
+            (text("feed_forward_length"), 8),
+            (text("expert_feed_forward_length"), 8),
+            (text("block_count"), 2),
+            (text("attention.head_count"), 2),
+            (text("attention.head_count_kv"), 2),
+            (text("expert_count"), 4),
+            (text("expert_shared_count"), 1),
+            (text("expert_used_count"), 2),
+            (text("context_length"), 64),
+            ("clip.vision.embedding_length".to_string(), 8),
+            ("clip.vision.block_count".to_string(), 1),
+            ("clip.vision.attention.head_count".to_string(), 2),
+            ("clip.vision.attention.head_count_kv".to_string(), 1),
+            ("clip.vision.feed_forward_length".to_string(), 8),
+            ("clip.vision.sam.head_count".to_string(), 2),
+            ("clip.vision.sam.block_count".to_string(), 1),
+            ("clip.vision.sam.embedding_length".to_string(), 4),
+        ] {
+            metadata.insert(key, Value::U32(value));
+        }
+        metadata.insert(text("attention.layer_norm_rms_epsilon"), Value::F32(1e-6));
+        metadata.insert(
+            "tokenizer.ggml.tokens".to_string(),
+            Value::Array(vec![Value::String(IMAGE_TOKEN.to_string())]),
+        );
+        let shapes = tensors.into_iter().collect::<HashMap<_, _>>();
+        let config: serde_json::Value =
+            serde_json::from_str(&deepseek_ocr_config(&metadata, &shapes).unwrap()).unwrap();
+        assert_eq!(config["architectures"][0], "DeepseekOCR2ForCausalLM");
+        assert_eq!(config["max_tiles"], OCR2_DEFAULT_MAX_TILES);
+        let widths = &config["vision_config"]["width"];
+        assert!(widths.get("clip-l-14-224").is_none());
+        assert_eq!(widths["qwen2-0-5b"]["kv_heads"], 1);
     }
 }

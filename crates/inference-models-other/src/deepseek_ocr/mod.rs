@@ -1,10 +1,13 @@
 //! DeepSeek-OCR (`DeepseekOCRForCausalLM`): the DeepEncoder (SAM ViT-B into CLIP-L, projected) over a global view
 //! and tiles, its tokens in place of the prompt's `<image>` run, read by a DeepSeek-V2 MoE without MLA.
-//! MIT deepseek-ai/DeepSeek-OCR; spec: the checkpoint's `modeling_deepseekocr.py` and `deepencoder.py`.
+//! DeepSeek-OCR-2 (`DeepseekOCR2ForCausalLM`) reads SAM through a Qwen2 query encoder in place of CLIP-L.
+//! MIT deepseek-ai/DeepSeek-OCR and DeepSeek-OCR-2; spec: the checkpoints' `modeling_deepseekocr*.py` and
+//! `deepencoder*.py`.
 
 pub mod config;
 pub mod inputs_processor;
 mod preprocess;
+mod query_encoder;
 pub mod vision;
 
 use std::any::Any;

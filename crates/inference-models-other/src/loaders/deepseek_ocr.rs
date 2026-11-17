@@ -44,6 +44,30 @@ fn image_budget(cfg: &Config) -> (usize, usize) {
     (cfg.image_token_count((tiles, 1)), tiles + 1)
 }
 
+// what reads SAM: CLIP-L's layers, embeddings and pre-norm, or the query encoder's layers, final norm and queries
+fn reader_elems(cfg: &Config) -> usize {
+    if let Some(query) = cfg.query_encoder() {
+        let d = query.dim;
+        let kv = query.kv_heads * (d / query.heads);
+        let layer = 2 * (d * d + d * kv) + d + 2 * kv + 3 * d * query.intermediate_size + 2 * d;
+        let queries = [cfg.tile_size(), cfg.vision_config.image_size]
+            .map(|side| Config::grid(side).pow(2) * d)
+            .iter()
+            .sum::<usize>();
+        return query.layers * layer + d + queries;
+    }
+    let Some(clip) = &cfg.vision_config.width.clip else {
+        return 0;
+    };
+    let clip_layer = 4 * clip.width * clip.width
+        + 2 * 4 * clip.width * clip.width
+        + 4 * clip.width
+        + 4 * 4 * clip.width;
+    clip.layers * clip_layer
+        + ((clip.image_size / clip.patch_size).pow(2) + 2) * clip.width
+        + 2 * clip.width
+}
+
 impl MultimodalModelLoader for DeepseekOcrLoader {
     fn load(
         &self,
@@ -185,17 +209,9 @@ impl DeviceMappedModelLoader for DeepseekOcrLoader {
             dtype,
             weight_pack_factor,
         )?;
-        let clip = &cfg.vision_config.width.clip;
-        let clip_layer = 4 * clip.width * clip.width
-            + 2 * 4 * clip.width * clip.width
-            + 4 * clip.width
-            + 4 * 4 * clip.width;
-        let clip_elems = clip.layers * clip_layer
-            + ((clip.image_size / clip.patch_size).pow(2) + 2) * clip.width
-            + 2 * clip.width;
         let projector = &cfg.projector_config;
         let projector_elems = (projector.input_dim + 3) * projector.n_embed;
-        let tower = cfg.sam_config()?.num_elems() + clip_elems + projector_elems;
+        let tower = cfg.sam_config()?.num_elems() + reader_elems(&cfg) + projector_elems;
         Ok(ends + tower * dtype.size_in_bytes())
     }
     fn layer_sizes_in_bytes(

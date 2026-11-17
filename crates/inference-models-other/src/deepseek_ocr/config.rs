@@ -15,6 +15,10 @@ serde_default_fn!(f64, routed_scaling_factor, 1.0);
 serde_default_fn!(String, topk_method, GREEDY.to_string());
 serde_default_fn!(usize, moe_layer_freq, 1);
 serde_default_fn!(u32, image_token_id, IMAGE_TOKEN_ID);
+serde_default_fn!(usize, query_layers, 24);
+serde_default_fn!(usize, query_heads, 14);
+serde_default_fn!(usize, query_kv_heads, 2);
+serde_default_fn!(usize, query_intermediate_size, 4864);
 
 const GREEDY: &str = "greedy";
 // the reference's `<image>` id, which its config leaves out
@@ -27,6 +31,9 @@ pub const DEFAULT_MAX_TILES: usize = 9;
 // Unlimited-OCR's `dynamic_preprocess(max_num=32)`
 const UNLIMITED_MAX_TILES: usize = 32;
 const UNLIMITED_OCR: &str = "UnlimitedOCRForCausalLM";
+// DeepSeek-OCR-2's `dynamic_preprocess(max_num=6, image_size=768)`
+const OCR2_MAX_TILES: usize = 6;
+const OCR2_TILE_SIZE: usize = 768;
 
 /// DeepSeek-V2 without MLA (`use_mla: false`): Llama attention, softmax top-k experts beside shared ones.
 #[derive(Debug, Clone, inference_json::FromJson)]
@@ -151,10 +158,27 @@ pub struct SamWidth {
     pub width: usize,
 }
 
+/// DeepSeek-OCR-2's Qwen2-0.5B-shaped query encoder; the reference fixes all but the width in code.
+#[derive(Debug, Clone, inference_json::FromJson)]
+pub struct QueryEncoderWidth {
+    pub dim: usize,
+    #[serde(default = "query_layers")]
+    pub layers: usize,
+    #[serde(default = "query_heads")]
+    pub heads: usize,
+    #[serde(default = "query_kv_heads")]
+    pub kv_heads: usize,
+    #[serde(default = "query_intermediate_size")]
+    pub intermediate_size: usize,
+}
+
+/// DeepSeek-OCR reads SAM through CLIP-L; DeepSeek-OCR-2 through the query encoder.
 #[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VisionWidths {
     #[serde(rename = "clip-l-14-224")]
-    pub clip: ClipWidth,
+    pub clip: Option<ClipWidth>,
+    #[serde(rename = "qwen2-0-5b")]
+    pub query: Option<QueryEncoderWidth>,
     pub sam_vit_b: SamWidth,
 }
 
@@ -185,20 +209,33 @@ pub struct Config {
 }
 
 // a local tile's side, and the SAM patch and neck strides that leave a tile's token grid
-pub const TILE_SIZE: usize = 640;
+const TILE_SIZE: usize = 640;
 const SAM_STRIDE: usize = 16 * 4;
 // the gray the global view is padded with: `int(0.5 * 255)`
 pub const PAD_GRAY: u8 = 127;
 
 impl Config {
+    pub fn query_encoder(&self) -> Option<&QueryEncoderWidth> {
+        self.vision_config.width.query.as_ref()
+    }
+
     pub fn max_tiles(&self) -> usize {
-        self.max_tiles.unwrap_or(
-            if self.architectures.iter().any(|arch| arch == UNLIMITED_OCR) {
-                UNLIMITED_MAX_TILES
-            } else {
-                DEFAULT_MAX_TILES
-            },
-        )
+        self.max_tiles.unwrap_or(if self.query_encoder().is_some() {
+            OCR2_MAX_TILES
+        } else if self.architectures.iter().any(|arch| arch == UNLIMITED_OCR) {
+            UNLIMITED_MAX_TILES
+        } else {
+            DEFAULT_MAX_TILES
+        })
+    }
+
+    /// A local tile's side.
+    pub fn tile_size(&self) -> usize {
+        if self.query_encoder().is_some() {
+            OCR2_TILE_SIZE
+        } else {
+            TILE_SIZE
+        }
     }
 
     pub fn sam_config(&self) -> Result<SamConfig> {
@@ -209,6 +246,8 @@ impl Config {
                 sam.downsample_channels
             );
         };
+        // OCR-2's last conv widens to the query encoder, whatever its config lists
+        let out = self.query_encoder().map_or(out, |query| query.dim);
         let mut cfg = SamConfig::vit_b(sam.global_attn_indexes.clone(), [mid, out]);
         cfg.embed_dim = sam.width;
         cfg.depth = sam.layers;
@@ -222,12 +261,18 @@ impl Config {
         size / SAM_STRIDE
     }
 
-    /// An image's tokens: each grid row of the tiles and of the global view ends in a newline, then one separator.
+    /// An image's tokens, then one separator: DeepSeek-OCR ends each grid row of the tiles and of the global view
+    /// in a newline, OCR-2 reads one query per grid cell with no newlines.
     pub fn image_token_count(&self, tiles: (usize, usize)) -> usize {
         let global = Self::grid(self.vision_config.image_size);
-        let tile = Self::grid(TILE_SIZE);
+        let tile = Self::grid(self.tile_size());
         let (cols, rows) = tiles;
-        let local = if cols * rows > 1 {
+        let tiled = cols * rows > 1;
+        if self.query_encoder().is_some() {
+            let local = if tiled { cols * rows * tile * tile } else { 0 };
+            return local + global * global + 1;
+        }
+        let local = if tiled {
             rows * tile * (cols * tile + 1)
         } else {
             0

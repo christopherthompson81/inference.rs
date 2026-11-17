@@ -1,5 +1,6 @@
 //! DeepSeek-OCR's DeepEncoder: SAM ViT-B, a CLIP-L that reads SAM's features in place of patch embeddings, and a
-//! linear projector over both, laid out as the reference's `DeepseekOCRModel.forward` does.
+//! linear projector over both, laid out as the reference's `DeepseekOCRModel.forward` does. DeepSeek-OCR-2 reads SAM
+//! through its query encoder instead and projects the queries alone.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,8 @@ use crate::attention::AttentionMask;
 use crate::layers::layer_norm;
 use crate::utils::unvarbuilder::UnVarBuilder;
 
-use super::config::{Config, TILE_SIZE};
+use super::config::{ClipWidth, Config};
+use super::query_encoder::QueryEncoder;
 
 const CLIP_EPS: f64 = 1e-5;
 const CLIP_MLP_RATIO: usize = 4;
@@ -30,8 +32,7 @@ struct ClipOverSam {
 }
 
 impl ClipOverSam {
-    fn load(vb: ShardedVarBuilder, cfg: &Config) -> Result<Self> {
-        let clip = &cfg.vision_config.width.clip;
+    fn load(vb: ShardedVarBuilder, clip: &ClipWidth) -> Result<Self> {
         let grid = clip.image_size / clip.patch_size;
         let encoder_cfg = ClipConfig {
             hidden_size: clip.width,
@@ -108,59 +109,92 @@ impl ClipOverSam {
     }
 }
 
+// what reads SAM's tokens before the projector
+enum Reader {
+    Clip(ClipOverSam),
+    Queries(Box<QueryEncoder>),
+}
+
 pub struct DeepEncoder {
     sam: SamEncoder,
-    clip: ClipOverSam,
+    reader: Reader,
     projector: Arc<dyn QuantMethod>,
-    image_newline: Tensor,
+    // DeepSeek-OCR ends each grid row with it; OCR-2 has none
+    image_newline: Option<Tensor>,
     view_separator: Tensor,
     global_size: usize,
+    tile_size: usize,
 }
 
 impl DeepEncoder {
     /// `vb` is the checkpoint's `model` prefix.
     pub fn load(vb: ShardedVarBuilder, cfg: &Config) -> Result<Self> {
         let projector = &cfg.projector_config;
+        let (global_size, tile_size) = (cfg.vision_config.image_size, cfg.tile_size());
+        let sam = SamEncoder::load(vb.pp("sam_model"), &cfg.sam_config()?)?;
+        let (reader, image_newline) = match (cfg.query_encoder(), &cfg.vision_config.width.clip) {
+            (Some(query), _) => (
+                Reader::Queries(Box::new(QueryEncoder::load(
+                    vb.pp("qwen2_model"),
+                    query,
+                    &[tile_size, global_size],
+                )?)),
+                None,
+            ),
+            (None, Some(clip)) => (
+                Reader::Clip(ClipOverSam::load(vb.pp("vision_model"), clip)?),
+                Some(vb.get(projector.n_embed, "image_newline")?),
+            ),
+            (None, None) => inference_tensor::bail!(
+                "DeepSeek-OCR's vision config names neither CLIP (`clip-l-14-224`) nor the query encoder (`qwen2-0-5b`)"
+            ),
+        };
         Ok(Self {
-            sam: SamEncoder::load(vb.pp("sam_model"), &cfg.sam_config()?)?,
-            clip: ClipOverSam::load(vb.pp("vision_model"), cfg)?,
+            sam,
+            reader,
             projector: inference_quant::linear(
                 projector.input_dim,
                 projector.n_embed,
                 &None,
                 vb.pp("projector").pp("layers"),
             )?,
-            image_newline: vb.get(projector.n_embed, "image_newline")?,
+            image_newline,
             view_separator: vb.get(projector.n_embed, "view_seperator")?,
-            global_size: cfg.vision_config.image_size,
+            global_size,
+            tile_size,
         })
     }
 
     pub fn dtype(&self) -> inference_tensor::DType {
-        self.image_newline.dtype()
+        self.view_separator.dtype()
     }
 
     // (B, 3, S, S) views to their (B, G * G, hidden) projected tokens
     fn encode(&self, pixels: &Tensor) -> Result<Tensor> {
         let sam = self.sam.forward(&pixels.to_dtype(self.dtype())?)?;
         let sam = sam.flatten_from(2)?.transpose(1, 2)?.contiguous()?;
-        let clip = self.clip.forward(&sam)?;
-        self.projector
-            .forward(&Tensor::cat(&[&clip, &sam], D::Minus1)?)
+        let read = match &self.reader {
+            Reader::Clip(clip) => Tensor::cat(&[&clip.forward(&sam)?, &sam], D::Minus1)?,
+            Reader::Queries(queries) => queries.forward(&sam)?,
+        };
+        self.projector.forward(&read)
     }
 
-    // (rows, cols, hidden) with a newline after every row, flattened
+    // (rows, cols, hidden) with a newline after every row, flattened; OCR-2's grids flatten as they are
     fn with_newlines(&self, grid: &Tensor) -> Result<Tensor> {
         let (rows, _, hidden) = grid.dims3()?;
-        let newline = self
-            .image_newline
+        let Some(newline) = &self.image_newline else {
+            return grid.reshape(((), hidden));
+        };
+        let newline = newline
             .to_dtype(grid.dtype())?
             .reshape((1, 1, hidden))?
             .broadcast_as((rows, 1, hidden))?;
         Tensor::cat(&[grid, &newline.contiguous()?], 1)?.reshape(((), hidden))
     }
 
-    /// One image's tokens: the tiles' grid (each row ending in a newline), the global view's, then the separator.
+    /// One image's tokens: the tiles', the global view's, then the separator. DeepSeek-OCR lays the tiles out as one
+    /// grid whose rows end in newlines; OCR-2 keeps each tile's queries together, tile after tile.
     pub fn image_features(
         &self,
         global: &Tensor,
@@ -172,13 +206,18 @@ impl DeepEncoder {
         let hidden = global.dim(D::Minus1)?;
         let mut parts = Vec::with_capacity(3);
         if let Some(tiles) = tiles {
-            let tile = Config::grid(TILE_SIZE);
-            let local = self
-                .encode(tiles)?
-                .reshape((rows, cols, tile, tile, hidden))?
-                .permute((0, 2, 1, 3, 4))?
-                .reshape((rows * tile, cols * tile, hidden))?;
-            parts.push(self.with_newlines(&local)?);
+            let local = self.encode(tiles)?;
+            parts.push(match self.reader {
+                Reader::Queries(_) => local.reshape(((), hidden))?,
+                Reader::Clip(_) => {
+                    let tile = Config::grid(self.tile_size);
+                    let local = local
+                        .reshape((rows, cols, tile, tile, hidden))?
+                        .permute((0, 2, 1, 3, 4))?
+                        .reshape((rows * tile, cols * tile, hidden))?;
+                    self.with_newlines(&local)?
+                }
+            });
         }
         parts.push(self.with_newlines(&global.reshape((side, side, hidden))?)?);
         parts.push(
@@ -193,9 +232,14 @@ impl DeepEncoder {
     pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.pp("sam_model").extend(self.sam.residual_tensors());
-        uvb.pp("vision_model").extend(self.clip.residual_tensors());
+        match &self.reader {
+            Reader::Clip(clip) => uvb.pp("vision_model").extend(clip.residual_tensors()),
+            Reader::Queries(queries) => uvb.pp("qwen2_model").extend(queries.residual_tensors()),
+        }
         uvb.pp("projector").pp("layers").add(&self.projector);
-        uvb.add_tensor("image_newline", self.image_newline.clone());
+        if let Some(newline) = &self.image_newline {
+            uvb.add_tensor("image_newline", newline.clone());
+        }
         uvb.add_tensor("view_seperator", self.view_separator.clone());
         uvb.to_safetensors()
     }

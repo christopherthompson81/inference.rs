@@ -18,7 +18,7 @@ use crate::media_inputs::{
 };
 use crate::paged_attention::{PagedAttentionMeta, block_hash::MultimodalKind};
 
-use super::preprocess::image_views;
+use super::preprocess::{Tiling, image_views};
 use super::{Config, DeepseekOcrSpecificArgs};
 
 pub const IMAGE_TOKEN: &str = "<image>";
@@ -36,6 +36,7 @@ struct Preprocessed {
 
 pub struct DeepseekOcrInputsProcessor {
     config: Config,
+    tiling: Tiling,
 }
 
 // (3, H, W) pixels normalized as `ToTensor` then `Normalize`
@@ -53,7 +54,12 @@ fn to_tensor(image: &RgbImage, mean: [f64; 3], std: [f64; 3], device: &Device) -
 
 impl DeepseekOcrInputsProcessor {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        let tiling = Tiling {
+            base: config.vision_config.image_size,
+            tile: config.tile_size(),
+            max_tiles: config.max_tiles(),
+        };
+        Self { config, tiling }
     }
 
     fn preprocess(
@@ -68,11 +74,7 @@ impl DeepseekOcrInputsProcessor {
         let mut tiles = Vec::with_capacity(images.len());
         let mut grids = Vec::with_capacity(images.len());
         for image in images {
-            let views = image_views(
-                image,
-                self.config.vision_config.image_size,
-                self.config.max_tiles(),
-            );
+            let views = image_views(image, self.tiling);
             globals.push(to_tensor(&views.global, mean, std, device)?);
             tiles.push(if views.tiles.is_empty() {
                 None

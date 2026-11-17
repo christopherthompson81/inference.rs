@@ -218,9 +218,14 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 22] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 23] = [
     (
         deepseek_ocr_bindings::PROJECTOR,
+        deepseek_ocr_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::DeepseekOcr,
+    ),
+    (
+        deepseek_ocr_bindings::PROJECTOR_2,
         deepseek_ocr_bindings::TEXT_ARCHITECTURE,
         NativeMultimodalGgufFamily::DeepseekOcr,
     ),

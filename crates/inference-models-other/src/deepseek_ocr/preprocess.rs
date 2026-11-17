@@ -6,7 +6,15 @@
 use image::{DynamicImage, RgbImage};
 use inference_vision::pil_resize_bicubic;
 
-use super::config::{MIN_TILES, PAD_GRAY, TILE_SIZE};
+use super::config::{MIN_TILES, PAD_GRAY};
+
+/// How an image splits: the global view's side, a tile's side and the most tiles.
+#[derive(Clone, Copy)]
+pub struct Tiling {
+    pub base: usize,
+    pub tile: usize,
+    pub max_tiles: usize,
+}
 
 /// One image's views as RGB bytes: the global view, then its tiles row by row.
 pub struct ImageViews {
@@ -64,7 +72,10 @@ fn target_ratios(max_tiles: usize) -> Vec<(usize, usize)> {
 
 /// `find_closest_aspect_ratio`: the grid nearest the image's aspect, a tie going to the larger grid while the image
 /// covers half its area.
-fn closest_grid(width: usize, height: usize, max_tiles: usize) -> (usize, usize) {
+fn closest_grid(width: usize, height: usize, tiling: Tiling) -> (usize, usize) {
+    let Tiling {
+        tile, max_tiles, ..
+    } = tiling;
     let aspect = width as f64 / height as f64;
     let area = (width * height) as f64;
     let mut best = (1, 1);
@@ -74,35 +85,36 @@ fn closest_grid(width: usize, height: usize, max_tiles: usize) -> (usize, usize)
         if diff < best_diff {
             best_diff = diff;
             best = (cols, rows);
-        } else if diff == best_diff && area > 0.5 * (TILE_SIZE * TILE_SIZE * cols * rows) as f64 {
+        } else if diff == best_diff && area > 0.5 * (tile * tile * cols * rows) as f64 {
             best = (cols, rows);
         }
     }
     best
 }
 
-pub fn image_views(image: &DynamicImage, base_size: usize, max_tiles: usize) -> ImageViews {
+pub fn image_views(image: &DynamicImage, tiling: Tiling) -> ImageViews {
+    let tile = tiling.tile;
     let image = image.to_rgb8();
     let (width, height) = (image.width() as usize, image.height() as usize);
-    let global = pad_square(&image, base_size);
-    if width <= TILE_SIZE && height <= TILE_SIZE {
+    let global = pad_square(&image, tiling.base);
+    if width <= tile && height <= tile {
         return ImageViews {
             global,
             tiles: Vec::new(),
             grid: (1, 1),
         };
     }
-    let (cols, rows) = closest_grid(width, height, max_tiles);
-    let resized = resize(&image, TILE_SIZE * cols, TILE_SIZE * rows);
+    let (cols, rows) = closest_grid(width, height, tiling);
+    let resized = resize(&image, tile * cols, tile * rows);
     let tiles = (0..rows)
         .flat_map(|row| (0..cols).map(move |col| (col, row)))
         .map(|(col, row)| {
             image::imageops::crop_imm(
                 &resized,
-                (col * TILE_SIZE) as u32,
-                (row * TILE_SIZE) as u32,
-                TILE_SIZE as u32,
-                TILE_SIZE as u32,
+                (col * tile) as u32,
+                (row * tile) as u32,
+                tile as u32,
+                tile as u32,
             )
             .to_image()
         })
@@ -118,21 +130,27 @@ pub fn image_views(image: &DynamicImage, base_size: usize, max_tiles: usize) -> 
 mod tests {
     use super::*;
 
+    const OCR: Tiling = Tiling {
+        base: 1024,
+        tile: 640,
+        max_tiles: 9,
+    };
+
     #[test]
     fn grids_follow_the_aspect_and_small_images_keep_one_view() {
-        assert_eq!(closest_grid(1240, 1600, 9), (2, 3));
+        assert_eq!(closest_grid(1240, 1600, OCR), (2, 3));
         // 2x1 ties 4x2, which an image covering half of 4x2 takes
-        assert_eq!(closest_grid(2000, 1000, 9), (4, 2));
-        assert_eq!(closest_grid(1500, 750, 9), (2, 1));
+        assert_eq!(closest_grid(2000, 1000, OCR), (4, 2));
+        assert_eq!(closest_grid(1500, 750, OCR), (2, 1));
         // a square ties 2x2 with 3x3, which it takes only while covering half of 3x3's area
-        assert_eq!(closest_grid(1300, 1300, 9), (2, 2));
-        assert_eq!(closest_grid(1400, 1400, 9), (3, 3));
+        assert_eq!(closest_grid(1300, 1300, OCR), (2, 2));
+        assert_eq!(closest_grid(1400, 1400, OCR), (3, 3));
         let small = DynamicImage::ImageRgb8(RgbImage::new(600, 400));
-        let views = image_views(&small, 1024, 9);
+        let views = image_views(&small, OCR);
         assert!(views.tiles.is_empty());
         assert_eq!(views.grid, (1, 1));
         let page = DynamicImage::ImageRgb8(RgbImage::new(1240, 1600));
-        let views = image_views(&page, 1024, 9);
+        let views = image_views(&page, OCR);
         assert_eq!(views.tiles.len(), 6);
         assert_eq!(views.global.dimensions(), (1024, 1024));
     }

@@ -4,10 +4,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use inference_quant::{
-    ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
-    ShardedVarBuilder, StaticLoraConfig,
+    ColumnParallelLayer, QuantMethod, QuantMethodConfig, QuantizedConfig, ReplicatedLayer,
+    RowParallelLayer, ShardedVarBuilder, StaticLoraConfig, UnquantLinear,
 };
-use inference_tensor::{D, DType, Device, DeviceLocation, Module, Result, Tensor, nn::LayerNorm};
+use inference_tensor::{
+    D, DType, Device, DeviceLocation, Module, Result, Tensor,
+    nn::{LayerNorm, Linear},
+};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
@@ -49,6 +52,8 @@ const O_PROJ: &str = "o_proj";
 const EXL3_TRELLIS: &str = "trellis";
 // draft tokens per step when `--mtp-n-predict` names none; one MTP layer chained this deep stays well accepted
 pub const DEFAULT_MTP_N_PREDICT: usize = 2;
+/// The `vocab_size` of a stack fed embeddings alone: it loads no token table (DeepSeek-OCR-2's query encoder).
+pub const EMBEDS_ONLY: usize = 0;
 // With experts offloaded every verified token's missed experts run on the CPU; one draft ties or beats none on
 // Qwen3.8-Flash-Next and two lose (qwen4exp investigation Runs 43 and 52)
 pub const DEFAULT_MTP_N_PREDICT_OFFLOADED: usize = 1;
@@ -1348,6 +1353,11 @@ pub fn stream_layers() -> StreamLayers {
     StreamLayers(STREAM_LAYERS.with(|stream| stream.replace(true)))
 }
 
+/// Until the guard drops, stacks load all their layers again: a tower's stack that no layer stream rebuilds.
+pub fn load_all_layers() -> StreamLayers {
+    StreamLayers(STREAM_LAYERS.with(|stream| stream.replace(false)))
+}
+
 /// Whether a [`stream_layers`] scope is open on this thread: a stack loaded now builds none of its layers.
 pub fn layers_streamed() -> bool {
     STREAM_LAYERS.get()
@@ -1437,6 +1447,7 @@ impl LayerMasks {
 /// Embeddings, layers and final norm: the part a causal LM and an embedder share.
 pub struct DecoderStack<A = AttentionBlock, F = Ffn> {
     pub embed_tokens: Arc<dyn QuantMethod>,
+    embeds_only: bool,
     pub layers: Vec<DecoderLayer<A, F>>,
     norm: Norm,
     norm_names: NormNames,
@@ -1615,6 +1626,12 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         let embed_vb = mapper.set_nm_device(vb_m.pp(names.embed_tokens), loading_isq);
         let embed_dim = shape.embed_dim.unwrap_or(shape.hidden_size);
         let embed_tokens = match tied_lm_head {
+            _ if shape.vocab_size == EMBEDS_ONLY => {
+                let empty = Tensor::zeros((0, embed_dim), dtype, real_device)?;
+                Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+                    Linear::new(empty, None),
+                ))?) as Arc<dyn QuantMethod>
+            }
             Some(head) => embedding_with_legacy_tied_uqff(
                 shape.vocab_size,
                 embed_dim,
@@ -1663,6 +1680,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             mapper.set_nm_device(vb_m.pp(shape.norm_names.last), false),
         )?;
         Ok(Self {
+            embeds_only: shape.vocab_size == EMBEDS_ONLY,
             embed_tokens,
             layers,
             norm,
@@ -1797,7 +1815,9 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
     /// The tensors ISQ leaves alone, under the stack's own prefix; `with_projections` for MoE-experts-only ISQ.
     pub fn residual_uvb(&self, uvb_m: &UnVarBuilder, with_projections: bool) {
         let modules = self.module_names;
-        uvb_m.pp(modules.embed_tokens).add(&self.embed_tokens);
+        if !self.embeds_only {
+            uvb_m.pp(modules.embed_tokens).add(&self.embed_tokens);
+        }
         self.norm.add_residual(&uvb_m.pp(self.norm_names.last));
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let uvb_l = uvb_m.pp(modules.layers).pp(layer_idx);
