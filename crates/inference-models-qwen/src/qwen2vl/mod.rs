@@ -210,6 +210,8 @@ pub fn compute_rope_index(
 
 pub struct QwenVlModel<V> {
     text: CausalLm,
+    /// The text stack ropes 1D positions itself (EXAONE 4.5) instead of taking M-RoPE tables.
+    flat_positions: bool,
     sliding_window: Option<usize>,
     vision: V,
     vision_prefix: &'static str,
@@ -246,6 +248,31 @@ impl<V: QwenVlVision> QwenVlModel<V> {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
+        let (vision, vision_prefix) =
+            Self::load_vision(&cfg.vision_config, &vb, &normal_loading_metadata)?;
+        let text = text::text_model(
+            cfg,
+            vb.clone(),
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
+        )?;
+        Ok(Self::assemble(
+            text,
+            false,
+            vision,
+            vision_prefix,
+            V::spatial_merge_size(&cfg.vision_config),
+            (cfg.image_token_id, cfg.video_token_id),
+        ))
+    }
+
+    /// The tower under `visual` (or `vision_tower`), on the real device.
+    fn load_vision(
+        cfg: &V::Config,
+        vb: &ShardedVarBuilder,
+        normal_loading_metadata: &NormalLoadingMetadata,
+    ) -> Result<(V, &'static str)> {
         let (vision_vb, vision_prefix) =
             if vb.contains_tensor("vision_tower.patch_embed.proj.weight") {
                 (vb.pp("vision_tower"), "vision_tower")
@@ -254,27 +281,33 @@ impl<V: QwenVlVision> QwenVlModel<V> {
             };
         let vision_vb = vision_vb.without_lora_registry();
         let vision = V::new(
-            &cfg.vision_config,
+            cfg,
             vision_vb.set_device(normal_loading_metadata.real_device.clone()),
             &normal_loading_metadata.mapper.get_comm_for(0)?,
         )?;
-        let text = text::text_model(
-            cfg,
-            vb.clone(),
-            is_gptx,
-            normal_loading_metadata,
-            attention_mechanism,
-        )?;
-        Ok(Self {
+        Ok((vision, vision_prefix))
+    }
+
+    /// A tower beside another family's text stack; `flat_positions` when that stack ropes 1D positions itself.
+    pub fn assemble(
+        text: CausalLm,
+        flat_positions: bool,
+        vision: V,
+        vision_prefix: &'static str,
+        spatial_merge_size: usize,
+        (image_token_id, video_token_id): (u32, u32),
+    ) -> Self {
+        Self {
             sliding_window: NormalModel::config(&text).sliding_window,
             text,
+            flat_positions,
             vision,
             vision_prefix,
-            spatial_merge_size: V::spatial_merge_size(&cfg.vision_config),
-            image_token_id: cfg.image_token_id,
-            video_token_id: cfg.video_token_id,
+            spatial_merge_size,
+            image_token_id,
+            video_token_id,
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
-        })
+        }
     }
 
     fn encode_visual_items(
@@ -386,22 +419,6 @@ impl<V: QwenVlVision> QwenVlModel<V> {
         );
         let (packed_layout, prompt_position_ids) =
             (packed_layout.as_ref(), prompt_position_ids.as_ref());
-        let seqlen_offsets = ctx.seqlen_offsets();
-        let attention_mask = CausalMasker.make_causal_mask(
-            input_ids,
-            &seqlen_offsets as &dyn PastKvLenCache,
-            self.text.embed_dtype(),
-            &CausalMaskConfig::default(),
-        )?;
-        let sliding_attention_mask = CausalMasker.make_causal_mask(
-            input_ids,
-            &seqlen_offsets as &dyn PastKvLenCache,
-            self.text.embed_dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
-        )?;
 
         let input_embeds = if pixel_values.is_some() || pixel_values_videos.is_some() {
             let mut xs = self.text.get_input_embeddings(input_ids)?;
@@ -507,6 +524,33 @@ impl<V: QwenVlVision> QwenVlModel<V> {
             self.text.get_input_embeddings(input_ids)?
         };
 
+        // the stack masks and ropes 1D positions as a text model does, the verify step's rows included
+        if self.flat_positions {
+            return self.text.forward_embeds(input_ids, input_embeds, ctx);
+        }
+        let seqlen_offsets = ctx.seqlen_offsets();
+        let attention_mask = CausalMasker.make_causal_mask(
+            input_ids,
+            &seqlen_offsets as &dyn PastKvLenCache,
+            self.text.embed_dtype(),
+            &CausalMaskConfig::default(),
+        )?;
+        let sliding_attention_mask = CausalMasker.make_causal_mask(
+            input_ids,
+            &seqlen_offsets as &dyn PastKvLenCache,
+            self.text.embed_dtype(),
+            &CausalMaskConfig {
+                sliding_window: self.sliding_window,
+                ..Default::default()
+            },
+        )?;
+        let has_mask = !matches!(attention_mask, AttentionMask::None);
+        let mapper = self.text.stack_mapper();
+        let masks = LayerMasks::new(
+            Some(DeviceMappedMask::new(attention_mask, mapper)?),
+            Some(DeviceMappedMask::new(sliding_attention_mask, mapper)?),
+            None,
+        );
         let decode_position_ids = if rope_img_grid_thw.is_none() && rope_vid_grid_thw.is_none() {
             crate::vision::mrope::text_decode_mrope_position_ids_from_context(input_ids, ctx)?
         } else {
@@ -528,7 +572,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
             let ropeidx_attn_mask = Tensor::stack(&ropeidx_attn_mask_bs, 0)?;
             let ropeidx_input_ids = if packed_layout.is_some() {
                 input_ids_full
-            } else if !matches!(attention_mask, AttentionMask::None) {
+            } else if has_mask {
                 input_ids
             } else {
                 input_ids_full
@@ -554,7 +598,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
                     .collect::<Result<Vec<_>>>()?;
                 let queries = seqlens.iter().map(|len| 0..*len).collect::<Vec<_>>();
                 gather_packed_mrope_positions(&sources, &queries, input_ids.device())?
-            } else if !matches!(attention_mask, AttentionMask::None) {
+            } else if has_mask {
                 position_ids
             } else {
                 crate::vision::mrope::mrope_position_ids_for_input(
@@ -565,12 +609,6 @@ impl<V: QwenVlVision> QwenVlModel<V> {
                 )?
             }
         };
-        let mapper = self.text.stack_mapper();
-        let masks = LayerMasks::new(
-            Some(DeviceMappedMask::new(attention_mask, mapper)?),
-            Some(DeviceMappedMask::new(sliding_attention_mask, mapper)?),
-            None,
-        );
         let (cos, sin) = self
             .text
             .mrope_tables(&position_ids, input_embeds.dtype())?;
@@ -620,7 +658,8 @@ impl Qwen2VLVisionSpecificArgs {
     }
 }
 
-impl<V: QwenVlVision> crate::speculative::SpeculativeTargetMixin for QwenVlModel<V> {}
+// the text stack drafts with its MTP head (EXAONE 4.5's), when it has one
+inference_nn::delegate_speculative_target!(@generic [V: QwenVlVision] QwenVlModel<V>, text: CausalLm);
 
 impl<V: QwenVlVision> crate::model::BlockDiffusionMixin for QwenVlModel<V> {}
 

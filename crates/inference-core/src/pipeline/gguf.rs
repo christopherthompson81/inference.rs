@@ -1506,7 +1506,9 @@ impl GGUFLoader {
                 RopePairing::HalfSplit,
                 None,
             ),
-            "qwen2vl" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen35moe" | "qwen4exp" => (
+            // `exaone4` reaches here only with a projector (EXAONE 4.5's); alone it is EXAONE 4.0's text model
+            "qwen2vl" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen35moe" | "qwen4exp"
+            | "exaone4" => (
                 qwen_multimodal_loader_type(&archive)?,
                 build_qwen_multimodal_bindings(&archive)?,
                 RopePairing::HalfSplit,

@@ -219,6 +219,7 @@ class MultimodalLoaderType(str, Enum):
     MINICPMO = "minicpmo"
     PHI4MM = "phi4mm"
     QWEN2_5VL = "qwen2_5vl"
+    EXAONE4_5 = "exaone4_5"
     GEMMA3 = "gemma3"
     MISTRAL3 = "mistral3"
     LLAMA4 = "llama4"

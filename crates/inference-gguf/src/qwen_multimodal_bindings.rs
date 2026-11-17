@@ -16,6 +16,8 @@ const QWEN2VL_PROJECTOR: &str = "qwen2vl_merger";
 const QWEN25VL_PROJECTOR: &str = "qwen2.5vl_merger";
 const QWEN3VL_PROJECTOR: &str = "qwen3vl_merger";
 const QWEN3A_PROJECTOR: &str = "qwen3a";
+// EXAONE 4.5: Qwen2.5-VL's tower with GQA beside an `exaone4` text stack
+const EXAONE45_PROJECTOR: &str = "exaone4_5";
 // the released Qwen3-ASR checkpoints keep the model under `thinker.`
 const QWEN3_ASR_TEXT: &str = "thinker.model";
 const QWEN3_ASR_LM_HEAD: &str = "thinker.lm_head";
@@ -33,6 +35,7 @@ enum QwenMultimodalFamily {
     Qwen4Exp,
     // a Qwen3 dense text model under the `qwen3vl` architecture, with the AuT audio tower
     Qwen3Asr,
+    Exaone45,
 }
 
 impl QwenMultimodalFamily {
@@ -46,6 +49,7 @@ impl QwenMultimodalFamily {
             Self::Qwen35Moe => MultimodalLoaderType::Qwen3_5Moe,
             Self::Qwen4Exp => MultimodalLoaderType::Qwen4Exp,
             Self::Qwen3Asr => MultimodalLoaderType::Qwen3Asr,
+            Self::Exaone45 => MultimodalLoaderType::Exaone4_5,
         }
     }
 
@@ -63,6 +67,19 @@ impl QwenMultimodalFamily {
             Self::Qwen3Asr => (QWEN3_ASR_TEXT, QWEN3_ASR_LM_HEAD),
             _ => ("model.language_model", "lm_head"),
         }
+    }
+
+    // the Qwen2-VL-style tower's native prefix
+    fn vision_prefix(self) -> &'static str {
+        match self {
+            Self::Exaone45 => "model.visual",
+            _ => "visual",
+        }
+    }
+
+    // post-norm layers (EXAONE 4's), whose post-attention norm llama.cpp names `post_attention_norm`
+    fn has_post_norms(self) -> bool {
+        self == Self::Exaone45
     }
 
     fn has_gemma_norm_offsets(self) -> bool {
@@ -176,6 +193,7 @@ pub fn build_qwen_multimodal_bindings(archive: &GgufArchive) -> Result<GgufBindi
         QwenMultimodalFamily::Qwen35
             | QwenMultimodalFamily::Qwen35Moe
             | QwenMultimodalFamily::Qwen4Exp
+            | QwenMultimodalFamily::Exaone45
     ) {
         bind_mtp(archive, &inventory, family, &mut bindings)?;
     }
@@ -505,6 +523,7 @@ pub fn is_qwen_multimodal_architecture(architecture: &str) -> bool {
         QWEN25VL_PROJECTOR,
         QWEN3VL_PROJECTOR,
         QWEN3A_PROJECTOR,
+        EXAONE45_PROJECTOR,
     ]
     .into_iter()
     .any(|projector| qwen_family_from_names(architecture, Some(projector)).is_ok())
@@ -524,6 +543,10 @@ fn qwen_family_from_names(
             ),
         },
         "qwen3vl" if projector == Some(QWEN3A_PROJECTOR) => QwenMultimodalFamily::Qwen3Asr,
+        "exaone4" => {
+            require_projector(projector, EXAONE45_PROJECTOR)?;
+            QwenMultimodalFamily::Exaone45
+        }
         "qwen3vl" => {
             require_projector(projector, QWEN3VL_PROJECTOR)?;
             QwenMultimodalFamily::Qwen3Vl
@@ -707,6 +730,13 @@ fn bind_text(
         format!("{lm_head}.weight"),
         "output.weight",
     );
+    // llama3 RoPE's factors, which llama.cpp's converter precomputes
+    bind(
+        inventory,
+        bindings,
+        format!("{model}.rope_freqs.weight"),
+        "rope_freqs.weight",
+    );
     let head = inference_nn::decision::DECISION_HEAD;
     bind(
         inventory,
@@ -770,7 +800,7 @@ fn bind_layer(
         ("input_layernorm.weight", "attn_norm.weight"),
         (
             "post_attention_layernorm.weight",
-            if family.has_gemma_norm_offsets() {
+            if family.has_gemma_norm_offsets() || family.has_post_norms() {
                 "post_attention_norm.weight"
             } else {
                 "ffn_norm.weight"
@@ -778,6 +808,7 @@ fn bind_layer(
         ),
         ("self_attn.q_norm.weight", "attn_q_norm.weight"),
         ("self_attn.k_norm.weight", "attn_k_norm.weight"),
+        ("post_feedforward_layernorm.weight", "post_ffw_norm.weight"),
     ] {
         bind_text_norm(
             inventory,
@@ -969,9 +1000,10 @@ fn bind_qwen2_vision(
     family: QwenMultimodalFamily,
     bindings: &mut GgufBindingMap,
 ) -> Result<()> {
-    bind_patch_embedding(inventory, "visual", bindings)?;
+    let prefix = family.vision_prefix();
+    bind_patch_embedding(inventory, prefix, bindings)?;
     for layer in inventory.layer_indices("v.blk.") {
-        let native = format!("visual.blocks.{layer}");
+        let native = format!("{prefix}.blocks.{layer}");
         let source = format!("v.blk.{layer}");
         bind_fused_qkv(inventory, &native, &source, bindings);
         for suffix in ["weight", "bias"] {
@@ -1008,7 +1040,7 @@ fn bind_qwen2_vision(
                         format!("{source}.ffn_down.{suffix}"),
                     );
                 }
-                QwenMultimodalFamily::Qwen25Vl => {
+                QwenMultimodalFamily::Qwen25Vl | QwenMultimodalFamily::Exaone45 => {
                     for projection in ["gate", "up", "down"] {
                         bind(
                             inventory,
@@ -1024,7 +1056,7 @@ fn bind_qwen2_vision(
     }
     bind_merger(
         inventory,
-        "visual.merger",
+        &format!("{prefix}.merger"),
         "ln_q",
         "mlp.0",
         "mlp.2",
@@ -1459,6 +1491,11 @@ mod tests {
                 Some(QWEN3A_PROJECTOR),
                 MultimodalLoaderType::Qwen3Asr,
             ),
+            (
+                "exaone4",
+                Some(EXAONE45_PROJECTOR),
+                MultimodalLoaderType::Exaone4_5,
+            ),
         ];
         for (architecture, projector, expected) in cases {
             assert_eq!(
@@ -1469,6 +1506,56 @@ mod tests {
         assert!(qwen_family_from_names("qwen2vl", None).is_err());
         assert!(qwen_family_from_names("qwen3vl", None).is_err());
         assert!(qwen_family_from_names("qwen3vl", Some(QWEN2VL_PROJECTOR)).is_err());
+        assert!(qwen_family_from_names("exaone4", None).is_err());
+        Ok(())
+    }
+
+    // EXAONE 4.5 nests both stacks under `model.` and its text layers are post-norm
+    #[test]
+    fn exaone45_binds_post_norm_text_and_a_nested_tower() -> Result<()> {
+        let inventory = inventory(&[
+            ("token_embd.weight", &[32, 8]),
+            ("output_norm.weight", &[8]),
+            ("output.weight", &[32, 8]),
+            ("rope_freqs.weight", &[2]),
+            ("blk.0.attn_q.weight", &[8, 8]),
+            ("blk.0.attn_q_norm.weight", &[4]),
+            ("blk.0.post_attention_norm.weight", &[8]),
+            ("blk.0.post_ffw_norm.weight", &[8]),
+            ("v.patch_embd.weight", &[8, 3, 2, 2]),
+            ("v.patch_embd.weight.1", &[8, 3, 2, 2]),
+            ("v.blk.0.attn_qkv.weight", &[16, 8]),
+            ("v.blk.0.ffn_gate.weight", &[16, 8]),
+            ("v.post_ln.weight", &[8]),
+            ("mm.0.weight", &[32, 32]),
+        ]);
+        let bindings = build_qwen_multimodal_bindings_from_inventory(
+            &inventory,
+            QwenMultimodalFamily::Exaone45,
+            None,
+            None,
+        )?;
+        assert_eq!(
+            names(&bindings),
+            [
+                "lm_head.weight",
+                "model.language_model.embed_tokens.weight",
+                "model.language_model.layers.0.post_attention_layernorm.weight",
+                "model.language_model.layers.0.post_feedforward_layernorm.weight",
+                "model.language_model.layers.0.self_attn.q_norm.weight",
+                "model.language_model.layers.0.self_attn.q_proj.weight",
+                "model.language_model.norm.weight",
+                "model.language_model.rope_freqs.weight",
+                "model.visual.blocks.0.attn.qkv.weight",
+                "model.visual.blocks.0.mlp.gate_proj.weight",
+                "model.visual.merger.ln_q.weight",
+                "model.visual.merger.mlp.0.weight",
+                "model.visual.patch_embed.proj.weight",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
+        );
         Ok(())
     }
 

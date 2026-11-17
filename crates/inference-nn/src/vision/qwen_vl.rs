@@ -24,6 +24,8 @@ pub struct TowerShape {
     pub in_channels: usize,
     pub hidden_size: usize,
     pub num_heads: usize,
+    /// Fewer than `num_heads` for a GQA tower (EXAONE 4.5's), whose fused qkv is `q + 2 * kv` wide.
+    pub num_kv_heads: usize,
     pub patch_size: usize,
     pub temporal_patch_size: usize,
     pub spatial_merge_size: usize,
@@ -235,16 +237,29 @@ struct VisionAttention {
     qkv: Arc<dyn QuantMethod>,
     proj: Arc<dyn QuantMethod>,
     num_heads: usize,
+    num_kv_heads: usize,
     head_dim: usize,
 }
 
 impl VisionAttention {
-    fn new(dim: usize, num_heads: usize, vb: ShardedVarBuilder) -> Result<Self> {
+    fn new(
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        vb: ShardedVarBuilder,
+    ) -> Result<Self> {
+        let head_dim = dim / num_heads;
         Ok(Self {
-            qkv: inference_quant::linear(dim, dim * 3, &None, vb.pp("qkv"))?,
+            qkv: inference_quant::linear(
+                dim,
+                dim + 2 * num_kv_heads * head_dim,
+                &None,
+                vb.pp("qkv"),
+            )?,
             proj: inference_quant::linear(dim, dim, &None, vb.pp("proj"))?,
             num_heads,
-            head_dim: dim / num_heads,
+            num_kv_heads,
+            head_dim,
         })
     }
 
@@ -255,14 +270,25 @@ impl VisionAttention {
         rotary_pos_emb: &Tensor,
     ) -> Result<Tensor> {
         let seq_len = xs.dim(0)?;
-        let (mut q, mut k, mut v) = {
-            let qkv = self
-                .qkv
-                .forward(&xs.unsqueeze(0)?)?
+        let qkv = self.qkv.forward(&xs.unsqueeze(0)?)?.squeeze(0)?;
+        let (mut q, mut k, mut v) = if self.num_kv_heads == self.num_heads {
+            let qkv = qkv
                 .reshape((seq_len, 3, self.num_heads, ()))?
                 .permute((1, 0, 2, 3))?
                 .chunk(3, 0)?;
             (qkv[0].squeeze(0)?, qkv[1].squeeze(0)?, qkv[2].squeeze(0)?)
+        } else {
+            let q_dim = self.num_heads * self.head_dim;
+            let kv_dim = self.num_kv_heads * self.head_dim;
+            let heads = |start, width, n| {
+                qkv.narrow(D::Minus1, start, width)?
+                    .reshape((seq_len, n, self.head_dim))
+            };
+            (
+                heads(0, q_dim, self.num_heads)?,
+                heads(q_dim, kv_dim, self.num_kv_heads)?,
+                heads(q_dim + kv_dim, kv_dim, self.num_kv_heads)?,
+            )
         };
 
         q = apply_rotary_pos_emb_vision(&q.unsqueeze(0)?, rotary_pos_emb)?
@@ -273,8 +299,14 @@ impl VisionAttention {
             .to_dtype(q.dtype())?;
 
         q = q.transpose(0, 1)?.contiguous()?;
-        k = k.transpose(0, 1)?.contiguous()?;
-        v = v.transpose(0, 1)?.contiguous()?;
+        let n_rep = self.num_heads / self.num_kv_heads;
+        let repeat = |t: Tensor| -> Result<Tensor> {
+            crate::layers::repeat_kv(t.transpose(0, 1)?.contiguous()?.unsqueeze(0)?, n_rep)?
+                .squeeze(0)?
+                .contiguous()
+        };
+        k = repeat(k)?;
+        v = repeat(v)?;
 
         let att = {
             let mut att =
@@ -322,7 +354,12 @@ impl VisionBlock {
             norm1: VisionNorm::new(norm, shape.hidden_size, vb.pp("norm1"))?,
             norm2: VisionNorm::new(norm, shape.hidden_size, vb.pp("norm2"))?,
             mlp: VisionMlp::new(mlp, shape.hidden_size, vb.pp("mlp"), comm)?,
-            attn: VisionAttention::new(shape.hidden_size, shape.num_heads, vb.pp("attn"))?,
+            attn: VisionAttention::new(
+                shape.hidden_size,
+                shape.num_heads,
+                shape.num_kv_heads,
+                vb.pp("attn"),
+            )?,
         })
     }
 

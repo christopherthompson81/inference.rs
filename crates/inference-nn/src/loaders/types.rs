@@ -269,6 +269,7 @@ macro_rules! multimodal_loader_table {
             MiniCpmO { cli: "minicpmo", hf: "MiniCPMO", loader: MiniCpmOLoader, feature: "models-qwen" },
             Phi4MM { cli: "phi4mm", hf: "Phi4MMForCausalLM", loader: Phi4MMLoader, feature: "models-phi" },
             Qwen2_5VL { cli: "qwen2_5vl", hf: "Qwen2_5_VLForConditionalGeneration", loader: Qwen2_5VLLoader, feature: "models-qwen" },
+            Exaone4_5 { cli: "exaone4_5", hf: "Exaone4_5_ForConditionalGeneration", loader: Exaone4_5Loader, feature: "models-qwen" },
             Gemma3 { cli: "gemma3", hf: "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM", loader: Gemma3Loader, feature: "models-gemma" },
             Mistral3 { cli: "mistral3", hf: "Mistral3ForConditionalGeneration", loader: Mistral3Loader, feature: "models-llama" },
             Llama4 { cli: "llama4", hf: "Llama4ForConditionalGeneration", loader: VLlama4Loader, feature: "models-llama" },

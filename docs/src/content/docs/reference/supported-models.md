@@ -102,6 +102,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `MiniCPMO` | MiniCPM-o | <details><summary><code>openbmb/MiniCPM-o-2_6</code></summary><code>inference run -m openbmb/MiniCPM-o-2_6</code></details> |
 | `Phi4MMForCausalLM` | Phi-4-multimodal | <details><summary><code>microsoft/Phi-4-multimodal-instruct</code></summary><code>inference run -m microsoft/Phi-4-multimodal-instruct</code></details> |
 | `Qwen2_5_VLForConditionalGeneration` | Qwen2.5-VL | <details><summary><code>Qwen/Qwen2.5-VL-7B-Instruct</code></summary><code>inference run -m Qwen/Qwen2.5-VL-7B-Instruct</code></details> |
+| `Exaone4_5_ForConditionalGeneration` | EXAONE 4.5 | <details><summary><code>LGAI-EXAONE/EXAONE-4.5-33B</code></summary><code>inference run -m LGAI-EXAONE/EXAONE-4.5-33B</code></details> |
 | `Gemma3ForConditionalGeneration` | Gemma 3 | <details><summary><code>google/gemma-3-12b-it</code></summary><code>inference run -m google/gemma-3-12b-it</code></details> |
 | `Mistral3ForConditionalGeneration` | Mistral Small 3 | <details><summary><code>mistralai/Mistral-Small-3.2-24B-Instruct-2506</code></summary><code>inference run -m mistralai/Mistral-Small-3.2-24B-Instruct-2506</code></details> |
 | `Llama4ForConditionalGeneration` | Llama 4 | <details><summary><code>meta-llama/Llama-4-Scout-17B-16E-Instruct</code></summary><code>inference run -m meta-llama/Llama-4-Scout-17B-16E-Instruct</code></details> |

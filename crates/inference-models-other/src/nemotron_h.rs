@@ -348,6 +348,7 @@ impl Config {
                 final_norm: Some("layers.1.final_layernorm"),
                 dense_block: false,
                 mask_first_position: false,
+                at_root: false,
             },
             layer_norm_final: true,
         }))

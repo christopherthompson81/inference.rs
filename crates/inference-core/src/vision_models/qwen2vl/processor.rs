@@ -1,4 +1,4 @@
-use inference_models_qwen::loaders::{Qwen2_5VLLoader, Qwen2VLLoader};
+use inference_models_qwen::loaders::{Exaone4_5Loader, Qwen2_5VLLoader, Qwen2VLLoader};
 use inference_models_qwen::qwen2vl::inputs_processor::{
     IMAGE_PAD, PLACEHOLDER, Qwen2VLImageProcessor, VIDEO_PAD,
 };
@@ -10,5 +10,10 @@ const SPECIAL_TOKENS: &[&str] = &[IMAGE_PAD, VIDEO_PAD, PLACEHOLDER];
 
 processor_factory!(Qwen2VLLoader, Qwen2_5VLLoader => |_, _, _, max_edge| {
     let inputs = Qwen2VLImageProcessor::new(max_edge);
+    media_processor(inputs, SPECIAL_TOKENS, MessagesAction::FlattenOnlyText)
+});
+
+processor_factory!(Exaone4_5Loader => |_, _, _, max_edge| {
+    let inputs = Qwen2VLImageProcessor::exaone4_5(max_edge);
     media_processor(inputs, SPECIAL_TOKENS, MessagesAction::FlattenOnlyText)
 });

@@ -451,6 +451,11 @@ impl SupportedArch for MultimodalLoaderType {
                 modalities: &[Text, Vision, Video],
                 examples: &[ex!("Qwen/Qwen2.5-VL-7B-Instruct")],
             },
+            Self::Exaone4_5 => ArchMetadata {
+                families: &["EXAONE 4.5"],
+                modalities: &[Text, Vision, Video],
+                examples: &[ex!("LGAI-EXAONE/EXAONE-4.5-33B")],
+            },
             Self::Gemma3 => ArchMetadata {
                 families: &["Gemma 3"],
                 modalities: &[Text, Vision],

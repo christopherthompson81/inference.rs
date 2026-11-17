@@ -36,6 +36,7 @@ const QWEN3_VIDEO_SAMPLING: VideoFrameSampling = VideoFrameSampling::Fps {
     max_frames: 768,
 };
 
+mod exaone4_5;
 mod minicpm_o;
 mod muse_glimmer;
 mod qwen1;
@@ -56,6 +57,7 @@ mod qwen3vl;
 mod sizing_tests;
 mod vibevoice_asr;
 
+pub use exaone4_5::*;
 pub use minicpm_o::*;
 pub use muse_glimmer::*;
 pub use qwen1::*;
@@ -87,6 +89,7 @@ inference_nn::boxed_loaders!(
 );
 inference_nn::boxed_loaders!(
     MultimodalModelLoader:
+    Exaone4_5Loader,
     MiniCpmOLoader,
     MuseGlimmerLoader,
     Qwen2VLLoader,

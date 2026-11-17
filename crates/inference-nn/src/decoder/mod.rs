@@ -31,6 +31,7 @@ use crate::{
 };
 
 mod eagle3;
+pub mod exaone4;
 mod moe;
 mod mtp;
 pub mod qwen3_vl;
@@ -140,6 +141,14 @@ impl NormNames {
         pre_ffn: Some("post_attention_layernorm"),
         post_attn: None,
         post_ffn: None,
+        last: "norm",
+    };
+    /// Post-norm layers: each sublayer's output normed before its residual add (OLMo 2, EXAONE 4).
+    pub const POST: Self = Self {
+        input: None,
+        pre_ffn: None,
+        post_attn: Some("post_attention_layernorm"),
+        post_ffn: Some("post_feedforward_layernorm"),
         last: "norm",
     };
 }
@@ -2161,7 +2170,7 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         let uvb_m = uvb.pp(self.stack.module_names.model);
         self.stack.residual_uvb(&uvb_m, with_projections);
         if let Some(mtp) = &self.mtp {
-            mtp.add_residual(&uvb_m);
+            mtp.add_residual(if mtp.at_root() { &uvb } else { &uvb_m });
         }
         uvb
     }
