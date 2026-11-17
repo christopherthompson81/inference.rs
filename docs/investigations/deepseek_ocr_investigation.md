@@ -141,3 +141,64 @@ Tests: fattn's paged kernel against a dense reference with the same mask (`the_w
 the keep term taken out of the reference), the gather mask (`a_kept_prompt_stays_visible_past_the_window`), and a tiny
 Unlimited-OCR whose first W + 1 reply tokens match full attention and later ones part from it (failing when the window
 drops the prompt). Known gap: a preempted sequence's re-prefill attends its generated tokens in full, as a prompt.
+
+## Run 6 - 2026-11-17 07:40
+
+**Question:** what does DeepSeek-OCR-2's reference produce, and does our query encoder match it bottom up?
+
+DeepSeek-OCR-2 keeps OCR's SAM (its last conv widened to 896, though the config still lists 1024) and text model, and
+replaces CLIP with `Qwen2Decoder2Encoder`: 24 Qwen2-0.5B layers (14 heads, 2 KV heads, rope base 1e6) over a view's
+SAM tokens followed by as many learned queries (`query_1024`, 256 for the global view; `query_768`, 144 for a 768
+tile). Tokens attend each other both ways and not the queries; each query sees every token and the queries up to its
+own. The queries' normed outputs are the view's features, projected 896 to 1280; no newlines, tiles kept one after
+another (not laid out as a grid), then the global view, then the separator. Tiling is OCR's `dynamic_preprocess`
+with 768 tiles and at most 6. The text model, template and prompts are unchanged.
+
+Reference: the same venv and page, `infer(base_size=1024, image_size=768, crop_mode=True)`, hooks on SAM, the query
+encoder and the projector.
+
+```
+tiles (6, 3, 768, 768)   -> SAM (6, 896, 12, 12) -> queries (6, 144, 896) -> projector (6, 144, 1280)
+global (1, 3, 1024, 1024) -> SAM (1, 896, 16, 16) -> queries (1, 256, 896) -> projector (1, 256, 1280)
+prompt: 1131 tokens = BOS + 864 tile + 256 global + separator + 9 text
+```
+
+The output is the page exactly, every block tagged and boxed.
+
+Our query encoder runs on the shared decoder's layers: a stack with no token table (`EMBEDS_ONLY`), one additive
+mask per view size, positions 0..2N. A throwaway test fed it the reference's saved SAM outputs (bf16, CUDA):
+
+```
+tiles   cos 0.999841  max |diff| 0.096 (max |ref| 2.25)
+global  cos 0.999855  max |diff| 0.124 (max |ref| 4.25)
+```
+
+## Run 7 - 2026-11-17 07:50
+
+**Question:** end to end, from safetensors and from a GGUF, against the reference and llama.cpp.
+
+`inference serve -m /mnt/data/models/deepseek-ocr-2`, one greedy request, the same prompt:
+
+```
+safetensors (bf16)   1131 prompt tokens, 327 out at 322 tok/s; text equal to the reference, 8 of its 32 box
+                     coordinates off by 1 to 3, each split a near tie (441 / 443 both -1.218, 222 / 223 0.25 apart)
+```
+
+GGUF: no published conversion, so llama.cpp's converter (970b51ce7) wrote a Q8_0 text GGUF and a Q8_0 `deepseekocr2`
+mmproj from the checkpoint; ours and llama-server on the same files.
+
+```
+ours           1131 prompt tokens, 327 out; text equal to the reference, 9 of 32 box coordinates off by 1
+llama.cpp      1131 prompt tokens, 327 out; text equal to the reference, 9 of 32 off by 1 or 2, no tags
+ours vs llama  four splits, all box digits at near ties (443 / 442, 224 / 223, 292 / 291, 512 / 510, each
+               under 0.3 apart in both); max |d top logprob| over the 12 tokens before the first 0.054
+```
+
+The mmproj stores the view separator as (1, 1280) (the converter now unsqueezes it; the ggml-org DeepSeek-OCR
+mmproj predates that and stores (1280)), so the binding reshapes it to its length. The mmproj carries no newline, and
+its query tables and Qwen2 layers bind from `v.resample_query_{768,1024}` and `v.blk.N`; the config names the
+encoder from `clip.vision.*` metadata, with 6 tiles unless `preproc_max_tiles` says otherwise.
+
+Tests: a tiny OCR-2 (the tiny checkpoint with the query encoder in place of CLIP) whose tiled and single-view images
+expand to 2 x 144 + 17 and 17 tokens and whose cached repeat decodes the same, and the OCR-2 GGUF inventory binding
+completely with its config naming the encoder.

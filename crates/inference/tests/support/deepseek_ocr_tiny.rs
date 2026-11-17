@@ -34,12 +34,21 @@ fn expert_shapes(cfg: &Config) -> HashMap<String, Vec<usize>> {
 
 /// The committed tiny config and tokenizer (the loader supplies the template), and random weights.
 pub fn tiny_checkpoint() -> anyhow::Result<tempfile::TempDir> {
-    let cfg: Config =
+    tiny_checkpoint_with(|_| {})
+}
+
+/// As [`tiny_checkpoint`], the config edited first: the weights follow the edited config, which the checkpoint keeps.
+pub fn tiny_checkpoint_with(
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> anyhow::Result<tempfile::TempDir> {
+    let mut config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(format!("{TINY}/config.json"))?)?;
+    edit(&mut config);
+    let cfg: Config = serde_json::from_value(config.clone())?;
     let layers = cfg.language_config.num_hidden_layers;
     let files = recording::fixture_files(TINY)?;
     let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
-    recording::record_checkpoint_seeded_with_shapes(
+    let dir = recording::record_checkpoint_seeded_with_shapes(
         &files,
         layers,
         &[],
@@ -48,5 +57,10 @@ pub fn tiny_checkpoint() -> anyhow::Result<tempfile::TempDir> {
             DeepseekOcrModel::new(&cfg, vb, true, metadata, AttentionImplementation::Eager)
                 .map(|_| ())
         },
-    )
+    )?;
+    std::fs::write(
+        dir.path().join("config.json"),
+        serde_json::to_string(&config)?,
+    )?;
+    Ok(dir)
 }

@@ -79,7 +79,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 
 | Model family | GGUF architecture |
 |---|---|
-| DeepSeek-OCR | `deepseek2-ocr` (projector `deepseekocr`) |
+| DeepSeek-OCR, DeepSeek-OCR-2 | `deepseek2-ocr` (projector `deepseekocr`, `deepseekocr2`) |
 | Gemma 3 | `gemma3` |
 | Gemma 3n | `gemma3n` |
 | Gemma 4 dense and MoE | `gemma4` |
