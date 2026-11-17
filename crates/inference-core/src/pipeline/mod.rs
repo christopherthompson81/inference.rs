@@ -818,6 +818,8 @@ pub struct GeneralMetadata {
     pub kind: ModelKind,
     pub activation_dtype: DType,
     pub sliding_window: Option<usize>,
+    /// The model's windows spare each sequence's prompt (`MultimodalModel::window_keeps_prompt`).
+    pub window_keeps_prompt: bool,
     // PagedAttention stuff
     pub cache_config: Option<CacheConfig>,
     pub cache_engine: Option<CacheEngine>,
@@ -1066,6 +1068,7 @@ pub struct DecodeGraphPrecaptureCtx {
     pub max_paged_context_len: usize,
     pub attention_backend: AttentionBackendKind,
     pub sliding_window: Option<usize>,
+    pub window_keeps_prompt: bool,
     pub num_kv_heads: usize,
 }
 

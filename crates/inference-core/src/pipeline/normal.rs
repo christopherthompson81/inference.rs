@@ -417,6 +417,7 @@ impl NormalLoader {
                 },
                 max_seq_len: model.max_seq_len(),
                 sliding_window: model.config().sliding_window,
+                window_keeps_prompt: false,
                 block_diffusion: false,
             },
             tokenizer,

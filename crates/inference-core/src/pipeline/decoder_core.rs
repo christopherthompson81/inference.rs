@@ -46,6 +46,7 @@ pub(crate) struct LoadedModelView<'a> {
     pub config: Arc<dyn ModelConfigLike + Send + Sync>,
     pub max_seq_len: usize,
     pub sliding_window: Option<usize>,
+    pub window_keeps_prompt: bool,
     pub block_diffusion: bool,
 }
 
@@ -172,6 +173,7 @@ impl DecoderCore {
                 kind: args.kind,
                 activation_dtype: args.dtype,
                 sliding_window: args.model.sliding_window,
+                window_keeps_prompt: args.model.window_keeps_prompt,
                 cache_config,
                 cache_engine,
                 model_metadata: Some(args.model.config),

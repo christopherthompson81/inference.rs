@@ -296,6 +296,13 @@ impl CudaGraphDecodeStep {
                 decode_window: rows.decode_window,
                 devices: rows.devices.clone(),
                 num_kv_heads: rows.num_kv_heads,
+                // a row's prompt does not move as it decodes
+                keep_lens: rows
+                    .keep_lens
+                    .iter()
+                    .take(self.real_batch)
+                    .copied()
+                    .collect(),
             }
             .padded(batch),
         );
@@ -367,6 +374,11 @@ impl CudaGraphPrecaptureInputs {
             decode_window: 1,
             devices,
             num_kv_heads: ctx.num_kv_heads,
+            keep_lens: if ctx.window_keeps_prompt {
+                vec![0; q_len]
+            } else {
+                Vec::new()
+            },
         });
         let metadata = rows
             .build_materialized()
@@ -522,6 +534,11 @@ impl CudaDecodeGraphKey {
             push_graph_tensor_keys(
                 "full_context_lens",
                 metadata.full_context_lens.as_ref(),
+                &mut tensors,
+            );
+            push_graph_tensor_keys(
+                "prompt_keep_lens",
+                metadata.prompt_keep_lens.as_ref(),
                 &mut tensors,
             );
             push_flashinfer_graph_tensor_keys(metadata, &mut tensors);
@@ -1831,6 +1848,7 @@ mod tests {
             decode_window: 1,
             devices: vec![Device::Cpu],
             num_kv_heads: 4,
+            keep_lens: Vec::new(),
         });
         let staged = rows.build_graph_staged().unwrap();
         let materialized = rows.build_materialized().unwrap();
@@ -1886,6 +1904,7 @@ mod tests {
             decode_window: 1,
             devices: vec![Device::Cpu],
             num_kv_heads: DECODE_CONTEXT_TEST_KV_HEADS,
+            keep_lens: Vec::new(),
         }
     }
 
@@ -2057,6 +2076,7 @@ mod tests {
             decode_window: 1,
             devices: vec![Device::Cpu],
             num_kv_heads: 4,
+            keep_lens: Vec::new(),
         })
         .build()
         .unwrap();
@@ -2388,6 +2408,7 @@ mod tests {
                 decode_window: 1,
                 devices: vec![Device::Cpu],
                 num_kv_heads: 1,
+                keep_lens: Vec::new(),
             }
             .padded(2),
         );
@@ -2434,6 +2455,7 @@ mod tests {
             decode_window: 1,
             devices: vec![Device::Cpu],
             num_kv_heads: 1,
+            keep_lens: Vec::new(),
         });
         let step = CudaGraphDecodeStep {
             input_ids: Tensor::zeros((1, 1), DType::U32, &Device::Cpu)?,
@@ -2468,6 +2490,7 @@ mod tests {
             decode_window: 1,
             devices: vec![device.clone()],
             num_kv_heads: 1,
+            keep_lens: Vec::new(),
         })
         .build_materialized()?;
         let initial_ids = Tensor::from_vec(vec![1u32], (1, 1), &device)?;

@@ -798,7 +798,7 @@ static bool ggml_cuda_flash_attn_ext_quant(ggml_backend_cuda_context & ctx, ggml
     const int D = Q->ne[0];
     const int rows = Q->ne[1];
     const int gqa = Q->ne[2] / K->ne[2];
-    if (!lay.k_bits || !lay.block_table || lay.cu_q || lay.cu_kv || lay.chunk > 0 || sinks || softcap != 0.0f ||
+    if (!lay.k_bits || !lay.block_table || lay.cu_q || lay.cu_kv || lay.chunk > 0 || lay.keep_lens || sinks || softcap != 0.0f ||
             max_bias != 0.0f || (mask && !lay.implicit_mask) || cc < GGML_CUDA_CC_AMPERE || (D != 128 && D != 256) ||
             lay.quant_head_dim != D || rows > FQ_MAX_ROWS || rows*gqa > FQ_MAX_COLS) {
         return false;

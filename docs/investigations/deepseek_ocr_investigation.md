@@ -87,3 +87,57 @@ class row first; GGUF row 0 equals the checkpoint's row 0 exactly), but for a ti
 table's, `clip_graph_deepseekocr::build` resamples rows 0..256 as the patch grid and takes row 256 as the class
 position. That resamples the class row in with the patches and drops the last patch row's position. On this page the
 effect is small (llama.cpp's text is the reference's), so it is noted here, not measured.
+
+## Run 4 - 2026-11-17 00:45
+
+**Question:** phase 2, Unlimited-OCR (baidu/Unlimited-OCR): what differs from OCR 1, and does its sliding window
+matter?
+
+Same towers and text shape (the checkpoint's tensor names are OCR 1's), with up to 32 tiles (`dynamic_preprocess
+(max_num=32)`), 32K positions, and `sliding_window: 128` in a new attention class, `SlidingWindowLlamaAttention`: the
+prompt attends causally in full, and each generated token sees the whole prompt plus the last 128 generated tokens
+(a ring buffer over the decode keys). The SGLang build in the repository's `wheel/` describes the same thing ("Decode
+phase: attend to ALL prefill tokens + sliding_window of decode tokens"). llama.cpp's converter ignores it: full MHA.
+The repository also ships a `chat_template.jinja` (`<image>` then the text, no BOS, no newline) and a duplicate of
+its weights as `model.safetensors` beside the indexed shard (byte-identical, removed here).
+
+Reference with the ring window and with it off (`sliding_window_size = None`), a dense synthetic page (1240x1754,
+five sections of invented sentences; 2x3 tiles, 907 prompt tokens), `<image>document parsing.`:
+
+```
+ring vs full (reference)    text identical; box coordinates differ by 1 on lines past the first 128 generated tokens
+ours (full attention)       907 prompt tokens; text identical to both; 12 box lines differ from full, 17 from ring
+```
+
+Our first run read 906 tokens and drifted: the checkpoint's template writes no BOS, which the reference's `infer`
+prepends whatever the prompt; the processor now prepends `bos_token_id` when the prompt lacks it.
+
+On this page the window moves box digits by as much as rounding does. Asked which way to go, the user chose to
+implement the window faithfully rather than ship full attention as llama.cpp does.
+
+## Run 5 - 2026-11-17 02:30
+
+**Question:** with the prompt-keeping window implemented, does our Unlimited-OCR follow the reference's ring window?
+
+The window: a query at position q of a sequence with a P-token prompt sees key k iff k <= q and (k < P or q - k < W).
+Prompt steps drop the window (every query is in the prompt); decode rows carry their sequence's prompt length
+(`DecodePagedRows::keep_lens`, `PagedAttentionInputMetadata::prompt_keep_lens`, a static buffer under CUDA decode
+graphs) to fattn's implicit mask (`fattn_layout::keep_lens`, spared before the window check) or to the gather's mask
+on the other backends. The stack and the cache see full attention, so no block outside the window is freed and the
+masks stay causal. Without PagedAttention the model refuses to load.
+
+Same page and prompt as Run 4:
+
+```
+                          vs ring reference    vs full-attention reference
+ours, full attention      17 box lines         12
+ours, prompt-keeping      9 box lines          13
+```
+
+Text equal to both throughout; the windowed run sits nearer the ring reference, the remaining lines box digits off by
+1. Decode ran under 4 captured CUDA graphs.
+
+Tests: fattn's paged kernel against a dense reference with the same mask (`the_window_keeps_each_prompt`, failing with
+the keep term taken out of the reference), the gather mask (`a_kept_prompt_stays_visible_past_the_window`), and a tiny
+Unlimited-OCR whose first W + 1 reply tokens match full attention and later ones part from it (failing when the window
+drops the prompt). Known gap: a preempted sequence's re-prefill attends its generated tokens in full, as a prompt.

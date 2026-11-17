@@ -576,6 +576,7 @@ impl MultimodalLoader {
                 },
                 max_seq_len: model.max_seq_len(),
                 sliding_window: model.config().sliding_window,
+                window_keeps_prompt: model.window_keeps_prompt(),
                 block_diffusion: model.is_block_diffusion(),
             },
             tokenizer,

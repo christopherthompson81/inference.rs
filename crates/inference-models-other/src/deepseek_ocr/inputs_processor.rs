@@ -71,7 +71,7 @@ impl DeepseekOcrInputsProcessor {
             let views = image_views(
                 image,
                 self.config.vision_config.image_size,
-                self.config.max_tiles,
+                self.config.max_tiles(),
             );
             globals.push(to_tensor(&views.global, mean, std, device)?);
             tiles.push(if views.tiles.is_empty() {
@@ -146,11 +146,17 @@ impl DeepseekOcrInputsProcessor {
             expanded.push_str(part);
         }
         seq.set_initial_prompt(expanded.clone());
-        let ids = tokenizer
+        let mut ids = tokenizer
             .encode_fast(expanded, false)
             .map_err(|err| anyhow::anyhow!(err.to_string()))?
             .get_ids()
             .to_vec();
+        // the reference prepends BOS whatever the template wrote (Unlimited-OCR's writes none)
+        if let Some(bos) = self.config.language_config.bos_token_id
+            && ids.first() != Some(&bos)
+        {
+            ids.insert(0, bos);
+        }
         if seq.mm_features().is_empty() {
             let hashes = seq
                 .image_hashes()

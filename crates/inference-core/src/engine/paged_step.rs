@@ -765,6 +765,7 @@ fn paged_attention_meta(
         block_size,
         max_paged_context_len,
         sliding_window: pipeline_metadata.sliding_window,
+        window_keeps_prompt: pipeline_metadata.window_keeps_prompt,
         attention_backend: model_metadata
             .map(|metadata| metadata.attention_backend_kind())
             .unwrap_or(AttentionBackendKind::Standard),

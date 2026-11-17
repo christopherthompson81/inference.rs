@@ -251,7 +251,7 @@ macro_rules! multimodal_loader_table {
             Idefics2 { cli: "idefics2", hf: "Idefics2ForConditionalGeneration", loader: Idefics2Loader, feature: "models-llama" },
             LLaVANext { cli: "llava_next", hf: "LlavaNextForConditionalGeneration", loader: LLaVANextLoader, feature: "models-llama" },
             LLaVA { cli: "llava", hf: "LlavaForConditionalGeneration", loader: LLaVALoader, feature: "models-llama" },
-            DeepseekOcr { cli: "deepseek_ocr", hf: "DeepseekOCRForCausalLM", loader: DeepseekOcrLoader, feature: "models-other" },
+            DeepseekOcr { cli: "deepseek_ocr", hf: "DeepseekOCRForCausalLM" | "UnlimitedOCRForCausalLM", loader: DeepseekOcrLoader, feature: "models-other" },
             Granite4Vision { cli: "granite4_vision", hf: "Granite4VisionForConditionalGeneration", loader: Granite4VisionLoader, feature: "models-other" },
             NemotronTranscribe { cli: "nemotron_transcribe", hf: "Nemotron3_5TranscribeForConditionalGeneration", loader: NemotronTranscribeLoader, feature: "models-other" },
             NemotronOmni {

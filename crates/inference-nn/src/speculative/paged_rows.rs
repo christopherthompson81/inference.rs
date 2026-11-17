@@ -190,6 +190,8 @@ pub fn make_paged_rows_metadata(
         cu_seqlens_q: None,
         cu_seqlens_kv: None,
         decode_rows: None,
+        prompt_keep_lens_cpu: None,
+        prompt_keep_lens: None,
     })
 }
 
@@ -278,6 +280,8 @@ pub fn make_paged_rows_decode_rows(
         decode_window: 1,
         devices: vec![device.clone()],
         num_kv_heads: paged_meta.prefill_key_value_heads,
+        // drafters' rows carry no prompt lengths; a prompt-keeping layer refuses them
+        keep_lens: Vec::new(),
     }))
 }
 

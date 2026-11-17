@@ -77,6 +77,9 @@ pub struct PagedKv<'a> {
     /// `(batch,)` u32: each sequence's full length when its table holds only its last `seq_lens` rows (a sliding
     /// window's), so `chunk` sees absolute positions; `None` when the table starts at position 0.
     pub full_lens: Option<&'a inference_tensor::Tensor>,
+    /// `(batch,)` u32: keys before each sequence's length here stay visible outside `window_left` (a prompt the
+    /// window keeps whole); `None` when the window drops every older key.
+    pub keep_lens: Option<&'a inference_tensor::Tensor>,
 }
 
 /// Sequences packed along dim 0 of a `(total, heads, dim)` tensor.

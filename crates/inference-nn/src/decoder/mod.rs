@@ -274,6 +274,9 @@ pub struct DecoderSpec {
     pub attention_temperature: Option<AttentionTemperature>,
     /// One entry per layer: the sliding window it attends over, or `None` for full attention.
     pub layer_windows: Vec<Option<usize>>,
+    /// The windows spare each sequence's prompt: decode sees the whole prompt and the window's newest keys
+    /// (Unlimited-OCR). Needs PagedAttention, whose decode rows carry the prompt lengths.
+    pub window_keeps_prompt: bool,
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantizedConfig>,
     pub norm: NormKind,
@@ -467,6 +470,7 @@ impl DecoderSpec {
             embed_dim: self.embed_dim,
             rms_norm_eps: self.rms_norm_eps,
             layer_windows: &self.layer_windows,
+            window_keeps_prompt: self.window_keeps_prompt,
             tie_word_embeddings: self.tie_word_embeddings,
             quantization_config: &self.quantization_config,
             norm: self.norm,
@@ -733,6 +737,7 @@ pub struct StackShape<'a> {
     pub embed_dim: Option<usize>,
     pub rms_norm_eps: f64,
     pub layer_windows: &'a [Option<usize>],
+    pub window_keeps_prompt: bool,
     pub tie_word_embeddings: bool,
     pub quantization_config: &'a Option<QuantizedConfig>,
     pub norm: NormKind,
@@ -746,7 +751,11 @@ pub struct StackShape<'a> {
 }
 
 impl StackShape<'_> {
+    // a prompt-keeping window is the paged layers' alone: the stack's masks and caches see full attention
     fn sliding_window(&self) -> Option<usize> {
+        if self.window_keeps_prompt {
+            return None;
+        }
         self.layer_windows.iter().flatten().next().copied()
     }
 }
@@ -773,9 +782,21 @@ impl LayerBuilder for StandardLayers<'_> {
             .expect("No RoPE for device location!")
             .clone();
         let paged_attn = match load.attention {
+            AttentionImplementation::Eager if spec.window_keeps_prompt => {
+                inference_tensor::bail!(
+                    "a window that spares the prompt needs PagedAttention, whose decode rows carry the prompt lengths"
+                );
+            }
             AttentionImplementation::Eager => None,
             AttentionImplementation::PagedAttention => {
-                Some(PagedAttention::new(spec.head_dim, load.device, None)?)
+                let paged = PagedAttention::new(spec.head_dim, load.device, None)?;
+                Some(
+                    if spec.window_keeps_prompt && spec.layer_windows[load.layer_idx].is_some() {
+                        paged.with_window_keep()
+                    } else {
+                        paged
+                    },
+                )
             }
         };
         let place = |name| {
@@ -1574,11 +1595,12 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         make: impl FnOnce(&dyn DeviceMapper, &Device) -> Result<B>,
     ) -> Result<Self> {
         // one sliding mask serves every sliding layer
+        let first_window = shape.layer_windows.iter().flatten().next();
         if shape
             .layer_windows
             .iter()
             .flatten()
-            .any(|window| Some(*window) != shape.sliding_window())
+            .any(|window| Some(window) != first_window)
         {
             inference_tensor::bail!(
                 "decoder layers slide over different windows: {:?}",
@@ -1649,7 +1671,8 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             embed_scale: shape.embed_scale,
             dtype,
             sliding_window: shape.sliding_window(),
-            has_full_layers: shape.layer_windows.iter().any(Option::is_none),
+            has_full_layers: shape.window_keeps_prompt
+                || shape.layer_windows.iter().any(Option::is_none),
             device: real_device.clone(),
             mapper,
             rebuild: None,
@@ -1892,7 +1915,7 @@ impl CausalLm {
             hidden_size: spec.hidden_size,
             num_kv_heads: (spec.num_kv_heads / world_size).max(1),
             num_attn_heads: spec.num_heads / world_size,
-            sliding_window: spec.sliding_window(),
+            sliding_window: spec.shape().sliding_window(),
             k_head_dim: spec.head_dim,
             v_head_dim: spec.head_dim,
             kv_cache_layout: KvCacheLayout::Standard,
@@ -1978,7 +2001,12 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
                 stack.mapper.set_nm_device(vb_lm_head, loading_isq),
             )?
         };
-        let cache_types = cache_types(shape.layer_windows, max_position_embeddings);
+        let windows = if shape.window_keeps_prompt {
+            vec![None; shape.layer_windows.len()]
+        } else {
+            shape.layer_windows.to_vec()
+        };
+        let cache_types = cache_types(&windows, max_position_embeddings);
         Ok(Self {
             stack,
             lm_head,

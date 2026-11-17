@@ -75,6 +75,7 @@ mod ffi {
         pub window_left: i32,
         pub chunk: i32,
         pub full_lens: *const core::ffi::c_void,
+        pub keep_lens: *const core::ffi::c_void,
         pub f32_values: i32,
     }
 
@@ -494,6 +495,7 @@ struct Addrs {
     block_table: Option<u64>,
     seq_lens: Option<u64>,
     full_lens: Option<u64>,
+    keep_lens: Option<u64>,
     cu_q: Option<u64>,
     cu_kv: Option<u64>,
 }
@@ -560,6 +562,7 @@ impl Fattn<'_> {
             lay.block_table = null_or(a.block_table);
             lay.seq_lens = null_or(a.seq_lens);
             lay.full_lens = null_or(a.full_lens);
+            lay.keep_lens = null_or(a.keep_lens);
             lay.max_blocks = p.block_table.dim(1)? as i32;
             lay.block_size_log2 = k_l.dims()[2].trailing_zeros() as i32;
             lay.block_stride_k = k_l.stride()[0] as i64 * es;
@@ -643,6 +646,7 @@ impl Fattn<'_> {
             block_table: present(self.paged.map(|p| p.block_table)),
             seq_lens: present(self.paged.map(|p| p.seq_lens)),
             full_lens: present(self.paged.and_then(|p| p.full_lens)),
+            keep_lens: present(self.paged.and_then(|p| p.keep_lens)),
             cu_q: present(self.q_seqs.map(|p| p.cu_seqlens)),
             cu_kv: present(self.kv_seqs.map(|p| p.cu_seqlens)),
         };
@@ -692,6 +696,7 @@ impl inference_tensor::CustomOp3 for Fattn<'_> {
         let block_table = held(self.paged.map(|p| p.block_table));
         let seq_lens = held(self.paged.map(|p| p.seq_lens));
         let full_lens = held(self.paged.and_then(|p| p.full_lens));
+        let keep_lens = held(self.paged.and_then(|p| p.keep_lens));
         let cu_q = held(self.q_seqs.map(|p| p.cu_seqlens));
         let cu_kv = held(self.kv_seqs.map(|p| p.cu_seqlens));
         let mut guards = Guards::new();
@@ -704,6 +709,7 @@ impl inference_tensor::CustomOp3 for Fattn<'_> {
             block_table: held_ptr(&block_table, &stream, &mut guards)?,
             seq_lens: held_ptr(&seq_lens, &stream, &mut guards)?,
             full_lens: held_ptr(&full_lens, &stream, &mut guards)?,
+            keep_lens: held_ptr(&keep_lens, &stream, &mut guards)?,
             cu_q: held_ptr(&cu_q, &stream, &mut guards)?,
             cu_kv: held_ptr(&cu_kv, &stream, &mut guards)?,
         };
@@ -818,6 +824,7 @@ fn dense_layout(
         window_left: opts.window_left.map_or(-1, |w| w as i32),
         chunk: opts.chunk.map_or(0, |c| c as i32),
         full_lens: std::ptr::null(),
+        keep_lens: std::ptr::null(),
         f32_values: opts.f32_values as i32,
     }
 }
@@ -981,6 +988,17 @@ fn validate_paged(
         inference_tensor::bail!(
             "fattn needs contiguous u32 full lens (batch,), got {:?}",
             full_lens.shape()
+        );
+    }
+    if let Some(keep_lens) = kv.keep_lens
+        && (keep_lens.dtype() != DType::U32
+            || keep_lens.dims1()? != b
+            || !keep_lens.is_contiguous()
+            || opts.window_left.is_none())
+    {
+        inference_tensor::bail!(
+            "fattn needs contiguous u32 keep lens (batch,) under a window, got {:?}",
+            keep_lens.shape()
         );
     }
     // rows past a sequence's length are read from its first row, so only the mask keeps them out
