@@ -146,6 +146,10 @@ pub struct PagedAttentionInputMetadata {
     pub cu_seqlens_kv: Option<HashMap<DeviceLocation, Tensor>>,
     /// Host rows this decode metadata was built from (decode steps only).
     pub decode_rows: Option<Arc<DecodePagedRows>>,
+    /// Per query row, the keys a prompt-keeping window spares (its sequence's prompt), when the model has one.
+    pub prompt_keep_lens_cpu: Option<Vec<usize>>,
+    /// `prompt_keep_lens_cpu` as u32 per device, for decode kernels.
+    pub prompt_keep_lens: Option<HashMap<DeviceLocation, Tensor>>,
 }
 
 impl PagedAttentionInputMetadata {
@@ -203,6 +207,8 @@ impl PagedAttentionInputMetadata {
             cu_seqlens_q: None,
             cu_seqlens_kv: None,
             decode_rows: None,
+            prompt_keep_lens_cpu: None,
+            prompt_keep_lens: None,
         })
     }
 
@@ -454,6 +460,8 @@ impl PagedAttentionInputMetadata {
             cu_seqlens_q: Some(cu_q_map),
             cu_seqlens_kv: Some(cu_kv_map),
             decode_rows: None,
+            prompt_keep_lens_cpu: self.prompt_keep_lens_cpu.clone(),
+            prompt_keep_lens: self.prompt_keep_lens.clone(),
         })
     }
 }
@@ -475,6 +483,8 @@ pub struct DecodePagedRows {
     pub decode_window: usize,
     pub devices: Vec<Device>,
     pub num_kv_heads: usize,
+    /// Per row, the keys a prompt-keeping window spares; empty when the model has none.
+    pub keep_lens: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -524,6 +534,7 @@ pub struct DecodePagedRowsGraphKey {
     num_kv_heads: usize,
     paged_block_table_len: usize,
     full_block_table_len: usize,
+    keeps_prompt: bool,
 }
 
 pub struct DecodeViewHostTensors {
@@ -658,6 +669,9 @@ impl DecodePagedRows {
             rows.context_lens.extend_from_slice(&self.context_lens[..q]);
             rows.full_context_lens
                 .extend_from_slice(&self.full_context_lens[..q]);
+            if !self.keep_lens.is_empty() {
+                rows.keep_lens.extend_from_slice(&self.keep_lens[..q]);
+            }
         }
         rows
     }
@@ -762,6 +776,7 @@ impl DecodePagedRows {
             num_kv_heads: self.num_kv_heads,
             paged_block_table_len,
             full_block_table_len,
+            keeps_prompt: !self.keep_lens.is_empty(),
         }
     }
 
@@ -830,6 +845,8 @@ impl DecodePagedRows {
             cu_seqlens_q: None,
             cu_seqlens_kv: None,
             decode_rows: Some(self.clone()),
+            prompt_keep_lens_cpu: (!self.keep_lens.is_empty()).then(|| self.keep_lens.clone()),
+            prompt_keep_lens: None,
         })
     }
 
@@ -1000,6 +1017,16 @@ impl DecodePagedRows {
             })
         };
 
+        let keep_lens = (!self.keep_lens.is_empty())
+            .then(|| {
+                Tensor::from_vec(
+                    self.keep_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
+                    (self.keep_lens.len(),),
+                    &Device::Cpu,
+                )
+            })
+            .transpose()?;
+        let mut keep_lens_map = HashMap::new();
         let mut slot_mappings_map = HashMap::new();
         let mut paged_maps = DecodeViewDeviceMaps::default();
         let mut full_maps = DecodeViewDeviceMaps::default();
@@ -1009,6 +1036,12 @@ impl DecodePagedRows {
                 decode_metadata_tensor(&slot_mappings, device, stage_on_host)?,
             );
             paged_maps.insert(&paged_tensors, device, stage_on_host)?;
+            if let Some(keep_lens) = keep_lens.as_ref() {
+                keep_lens_map.insert(
+                    device.location(),
+                    decode_metadata_tensor(keep_lens, device, stage_on_host)?,
+                );
+            }
             if let Some(full_tensors) = full_tensors.as_ref() {
                 full_maps.insert(full_tensors, device, stage_on_host)?;
             }
@@ -1103,6 +1136,8 @@ impl DecodePagedRows {
             cu_seqlens_q: None,
             cu_seqlens_kv: None,
             decode_rows: Some(self.clone()),
+            prompt_keep_lens_cpu: (!self.keep_lens.is_empty()).then(|| self.keep_lens.clone()),
+            prompt_keep_lens: keep_lens.is_some().then_some(keep_lens_map),
         })
     }
 }
@@ -1117,6 +1152,8 @@ pub struct PromptChunkPlan {
 #[derive(Clone)]
 pub struct PagedAttentionMeta {
     pub sliding_window: Option<usize>,
+    /// Decode rows carry their sequence's prompt length, which the model's windows spare.
+    pub window_keeps_prompt: bool,
     pub block_size: usize,
     pub max_paged_context_len: usize,
     pub attention_backend: AttentionBackendKind,

@@ -153,6 +153,7 @@ fn paged_vs_dense() -> Result<()> {
                 block_table: &block_table,
                 seq_lens: &seq_lens,
                 full_lens: None,
+                keep_lens: None,
             };
             let lens = vec![seq_kv; batch];
             let scale = 1. / (d as f32).sqrt();
@@ -291,6 +292,7 @@ fn paged<'a>(k: &'a Tensor, v: &'a Tensor, table: &'a Tensor, lens: &'a Tensor) 
         block_table: table,
         seq_lens: lens,
         full_lens: None,
+        keep_lens: None,
     }
 }
 

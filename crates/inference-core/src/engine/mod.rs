@@ -782,6 +782,7 @@ impl Engine {
                                 .map(|metadata| metadata.attention_backend_kind())
                                 .unwrap_or(crate::paged_attention::AttentionBackendKind::Standard),
                             sliding_window: pipeline_metadata.sliding_window,
+                            window_keeps_prompt: pipeline_metadata.window_keeps_prompt,
                             num_kv_heads: pipeline_metadata
                                 .model_metadata
                                 .as_ref()

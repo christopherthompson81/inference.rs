@@ -473,6 +473,7 @@ mod tests {
             decode_window: 1,
             devices: vec![device.clone()],
             num_kv_heads: 1,
+            keep_lens: Vec::new(),
         })
     }
 

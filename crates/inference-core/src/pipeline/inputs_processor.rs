@@ -828,6 +828,8 @@ pub mod text_models_inputs_processor {
                     None
                 },
                 decode_rows: None,
+                prompt_keep_lens_cpu: None,
+                prompt_keep_lens: None,
             })
         } else {
             None
@@ -890,6 +892,7 @@ pub mod text_models_inputs_processor {
         let mut slot_mappings = Vec::new();
         let mut paged_attn_context_lens = Vec::new();
         let mut full_paged_attn_context_lens = Vec::new();
+        let mut keep_lens = Vec::new();
         let mut seqlens_q = if flash_attn { vec![0] } else { Vec::new() };
         let mut seqlens_k = if flash_attn { vec![0] } else { Vec::new() };
         // Staged speculative tokens are appended to the decode input only when
@@ -1000,6 +1003,9 @@ pub mod text_models_inputs_processor {
                     let full_context_len = start_pos + row + 1;
 
                     full_paged_attn_context_lens.push(full_context_len);
+                    if paged_attn_metadata.window_keeps_prompt {
+                        keep_lens.push(seq.prompt_tokens().saturating_sub(seq.token_offset()));
+                    }
 
                     let paged_attn_context_len = if let Some(sliding_window) =
                         paged_attn_metadata.sliding_window
@@ -1052,6 +1058,7 @@ pub mod text_models_inputs_processor {
                 decode_window,
                 devices: mapper.unwrap().get_unique_devices(),
                 num_kv_heads: paged_attn_input.prefill_key_value_heads,
+                keep_lens,
             });
             Some(rows.build()?)
         } else {
@@ -1623,6 +1630,7 @@ pub mod text_models_inputs_processor {
                 decode_window: 1,
                 devices: vec![Device::Cpu],
                 num_kv_heads: 4,
+                keep_lens: Vec::new(),
             })
             .build()
             .unwrap();
@@ -1650,6 +1658,7 @@ pub mod text_models_inputs_processor {
                 decode_window: 1,
                 devices: vec![Device::Cpu],
                 num_kv_heads: 4,
+                keep_lens: Vec::new(),
             });
             let metadata = rows
                 .build_graph_update(PagedDecodeMetadataRequirements::graph(
@@ -1685,6 +1694,7 @@ pub mod text_models_inputs_processor {
                 decode_window: 1,
                 devices: vec![Device::Cpu],
                 num_kv_heads: 4,
+                keep_lens: Vec::new(),
             };
             let padded = rows.padded(4);
             assert_eq!(padded.batch_size(), 4);
@@ -1725,6 +1735,7 @@ pub mod text_models_inputs_processor {
                 decode_window: 1,
                 devices: vec![Device::Cpu],
                 num_kv_heads: 1,
+                keep_lens: Vec::new(),
             });
 
             assert_eq!(rows.block_tables.unique_table_count(), 2);
@@ -1773,6 +1784,7 @@ pub mod text_models_inputs_processor {
                 decode_window: 1,
                 devices: vec![Device::Cpu],
                 num_kv_heads: 1,
+                keep_lens: Vec::new(),
             });
 
             assert_eq!(

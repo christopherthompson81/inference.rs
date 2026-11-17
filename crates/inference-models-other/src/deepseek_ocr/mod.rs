@@ -44,6 +44,7 @@ pub struct DeepseekOcrModel {
     encoder: DeepEncoder,
     text: CausalLm,
     image_token_id: u32,
+    window_keeps_prompt: bool,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
     encoder_cache_hits: Arc<AtomicUsize>,
     encoder_cache_misses: Arc<AtomicUsize>,
@@ -71,6 +72,7 @@ impl DeepseekOcrModel {
             encoder,
             text,
             image_token_id: cfg.image_token_id,
+            window_keeps_prompt: cfg.language_config.sliding_window.is_some(),
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(ENCODER_CACHE_ENTRIES))),
             encoder_cache_hits: Arc::new(AtomicUsize::new(0)),
             encoder_cache_misses: Arc::new(AtomicUsize::new(0)),
@@ -183,5 +185,8 @@ impl MultimodalModel for DeepseekOcrModel {
     }
     fn supports_mixed_media_batches(&self) -> bool {
         true
+    }
+    fn window_keeps_prompt(&self) -> bool {
+        self.window_keeps_prompt
     }
 }

@@ -178,6 +178,10 @@ pub trait MultimodalModel:
     fn supports_mixed_media_batches(&self) -> bool {
         false
     }
+    /// Its sliding windows spare each sequence's prompt: decode sees the whole prompt and the window's newest keys.
+    fn window_keeps_prompt(&self) -> bool {
+        false
+    }
     /// Runs before a request's prompt is expanded, for media whose token count depends on what the tower makes of it
     /// (a video whose redundant tokens are pruned): the result goes in the sequence's `encoded_media`.
     fn encode_prompt_media(

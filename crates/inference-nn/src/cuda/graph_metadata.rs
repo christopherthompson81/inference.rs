@@ -33,6 +33,7 @@ pub struct CudaDecodeGraphMetadataBuffers {
     context_lens: Option<CudaGraphVarMap>,
     full_block_tables: Option<CudaGraphVarMap>,
     full_context_lens: Option<CudaGraphVarMap>,
+    prompt_keep_lens: Option<CudaGraphVarMap>,
     paged_kv_indptr: Option<CudaGraphVarMap>,
     paged_kv_indices: Option<CudaGraphVarMap>,
     paged_kv_last_page_len: Option<CudaGraphVarMap>,
@@ -112,6 +113,7 @@ impl CudaDecodeGraphMetadataBuffers {
                 metadata.full_context_lens.as_ref(),
                 flashinfer_views_alias,
             )?,
+            prompt_keep_lens: option_var_map_from_tensor_map(metadata.prompt_keep_lens.as_ref())?,
             paged_kv_indptr: option_var_map_from_tensor_map(
                 flashinfer_paged_view(metadata).map(|view| &view.paged_kv.indptr),
             )?,
@@ -242,6 +244,13 @@ impl CudaDecodeGraphMetadataBuffers {
                 )?;
             }
         }
+        // a slot may hold another sequence on this replay, so its prompt length is copied every time
+        copy_option_var_map(
+            &self.prompt_keep_lens,
+            metadata.prompt_keep_lens.as_ref(),
+            "prompt_keep_lens",
+            host_staging,
+        )?;
         if self.requirements.block_tables {
             copy_option_var_map(
                 &self.block_tables,
@@ -415,6 +424,8 @@ impl CudaDecodeGraphMetadataBuffers {
             cu_seqlens_q: metadata.cu_seqlens_q.clone(),
             cu_seqlens_kv: metadata.cu_seqlens_kv.clone(),
             decode_rows: metadata.decode_rows.clone(),
+            prompt_keep_lens_cpu: metadata.prompt_keep_lens_cpu.clone(),
+            prompt_keep_lens: option_tensor_map_from_var_map(&self.prompt_keep_lens),
         }
     }
 }
@@ -668,6 +679,7 @@ mod tests {
             decode_window: 1,
             devices: vec![Device::Cpu],
             num_kv_heads: 4,
+            keep_lens: Vec::new(),
         })
         .build_materialized()
         .unwrap();
@@ -706,6 +718,7 @@ mod tests {
             decode_window: 1,
             devices: vec![Device::Cpu],
             num_kv_heads: 4,
+            keep_lens: Vec::new(),
         })
         .build()
         .unwrap();
@@ -749,6 +762,7 @@ mod tests {
                 decode_window: 1,
                 devices: vec![device.clone()],
                 num_kv_heads: 4,
+                keep_lens: Vec::new(),
             }))
         };
         let initial = rows(vec![1, 2, 3, 4], 128)?.build_materialized()?;

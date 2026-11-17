@@ -100,6 +100,7 @@ fn check(c: PagedCase) -> Result<()> {
             block_table: &block_table,
             seq_lens: &seq_lens_t,
             full_lens: None,
+            keep_lens: None,
         };
         let q = Tensor::randn(0f32, 1., (b, seq_q, N_HEAD, d), &dev)?.to_dtype(dtype)?;
         let opts = FattnOptions {
@@ -149,6 +150,114 @@ fn check(c: PagedCase) -> Result<()> {
     Ok(())
 }
 
+fn the_window_keeps_each_prompt() -> Result<()> {
+    // whole tables from position 0, each sequence's first keep_lens rows visible past the window
+    let Some(dev) = cuda() else { return Ok(()) };
+    let (d, h_kv, bs, window) = (128, 2, 16, 16);
+    // (rows, prompt kept): a prompt short of the window's reach, one covering the whole sequence, none
+    let seqs = [(90usize, 20usize), (70, 70), (50, 0)];
+    let scale = 1. / (d as f32).sqrt();
+    for seq_q in [1, 3] {
+        let b = seqs.len();
+        let max_blocks = seqs.iter().map(|(l, _)| l.div_ceil(bs)).max().unwrap();
+        let mut tables = vec![0u32; b * max_blocks];
+        let mut next = 0;
+        for (s, (len, _)) in seqs.iter().enumerate() {
+            for j in 0..len.div_ceil(bs) {
+                tables[s * max_blocks + j] = ((next * BLOCK_SHUFFLE + 7) % NUM_BLOCKS) as u32;
+                next += 1;
+            }
+        }
+        let rows: Vec<(Tensor, Tensor)> = seqs
+            .iter()
+            .map(|&(len, _)| -> Result<_> {
+                let r = || Tensor::randn(0f32, 1., (len, h_kv, d), &Device::Cpu);
+                Ok((r()?, r()?))
+            })
+            .collect::<Result<_>>()?;
+        let cache = |pick: fn(&(Tensor, Tensor)) -> &Tensor| -> Result<Tensor> {
+            let mut data = vec![f32::NAN; NUM_BLOCKS * h_kv * bs * d];
+            for (s, (len, _)) in seqs.iter().enumerate() {
+                let src = pick(&rows[s]).to_vec3::<f32>()?;
+                for p in 0..*len {
+                    let blk = tables[s * max_blocks + p / bs] as usize;
+                    for (hd, row) in src[p].iter().enumerate() {
+                        let at = ((blk * h_kv + hd) * bs + p % bs) * d;
+                        data[at..at + d].copy_from_slice(row);
+                    }
+                }
+            }
+            Ok(
+                Tensor::from_vec(data, (NUM_BLOCKS, h_kv, bs, d), &Device::Cpu)?
+                    .to_dtype(DType::BF16)?
+                    .to_device(&dev)?,
+            )
+        };
+        let (k_cache, v_cache) = (cache(|r| &r.0)?, cache(|r| &r.1)?);
+        let block_table = Tensor::from_vec(tables, (b, max_blocks), &dev)?;
+        let lens = |pick: fn(&(usize, usize)) -> usize| -> Result<Tensor> {
+            Ok(Tensor::from_vec(
+                seqs.iter().map(|s| pick(s) as u32).collect::<Vec<_>>(),
+                b,
+                &dev,
+            )?)
+        };
+        let (seq_lens, keep_lens) = (lens(|s| s.0)?, lens(|s| s.1)?);
+        let kv = PagedKv {
+            k_cache: &k_cache,
+            v_cache: &v_cache,
+            block_table: &block_table,
+            seq_lens: &seq_lens,
+            full_lens: None,
+            keep_lens: Some(&keep_lens),
+        };
+        let q = Tensor::randn(0f32, 1., (b, seq_q, N_HEAD, d), &dev)?.to_dtype(DType::BF16)?;
+        let opts = FattnOptions {
+            scale,
+            causal: true,
+            window_left: Some(window - 1),
+            ..Default::default()
+        };
+        let got = flash_attn_paged(&q, &kv, &opts)?;
+        for (s, &(len, keep)) in seqs.iter().enumerate() {
+            let mask: Vec<f32> = (0..seq_q)
+                .flat_map(|i| {
+                    (0..len).map(move |j| {
+                        let qp = len - seq_q + i;
+                        if j <= qp && (qp - j < window || j < keep) {
+                            0.
+                        } else {
+                            f32::NEG_INFINITY
+                        }
+                    })
+                })
+                .collect();
+            let mask = Tensor::from_vec(mask, (1, seq_q, len), &dev)?.to_dtype(DType::F16)?;
+            let seq = Case {
+                batch: 1,
+                q_layout: QLayout::Contiguous,
+                ..case(d, h_kv, seq_q, len)
+            };
+            let bf16 = |t: &Tensor| -> Result<Tensor> {
+                Ok(t.to_dtype(DType::BF16)?.to_device(&dev)?.unsqueeze(0)?)
+            };
+            let (k, v) = (bf16(&rows[s].0)?, bf16(&rows[s].1)?);
+            let want = reference(&q.narrow(0, s, 1)?, &k, &v, Some(&mask), None, &seq, scale)?;
+            let diff = (got.narrow(0, s, 1)?.to_dtype(DType::F32)? - &want)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            let peak = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            assert!(
+                diff <= 1e-2 * peak,
+                "seq {s} (rows {len}, keep {keep}) q {seq_q}: max diff {diff}, peak {peak}"
+            );
+        }
+    }
+    Ok(())
+}
+
 inference_tensor::gpu_cases!(
     cuda_cases,
     [
@@ -160,7 +269,8 @@ inference_tensor::gpu_cases!(
         one_sequence_with_spare_table_entries,
         rejects_a_short_mask_and_odd_blocks,
         small_blocks_and_no_gqa,
-        supported_paged_answers_for_kernel_limits
+        supported_paged_answers_for_kernel_limits,
+        the_window_keeps_each_prompt
     ]
 );
 
@@ -266,6 +376,7 @@ fn rejects_a_short_mask_and_odd_blocks() -> Result<()> {
         block_table: &block_table,
         seq_lens: &seq_lens,
         full_lens: None,
+        keep_lens: None,
     };
     let q = Tensor::zeros((1, 1, 8, 64), DType::BF16, &dev)?;
     let mut opts = FattnOptions {
@@ -303,6 +414,7 @@ fn supported_paged_answers_for_kernel_limits() -> Result<()> {
             block_table: &block_table,
             seq_lens: &seq_lens,
             full_lens: None,
+            keep_lens: None,
         };
         let q = Tensor::zeros((2, 1, 8, d), DType::BF16, &dev)?;
         let supported = supported_paged(&q, &kv, opts)?;
@@ -346,6 +458,7 @@ fn supported_paged_answers_for_kernel_limits() -> Result<()> {
         block_table: &Tensor::zeros((3, 3), DType::U32, &dev)?,
         seq_lens: &seq_lens,
         full_lens: None,
+        keep_lens: None,
     };
     assert!(
         supported_paged(
@@ -417,6 +530,7 @@ fn chunks_count_from_full_lens() -> Result<()> {
             block_table: &block_table,
             seq_lens: &seq_lens,
             full_lens: Some(&full_lens),
+            keep_lens: None,
         };
         let q = Tensor::randn(0f32, 1., (b, seq_q, N_HEAD, d), &dev)?.to_dtype(DType::BF16)?;
         let opts = FattnOptions {

@@ -422,6 +422,7 @@ pub fn new_family_model<T: FamilyAttention>(
         embed_dim: None,
         rms_norm_eps: cfg.rms_norm_eps,
         layer_windows: &layer_windows,
+        window_keeps_prompt: false,
         tie_word_embeddings: cfg.tie_word_embeddings,
         quantization_config: &cfg.quantization_config,
         norm: NormKind::Rms,

@@ -14,7 +14,6 @@ serde_default_fn!(f32, rope_theta, 10_000.0);
 serde_default_fn!(f64, routed_scaling_factor, 1.0);
 serde_default_fn!(String, topk_method, GREEDY.to_string());
 serde_default_fn!(usize, moe_layer_freq, 1);
-serde_default_fn!(usize, max_tiles, DEFAULT_MAX_TILES);
 serde_default_fn!(u32, image_token_id, IMAGE_TOKEN_ID);
 
 const GREEDY: &str = "greedy";
@@ -25,6 +24,9 @@ const SHARED_EXPERTS: &str = "shared_experts";
 // `dynamic_preprocess`'s tile counts
 pub const MIN_TILES: usize = 2;
 pub const DEFAULT_MAX_TILES: usize = 9;
+// Unlimited-OCR's `dynamic_preprocess(max_num=32)`
+const UNLIMITED_MAX_TILES: usize = 32;
+const UNLIMITED_OCR: &str = "UnlimitedOCRForCausalLM";
 
 /// DeepSeek-V2 without MLA (`use_mla: false`): Llama attention, softmax top-k experts beside shared ones.
 #[derive(Debug, Clone, inference_json::FromJson)]
@@ -59,6 +61,10 @@ pub struct TextConfig {
     pub rope_theta: f32,
     #[serde(default)]
     pub tie_word_embeddings: bool,
+    pub bos_token_id: Option<u32>,
+    /// Unlimited-OCR's decode window, which spares the prompt (`SlidingWindowLlamaAttention`).
+    #[serde(alias = "sliding_window_size")]
+    pub sliding_window: Option<usize>,
     #[serde(alias = "quantization")]
     pub quantization_config: Option<QuantizedConfig>,
 }
@@ -100,7 +106,8 @@ impl TextConfig {
                 theta: self.rope_theta,
             },
             max_position_embeddings: self.max_position_embeddings,
-            layer_windows: vec![None; layers],
+            layer_windows: vec![self.sliding_window; layers],
+            window_keeps_prompt: self.sliding_window.is_some(),
             tie_word_embeddings: self.tie_word_embeddings,
             quantization_config: self.quantization_config.clone(),
             moe: Some(MoeSpec {
@@ -169,9 +176,10 @@ pub struct Config {
     pub language_config: TextConfig,
     pub vision_config: VisionConfig,
     pub projector_config: ProjectorConfig,
-    /// `dynamic_preprocess`'s largest tile count (Unlimited-OCR tiles further).
-    #[serde(default = "max_tiles")]
-    pub max_tiles: usize,
+    #[serde(default)]
+    pub architectures: Vec<String>,
+    /// `dynamic_preprocess`'s largest tile count, when not the architecture's.
+    pub max_tiles: Option<usize>,
     #[serde(default = "image_token_id")]
     pub image_token_id: u32,
 }
@@ -183,6 +191,16 @@ const SAM_STRIDE: usize = 16 * 4;
 pub const PAD_GRAY: u8 = 127;
 
 impl Config {
+    pub fn max_tiles(&self) -> usize {
+        self.max_tiles.unwrap_or(
+            if self.architectures.iter().any(|arch| arch == UNLIMITED_OCR) {
+                UNLIMITED_MAX_TILES
+            } else {
+                DEFAULT_MAX_TILES
+            },
+        )
+    }
+
     pub fn sam_config(&self) -> Result<SamConfig> {
         let sam = &self.vision_config.width.sam_vit_b;
         let [mid, out] = sam.downsample_channels[..] else {

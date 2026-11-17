@@ -40,7 +40,7 @@ fn shape(cfg: &Config, intermediate_size: usize) -> DecoderLayerShape {
 
 // one image's tokens and views at most: every tile the grid search allows, plus the global view
 fn image_budget(cfg: &Config) -> (usize, usize) {
-    let tiles = cfg.max_tiles;
+    let tiles = cfg.max_tiles();
     (cfg.image_token_count((tiles, 1)), tiles + 1)
 }
 

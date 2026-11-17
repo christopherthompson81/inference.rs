@@ -701,6 +701,8 @@ fn prefix_gather_causal_mask(
     q_max: usize,
     kv_max: usize,
     sliding_window: Option<usize>,
+    // per batch row, the keys the window spares (its sequence's prompt)
+    keep: Option<&[usize]>,
     dtype: DType,
     device: &Device,
 ) -> Result<AttentionMask> {
@@ -718,7 +720,8 @@ fn prefix_gather_causal_mask(
                     let q_pos = prefix_len + q_idx;
                     let future = kv_idx > q_pos;
                     let too_old = sliding_window
-                        .is_some_and(|window| q_pos >= window && kv_idx <= q_pos - window);
+                        .is_some_and(|window| q_pos >= window && kv_idx <= q_pos - window)
+                        && !keep.is_some_and(|keep| kv_idx < keep[batch_idx]);
                     let mm_prefix = mm_prefix_ranges
                         .and_then(|ranges| ranges.get(batch_idx))
                         .is_some_and(|ranges| {
@@ -875,9 +878,35 @@ struct PagedForwardCtx<'a> {
     dims: PagedForwardDims,
     use_full: bool,
     alibi_slopes: Option<Tensor>,
+    // a decode step under a prompt-keeping window, whose rows carry their prompt lengths
+    keeps_prompt: bool,
 }
 
 impl PagedForwardCtx<'_> {
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn keep_lens(&self, dev: &DeviceLocation) -> Result<Option<&Tensor>> {
+        if !self.keeps_prompt {
+            return Ok(None);
+        }
+        match self
+            .input_metadata
+            .prompt_keep_lens
+            .as_ref()
+            .and_then(|lens| lens.get(dev))
+        {
+            Some(lens) => Ok(Some(lens)),
+            None => inference_tensor::bail!(
+                "a prompt-keeping window's decode needs its rows' prompt lengths on {dev:?}"
+            ),
+        }
+    }
+
+    fn keep_cpu(&self) -> Option<&[usize]> {
+        self.keeps_prompt
+            .then_some(self.input_metadata.prompt_keep_lens_cpu.as_deref())
+            .flatten()
+    }
+
     fn block_tables(&self, dev: &DeviceLocation) -> Option<&Tensor> {
         if self.use_full {
             self.input_metadata.full_block_tables.as_ref()?.get(dev)
@@ -968,6 +997,8 @@ pub struct PagedAttention {
     fp8_q_scale: Tensor,
     fp8_k_scale: Tensor,
     fp8_v_scale: Tensor,
+    // the window spares the sequence's prompt: prompt steps attend causally in full, decode sees prompt and window
+    window_keeps_prompt: bool,
 }
 
 impl PagedAttention {
@@ -1006,7 +1037,14 @@ impl PagedAttention {
             fp8_q_scale: Tensor::new(fp8_attention_scales.q, device)?,
             fp8_k_scale: Tensor::new(fp8_attention_scales.k, device)?,
             fp8_v_scale: Tensor::new(fp8_attention_scales.v, device)?,
+            window_keeps_prompt: false,
         })
+    }
+
+    /// A sliding window that spares each sequence's prompt (Unlimited-OCR's decode window).
+    pub fn with_window_keep(mut self) -> Self {
+        self.window_keeps_prompt = true;
+        self
     }
 
     #[cfg(test)]
@@ -1167,6 +1205,7 @@ impl PagedAttention {
             },
             use_full,
             alibi_slopes,
+            keeps_prompt: self.window_keeps_prompt && setup.input_metadata.is_decode_step(),
         })
     }
 
@@ -1527,6 +1566,7 @@ impl PagedAttention {
                 ctx.dims.seq_len,
                 max_kv,
                 ctx.sdpa_params.sliding_window,
+                None,
                 tensors.query.dtype(),
                 device,
             )?,
@@ -1545,6 +1585,7 @@ impl PagedAttention {
                     ctx.dims.seq_len,
                     max_kv,
                     ctx.sdpa_params.sliding_window,
+                    None,
                     tensors.query.dtype(),
                     device,
                 )?
@@ -1635,6 +1676,7 @@ impl PagedAttention {
                 ctx.dims.seq_len,
                 max_kv,
                 ctx.sdpa_params.sliding_window,
+                None,
                 tensors.query.dtype(),
                 device,
             )?
@@ -1857,9 +1899,9 @@ impl PagedAttention {
                 tensors.attention_mask,
             );
         }
-        // a CUDA build plans for CUDA's kernels; a Vulkan device takes its own paged decode
+        // a CUDA build plans for CUDA's kernels; a Vulkan device takes its own paged decode, which has no window
         #[cfg(all(feature = "cuda", target_family = "unix"))]
-        if key_cache_ref.device().is_vulkan() {
+        if key_cache_ref.device().is_vulkan() && !ctx.keeps_prompt {
             return self.run_standard_paged_decode(
                 ctx,
                 &query,
@@ -1970,7 +2012,9 @@ impl PagedAttention {
         )?;
         let q_4d = query.reshape((query_rows, ctx.dims.attention_heads, 1, ctx.dims.head_size))?;
 
+        // the varlen kernels' window would drop the prompt a keeping window spares
         if !attention_mask.is_custom()
+            && !ctx.keeps_prompt
             && should_use_decode_gather_varlen(
                 supports_packed_varlen_sdpa(query, ctx.dims.head_size, ctx.sdpa_params),
                 ctx.sdpa_params.sinks.is_some(),
@@ -2035,6 +2079,7 @@ impl PagedAttention {
                     1,
                     max_kv,
                     ctx.sdpa_params.sliding_window,
+                    ctx.keep_cpu(),
                     query.dtype(),
                     query.device(),
                 )?
@@ -2165,6 +2210,7 @@ impl PagedAttention {
             block_table: block_tables,
             seq_lens: &seq_lens,
             full_lens: ctx.chunk_full_lens(&query.device().location())?,
+            keep_lens: None,
         };
         let opts = FattnOptions {
             scale: ctx.sdpa_params.softmax_scale,
@@ -2244,22 +2290,23 @@ impl PagedAttention {
         // each cut to its own row's blocks
         let rows = ctx.dims.seq_len;
         let windowed_tables = !ctx.use_full && ctx.input_metadata.full_block_tables.is_some();
-        let per_sequence = (rows > 1 && ctx.sdpa_params.chunk.is_none() && !windowed_tables)
-            .then(|| -> Result<_> {
-                let seqs = query.dim(0)? / rows;
-                let width = block_table.dim(1)?;
-                Ok((
-                    block_table
-                        .reshape((seqs, rows, width))?
-                        .narrow(1, 0, 1)?
-                        .reshape((seqs, width))?,
-                    seq_lens
-                        .reshape((seqs, rows))?
-                        .narrow(1, rows - 1, 1)?
-                        .reshape(seqs)?,
-                ))
-            })
-            .transpose()?;
+        let per_sequence =
+            (rows > 1 && ctx.sdpa_params.chunk.is_none() && !windowed_tables && !ctx.keeps_prompt)
+                .then(|| -> Result<_> {
+                    let seqs = query.dim(0)? / rows;
+                    let width = block_table.dim(1)?;
+                    Ok((
+                        block_table
+                            .reshape((seqs, rows, width))?
+                            .narrow(1, 0, 1)?
+                            .reshape((seqs, width))?,
+                        seq_lens
+                            .reshape((seqs, rows))?
+                            .narrow(1, rows - 1, 1)?
+                            .reshape(seqs)?,
+                    ))
+                })
+                .transpose()?;
         let (block_table, seq_lens) = match &per_sequence {
             Some((tables, lens)) => (tables, lens),
             None => (block_table, seq_lens),
@@ -2270,6 +2317,7 @@ impl PagedAttention {
             block_table,
             seq_lens,
             full_lens: ctx.chunk_full_lens(dev)?,
+            keep_lens: ctx.keep_lens(dev)?,
         };
         let opts = FattnOptions {
             scale: ctx.sdpa_params.softmax_scale,
@@ -2390,6 +2438,21 @@ impl PagedAttention {
                 query.dim(inference_tensor::D::Minus1)?,
             )?)
         };
+        // every query of a prompt step sits in the prompt the window spares, so it attends causally in full
+        let unwindowed;
+        let sdpa_params = if self.window_keeps_prompt && !input_metadata.is_decode_step() {
+            unwindowed = SdpaParams {
+                n_kv_groups: sdpa_params.n_kv_groups,
+                softcap: sdpa_params.softcap,
+                softmax_scale: sdpa_params.softmax_scale,
+                sliding_window: None,
+                sinks: sdpa_params.sinks.clone(),
+                chunk: sdpa_params.chunk,
+            };
+            &unwindowed
+        } else {
+            sdpa_params
+        };
         let ctx = self.build_forward_ctx(PagedForwardSetup {
             tensors,
             donor_cache_shape,
@@ -2398,6 +2461,11 @@ impl PagedAttention {
             flash_params,
             write_cache,
         })?;
+        if ctx.keeps_prompt && ctx.keep_cpu().is_none() {
+            inference_tensor::bail!(
+                "a prompt-keeping window's decode needs its rows' prompt lengths"
+            );
+        }
 
         if let Some((flash_params, segment_lens)) = flash_params.and_then(|params| {
             params
@@ -2546,6 +2614,7 @@ impl PagedAttention {
                 block_table: &block_table,
                 seq_lens,
                 full_lens: None,
+                keep_lens: None,
             };
             let (b, _, s, d) = query.dims4()?;
             let opts = FattnOptions {
@@ -2609,6 +2678,7 @@ impl PagedAttention {
                 block_table: compact_table,
                 seq_lens: kept,
                 full_lens: None,
+                keep_lens: None,
             };
             let d = query.dim(inference_tensor::D::Minus1)?;
             let opts = FattnOptions {
@@ -2903,9 +2973,18 @@ mod tests {
 
     #[test]
     fn ragged_decode_mask_excludes_padding() {
-        let mask =
-            prefix_gather_causal_mask(&[1, 1], &[2, 4], None, 1, 4, None, DType::F32, &Device::Cpu)
-                .unwrap();
+        let mask = prefix_gather_causal_mask(
+            &[1, 1],
+            &[2, 4],
+            None,
+            1,
+            4,
+            None,
+            None,
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
         let AttentionMask::Custom(mask) = mask else {
             panic!("expected custom mask");
         };
@@ -2929,7 +3008,7 @@ mod tests {
     #[test]
     fn ragged_prompt_mask_keeps_padding_rows_finite() {
         let mask =
-            prefix_gather_causal_mask(&[2], &[2], None, 4, 2, None, DType::F32, &Device::Cpu)
+            prefix_gather_causal_mask(&[2], &[2], None, 4, 2, None, None, DType::F32, &Device::Cpu)
                 .unwrap();
         let AttentionMask::Custom(mask) = mask else {
             panic!("expected custom mask");
@@ -2953,9 +3032,18 @@ mod tests {
 
     #[test]
     fn sliding_mask_uses_window_as_token_capacity() {
-        let mask =
-            prefix_gather_causal_mask(&[1], &[6], None, 1, 6, Some(4), DType::F32, &Device::Cpu)
-                .unwrap();
+        let mask = prefix_gather_causal_mask(
+            &[1],
+            &[6],
+            None,
+            1,
+            6,
+            Some(4),
+            None,
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
         let AttentionMask::Custom(mask) = mask else {
             panic!("expected custom mask");
         };
@@ -2967,10 +3055,45 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_prompt_stays_visible_past_the_window() {
+        // two decode rows at position 9 under a window of 3: one kept a 2-token prompt, the other none
+        let mask = prefix_gather_causal_mask(
+            &[1, 1],
+            &[10, 10],
+            None,
+            1,
+            10,
+            Some(3),
+            Some(&[2, 0]),
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let AttentionMask::Custom(mask) = mask else {
+            panic!("expected custom mask");
+        };
+        let visible = |row: &[f32]| row.iter().map(|&v| v == 0.0).collect::<Vec<_>>();
+        let rows = mask.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let (kept, plain) = rows.split_at(10);
+        let window = |keep: usize| (0..10).map(|k| k < keep || k >= 7).collect::<Vec<_>>();
+        assert_eq!(visible(kept), window(2));
+        assert_eq!(visible(plain), window(0));
+    }
+
+    #[test]
     fn sliding_mask_moves_with_each_chunked_query_row() {
-        let mask =
-            prefix_gather_causal_mask(&[3], &[8], None, 3, 8, Some(4), DType::F32, &Device::Cpu)
-                .unwrap();
+        let mask = prefix_gather_causal_mask(
+            &[3],
+            &[8],
+            None,
+            3,
+            8,
+            Some(4),
+            None,
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
         let AttentionMask::Custom(mask) = mask else {
             panic!("expected custom mask");
         };
@@ -2987,9 +3110,18 @@ mod tests {
 
     #[test]
     fn sliding_mask_handles_unit_window_and_query_longer_than_window() {
-        let unit =
-            prefix_gather_causal_mask(&[1], &[3], None, 1, 3, Some(1), DType::F32, &Device::Cpu)
-                .unwrap();
+        let unit = prefix_gather_causal_mask(
+            &[1],
+            &[3],
+            None,
+            1,
+            3,
+            Some(1),
+            None,
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
         let AttentionMask::Custom(unit) = unit else {
             panic!("expected custom mask");
         };
@@ -2998,9 +3130,18 @@ mod tests {
             vec![f32::NEG_INFINITY, f32::NEG_INFINITY, 0.0]
         );
 
-        let chunk =
-            prefix_gather_causal_mask(&[5], &[7], None, 5, 7, Some(2), DType::F32, &Device::Cpu)
-                .unwrap();
+        let chunk = prefix_gather_causal_mask(
+            &[5],
+            &[7],
+            None,
+            5,
+            7,
+            Some(2),
+            None,
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
         let AttentionMask::Custom(chunk) = chunk else {
             panic!("expected custom mask");
         };
@@ -3020,6 +3161,7 @@ mod tests {
             2,
             8,
             Some(3),
+            None,
             DType::F32,
             &Device::Cpu,
         )
@@ -3120,6 +3262,7 @@ mod tests {
             1,
             5,
             Some(3),
+            None,
             DType::F32,
             &Device::Cpu,
         )

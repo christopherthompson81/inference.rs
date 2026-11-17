@@ -141,6 +141,7 @@ fn check_with(c: Case, capture: bool, kv_bits: Option<(u32, u32)>) -> Result<()>
         decode_window: 1,
         devices: vec![dev.clone()],
         num_kv_heads: n_head_kv,
+        keep_lens: Vec::new(),
     });
     let mut metadata = rows
         .build_materialized()
@@ -731,6 +732,7 @@ fn check_prefill_heads(c: PrefillCase, (n_head, n_head_kv): (usize, usize)) -> R
         },
         use_full: true,
         alibi_slopes: None,
+        keeps_prompt: false,
     };
     let out = layer
         .try_run_fattn_paged_prefill(FattnPrefillCall {

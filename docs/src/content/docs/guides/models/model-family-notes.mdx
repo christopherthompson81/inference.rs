@@ -239,6 +239,8 @@ inference run -m llava-hf/llava-v1.6-vicuna-7b-hf \
 
 DeepSeek-OCR (`DeepseekOCRForCausalLM`, `deepseek-ai/DeepSeek-OCR`) reads a page as a 1024 global view plus, for an image larger than 640 pixels, 2 to 9 tiles of 640 (the reference's "Gundam" mode), through SAM ViT-B and CLIP-L into a small DeepSeek-V2 MoE without MLA. It loads from safetensors or from llama.cpp's `deepseek2-ocr` GGUF with the `deepseekocr` projector, which needs no other files. Its checkpoints ship no chat template; the built-in one is the reference's plain format: the image then the instruction, such as `<|grounding|>Convert the document to markdown.` (markdown with each block's box) or `Free OCR.` (text only). The reply keeps the tokenizer's special tokens, since its layout tags (`<|ref|>`, `<|det|>`) and table cells (`<td>`) are among them.
 
+Baidu's Unlimited-OCR (`UnlimitedOCRForCausalLM`, `baidu/Unlimited-OCR`) is the same model with up to 32 tiles and a decode window: each token it writes sees the whole prompt but only the last 128 tokens of its own reply, the window its long outputs were trained with (llama.cpp attends to everything). The window needs PagedAttention, on by default on a GPU; without it the model refuses to load. Its own template, used as shipped, writes `<image>` then the instruction, such as `document parsing.`, and BOS is added as the reference adds it.
+
 ## Qwen3-VL
 
 Per-request video frame-sampling overrides are not exposed. In multi-turn conversations reusing prefix cache entries, pixel inputs are narrowed per turn by grid count, not image count.
