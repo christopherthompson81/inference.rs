@@ -283,3 +283,55 @@ No gain; the one-seed win was the trajectories. Unmodeled in the replay, and a l
 on the host each step makes the CPU wait for the drafter before staging the verify, which the fixed path overlaps.
 Not kept. On this target no depth policy tried (Runs 10-13) beats fixed 7 drafts: the payoff curve is flat around 7,
 and whatever adapts pays about what the adaptation finds.
+
+## Run 14 - 2026-11-17 14:10
+
+**Question:** with Run 13's seeded method, how does DSpine compare with DFlash 2 at 7 drafts (both q4k)?
+
+`abrun.sh` per drafter, alternated twice; sampled over request seeds 11-13 (18 requests, 700 tokens), greedy once per
+prompt. Each seeded run repeats its text exactly, so the two rounds differ only by clocks.
+
+```
+                 sampled tok/s (accepted/step)                               greedy tok/s (accepted/step)
+           math   code   review algebra rust   essay  TOTAL        math   code   review algebra rust   essay  TOTAL
+DSpine     223    128    110    160     118    86     125.5/123.4  225    181    117    185     141    86     140.5/140.3
+           (5.32) (2.62) (2.10) (3.50)  (2.33) (1.43)              (5.17) (3.90) (2.18) (4.03)  (2.83) (1.34)
+DFlash 2   220    130    113    177     111    92     126.5/127.7  228    187    108    197     134    98     143.8/143.7
+           (5.08) (2.60) (2.18) (4.00)  (2.06) (1.54)              (5.19) (3.99) (1.89) (4.30)  (2.59) (1.65)
+```
+
+DFlash 2 leads by about 2% sampled and 2.4% greedy at the same depth; per prompt it is a split (DSpine ahead on math
+and rust, DFlash 2 on algebra and essay). Run 2's one-seed DSpine lead on sampled code (154 vs 133) was trajectory.
+DSpine's case is its deeper block, and Runs 10-13 found no way to make 15 drafts pay on this card, so DFlash 2 stays
+the recommended drafter for this target here; DSpine is the option where verify rows are cheaper (a faster card).
+
+## Run 15 - 2026-11-17 15:05
+
+**Question:** could tree verification, spending the 16 verify rows on alternatives instead of depth, make DSpine's
+wide verify pay? Bound it offline before touching the hybrid target's linear-attention state.
+
+Throwaway logging (local branch `exp/dspine-rank-log`, env `DSPINE_RANK_LOG`) wrote each lone sampled step's 15
+drafts with every position's 16 candidates and probabilities, and the committed tokens the next step saw; `rank.py`
+(scratchpad) pairs them. Sampled, 15 drafts, seeds 11-13 over the six prompts: 3,415 steps, mean accepted 2.63.
+
+```
+at a rejection, the target's token was the drafter's best undrafted candidate 19.1%, second 10.6%, third 7.3%,
+  any of the 16 63.1%, not a candidate 36.9%; 89.3% of steps reject inside the first 7 positions
+
+per step, at the measured step costs (8 rows 28.88 ms, 16 rows 34.24 ms)          tok/step   tok/s
+chain 7  (8 rows)                                                                   3.223      111.6
+chain 15 (16 rows)                                                                  3.634      106.1
+chain 7 + the best undrafted candidate as a leaf at each position (14 rows)          3.390       99.0
+chain 5 + two leaves per position (15 rows)                                          3.231       94.4
+chain 3 + four leaves per position (15 rows)                                         2.876       84.0
+chain 9 + a 6-row branch at its least confident position (continuation 0 / fresh)    3.411-3.472  99.6-101.4
+oracle: chain 7 + an 8-row branch placed at the actual rejection, fresh continuation  3.763      109.9
+```
+
+Optimistic throughout: tree rows priced as chain rows (no tree mask or forked GDN state), a branch's continuation
+accepting like a fresh chain right after a rejection, and the committed token (drawn from the verifier's residual)
+taken as the token a tree would have accepted. Even so, no 16-row tree commits more than the 16-row chain, and the
+oracle placement stays under chain 7's rate. The drafter's second guess is rarely the target's pick: a rejected draft
+is a distribution miss (a third of the time outside the top 16), not a near miss a sibling would catch. Greedy not
+measured (greedy proposals carry no candidates). Tree verification is not worth the GDN work on this target and card;
+only a cheaper wide verify (rows 9-16 near free) would make the longer block pay.
