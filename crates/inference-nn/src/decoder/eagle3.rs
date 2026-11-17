@@ -660,6 +660,7 @@ impl Eagle3Drafter {
                 final_norm: Some(FINAL_NORM),
                 dense_block: true,
                 mask_first_position: false,
+                at_root: false,
             },
             chain_normed: cfg.norm_output,
             kv_layer_idx,

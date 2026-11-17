@@ -27,6 +27,7 @@ impl Qwen2VLVisionModel {
             in_channels: cfg.in_channels,
             hidden_size: cfg.embed_dim,
             num_heads: cfg.num_heads,
+            num_kv_heads: cfg.num_heads,
             patch_size: cfg.patch_size,
             temporal_patch_size: cfg.temporal_patch_size,
             spatial_merge_size: cfg.spatial_merge_size,

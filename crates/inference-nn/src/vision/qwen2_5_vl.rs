@@ -46,6 +46,8 @@ pub struct VisionConfig {
     pub intermediate_size: usize,
     #[serde(default = "default_num_heads")]
     pub num_heads: usize,
+    /// EXAONE 4.5's GQA tower; Qwen2.5-VL's attends with every head.
+    pub num_key_value_heads: Option<usize>,
     #[serde(default = "default_in_channels")]
     pub in_chans: usize,
     #[serde(default = "default_patch_size")]
@@ -82,6 +84,7 @@ impl Qwen2_5VLVisionModel {
             in_channels: cfg.in_chans,
             hidden_size: cfg.hidden_size,
             num_heads: cfg.num_heads,
+            num_kv_heads: cfg.num_key_value_heads.unwrap_or(cfg.num_heads),
             patch_size: cfg.patch_size,
             temporal_patch_size: cfg.temporal_patch_size,
             spatial_merge_size: cfg.spatial_merge_size,
@@ -264,6 +267,7 @@ mod tests {
             hidden_act: Activation::QuickGelu,
             intermediate_size: 8,
             num_heads: 1,
+            num_key_value_heads: None,
             in_chans: 1,
             patch_size: 1,
             spatial_merge_size: 1,
@@ -317,5 +321,100 @@ mod tests {
 
         assert_eq!(actual, expected);
         Ok(())
+    }
+
+    // a GQA tower attends as an MHA one whose k and v repeat each kv head for its query heads
+    #[test]
+    fn a_gqa_tower_matches_mha_with_repeated_kv_heads() -> Result<()> {
+        const HIDDEN: usize = 16;
+        const HEADS: usize = 4;
+        const KV_HEADS: usize = 2;
+        const HEAD_DIM: usize = HIDDEN / HEADS;
+        let cfg = |kv_heads| VisionConfig {
+            depth: 1,
+            hidden_size: HIDDEN,
+            out_hidden_size: HIDDEN,
+            hidden_act: Activation::Silu,
+            intermediate_size: 16,
+            num_heads: HEADS,
+            num_key_value_heads: kv_heads,
+            in_chans: 1,
+            patch_size: 1,
+            spatial_merge_size: 1,
+            temporal_patch_size: 2,
+            window_size: 4,
+            fullatt_block_indexes: vec![0],
+        };
+        let device = Device::Cpu;
+        let randn = |shape: &[usize]| Tensor::randn(0f32, 1., shape, &device);
+        let mut shared = HashMap::new();
+        for (name, shape) in [
+            ("patch_embed.proj.weight", vec![HIDDEN, 1, 2, 1, 1]),
+            ("blocks.0.norm1.weight", vec![HIDDEN]),
+            ("blocks.0.norm2.weight", vec![HIDDEN]),
+            ("blocks.0.mlp.gate_proj.weight", vec![16, HIDDEN]),
+            ("blocks.0.mlp.gate_proj.bias", vec![16]),
+            ("blocks.0.mlp.up_proj.weight", vec![16, HIDDEN]),
+            ("blocks.0.mlp.up_proj.bias", vec![16]),
+            ("blocks.0.mlp.down_proj.weight", vec![HIDDEN, 16]),
+            ("blocks.0.mlp.down_proj.bias", vec![HIDDEN]),
+            ("blocks.0.attn.proj.weight", vec![HIDDEN, HIDDEN]),
+            ("blocks.0.attn.proj.bias", vec![HIDDEN]),
+            ("merger.ln_q.weight", vec![HIDDEN]),
+            ("merger.mlp.0.weight", vec![HIDDEN, HIDDEN]),
+            ("merger.mlp.0.bias", vec![HIDDEN]),
+            ("merger.mlp.2.weight", vec![HIDDEN, HIDDEN]),
+            ("merger.mlp.2.bias", vec![HIDDEN]),
+        ] {
+            shared.insert(name.to_string(), randn(&shape)?);
+        }
+        let kv_dim = KV_HEADS * HEAD_DIM;
+        let qkv_w = randn(&[HIDDEN + 2 * kv_dim, HIDDEN])?;
+        let qkv_b = randn(&[HIDDEN + 2 * kv_dim])?;
+        // query head h reads kv head h / (HEADS / KV_HEADS)
+        let repeated = |t: &Tensor, start: usize| -> Result<Tensor> {
+            let heads = (0..HEADS)
+                .map(|h| t.narrow(0, start + h / (HEADS / KV_HEADS) * HEAD_DIM, HEAD_DIM))
+                .collect::<Result<Vec<_>>>()?;
+            Tensor::cat(&heads, 0)
+        };
+        let mha = |t: &Tensor| -> Result<Tensor> {
+            Tensor::cat(
+                &[
+                    t.narrow(0, 0, HIDDEN)?,
+                    repeated(t, HIDDEN)?,
+                    repeated(t, HIDDEN + kv_dim)?,
+                ],
+                0,
+            )
+        };
+        let comm = Arc::new(inference_quant::Comm::from_device(
+            inference_quant::Id::new(),
+            &device,
+            0,
+            1,
+        )?);
+        let run = |kv_heads: Option<usize>, qkv_w: Tensor, qkv_b: Tensor| -> Result<Tensor> {
+            let mut tensors = shared.clone();
+            tensors.insert("blocks.0.attn.qkv.weight".to_string(), qkv_w);
+            tensors.insert("blocks.0.attn.qkv.bias".to_string(), qkv_b);
+            let vb = inference_quant::ShardedSafeTensors::wrap(tensors, DType::F32, device.clone());
+            let model = Qwen2_5VLVisionModel::new(&cfg(kv_heads), vb, &comm)?;
+            let grid_thw = Tensor::new(&[[1u32, 2, 2]], &device)?;
+            model.forward(&randn_seeded(&device)?, &grid_thw)
+        };
+        let gqa = run(Some(KV_HEADS), qkv_w.clone(), qkv_b.clone())?;
+        let mha = run(None, mha(&qkv_w)?, mha(&qkv_b)?)?;
+        let diff = (gqa - mha)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(diff < 1e-5, "GQA and MHA towers differ by {diff}");
+        Ok(())
+    }
+
+    // four patches of in_chans * temporal_patch_size values, the same for both towers
+    fn randn_seeded(device: &Device) -> Result<Tensor> {
+        Tensor::new(
+            &[[0.3f32, -1.2], [0.8, 0.1], [-0.5, 1.7], [1.1, -0.4]],
+            device,
+        )
     }
 }

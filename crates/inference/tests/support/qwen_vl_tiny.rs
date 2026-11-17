@@ -1,6 +1,7 @@
 //! Builds tiny random-weight Qwen-VL checkpoints at test time, for the image and video input paths.
 #![allow(dead_code)]
 
+use inference_models_qwen::exaone4_5::{Config as Exaone4_5Config, exaone4_5_model};
 use inference_models_qwen::qwen2_5_vl::{Config as Qwen2_5VLConfig, Qwen2_5VLModel};
 use inference_models_qwen::qwen2vl::{Config as Qwen2VLConfig, Qwen2VLModel};
 use inference_models_qwen::qwen3_5::{Config as Qwen3_5Config, Qwen3_5Model};
@@ -32,6 +33,8 @@ const QWEN3_5_MOE: &str = concat!(
     "/tests/fixtures/qwen_vl/qwen3_5_moe"
 );
 const TEXT_LAYERS: usize = 2;
+// shorter than every prompt, so the sliding layer drops keys
+const EXAONE_SLIDING_WINDOW: usize = 2;
 // From qwen3_5_moe/ and qwen3_vl_moe/config.json, written by make_tiny.py.
 const MOE_LAYERS: usize = 4;
 const MOE_EXPERTS: usize = 4;
@@ -82,6 +85,94 @@ pub fn tiny_qwen2_5_vl() -> anyhow::Result<tempfile::TempDir> {
     recording::record_checkpoint(&files, TEXT_LAYERS, MLX_PROBES, |vb, metadata| {
         Qwen2_5VLModel::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
     })
+}
+
+/// Qwen2.5-VL's tokenizer and template under an EXAONE 4.5 config: a GQA tower (one kv head for two) beside EXAONE 4
+/// text layers, a sliding one and a NoPE global one.
+pub fn tiny_exaone4_5() -> anyhow::Result<tempfile::TempDir> {
+    record_exaone4_5(false)
+}
+
+/// As [`tiny_exaone4_5`] with its MTP layer, at the checkpoint's root as EXAONE 4.5 keeps it.
+pub fn tiny_exaone4_5_mtp() -> anyhow::Result<tempfile::TempDir> {
+    record_exaone4_5(true)
+}
+
+fn record_exaone4_5(mtp: bool) -> anyhow::Result<tempfile::TempDir> {
+    let qwen: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!(
+        "{QWEN2_5_VL}/config.json"
+    ))?)?;
+    let mut vision = qwen["vision_config"].clone();
+    vision["num_key_value_heads"] = 1.into();
+    let config = serde_json::json!({
+        "architectures": ["Exaone4_5_ForConditionalGeneration"],
+        "model_type": "exaone4_5",
+        "image_token_id": qwen["image_token_id"],
+        "video_token_id": qwen["video_token_id"],
+        "tie_word_embeddings": false,
+        "eos_token_id": qwen["eos_token_id"],
+        "vision_config": vision,
+        "text_config": {
+            "model_type": "exaone4_5_text",
+            "vocab_size": qwen["vocab_size"],
+            "hidden_size": qwen["hidden_size"],
+            "intermediate_size": qwen["intermediate_size"],
+            "num_hidden_layers": TEXT_LAYERS,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 64,
+            "max_position_embeddings": 4096,
+            "rms_norm_eps": 1e-5,
+            "hidden_act": "silu",
+            "rope_scaling": {
+                "factor": 16.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0,
+                "original_max_position_embeddings": 256, "rope_theta": 1000000.0, "rope_type": "llama3"
+            },
+            "sliding_window": EXAONE_SLIDING_WINDOW,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "num_nextn_predict_layers": usize::from(mtp),
+        },
+    });
+    let mut cfg: Exaone4_5Config = serde_json::from_value(config.clone())?;
+    cfg.mtp = mtp;
+    let staging = tempfile::tempdir()?;
+    let config_path = staging.path().join("config.json");
+    std::fs::write(&config_path, config.to_string())?;
+    let mut files = files(QWEN2_5_VL)?;
+    files.retain(|path| path.file_name().is_some_and(|name| name != "config.json"));
+    files.push(config_path);
+    // EXAONE's delimiters under the ids Qwen's take
+    for path in &mut files {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if [
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "chat_template.jinja",
+        ]
+        .contains(&name.as_str())
+        {
+            let text = std::fs::read_to_string(&path)?
+                .replace("<|vision_start|>", "<vision>")
+                .replace("<|vision_end|>", "</vision>");
+            let renamed = staging.path().join(&name);
+            std::fs::write(&renamed, text)?;
+            *path = renamed;
+        }
+    }
+    let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
+    // llama.cpp's precomputed llama3 factors; a safetensors checkpoint has none
+    recording::record_checkpoint(
+        &files,
+        TEXT_LAYERS,
+        &["model.language_model.rope_freqs.weight"],
+        |vb, metadata| {
+            exaone4_5_model(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
+        },
+    )
 }
 
 pub fn tiny_qwen3_vl_moe() -> anyhow::Result<tempfile::TempDir> {

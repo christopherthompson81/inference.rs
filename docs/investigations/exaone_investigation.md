@@ -95,3 +95,87 @@ ours, the bf16 checkpoint 12.4020                    0.00199    0.00113   0.0174
 
 The engines agree at the level other models do (Run 1's 1.2B is the outlier, its own spread). EXAONE 3.5 decodes
 correctly.
+
+## Run 4 - 2026-11-16 19:00
+
+**Question:** does EXAONE 4.5 (LGAI-EXAONE/EXAONE-4.5-33B-GGUF: Q4_K_M text, 18.7 GiB, F16 projector, 2.4 GiB) read
+images as llama.cpp and transformers do?
+
+EXAONE 4.5 is Qwen2.5-VL's windowed vision tower with GQA attention (32 query heads, 8 kv) beside the EXAONE 4 text
+stack, on plain 1D positions (no M-RoPE), with `<vision><|image_pad|></vision>` placeholders. It runs on the Qwen-VL
+path: the tower moved to `inference_nn::vision` and took GQA, the Qwen-VL inputs processor takes the delimiters and
+whether to build M-RoPE positions from its spec, and the model ropes and masks as a text stack does. The GGUFs bind as
+Qwen2.5-VL's projector under `model.visual`, the text as EXAONE 4 under `model.language_model`, the `nextn` block as
+the checkpoint's root-level `mtp.*`.
+
+Probe: the repository's sample photo (3744x5616, a person in a hanbok making kimchi) resized to 448x672 (384 image
+tokens), "Describe this image in one sentence.", greedy, thinking off and on. llama.cpp needs `--no-mmproj-offload`
+(the projector does not fit beside the weights), ours spills layers 60-63 to the CPU.
+
+```
+                prompt tokens (transformers' processor: 403 off / 401 on, 384 pads)
+llama.cpp       402 / 400
+ours            403 / 401
+
+thinking off    5 of 34 equal, max |d logprob| 0.226; step 5 a near tie on both sides:
+                llama.cpp ' ' -0.607 / ' traditional' -0.878, ours ' traditional' -0.704 / ' ' -0.778
+                llama.cpp: "A person in a light blue hanbok is preparing kimchi in a dark bowl, while a plate of freshly
+                           made, vibrant kimchi sits in the foreground on a white tablecloth."
+                ours:      "A person in a light blue traditional Korean hanbok is preparing kimchi in a dark bowl, while a
+                           plate of freshly made, vibrant red kimchi sits in the foreground on a white tablecloth."
+thinking on     19 of 80 equal, max |d logprob| 0.108; step 19 a near tie (' foreground' -0.675 / ' image' -0.714)
+```
+
+Our prompt is transformers' token for token in count; llama.cpp's is one shorter (its media marker leaves out a
+newline the template writes), so the image's surroundings already differ there. The text side alone (the same GGUF as
+a text model, wikitext-2 c=2048, 4 chunks): PPL 7.4759 against llama.cpp's 7.4640, KLD 0.00281, same top-1 97.75%.
+
+What the run turned up: the GGUF's `exaone-moe` pre-tokenizer (now read), its 65-block pattern covering the MTP
+block (the text config keeps the stack's 64), the vision delimiters marking each image's span for the prefix cache
+(Qwen's were looked up), and drafting through the Qwen-VL wrapper, which built its own masks for the verify step's
+rows: a flat-position model now masks as its text stack does, and the tiny MTP test keeps greedy output.
+
+## Run 5 - 2026-11-16 19:55
+
+**Question:** does EXAONE 4.5's MTP layer draft on the real checkpoint?
+
+`--mtp` needs every layer on the card (PagedAttention), which the Q4_K_M text GGUF with the projector misses; the
+IQ4_XS text GGUF (16.8 GiB) fits with it at 2048 tokens. Greedy output with `--mtp --mtp-n-predict 2` equals plain
+(46 of 46 text tokens, 36 of 36 image tokens), but no draft is accepted: 0 of 86, and 0 of 43 at one draft a step.
+
+The head is vLLM's `Exaone4_5MultiTokenPredictor` (vllm/model_executor/models/exaone4_5_mtp.py): `fc` over
+`concat(pre_fc_norm_embedding(embed(token p+1)), pre_fc_norm_hidden(h_p))`, one `Exaone4DecoderLayer` (post-norm, its
+first layer, so sliding with RoPE), `mtp.norm`, the shared `lm_head`, `h_p` the target's final-normed output. The
+drafts are on topic but Korean (' 산란' "scattering" where ' by' follows "scattered", ' 파장' "wavelength" for
+' violet'); with the hidden half zeroed they turn to English function words, so the hidden half carries them.
+
+Checks, none of which moved acceptance off zero:
+
+```
+GGUF blk.64 against the checkpoint's bf16 mtp.* (shard 2's byte range)   cos 0.997 (IQ4_XS), norms 1.0000
+the dumped hiddens through the head                                        the target's next tokens (last row exact)
+a numpy reference of vLLM's head over those hiddens, 39 rows of plain English text:
+  as specified (GGUF weights or the checkpoint's bf16 MTP weights)        0/39
+  pre-norm hidden, current-token embedding, halves swapped, norms swapped  0/39
+  no attention to earlier rows                                             3/39
+  a pre-norm reading of the layer                                          0/39
+```
+
+The engine computes what vLLM's code describes; that description, over these weights and hiddens, predicts nothing
+here. Every probe above ran with thinking off or on raw text, which turns out to be the point: a self-distillation
+project on the stock head (github.com/gnu-gnu/exaone45-mtp-selfdistill, vLLM, FP8, 3 drafts) measures about 30%
+acceptance on thinking requests and 0.8% on non-thinking ones, where MTP runs at 0.85x of plain. The head was trained
+on reasoning traces.
+
+With thinking on (the sky prompt, 400 tokens, IQ4_XS with the projector, 2048 tokens):
+
+```
+                  accepted          decode tok/s
+plain                               38.5
+--mtp, 1 draft    161 of 235 (69%)  57.2  (1.49x)
+--mtp, 3 drafts   156 of 408 (38%)  51.6  (1.34x)
+```
+
+Drafted output parts from plain at near ties (164 of 382 and 82 of 297 tokens equal; the splits 0.04 apart), as
+batched verify rows round apart from one-by-one decode. EXAONE 4.5's MTP works as the references describe; it pays
+only while the model thinks, so `--mtp` suits thinking requests and costs speed on others.

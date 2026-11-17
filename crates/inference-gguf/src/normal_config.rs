@@ -1378,12 +1378,31 @@ fn build_exaone(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
 fn build_exaone4(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     let fields = StandardFields::read(metadata, Some(DEFAULT_ROPE_THETA))?;
     require_full_rotary(metadata, fields.head_dim)?;
-    let layer_types = qwen2_layer_types(metadata, &fields)?;
+    // the pattern also covers EXAONE 4.5's MTP block, past the decoder's layers
+    let blocks = metadata.required_usize("block_count")?;
+    let layer_types = fields
+        .sliding_window
+        .map(|_| -> SynthesisResult<Vec<&str>> {
+            let pattern = metadata
+                .sliding_pattern(blocks)?
+                .unwrap_or_else(|| vec![true; blocks]);
+            Ok(pattern
+                .into_iter()
+                .take(fields.num_hidden_layers)
+                .map(|sliding| {
+                    if sliding {
+                        "sliding_attention"
+                    } else {
+                        "full_attention"
+                    }
+                })
+                .collect())
+        });
     let mut config = fields.rms_json();
     config.insert("hidden_act".into(), json!("silu"));
     config.insert("head_dim".into(), json!(fields.head_dim));
     config.insert("rope_scaling".into(), llama_rope_scaling(metadata)?);
-    config.insert("layer_types".into(), json!(layer_types));
+    config.insert("layer_types".into(), json!(layer_types.transpose()?));
     Ok(JsonValue::Object(config))
 }
 

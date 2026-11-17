@@ -293,7 +293,10 @@ pub trait SpeculativeTargetMixin {
 #[macro_export]
 macro_rules! delegate_speculative_target {
     ($wrapper:ty, $field:ident: $inner:ty) => {
-        impl $crate::speculative::SpeculativeTargetMixin for $wrapper {
+        $crate::delegate_speculative_target!(@generic [] $wrapper, $field: $inner);
+    };
+    (@generic [$($generic:ident: $bound:path),*] $wrapper:ty, $field:ident: $inner:ty) => {
+        impl<$($generic: $bound),*> $crate::speculative::SpeculativeTargetMixin for $wrapper {
             fn attach_speculative(
                 &mut self,
                 config: $crate::speculative::SpeculativeConfig,

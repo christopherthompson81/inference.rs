@@ -31,6 +31,7 @@ const MTP: MtpSpec = MtpSpec {
     final_norm: None,
     dense_block: true,
     mask_first_position: true,
+    at_root: false,
 };
 
 #[derive(Debug, Clone, Default, serde::Serialize, inference_json::FromJson)]

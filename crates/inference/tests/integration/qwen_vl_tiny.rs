@@ -15,8 +15,8 @@ mod concurrent_cases;
 #[path = "../support/qwen_vl_tiny.rs"]
 mod support;
 use support::{
-    tiny_flash_next_vl, tiny_qwen2_5_vl, tiny_qwen2_vl, tiny_qwen3_5_moe, tiny_qwen3_5_moe_mtp,
-    tiny_qwen3_5_mtp, tiny_qwen3_vl, tiny_qwen3_vl_moe,
+    tiny_exaone4_5, tiny_exaone4_5_mtp, tiny_flash_next_vl, tiny_qwen2_5_vl, tiny_qwen2_vl,
+    tiny_qwen3_5_moe, tiny_qwen3_5_moe_mtp, tiny_qwen3_5_mtp, tiny_qwen3_vl, tiny_qwen3_vl_moe,
 };
 
 const PROMPT: &str = "describe";
@@ -184,6 +184,19 @@ async fn qwen2_5_vl_images_and_video() -> anyhow::Result<()> {
         (vec![3, 244, 153, 27, 31, 153], 37),
     ];
     assert_eq!(traces, expected);
+    Ok(())
+}
+
+// EXAONE 4.5 takes Qwen2.5-VL's media path with 1D positions and its own delimiters, and two images decode apart
+async fn exaone4_5_images_and_video() -> anyhow::Result<()> {
+    let checkpoint = tiny_exaone4_5()?;
+    let model = build(checkpoint.path()).await?;
+    let traces = traces(&model).await?;
+    let prompt_tokens = traces.iter().map(|(_, prompt)| *prompt).collect::<Vec<_>>();
+    // Qwen2.5-VL's counts and the newline EXAONE writes after each medium
+    assert_eq!(prompt_tokens, vec![33 + 1, 37 + 2, 37 + 1]);
+    let other_image = greedy_ids(&model, images(&IMAGE_SIDES[1..])).await?;
+    assert_ne!(traces[0].0, other_image.0, "two images decode alike");
     Ok(())
 }
 
@@ -513,6 +526,13 @@ async fn qwen3_5_builtin_mtp_keeps_greedy_output() -> anyhow::Result<()> {
     builtin_mtp_keeps_greedy_output(tiny_qwen3_5_mtp()?).await
 }
 
+async fn exaone4_5_builtin_mtp_keeps_greedy_output() -> anyhow::Result<()> {
+    if !ON_GPU {
+        return Ok(());
+    }
+    builtin_mtp_keeps_greedy_output(tiny_exaone4_5_mtp()?).await
+}
+
 async fn qwen3_5_moe_builtin_mtp_keeps_greedy_output() -> anyhow::Result<()> {
     if !ON_GPU {
         return Ok(());
@@ -618,6 +638,7 @@ concurrent_cases!(
         qwen2_vl_images_and_video: 348,
         qwen3_vl_images_and_video: 348,
         qwen2_5_vl_images_and_video: 348,
+        exaone4_5_images_and_video: 348,
         qwen3_vl_moe_images_and_video: 348,
         qwen2_vl_prefix_cache_serves_only_the_same_media: 362,
         qwen3_vl_prefix_cache_serves_only_the_same_media: 362,
@@ -626,6 +647,7 @@ concurrent_cases!(
         qwen3_5_moe_text_and_image: 388,
         flash_next_text_and_image: 394,
         qwen3_5_builtin_mtp_keeps_greedy_output: 534,
+        exaone4_5_builtin_mtp_keeps_greedy_output: 534,
         qwen3_5_moe_builtin_mtp_keeps_greedy_output: 514,
         qwen3_vl_ignores_a_configured_sliding_window: 348,
         a_lora_adapter_on_a_multimodal_model_applies_only_when_selected: 362,

@@ -98,7 +98,6 @@ inference_nn::json_config!(
     paddleocr_vl::config::Config,
     seed_oss::Config,
     exaone::Config,
-    exaone4::Config,
     rwkv6::Config,
     rwkv7::Config,
     rwkv_hybrid::ArwkvConfig,

@@ -41,14 +41,31 @@ pub const VISION_END: &str = "<|vision_end|>";
 pub const IMAGE_PAD: &str = "<|image_pad|>";
 pub const VIDEO_PAD: &str = "<|video_pad|>";
 pub const PLACEHOLDER: &str = "<|placeholder|>";
+pub const EXAONE_VISION_START: &str = "<vision>";
+pub const EXAONE_VISION_END: &str = "</vision>";
 
 pub struct Qwen2VLImageProcessor {
     max_edge: Option<u32>,
+    flat_positions: bool,
+    delimiters: (&'static str, &'static str),
 }
 
 impl Qwen2VLImageProcessor {
     pub fn new(max_edge: Option<u32>) -> Self {
-        Self { max_edge }
+        Self {
+            max_edge,
+            flat_positions: false,
+            delimiters: (VISION_START, VISION_END),
+        }
+    }
+
+    /// Qwen2.5-VL's media handling for EXAONE 4.5: 1D positions, `<vision>` delimiters.
+    pub fn exaone4_5(max_edge: Option<u32>) -> Self {
+        Self {
+            max_edge,
+            flat_positions: true,
+            delimiters: (EXAONE_VISION_START, EXAONE_VISION_END),
+        }
     }
 }
 
@@ -516,6 +533,14 @@ impl QwenVlSpec for Qwen2VLImageProcessor {
 
     fn video_runs_per_item(&self, grid: Option<&Tensor>) -> Result<Vec<usize>> {
         Ok(vec![1; grid.map_or(Ok(0), |grid| grid.dim(0))?])
+    }
+
+    fn mrope(&self) -> bool {
+        !self.flat_positions
+    }
+
+    fn vision_delimiters(&self) -> (&'static str, &'static str) {
+        self.delimiters
     }
 
     fn packed_text_needs_prompt_mrope(&self) -> bool {

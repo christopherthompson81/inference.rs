@@ -73,6 +73,14 @@ pub(crate) trait QwenVlSpec: Sync {
     fn video_runs_per_item(&self, grid: Option<&Tensor>) -> Result<Vec<usize>>;
     // Whether a packed text-only prefill still takes its MRoPE positions from the processor.
     fn packed_text_needs_prompt_mrope(&self) -> bool;
+    // Whether the model ropes M-RoPE positions at all; EXAONE 4.5's text stack takes plain 1D ones.
+    fn mrope(&self) -> bool {
+        true
+    }
+    // The tokens around each medium's pads, which mark its span for the prefix cache.
+    fn vision_delimiters(&self) -> (&'static str, &'static str) {
+        (VISION_START, VISION_END)
+    }
     fn mrope_position_source(
         &self,
         seq: &dyn MediaSequence,
@@ -466,8 +474,9 @@ impl QwenVlInputs<'_> {
             seq.multimodal().rope_img_grid_thw.is_some()
                 || seq.multimodal().rope_vid_grid_thw.is_some()
         });
-        let needs_prompt_mrope =
-            has_rope_grids || (flash_meta.packed && self.spec.packed_text_needs_prompt_mrope());
+        let needs_prompt_mrope = self.spec.mrope()
+            && (has_rope_grids
+                || (flash_meta.packed && self.spec.packed_text_needs_prompt_mrope()));
         let input_ids_full = match input_ids_full {
             Some(ids) => ids,
             None if flash_meta.packed || needs_prompt_mrope => {
@@ -582,8 +591,16 @@ impl QwenVlInputs<'_> {
                 spatial_merge_size: self.spec.spatial_merge_size(config)?,
                 image_token_id: token_id(&tokenizer, IMAGE_PAD, "image pad")?,
                 video_token_id: token_id(&tokenizer, VIDEO_PAD, "video pad")?,
-                vision_start_token_id: token_id(&tokenizer, VISION_START, "vision start")?,
-                vision_end_token_id: token_id(&tokenizer, VISION_END, "vision end")?,
+                vision_start_token_id: token_id(
+                    &tokenizer,
+                    self.spec.vision_delimiters().0,
+                    "vision start",
+                )?,
+                vision_end_token_id: token_id(
+                    &tokenizer,
+                    self.spec.vision_delimiters().1,
+                    "vision end",
+                )?,
             };
             Some(self.prompt_mrope(input_seqs, flash_meta.packed, input.dim(1)?, &mrope)?)
         } else {
@@ -791,8 +808,9 @@ impl QwenVlInputs<'_> {
         }
         seq.set_initial_prompt(detok);
         if seq.mm_features().is_empty() {
-            let start_id = token_id(tokenizer, VISION_START, "vision start")?;
-            let end_id = token_id(tokenizer, VISION_END, "vision end")?;
+            let (start, end) = self.spec.vision_delimiters();
+            let start_id = token_id(tokenizer, start, "vision start")?;
+            let end_id = token_id(tokenizer, end, "vision end")?;
             let img_pad_id = token_id(tokenizer, IMAGE_PAD, "image pad")?;
             let image_ranges =
                 find_placeholder_delimited_ranges(&ids, img_pad_id, start_id, end_id);

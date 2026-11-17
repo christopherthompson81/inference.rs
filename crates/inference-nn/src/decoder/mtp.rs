@@ -45,6 +45,8 @@ pub struct MtpSpec {
     pub dense_block: bool,
     /// Position 0 has no previous token, so its embedding is zeroed (vLLM's ERNIE and DeepSeek heads).
     pub mask_first_position: bool,
+    /// The names sit under the checkpoint's root, not the stack's prefix (EXAONE 4.5's `mtp.*`).
+    pub at_root: bool,
 }
 
 struct DraftRow {
@@ -167,6 +169,14 @@ impl MtpBlock for StandardMtpBlock {
         if let (Some(norm), Some(name)) = (&self.layer.norms.pre_ffn, self.norm_names.pre_ffn) {
             norm.add_residual(&uvb_b.pp(name));
         }
+        if let (Some((post_attn, post_ffn)), Some(attn_name), Some(ffn_name)) = (
+            &self.layer.norms.post,
+            self.norm_names.post_attn,
+            self.norm_names.post_ffn,
+        ) {
+            post_attn.add_residual(&uvb_b.pp(attn_name));
+            post_ffn.add_residual(&uvb_b.pp(ffn_name));
+        }
         super::LayerAttention::add_residual(&self.layer.self_attn, &uvb_b.pp(self.self_attn_name));
     }
 }
@@ -280,14 +290,14 @@ impl MtpHead<StandardMtpBlock> {
             device: &device,
             attention,
         };
+        let vb_m = &if mtp.at_root {
+            vb_m.root()
+        } else {
+            vb_m.clone()
+        };
         let vb_block = vb_m.pp(mtp.block);
         let (self_attn, mlp) = builder.build(&load, vb_block.clone())?;
         let names = spec.norm_names;
-        if names.post_attn.is_some() || names.post_ffn.is_some() {
-            inference_tensor::bail!(
-                "an MTP head over post-norm or sandwich layers is not supported"
-            );
-        }
         let norm = |vb: ShardedVarBuilder| {
             Norm::new(
                 spec.norm,
@@ -308,7 +318,15 @@ impl MtpHead<StandardMtpBlock> {
                     .pre_ffn
                     .map(|name| norm(vb_block.pp(name)))
                     .transpose()?,
-                post: None,
+                post: match (names.post_attn, names.post_ffn) {
+                    (Some(post_attn), Some(post_ffn)) => {
+                        Some((norm(vb_block.pp(post_attn))?, norm(vb_block.pp(post_ffn))?))
+                    }
+                    (None, None) => None,
+                    _ => inference_tensor::bail!(
+                        "an MTP head's layer names both post norms or neither"
+                    ),
+                },
             },
         };
         Ok(Self::from_parts(MtpHeadParts {
@@ -502,6 +520,10 @@ impl<B: MtpBlock> MtpHead<B> {
             .broadcast_as((rows, 1))?
             .contiguous()?;
         Tensor::cat(&[&logits, &floor], 1)?.index_select(&vocab.gather, 1)
+    }
+
+    pub fn at_root(&self) -> bool {
+        self.names.at_root
     }
 
     pub fn n_predict(&self) -> usize {

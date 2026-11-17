@@ -628,6 +628,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.MINICPMO` | `'minicpmo'` |
 | `MultimodalLoaderType.PHI4MM` | `'phi4mm'` |
 | `MultimodalLoaderType.QWEN2_5VL` | `'qwen2_5vl'` |
+| `MultimodalLoaderType.EXAONE4_5` | `'exaone4_5'` |
 | `MultimodalLoaderType.GEMMA3` | `'gemma3'` |
 | `MultimodalLoaderType.MISTRAL3` | `'mistral3'` |
 | `MultimodalLoaderType.LLAMA4` | `'llama4'` |

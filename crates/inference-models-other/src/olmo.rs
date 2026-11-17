@@ -22,13 +22,6 @@ const FULL_ATTENTION: &str = "full_attention";
 const YARN: &str = "yarn";
 const DEFAULT_ROPE: &str = "default";
 
-pub const OLMO2_NORMS: NormNames = NormNames {
-    input: None,
-    pre_ffn: None,
-    post_attn: Some("post_attention_layernorm"),
-    post_ffn: Some("post_feedforward_layernorm"),
-    last: "norm",
-};
 const FULL_WIDTH_QK_NORM: QkNorm = QkNorm::FullWidth {
     q: "q_norm",
     k: "k_norm",
@@ -173,7 +166,7 @@ impl Olmo2Config {
     pub fn decoder_spec(&self) -> inference_tensor::Result<DecoderSpec> {
         let c = &self.common;
         let mut spec = c.base_spec(NormKind::Rms, self.rms_norm_eps);
-        spec.norm_names = OLMO2_NORMS;
+        spec.norm_names = NormNames::POST;
         spec.qk_norm = Some(FULL_WIDTH_QK_NORM);
         spec.rope = self.rope(self.rope_scaling.as_ref())?;
         if let Some(layer_types) = &self.layer_types {
