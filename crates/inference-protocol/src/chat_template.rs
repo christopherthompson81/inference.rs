@@ -1020,6 +1020,28 @@ mod tests {
         assert_eq!(rendered, enabled);
     }
 
+    // EXAONE 4's template skips its system turn with `continue` and passes json.dumps' `ensure_ascii`
+    #[test]
+    fn templates_can_continue_a_loop_and_keep_non_ascii_json() {
+        let template = ChatTemplateValue(Either::Left(
+            "{%- for m in messages %}{%- if loop.first %}{{ m.content | tojson(ensure_ascii=False) }}{%- continue %}{%- endif %}|{{ m.content }}{%- endfor %}"
+                .to_string(),
+        ));
+        let rendered = apply_chat_template_to(
+            vec![user_text_message("h\u{e9}llo"), user_text_message("next")],
+            true,
+            None,
+            None,
+            &template,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(rendered, "\"h\u{e9}llo\"|next");
+    }
+
     #[test]
     fn thinking_off_is_a_zero_thinking_budget() {
         let template = ChatTemplateValue(Either::Left(

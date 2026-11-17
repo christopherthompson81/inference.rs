@@ -1055,7 +1055,13 @@ impl AttentionBlock {
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<(Tensor, Tensor)> {
         let Some(rope) = &self.rotary_emb else {
-            return Ok((q, k));
+            // a NoPE layer still norms each head (EXAONE 4's global layers)
+            return match &self.qk_norm {
+                Some((QkNorm::BeforeRope { .. } | QkNorm::AfterRope { .. }, q_norm, k_norm)) => {
+                    Ok((q_norm.forward(&q)?, k_norm.forward(&k)?))
+                }
+                Some((QkNorm::FullWidth { .. }, ..)) | None => Ok((q, k)),
+            };
         };
         match (&**rope, &self.qk_norm) {
             (LayerRope::MRope(_) | LayerRope::InterleavedMRope(_), None) => {
@@ -1463,13 +1469,9 @@ impl DecoderStack {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: &AttentionImplementation,
     ) -> Result<Self> {
-        // a NoPE layer skips the RoPE step that carries q/k norm and the temperature
-        if !spec.no_rope_layers.is_empty()
-            && (spec.qk_norm.is_some() || spec.attention_temperature.is_some())
-        {
-            inference_tensor::bail!(
-                "NoPE layers with q/k norm or attention temperature are not supported"
-            );
+        // a NoPE layer skips the RoPE step that carries the temperature
+        if !spec.no_rope_layers.is_empty() && spec.attention_temperature.is_some() {
+            inference_tensor::bail!("NoPE layers with attention temperature are not supported");
         }
         if let RopeKind::MRope { interleaved, .. } = spec.rope {
             // interleaved M-RoPE fuses an RMS q/k norm before rotating; nothing else rides along

@@ -361,6 +361,11 @@ impl SupportedArch for NormalLoaderType {
                     ex!("LiquidAI/LFM2-8B-A1B", "LFM2"),
                 ],
             },
+            Self::Exaone4 => ArchMetadata {
+                families: &["EXAONE 4.0"],
+                modalities: m,
+                examples: &[ex!("LGAI-EXAONE/EXAONE-4.0-1.2B")],
+            },
             Self::SeedOss => ArchMetadata {
                 families: &["Seed-OSS"],
                 modalities: m,

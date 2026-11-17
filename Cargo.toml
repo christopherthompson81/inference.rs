@@ -197,7 +197,7 @@ tokenizers = { version = "0.23.2", default-features = false }
 # rustls on the provider `inference_mcp::tls::install_provider()` installs, trusting the system roots
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
 chrono = "0.4.43"
-minijinja = { version = "2.14.0", features = ["builtins", "json", "preserve_order"] }
+minijinja = { version = "2.14.0", features = ["builtins", "json", "loop_controls", "preserve_order"] }
 minijinja-contrib = { version = "2.14.0", features = ["pycompat"] }
 regex-automata = { version = "0.4.13", features = ["meta"] }
 galil-seiferas = "0.1.5"
