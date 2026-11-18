@@ -34,8 +34,6 @@ const IMATRIX_GGUF_TYPE: &str = "imatrix";
 const PROJECTOR_GGUF_ARCHITECTURE: &str = "clip";
 // inference_layout's `model_type` and GGUF `general.architecture`; that crate's kernels are too heavy to depend on here
 const LAYOUT_ARCHITECTURE: &str = "pp_doclayout_v3";
-// `architectures` of the DFlash drafter checkpoints (`DFlashDraftModel`, `DFlash2DraftModel`)
-const DRAFTER_ARCHITECTURE_PREFIX: &str = "DFlash";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,7 +60,7 @@ pub enum InventoryKind {
     Projector,
     /// A document layout detector (PP-DocLayoutV3), loaded apart from the engine.
     Layout,
-    /// A speculative decoding drafter (DFlash), attached to the model it drafts for (`mtp.model`).
+    /// A speculative decoding drafter (DFlash, DSpark, DSpine), attached to the model it drafts for (`mtp.model`).
     Drafter,
 }
 
@@ -732,7 +730,7 @@ fn dir_model(dir: &Path, origin: Origin<'_>) -> InventoryModel {
         if model
             .architecture
             .as_deref()
-            .is_some_and(|arch| arch.starts_with(DRAFTER_ARCHITECTURE_PREFIX))
+            .is_some_and(inference_nn::speculative::is_drafter_architecture)
         {
             model.kind = Some(InventoryKind::Drafter);
             return model;
@@ -953,6 +951,38 @@ mod tests {
         assert_eq!(profile("small-dense"), Some("Qwen3 0.6B"));
         assert_eq!(profile("unmeasured-Q8_0.gguf"), None);
         assert_eq!(profile("state-space-Q8_0.gguf"), None);
+    }
+
+    #[test]
+    fn every_drafter_architecture_lists_as_a_drafter() {
+        let dir = tempfile::tempdir().unwrap();
+        let architectures = [
+            "DFlashDraftModel",
+            "DFlash2DraftModel",
+            "DSparkDraftModel",
+            "DSpineDraftModel",
+        ];
+        for architecture in architectures {
+            let checkpoint = dir.path().join(architecture);
+            fs::create_dir(&checkpoint).unwrap();
+            fs::write(
+                checkpoint.join("config.json"),
+                format!(r#"{{"architectures": ["{architecture}"]}}"#),
+            )
+            .unwrap();
+            fs::write(checkpoint.join("model.safetensors"), b"").unwrap();
+        }
+        let scan = scan_models(&ScanRequest {
+            folders: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        });
+        for architecture in architectures {
+            assert_eq!(
+                by_name(&scan, architecture).kind,
+                Some(InventoryKind::Drafter),
+                "{architecture}"
+            );
+        }
     }
 
     #[test]

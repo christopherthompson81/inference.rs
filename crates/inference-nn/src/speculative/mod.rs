@@ -8,7 +8,10 @@ pub mod policy;
 pub mod proposer;
 pub mod target;
 
-pub use config::{MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig};
+pub use config::{
+    DSPINE_ARCHITECTURE, MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig,
+    is_drafter_architecture,
+};
 pub use logging::{SpeculativeAttachInfo, SpeculativeAttachKind};
 pub use policy::{
     AUTO_DEPTHS, AUTO_MAX_DEPTH, SpeculativeBatchObservation, SpeculativeBatchPlan,

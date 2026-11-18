@@ -32,7 +32,9 @@ use crate::dspine::{BridgeStash, DSpineHead, DSpineKeys, DSpineSpec, SecondPass,
 use inference_nn::layers::{RmsNorm, YarnRopeConfig, yarn_inv_freq_and_attention_factor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_nn::paged_attention::AuxiliaryPagedLayers;
-use inference_nn::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
+use inference_nn::speculative::{
+    MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay, is_drafter_architecture,
+};
 use inference_nn::utils::varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -57,7 +59,7 @@ pub const DEFAULT_MAX_DRAFTS: usize = 7;
 // depths an autotuned DFlash drafter chooses between, up to its n_predict (DSpine's 15-draft block reaches 11 and 15)
 pub const AUTO_DEPTHS: [usize; 5] = [3, 5, 7, 11, 15];
 const DSPARK_MARKOV_HEAD_TYPE: &str = "vanilla";
-const DSPINE: &str = "DSpine";
+use inference_nn::speculative::DSPINE_ARCHITECTURE as DSPINE;
 // Eager forwards use this cache; CUDA graphs derive RoPE from their replayed position inputs.
 const ROPE_CACHE_LEN: usize = 65536;
 const MASK_CACHE_CAP: usize = 64;
@@ -207,14 +209,6 @@ fn dflash_prefix_replay(
     }
 }
 
-/// Whether an `architectures` entry names a drafter this module loads: DFlash, DFlash 2 or DSpark.
-pub fn is_dflash_architecture(name: &str) -> bool {
-    name.contains("DFlash")
-        || name.contains("Dflash")
-        || name.contains("DSpark")
-        || name.contains(DSPINE)
-}
-
 fn config_names_dflash(value: &serde_json::Value) -> bool {
     value
         .get("architectures")
@@ -222,7 +216,7 @@ fn config_names_dflash(value: &serde_json::Value) -> bool {
         .is_some_and(|architectures| {
             architectures
                 .iter()
-                .any(|architecture| architecture.as_str().is_some_and(is_dflash_architecture))
+                .any(|architecture| architecture.as_str().is_some_and(is_drafter_architecture))
         })
 }
 
@@ -283,7 +277,9 @@ pub struct DFlashLoadTarget<'a> {
 
 impl DFlashConfig {
     pub fn is_dflash(&self) -> bool {
-        self.architectures.iter().any(|a| is_dflash_architecture(a))
+        self.architectures
+            .iter()
+            .any(|a| is_drafter_architecture(a))
     }
 
     fn is_dspark(&self) -> bool {
