@@ -9,7 +9,7 @@ Four commands turn an image of an object into 3D:
   color and metallic-roughness textures) from its own sparse structure, shape and texture stages.
 - `inference texture-mesh` paints a mesh you already have from the image, with TRELLIS.2's texturing pipeline.
 - `inference image-to-splat` runs Idol: the object as 3D Gaussian splats (PLY and SPZ), with the camera the image was
-  seen from.
+  seen from, and as a textured mesh (GLB) baked from them.
 - `inference voxels` runs JoVox for the object's voxel structure and meshes it with TRELLIS.2's shape stage
   (geometry only).
 
@@ -139,6 +139,7 @@ inference image-to-splat --image photo.jpg --out chair/ --mode real --gaussians 
 | `--guidance` | 3 | Classifier-free guidance strength (0: none) |
 | `--rescale-t` | 3 | The time grid's shift toward high noise (1: uniform) |
 | `--print-size` | 100 | The printable STL's longest side in millimetres (5 to 2000); see [Printable STL](#printable-stl) |
+| `--texture-size` | 2048 | The textured model's texture width and height: 1024, 2048 or 4096 |
 | `--idol`, `--dinov3`, `--vae` | fetched | Idol's folder, DINOv3 ViT-H+/16's `model.safetensors`, a FLUX.2 VAE's `diffusion_pytorch_model.safetensors` |
 | `--cpu` | off | Run on the CPU (very slow) |
 
@@ -151,17 +152,25 @@ chair/
   splat.ply      standard 3DGS PLY (degree-0 color, logit opacity, log scales), y down as 3DGS viewers expect
   splat.spz      the same splats as SPZ
   print.stl      the solid the splats enclose, to 3D print, in millimetres, +z up, standing on z = 0
+  model.glb      that solid's surface with a base color texture baked from the splats, y up as glTF expects
   prepared.png   what the model saw: the object cut out on black, 1024 x 1024
   meta.json      seed, Gaussian count, settings, timing and the input's camera (yaw, pitch, radius, vertical fov)
 ```
 
 The camera is Idol's z-up object frame: the eye sits at `radius * (sin yaw cos pitch, cos yaw cos pitch, sin pitch)`
 looking at the origin. On an RTX 3090 a default run takes 53 s (the 50 sampling steps most of it; the reference takes
-49 s) at an 8.1 GB GPU peak, plus about 3 s on the CPU for the printable STL.
+49 s) at an 8.1 GB GPU peak, plus about 2 s on the CPU for the printable STL and 5 s for the textured model.
+
+The textured model is the printable solid's surface (in the unit cube, simplified toward 200,000 faces), unwrapped and
+baked as TRELLIS.2's export bakes its own: each texel takes the color of the splats around it, from a 256^3 volume where
+each Gaussian's color (its base spherical harmonic) is spread over the cells within a standard deviation, weighted by
+opacity, and grown a few cells outward so the surface, which sits just outside the splats, finds it. The material is
+matte and opaque: the splats' colors already hold their lighting, and view-dependent shine is not carried.
 
 As a server job: `{"kind": "image_to_splat"}` with one image, optionally `seed`, `mode` (`"synthetic"` or `"real"`),
-`gaussians`, `steps`, `guidance`, `rescale_t`, `print_size_mm` and `placement`; outputs under `splat/`. The web UI's
-3D tab has it as **Splats from an image**, opening in the splat viewer from the input's camera. With `--world-models <folder>`,
+`gaussians`, `steps`, `guidance`, `rescale_t`, `print_size_mm`, `texture_size` and `placement`; outputs under
+`splat/`. The web UI's 3D tab has it as **Splats from an image**, opening in the splat viewer from the input's camera,
+with **View textured model** and **View printable** beside it. With `--world-models <folder>`,
 checkpoints found there as `idol`, `dinov3-vith16plus-pretrain-lvd1689m/model.safetensors` and
 `FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors` are used instead of fetching them.
 

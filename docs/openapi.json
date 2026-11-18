@@ -7087,6 +7087,15 @@
             "format": "int32",
             "description": "Sampling steps (50 by default)",
             "minimum": 0
+          },
+          "texture_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The textured model's texture width and height: 1024, 2048 (the default) or 4096",
+            "minimum": 0
           }
         }
       },

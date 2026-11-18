@@ -391,6 +391,7 @@ async fn main() -> Result<()> {
             guidance,
             rescale_t,
             print_size,
+            texture_size,
             idol,
             dinov3,
             vae,
@@ -398,7 +399,8 @@ async fn main() -> Result<()> {
         } => {
             use inference_jobs::image_to_splat::{
                 IdolSettings, ImageToSplatOptions, MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS,
-                MAX_STEPS, MIN_GAUSSIANS, NoProgress, fetch_models, generate_splat_on,
+                MAX_STEPS, MIN_GAUSSIANS, NoProgress, TEXTURE_SIZES, fetch_models,
+                generate_splat_on,
             };
             let margin = match mode.as_str() {
                 "synthetic" => MARGIN_SYNTHETIC,
@@ -412,6 +414,9 @@ async fn main() -> Result<()> {
                 anyhow::bail!("--gaussians must be {MIN_GAUSSIANS} to {MAX_GAUSSIANS}");
             }
             check_print_size(print_size)?;
+            if !TEXTURE_SIZES.contains(&texture_size) {
+                anyhow::bail!("--texture-size must be one of {TEXTURE_SIZES:?}");
+            }
             let options = ImageToSplatOptions {
                 settings: IdolSettings {
                     seed,
@@ -422,6 +427,7 @@ async fn main() -> Result<()> {
                     margin,
                 },
                 print_size_mm: print_size,
+                texture_size,
             };
             let models = fetch_models(idol, dinov3, vae, &NoProgress)?;
             let device = if cpu {
@@ -442,6 +448,15 @@ async fn main() -> Result<()> {
                 report.camera.fov,
                 print_line(report.print.as_ref())
             );
+            if let Some(t) = &report.textured {
+                println!(
+                    "{}: {} faces, {}^2 texture, {:.1} s",
+                    inference_jobs::image_to_splat::GLB_FILE,
+                    t.faces,
+                    t.texture_size,
+                    t.seconds
+                );
+            }
         }
 
         Command::TextureMesh {

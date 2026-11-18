@@ -488,6 +488,10 @@ pub enum Command {
         #[arg(long, default_value_t = inference_jobs::print::DEFAULT_PRINT_SIZE_MM)]
         print_size: f64,
 
+        /// The textured model's (model.glb) texture width and height: 1024, 2048 or 4096
+        #[arg(long, default_value_t = inference_jobs::image_to_splat::DEFAULT_TEXTURE_SIZE)]
+        texture_size: usize,
+
         /// Idol's folder; fetched from speridlabs/idol when unset
         #[arg(long)]
         idol: Option<PathBuf>,

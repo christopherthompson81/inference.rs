@@ -2,6 +2,7 @@
 //! and the input's camera from DINOv3 and FLUX.2 VAE tokens; an octree decoder places anchor points from the latent and
 //! a Gaussian decoder turns each anchor into 32 Gaussians.
 
+mod colors;
 mod conditioning;
 mod decoder;
 mod dit;
@@ -11,6 +12,7 @@ mod parity;
 mod pipeline;
 mod preprocess;
 
+pub use colors::color_cells;
 pub use decoder::Gaussians;
 pub use pipeline::{
     Camera, IDOL_IMAGE_SIZE, IdolOutput, IdolPaths, IdolSettings, MAX_GAUSSIANS, MAX_STEPS,

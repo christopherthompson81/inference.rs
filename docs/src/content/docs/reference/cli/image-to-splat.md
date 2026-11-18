@@ -24,6 +24,7 @@ inference image-to-splat [OPTIONS] --image <IMAGE> --out <OUT>
 | `--guidance <GUIDANCE>` | `3` | Classifier-free guidance strength (0: none) |
 | `--rescale-t <RESCALE_T>` | `3` | The time grid's shift toward high noise (1: uniform) |
 | `--print-size <PRINT_SIZE>` | `100` | The printable STL's (print.stl) longest side, in millimetres |
+| `--texture-size <TEXTURE_SIZE>` | `2048` | The textured model's (model.glb) texture width and height: 1024, 2048 or 4096 |
 | `--idol <IDOL>` |  | Idol's folder; fetched from speridlabs/idol when unset |
 | `--dinov3 <DINOV3>` |  | DINOv3 ViT-H+/16's model.safetensors; fetched from facebook/dinov3-vith16plus-pretrain-lvd1689m (gated) when unset |
 | `--vae <VAE>` |  | A FLUX.2 VAE's diffusion_pytorch_model.safetensors; fetched from black-forest-labs/FLUX.2-klein-4B when unset |

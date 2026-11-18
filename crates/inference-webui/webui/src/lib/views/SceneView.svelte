@@ -46,6 +46,7 @@
   const MODEL_PRINT = "model/print.stl";
   const SAMPLE_PRINT = /^model\/(\d+)\/print\.stl$/;
   const OBJECT_PRINT = "splat/print.stl";
+  const OBJECT_MODEL = "splat/model.glb";
   const DEFAULT_PRINT_SIZE_MM = 100;
   const VOXELS_PLY = "voxels/voxels.ply";
   const VOXELS_MESH = "voxels/mesh.ply";
@@ -270,6 +271,7 @@
           steps: typeof splatSteps === "number" && Number.isFinite(splatSteps) ? splatSteps : null,
           guidance: typeof splatGuidance === "number" && Number.isFinite(splatGuidance) ? splatGuidance : null,
           print_size_mm: typeof printSize === "number" && Number.isFinite(printSize) ? printSize : null,
+          texture_size: textureSize,
           placement: room,
         });
       case "voxels":
@@ -361,6 +363,7 @@
       const n = output.file.match(SAMPLE_PRINT)?.[1];
       if (n) out.push({ label: `View printable ${n}`, file: output.file, format: "stl", flat: false });
     }
+    if (made(OBJECT_MODEL)) out.push({ label: "View textured model", file: OBJECT_MODEL, format: "glb", flat: false });
     if (made(OBJECT_PRINT)) out.push({ label: "View printable", file: OBJECT_PRINT, format: "stl", flat: false });
     if (made(VOXELS_PLY)) out.push({ label: "View voxels", file: VOXELS_PLY, format: "ply", flat: true });
     if (made(VOXELS_MESH)) out.push({ label: "View mesh", file: VOXELS_MESH, format: "ply", flat: false });
@@ -512,6 +515,15 @@
               <label class="flex flex-col gap-1">
                 <span class="text-[11px] text-gray-500">Guidance</span>
                 <input type="number" min="0" step="0.5" class="w-24 {field}" bind:value={splatGuidance} placeholder="3" disabled={busy} />
+              </label>
+              <label class="flex flex-col gap-1" title="The textured model's texture, baked from the splats' colors">
+                <span class="text-[11px] text-gray-500">Texture size</span>
+                <select class={field} bind:value={textureSize} disabled={busy}>
+                  <option value={null}>2048 (default)</option>
+                  {#each TEXTURE_SIZES as size (size)}
+                    <option value={size}>{size}</option>
+                  {/each}
+                </select>
               </label>
             {:else if mode === "voxels"}
               <label class="flex flex-col gap-1">

@@ -3,6 +3,7 @@
 
 use std::ops::RangeInclusive;
 use std::path::Path;
+use std::time::Instant;
 
 use inference_recon::printable::Solid;
 use serde::Serialize;
@@ -24,14 +25,15 @@ pub struct PrintReport {
     pub seconds: f64,
 }
 
-/// Writes the solid `make` builds as `print.stl` into `dir`; `None` (and no file) when nothing came out solid.
+/// Writes `solid` as `print.stl` into `dir`; `None` (and no file) when nothing came out solid. `started` is when
+/// making the solid began.
 pub fn write_print(
-    make: impl FnOnce() -> Solid,
+    solid: &Solid,
     dir: &Path,
     size_mm: f64,
+    started: Instant,
 ) -> anyhow::Result<Option<PrintReport>> {
-    let start = std::time::Instant::now();
-    let Some(print) = make().printable(size_mm) else {
+    let Some(print) = solid.printable(size_mm) else {
         tracing::warn!("the object came out with no solid to print");
         return Ok(None);
     };
@@ -40,6 +42,6 @@ pub fn write_print(
         size_mm,
         faces: print.faces,
         volume_cm3: print.volume_mm3 / MM3_PER_CM3,
-        seconds: start.elapsed().as_secs_f64(),
+        seconds: started.elapsed().as_secs_f64(),
     }))
 }
