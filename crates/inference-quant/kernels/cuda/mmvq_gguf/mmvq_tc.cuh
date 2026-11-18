@@ -3,14 +3,13 @@
 // is read and decoded once whatever the row count (sm_80+). After ExLlamaV3's exl3_gemv_kernel.
 
 #include "mmvq_rows.cuh"
+#include "mmvq_tc_act.cuh"
 
 // weight rows one warp's mma covers
 #define MMVQ_TC_ROWS 16
 // input rows one mma covers; 9-16 rows take a second mma per weight fragment, over activations quantized as a second
 // 8-row half right after the first
 #define MMVQ_TC_HALF_ROWS 8
-// mmvq_tc_quantize's bytes per 32-value block of one half: 32 lanes' int2 fragments, 8 rows' f32 scales and sums
-#define MMVQ_TC_HALF_BLOCK_BYTES (WARP_SIZE * 8 + 8 * 4 + 8 * 4)
 
 // Tile-ordered IQ4_KS (`iq4_ks_tiled`), the bytes of 16 rows regrouped so a warp reads the mma's A fragments with
 // coalesced word loads: per 16-row group, the rows' f32 scales (64 bytes), then per 256-value superblock its block
@@ -55,13 +54,13 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
   const int ngroups = (nrows_x + MMVQ_TC_ROWS - 1) / MMVQ_TC_ROWS;
   const int rg0 = blockIdx.x * GROUPS;
   const int2 *yq[HALVES];
-  const float2 *yd[HALVES];
-  const int2 *ys[HALVES];
+  const half2 *yd[HALVES];
+  const int *ys[HALVES];
 #pragma unroll
   for (int h = 0; h < HALVES; ++h) {
-    yq[h] = (const int2 *)((const char *)vy + (int64_t)h * nb * MMVQ_TC_HALF_BLOCK_BYTES);
-    yd[h] = (const float2 *)(yq[h] + (int64_t)nb * WARP_SIZE);
-    ys[h] = (const int2 *)(yd[h] + (int64_t)nb * (WARP_SIZE / 8));
+    yq[h] = (const int2 *)((const char *)vy + (int64_t)h * nb * MMVQ_TC_ACT_HALF_BLOCK_BYTES);
+    yd[h] = (const half2 *)(yq[h] + (int64_t)nb * WARP_SIZE);
+    ys[h] = (const int *)(yd[h] + (int64_t)nb * (WARP_SIZE / 8));
   }
 
   const char *gp[GROUPS];
@@ -94,8 +93,8 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
   // block ib's activations, the same for every row group: B fragment, row scales and row sums
   struct Act {
     int2 bq[HALVES];
-    float2 dy[HALVES];
-    int2 xs[HALVES];
+    half2 dy[HALVES];
+    int xs[HALVES];
   };
   auto load_act = [&](int ib, Act &a) {
 #pragma unroll
@@ -139,8 +138,8 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
         const float db = sb[n] * ((scb & 254) - 127);
 #pragma unroll
         for (int h = 0; h < HALVES; ++h) {
-          const int2 xs = act.xs[h];
-          const float2 dy = act.dy[h];
+          const int2 xs = tc_unpack_sums(act.xs[h]);
+          const float2 dy = __half22float2(act.dy[h]);
           int c[4] = {hia * xs.x, hia * xs.y, hib * xs.x, hib * xs.y};
           asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
               "{%0, %1, %2, %3};"
@@ -219,13 +218,13 @@ static void launch_mmvq_tc_iq4_ks(const void *vx, const void *vy, void *dst, int
                                    int stride_col_dst, int b_size, int cfg, void *stream) {
   cudaStream_t s = static_cast<cudaStream_t>(stream);
   // two input halves double the accumulators and the activations in flight: more row groups per warp, a shallower
-  // prefetch (RTX 3090 at 16 rows: FFN up 8x4x1, down 8x4x2, ssm_out 8x2x2)
+  // prefetch (RTX 3090 at 16 rows: FFN and ssm_out 8x2x3, attn_qkv 8x4x1)
   if (b_size > MMVQ_TC_HALF_ROWS) {
     switch (cfg) {
     case 1: launch_mmvq_tc_cfg<dst_t, 8, 4, 1>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
     case 2: launch_mmvq_tc_cfg<dst_t, 8, 4, 2>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
     case 3: launch_mmvq_tc_cfg<dst_t, 8, 2, 2>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
-    default: launch_mmvq_tc_cfg<dst_t, 8, 2, 4>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
+    default: launch_mmvq_tc_cfg<dst_t, 8, 2, 3>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); return;
     }
   }
   switch (cfg) {

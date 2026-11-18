@@ -1777,11 +1777,23 @@ fn speculative_state_commit_matches_prefix_replay_cuda() -> Result<()> {
 fn speculative_checkpoint_kernels_match_serial_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
+    // 16 is a DSpine verify block, the fused kernel's widest
+    for seq_len in [8, 16] {
+        run_speculative_checkpoint_case(&dev, seq_len)?;
+    }
+    Ok(())
+}
+
+fn run_speculative_checkpoint_case(dev: &Device, seq_len: usize) -> Result<()> {
+    let dev = dev.clone();
     let batch_size = 3;
-    let seq_len = 8;
-    let checkpoint_lanes = 8;
+    let checkpoint_lanes = seq_len;
     let capacity = batch_size * checkpoint_lanes;
-    let active_slots_host = vec![7u32, 14, GDN_PAD_SLOT];
+    let active_slots_host = vec![
+        checkpoint_lanes as u32 - 1,
+        2 * checkpoint_lanes as u32 - 2,
+        GDN_PAD_SLOT,
+    ];
     let active_slots = Tensor::from_vec(active_slots_host.clone(), (batch_size,), &dev)?;
 
     let conv_dim = 37;
