@@ -44,53 +44,6 @@ fn prepare_cuda_archive(path: std::path::PathBuf) -> std::path::PathBuf {
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-fn cuda_header_hash(dir: &str, excluded_dirs: &[&str]) -> Result<u64> {
-    use std::path::Path;
-
-    fn update(hash: &mut u64, bytes: &[u8]) {
-        for byte in bytes {
-            *hash ^= u64::from(*byte);
-            *hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    fn visit(path: &Path, excluded_dirs: &[&str], hash: &mut u64) -> Result<()> {
-        if excluded_dirs
-            .iter()
-            .any(|excluded| path == Path::new(excluded))
-        {
-            return Ok(());
-        }
-        if path.is_dir() {
-            let mut entries = std::fs::read_dir(path)?
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort();
-            for entry in entries {
-                visit(&entry, excluded_dirs, hash)?;
-            }
-            return Ok(());
-        }
-
-        let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-            return Ok(());
-        };
-        if ext != "cuh" && ext != "h" && ext != "hpp" {
-            return Ok(());
-        }
-
-        println!("cargo:rerun-if-changed={}", path.display());
-        update(hash, path.to_string_lossy().as_bytes());
-        update(hash, &std::fs::read(path)?);
-        Ok(())
-    }
-
-    let mut hash = 0xcbf29ce484222325;
-    visit(Path::new(dir), excluded_dirs, &mut hash)?;
-    Ok(hash)
-}
-
-#[cfg(all(feature = "cuda", target_family = "unix"))]
 fn main() -> Result<()> {
     use std::path::PathBuf;
 
@@ -103,11 +56,6 @@ fn main() -> Result<()> {
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let kernel_build_dir = cuda_build_dir(&out_dir, "kernels");
-
-    let header_hash_arg = format!(
-        "-DINFERENCE_RS_CUDA_HEADER_HASH={:016x}",
-        cuda_header_hash("kernels/cuda", &["kernels/cuda/fa3"])?
-    );
 
     let mut builder = inference_kernel_build::KernelBuilder::new()
         .source_glob("kernels/cuda/*.cu")
@@ -125,8 +73,7 @@ fn main() -> Result<()> {
         .arg("--use_fast_math")
         .arg("--verbose")
         .arg("--compiler-options")
-        .arg("-fPIC")
-        .arg(&header_hash_arg);
+        .arg("-fPIC");
 
     let compute_cap = builder.get_compute_cap().unwrap_or(80);
     // the sm_90a FA3 library builds when 90 is listed; the runtime takes it only on an sm_90 device
@@ -160,10 +107,6 @@ fn main() -> Result<()> {
 
     let using_fa3_fp8_paged = sm90_listed;
     if using_fa3_fp8_paged {
-        let fa3_header_hash = cuda_header_hash("third_party/flash-attention", &[])?
-            .wrapping_mul(0x100000001b3)
-            ^ cuda_header_hash("kernels/cuda/fa3", &[])?;
-        let fa3_header_hash_arg = format!("-DINFERENCE_RS_FA3_HEADER_HASH={fa3_header_hash:016x}");
         let fa3_build_dir = cuda_build_dir(&out_dir, "fa3");
         let mut fa3_builder = inference_kernel_build::KernelBuilder::new()
             .source_files(FA3_SOURCES)
@@ -197,7 +140,6 @@ fn main() -> Result<()> {
             .arg("-fPIC")
             .arg("-Xcompiler")
             .arg("-fvisibility=hidden")
-            .arg(&fa3_header_hash_arg)
             .max_threads(1)
             .nvcc_thread_patterns(
                 &["flash_fwd", "flash_prepare_scheduler", "fa3_decode_api"],
