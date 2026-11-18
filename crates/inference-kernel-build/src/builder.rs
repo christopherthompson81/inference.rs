@@ -531,6 +531,9 @@ impl KernelBuilder {
         toolkit.nvcc_path.hash(&mut key);
         toolkit.version.hash(&mut key);
         std::env::var("NVCC_CCBIN").ok().hash(&mut key);
+        // headers in the key, not in each object's arguments: an edit lands in a fresh dir (a running binary keeps its
+        // libraries, a revert finds the old dir) while ccache still hits every object it leaves unchanged
+        hash_paths(self.sources.watch_paths()).hash(&mut key);
         self.toolkit = Some(toolkit);
         let sources = self.sources.resolve()?;
         for file in &sources {

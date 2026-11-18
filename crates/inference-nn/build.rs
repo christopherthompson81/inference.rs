@@ -35,44 +35,6 @@ fn prepare_cuda_archive(path: std::path::PathBuf) -> std::path::PathBuf {
     path
 }
 
-#[cfg(feature = "cuda")]
-fn cuda_header_hash(dir: &std::path::Path) -> std::io::Result<u64> {
-    fn update(hash: &mut u64, bytes: &[u8]) {
-        for byte in bytes {
-            *hash ^= u64::from(*byte);
-            *hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    fn visit(path: &std::path::Path, hash: &mut u64) -> std::io::Result<()> {
-        if path.is_dir() {
-            let mut entries = std::fs::read_dir(path)?
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort();
-            for entry in entries {
-                visit(&entry, hash)?;
-            }
-            return Ok(());
-        }
-
-        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-            return Ok(());
-        };
-        if !matches!(extension, "h" | "cuh" | "hpp") {
-            return Ok(());
-        }
-
-        update(hash, path.to_string_lossy().as_bytes());
-        update(hash, &std::fs::read(path)?);
-        Ok(())
-    }
-
-    let mut hash = 0xcbf29ce484222325;
-    visit(dir, &mut hash)?;
-    Ok(hash)
-}
-
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(has_flashinfer_gdn_sm90_kernel)");
     println!("cargo::rustc-check-cfg=cfg(has_gdn_fp8_producer)");
@@ -91,11 +53,6 @@ fn main() {
         println!("cargo:rerun-if-env-changed=CUDA_PATH");
         let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
         let build_dir = cuda_build_dir(&out_dir, "kernels");
-        let header_hash_arg = format!(
-            "-DINFERENCE_RS_NN_CUDA_HEADER_HASH=0x{:016x}",
-            cuda_header_hash(std::path::Path::new("kernels/cuda"))
-                .expect("failed to hash CUDA headers")
-        );
 
         let mut builder = inference_kernel_build::KernelBuilder::new()
             .source_glob("kernels/cuda/*.cu")
@@ -113,8 +70,7 @@ fn main() {
             .arg("--use_fast_math")
             .arg("--verbose")
             .arg("--compiler-options")
-            .arg("-fPIC")
-            .arg(&header_hash_arg);
+            .arg("-fPIC");
 
         // a minimum holds for the lowest listed arch; the sm_90a library builds when 90 is listed
         let compute_cap = builder.get_compute_cap().unwrap_or(80);

@@ -1026,3 +1026,46 @@ Review follow-ups:
   - `touch` only: qwen family 6.6 s, diffusion 6.3 s, inference-nn 8.4 s, core 6.0 s, inference-api 3.8 s, CLI 1.8 s.
   - A real edit (a new `pub const`, which changes the crate's metadata so dependents recompile): qwen family 7.8 s, inference-nn 10.0 s, core 10.7 s, inference-api 7.1 s.
 - Implication: build time needs no work now. The cold build is faster than before the two series, and an edit anywhere rebuilds the binary in about 11 s or less.
+
+## Run 52 - 2026-11-18 20:40
+
+**Question:** kernel rebuilds feel slow. Where does a kernel edit's time go?
+
+**Cold kernel build, per file.** A temporary nvcc wrapper logged each call's time with `CCACHE_RECACHE=1` (compiles
+and stores, never reads), and `target/debug/cuda-kernels` was set aside so every library rebuilt
+(`scripts/build_cli.sh cuda`, load 0.1 at the start):
+
+```
+wall 873.5 s, of which nvcc 855 s; 12,630 nvcc CPU-seconds over 260 files (link steps: 92 calls, 4 s)
+crate               nvcc s   longest file   files
+inference-fattn       6,398        540 s       40
+inference-quant       5,941        122 s      179
+inference-nn            242         47 s       32
+inference-paged-attn     49         14 s        9
+```
+
+The cold build is bound by total work (12,630 s over 16 cores is about 790 s), and half of it is flash attention:
+the 22 `fattn-mma-f16-instance-*` files take 110-540 s each. One of them
+(`ncols1_8-ncols2_1`) takes 223 s here and 24 s in upstream llama.cpp (same flags, sm_86, same machine), with the
+same 93 kernels in the object but 4.5x the instructions (282K against 63K): our kernels carry the runtime
+`fattn_layout` paths (bf16 and fp8 K/V, 2-8 bit quantized K/V, paged and packed rows, f32 value sums) in every
+kernel. A header include map (`hk/incgraph.py`) prices a touch: any `fattn-mma-f16.cuh` edit recompiles 23 files,
+5,865 nvcc-seconds; `gguf_iq_tables.cuh` 56 files, 3,016 s; the MMQ headers 35 files, 2,703 s.
+
+**A one-line header edit.** A comment appended to `mmvq_tc.cuh`, which one file includes: `Compiling 179 of 179
+kernels`, 7 min 8 s (again 7 min 18 s with a second comment), and ccache hit 0 of 217 cacheable calls. The Rust
+crates above inference-quant recompiled in about 12 s of that (cargo `--timings`: 416.5 s was the quant build
+script). The cause: quant, nn and paged-attention passed `-D..._CUDA_HEADER_HASH=<hash of every header>` to every
+nvcc call, so any header edit changed every command line and every ccache key. The define dates from before the
+builder had its own change detection; what it still did was key the library directory (the key hashes the extra
+args), which is why an edit lands in a fresh directory a running binary does not hold and a revert finds the old one.
+
+**Change.** The builder hashes the watched files into the library directory key itself, and the three crates drop
+the define with their hand-written header hashes (quant also watches the vendored EXL3 sources its instance files
+include, which its hash covered and a directory watch does not; nvfp4 watches the whole kernel tree it hashed; FA3
+already watched its trees). The same probe: 32.6 s, ccache 178 of 179 direct hits. The one-time rebuild after the
+change took 7 min 29 s (every quant, nn and paged-attention line changed; fattn's did not and came from ccache).
+
+**Next.** Flash attention's compile weight is the open item: splitting each instance file per head size (6 per
+file) would cut its 540 s tail without cutting the work; cutting the work means compiling each K/V mode as its own
+kernels instead of every kernel carrying all of them, a performance-sensitive redesign.

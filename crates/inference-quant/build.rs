@@ -220,28 +220,17 @@ fn main() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let deepgemm_generator_hash =
             cuda_headers::hash(&deepgemm_headers).map_err(|e| e.to_string())?;
-        let mut header_files =
-            cuda_headers::find(Path::new("kernels/cuda")).map_err(|e| e.to_string())?;
-        // the EXL3 kernels' vendored headers, and the vendored sources their instance files include
-        header_files
-            .extend(cuda_headers::find(Path::new(EXL3_THIRD_PARTY)).map_err(|e| e.to_string())?);
-        header_files.extend(cuda_sources(Path::new(EXL3_THIRD_PARTY)).map_err(|e| e.to_string())?);
-        for header_file in &header_files {
-            println!("cargo:rerun-if-changed={}", header_file.display());
-        }
         for header_file in &deepgemm_headers {
             println!("cargo:rerun-if-changed={}", header_file.display());
         }
-        let header_hash_arg = format!(
-            "-DINFERENCE_RS_QUANT_CUDA_HEADER_HASH=0x{:016x}",
-            cuda_headers::hash(&header_files).map_err(|e| e.to_string())?
-        );
+        // the vendored EXL3 sources the instance files include are headers to them
+        let exl3_sources = cuda_sources(Path::new(EXL3_THIRD_PARTY)).map_err(|e| e.to_string())?;
         let kernel_build_dir = cuda_build_dir(&out_dir, "kernels");
         let mut builder = cuda_kernel_builder(&kernel_build_dir)
             .source_glob("kernels/cuda/*/*.cu")
             .watch(["kernels/cuda", EXL3_THIRD_PARTY])
-            .include_path(EXL3_THIRD_PARTY)
-            .arg(&header_hash_arg);
+            .watch(&exl3_sources)
+            .include_path(EXL3_THIRD_PARTY);
 
         // a minimum holds for the lowest listed arch; an arch-specific library builds when its arch is listed
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
@@ -382,7 +371,7 @@ fn main() -> Result<(), String> {
             let mut nvfp4_builder = inference_kernel_build::KernelBuilder::new()
                 .out_dir(&nvfp4_build_dir)
                 .source_files(["kernels/cuda/nvfp4_cutlass/nvfp4_cutlass.cu"])
-                .watch(["kernels/cuda/nvfp4_cutlass"])
+                .watch(["kernels/cuda"])
                 .compute_cap_arch("121a")
                 .compress_fatbin()
                 .with_compute_override_arch("nvfp4_cutlass.cu", "121a")
@@ -393,7 +382,6 @@ fn main() -> Result<(), String> {
                 .arg("--fmad=false")
                 .arg("--compiler-options")
                 .arg("-fPIC")
-                .arg(&header_hash_arg)
                 .with_cutlass(Some(&nvfp4_cutlass_commit));
             if let Some(cuda_nvcc_flags_env) = CUDA_NVCC_FLAGS {
                 nvfp4_builder = nvfp4_builder
