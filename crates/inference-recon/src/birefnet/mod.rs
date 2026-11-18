@@ -35,14 +35,13 @@ pub struct BiRefNet {
 impl BiRefNet {
     /// Loads `dir`'s `model.safetensors` onto `device`; it runs in f32.
     pub fn load(dir: &Path, device: &Device) -> Result<Self> {
+        Self::load_file(&dir.join("model.safetensors"), device)
+    }
+
+    /// Loads a BiRefNet checkpoint file (Idol ships one, without the training-only side outputs); it runs in f32.
+    pub fn load_file(path: &Path, device: &Device) -> Result<Self> {
         // SAFETY: the checkpoint file is not modified while the model is loaded
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[dir.join("model.safetensors")],
-                DType::F32,
-                device,
-            )?
-        };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, device)? };
         let context: usize = CHANNELS[1..].iter().sum();
         Ok(Self {
             encoder: Swin::load(SWIN_L, vb.pp("bb"))?,
@@ -118,6 +117,25 @@ impl BiRefNet {
             (width, height),
             PilFilter::Bicubic,
         ))
+    }
+
+    /// The foreground mask as Idol's `remove_background` makes it: torch bilinear (corners aligned) to 1024^2 and back,
+    /// the probability truncated to 8 bits.
+    pub fn mask_bilinear(&self, rgb: &[u8], (width, height): (usize, usize)) -> Result<Vec<u8>> {
+        let pixels: Vec<f32> = rgb.iter().map(|&v| f32::from(v) / 255.0).collect();
+        let images = Tensor::from_vec(pixels, (1, height, width, 3), &self.device)?
+            .permute((0, 3, 1, 2))?
+            .contiguous()?
+            .upsample_bilinear2d(INPUT_SIZE, INPUT_SIZE, true)?;
+        let mean = Tensor::new(&MEAN, &self.device)?.reshape((1, 3, 1, 1))?;
+        let std = Tensor::new(&STD, &self.device)?.reshape((1, 3, 1, 1))?;
+        let images = images.broadcast_sub(&mean)?.broadcast_div(&std)?;
+        let probs = inference_tensor::nn::ops::sigmoid(&self.logits(&images)?)?
+            .upsample_bilinear2d(height, width, true)?
+            .clamp(0f32, 1f32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        Ok(probs.iter().map(|p| (p * 255.0) as u8).collect())
     }
 
     /// The image with the mask as its alpha (four bytes a pixel).

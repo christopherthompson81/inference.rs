@@ -105,3 +105,18 @@ A GPU case: even attention over 8192 keys valued ~1000 through `sdpa` lands on t
 
 Bundle (`--size`): libinferencefattn.so +0.18 MiB for the three instances across archs; libinference_ffi.so +1.76 MiB
 from the TRELLIS.2 work merged today (#896-#903, no size run then); baseline updated.
+
+## Run 5 - 2026-11-17
+
+Question: Idol's denoiser (head 64, joint attention over 12,294 tokens, f16 blocks) drifted 4.3% rms in velocity
+against the reference's f16 run; does the f16 value sum explain it, and does head 64 need its own f32-values build?
+
+- f16 fattn (default sums): velocity rms 4.3% off the reference f16 dump.
+- f32 Sdpa on the same inputs: 0.23% (the reference's own f16-vs-f32 gap is 0.41%), so the sums were the drift.
+- `fattn_mma_f32_values_built` widened to `DKQ == 64 || DKQ == 128` (same `DV == DKQ`, `ncols2 == 1`, `ncols1 >= 16`),
+  selection in fattn.cu likewise; `f32_values.rs` loops `matches_the_reference` and `diffuse_rows_beat_the_f16_sums`
+  over both heads, the unbuilt check moved to head 80.
+- Idol with fattn f32 values: velocity 0.23%, end to end 68 s against 425 s with f32 Sdpa.
+
+Implication: the f32 value sums are the general answer for long diffuse rows in f16 DiTs, not a TRELLIS.2 quirk; a
+new head size is a gate change plus instances, not a new kernel.

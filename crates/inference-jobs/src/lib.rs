@@ -26,6 +26,7 @@ use crate::reconstruction::{
 };
 
 pub mod image_to_3d;
+pub mod image_to_splat;
 pub mod reconstruction;
 pub mod texture_mesh;
 pub mod voxels;
@@ -55,6 +56,9 @@ const VOXELS_NEED_BYTES: u64 = 12 << 30;
 // an image-to-3D job's: one flow at a time, but two decoders' 1024^3 levels
 const IMAGE_TO_3D_NEED_BYTES: u64 = 16 << 30;
 const IMAGE_TO_3D_DIR: &str = "model";
+// Idol's 8.1 GB peak at its default Gaussian count, and room for the decoder's batches at a million
+const IMAGE_TO_SPLAT_NEED_BYTES: u64 = 10 << 30;
+const IMAGE_TO_SPLAT_DIR: &str = "splat";
 // files read as a video rather than images
 const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "m4v", "mov", "avi", "mkv", "webm", "gif"];
 // the checkpoints' places under a models root, as their repositories lay them out
@@ -68,6 +72,9 @@ pub(crate) const DINOV3_DIR: &str = "dinov3-vitl16-pretrain-lvd1689m";
 pub(crate) const BIREFNET_DIR: &str = "BiRefNet";
 pub(crate) const TRELLIS2_DIR: &str = "TRELLIS.2-4B";
 pub(crate) const TRELLIS_LARGE_DIR: &str = "TRELLIS-image-large";
+pub(crate) const IDOL_DIR: &str = "idol";
+pub(crate) const DINOV3_HPLUS_FILE: &str = "dinov3-vith16plus-pretrain-lvd1689m/model.safetensors";
+pub(crate) const FLUX2_VAE_FILE: &str = "FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors";
 /// Where JoVox-64 is fetched from when no checkpoint is configured.
 pub const JOVOX_REPO: &str = "xiangjuntang/JoVox-64";
 /// Where DINOv3 ViT-L/16 is fetched from (gated: the token's account needs access).
@@ -78,6 +85,12 @@ pub const TRELLIS2_REPO: &str = "microsoft/TRELLIS.2-4B";
 pub const TRELLIS_LARGE_REPO: &str = "microsoft/TRELLIS-image-large";
 /// Where BiRefNet is fetched from.
 pub const BIREFNET_REPO: &str = "ZhengPeng7/BiRefNet";
+/// Where Idol (image to Gaussian splats) is fetched from.
+pub const IDOL_REPO: &str = "speridlabs/idol";
+/// Where DINOv3 ViT-H+/16, Idol's image encoder, is fetched from (gated: the token's account needs access).
+pub const DINOV3_HPLUS_REPO: &str = "facebook/dinov3-vith16plus-pretrain-lvd1689m";
+/// Where FLUX.2's VAE, Idol's other image encoder, is fetched from: FLUX.2-klein-4B's copy (ungated).
+pub const FLUX2_VAE_REPO: &str = "black-forest-labs/FLUX.2-klein-4B";
 /// Where WorldMirror 2.0 is fetched from when no checkpoint is configured.
 pub const WORLDMIRROR_REPO: &str = "tencent/HY-World-2.0";
 const WORLDMIRROR_FILES: [&str; 2] = ["config.json", "model.safetensors"];
@@ -151,6 +164,15 @@ pub struct JobsConfig {
     /// TRELLIS-image-large, whose sparse-structure decoder TRELLIS.2 reuses; fetched from its repository when unset
     #[schema(value_type = Option<String>)]
     pub trellis_large: Option<PathBuf>,
+    /// Idol's folder, for image-to-splat jobs; fetched from its repository when unset
+    #[schema(value_type = Option<String>)]
+    pub idol: Option<PathBuf>,
+    /// DINOv3 ViT-H+/16's `model.safetensors`, Idol's image encoder; fetched from its gated repository when unset
+    #[schema(value_type = Option<String>)]
+    pub dinov3_hplus: Option<PathBuf>,
+    /// A FLUX.2 VAE's `diffusion_pytorch_model.safetensors`, Idol's other encoder; fetched when unset
+    #[schema(value_type = Option<String>)]
+    pub flux2_vae: Option<PathBuf>,
     /// A Hugging Face repo laid out as a models root, fetched into the hub cache before a job that needs a checkpoint
     /// the fields above leave unset
     pub models_repo: Option<String>,
@@ -178,6 +200,9 @@ impl Default for JobsConfig {
             birefnet: None,
             trellis2: None,
             trellis_large: None,
+            idol: None,
+            dinov3_hplus: None,
+            flux2_vae: None,
             models_repo: None,
             worldmirror_repo: Some(WORLDMIRROR_REPO.to_string()),
             devices: None,
@@ -190,8 +215,9 @@ impl Default for JobsConfig {
 impl JobsConfig {
     /// The checkpoints found under `root` in their repositories' layout: `WorldStereo/worldstereo-memory-dmd`,
     /// `Wan2.1-I2V-14B-480P-Diffusers`, `moge-2-vitl-normal`, `HY-World-2.0/HY-WorldMirror-2.0`,
-    /// `lpips-vgg/lpips_vgg.safetensors`, `JoVox-64`, `dinov3-vitl16-pretrain-lvd1689m` and `BiRefNet`; a missing one
-    /// stays unset.
+    /// `lpips-vgg/lpips_vgg.safetensors`, `JoVox-64`, `dinov3-vitl16-pretrain-lvd1689m`, `BiRefNet`, `TRELLIS.2-4B`,
+    /// `TRELLIS-image-large`, `idol`, `dinov3-vith16plus-pretrain-lvd1689m/model.safetensors` and
+    /// `FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors`; a missing one stays unset.
     pub fn with_models_root(mut self, root: &Path) -> Self {
         let found = |relative: &str| {
             let path = root.join(relative);
@@ -207,6 +233,9 @@ impl JobsConfig {
         self.birefnet = found(BIREFNET_DIR);
         self.trellis2 = found(TRELLIS2_DIR);
         self.trellis_large = found(TRELLIS_LARGE_DIR);
+        self.idol = found(IDOL_DIR);
+        self.dinov3_hplus = found(DINOV3_HPLUS_FILE);
+        self.flux2_vae = found(FLUX2_VAE_FILE);
         self
     }
 
@@ -497,6 +526,43 @@ pub struct ImageTo3dJob {
     pub placement: Option<Placement>,
 }
 
+/// How an image-to-splat job crops its image around the object.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SplatImageMode {
+    /// Renders and generated images of one object: a tight crop (1.2x the object)
+    #[default]
+    Synthetic,
+    /// Photos: a looser crop (1.7x the object)
+    Real,
+}
+
+/// Idol's Gaussian splats of the object in the job's one image.
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
+pub struct ImageToSplatJob {
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub mode: Option<SplatImageMode>,
+    /// Gaussians to make, 32,768 to 1,048,576 (262,144 by default), rounded down to a multiple of 32
+    #[serde(default)]
+    pub gaussians: Option<u32>,
+    /// Sampling steps (50 by default)
+    #[serde(default)]
+    pub steps: Option<u32>,
+    /// Classifier-free guidance strength (3 by default; 0: none)
+    #[serde(default)]
+    pub guidance: Option<f64>,
+    /// The time grid's shift toward high noise (3 by default; 1: uniform)
+    #[serde(default)]
+    pub rescale_t: Option<f64>,
+    /// How much it may displace to run, in place of the server's setting
+    #[serde(default)]
+    pub placement: Option<Placement>,
+}
+
 /// A mesh painted from an image with TRELLIS.2's texturing pipeline; the job takes the mesh (glb, obj or ply) and the
 /// image.
 #[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
@@ -539,6 +605,8 @@ pub enum JobRequest {
     ImageTo3d(ImageTo3dJob),
     /// A mesh painted from an image with TRELLIS.2
     TextureMesh(TextureMeshJob),
+    /// Idol's Gaussian splats of the object in one image
+    ImageToSplat(ImageToSplatJob),
 }
 
 impl JobRequest {
@@ -549,6 +617,7 @@ impl JobRequest {
             Self::Voxels(_) => "voxels",
             Self::ImageTo3d(_) => "image_to_3d",
             Self::TextureMesh(_) => "texture_mesh",
+            Self::ImageToSplat(_) => "image_to_splat",
         }
     }
 }
@@ -1570,6 +1639,81 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
     Ok((prepare, work))
 }
 
+fn image_to_splat_work(
+    config: &JobsConfig,
+    job: ImageToSplatJob,
+) -> Result<(Prepare, Work), ApiError> {
+    use crate::image_to_splat::{
+        MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS, MAX_STEPS, MIN_GAUSSIANS, fetch_models,
+        generate_splat_on,
+    };
+    let defaults = inference_recon::idol::IdolSettings::default();
+    let settings = inference_recon::idol::IdolSettings {
+        seed: job.seed.unwrap_or(defaults.seed),
+        steps: job.steps.map_or(defaults.steps, |s| s as usize),
+        guidance: job.guidance.unwrap_or(defaults.guidance),
+        rescale_t: job.rescale_t.unwrap_or(defaults.rescale_t),
+        gaussians: job.gaussians.map_or(defaults.gaussians, |g| g as usize),
+        margin: match job.mode.unwrap_or_default() {
+            SplatImageMode::Synthetic => MARGIN_SYNTHETIC,
+            SplatImageMode::Real => MARGIN_REAL,
+        },
+    };
+    if !(1..=MAX_STEPS).contains(&settings.steps) {
+        return Err(ApiError::invalid_request(format!(
+            "steps must be 1 to {MAX_STEPS}"
+        )));
+    }
+    if !(MIN_GAUSSIANS..=MAX_GAUSSIANS).contains(&settings.gaussians) {
+        return Err(ApiError::invalid_request(format!(
+            "gaussians must be {MIN_GAUSSIANS} to {MAX_GAUSSIANS}"
+        )));
+    }
+    if !(settings.guidance >= 0.0 && settings.rescale_t > 0.0) {
+        return Err(ApiError::invalid_request(
+            "guidance must be at least 0 and rescale_t above 0",
+        ));
+    }
+    let fetched = Arc::new(std::sync::OnceLock::new());
+    let (base, slot) = (config.clone(), fetched.clone());
+    let prepare: Prepare = Box::new(move |ctx: &JobContext| {
+        let models = fetch_models(
+            base.idol.clone(),
+            base.dinov3_hplus.clone(),
+            base.flux2_vae.clone(),
+            ctx,
+        )?;
+        let _ = slot.set(models);
+        Ok(())
+    });
+    let work: Work = Box::new(move |ctx: &JobContext| {
+        let models = fetched.get().expect("prepared before the work runs");
+        let device = ctx.device()?.clone();
+        let image = ctx
+            .inputs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("an image-to-splat job takes one image"))?;
+        let out = ctx.dir().join(IMAGE_TO_SPLAT_DIR);
+        let report = generate_splat_on(models, &image, &out, &settings, ctx, &device)?;
+        let dir = ctx.dir();
+        let outputs = [
+            ("splats", crate::image_to_splat::SPZ_FILE),
+            ("splats (ply)", crate::image_to_splat::PLY_FILE),
+            ("prepared image", crate::image_to_splat::PREPARED_FILE),
+            ("meta", crate::image_to_splat::META_FILE),
+        ]
+        .into_iter()
+        .filter_map(|(name, file)| output(dir, &format!("{IMAGE_TO_SPLAT_DIR}/{file}"), name))
+        .collect();
+        Ok(JobResult {
+            outputs,
+            report: serde_json::to_value(report)?,
+        })
+    });
+    Ok((prepare, work))
+}
+
 // the name a job input was given
 fn input_name(input: &JobInput) -> String {
     match input {
@@ -1723,6 +1867,16 @@ impl JobQueue {
                 let placement = job.placement;
                 let work = texture_mesh_work(&config, job)?;
                 (JobNeed::Bytes(IMAGE_TO_3D_NEED_BYTES), placement, work)
+            }
+            JobRequest::ImageToSplat(job) => {
+                if inputs.len() != 1 {
+                    return Err(ApiError::invalid_request(
+                        "an image-to-splat job takes one image",
+                    ));
+                }
+                let placement = job.placement;
+                let work = image_to_splat_work(&config, job)?;
+                (JobNeed::Bytes(IMAGE_TO_SPLAT_NEED_BYTES), placement, work)
             }
         };
         let target = Target {

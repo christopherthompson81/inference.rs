@@ -2283,9 +2283,9 @@ static constexpr bool fattn_vkq_f32_compiled = true;
 static constexpr bool fattn_vkq_f32_compiled = false;
 #endif // defined(TURING_MMA_AVAILABLE)
 
-// inference-fattn: the cases the f32 value sums are built for: head 128 without GQA packing, 16 or more columns
+// inference-fattn: the cases the f32 value sums are built for: head 64 or 128 without GQA packing, 16 or more columns
 static constexpr __host__ __device__ bool fattn_mma_f32_values_built(const int DKQ, const int DV, const int ncols1, const int ncols2) {
-    return DKQ == 128 && DV == 128 && ncols2 == 1 && ncols1 >= 16;
+    return (DKQ == 128 || DKQ == 64) && DV == DKQ && ncols2 == 1 && ncols1 >= 16;
 }
 
 static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(
@@ -2598,7 +2598,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
                 ggml_cuda_raise_shared_memory_limit(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), shared_memory_limit_raised[id], nbytes_shared_total);
 #endif // !defined(GGML_USE_MUSA)
             } else {
-                GGML_ABORT("f32 value sums are built for head dim 128 without GQA packing at 16 or more columns");
+                GGML_ABORT("f32 value sums are built for head dims 64 and 128 without GQA packing at 16 or more columns");
             }
         } else {
             constexpr bool use_sparse_kernel = false;

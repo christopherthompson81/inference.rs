@@ -189,7 +189,7 @@ impl CrossKv {
 
 // a linear's product over `[batch, tokens, in]` without its bias, and the bias, for a fused pass to add
 #[cfg(feature = "cuda")]
-fn unbiased<'a>(linear: &'a AmpLinear, x: &Tensor) -> Result<(Tensor, &'a Tensor)> {
+pub(crate) fn unbiased<'a>(linear: &'a AmpLinear, x: &Tensor) -> Result<(Tensor, &'a Tensor)> {
     let linear = linear.linear();
     let Some(bias) = linear.bias() else {
         inference_tensor::bail!("the fused block's linears carry a bias");
@@ -204,7 +204,7 @@ fn unbiased<'a>(linear: &'a AmpLinear, x: &Tensor) -> Result<(Tensor, &'a Tensor
 
 // `[batch, heads, tokens, d]` attention; on CUDA fattn sums the softmax-weighted values in f32 (its f16 sums overflow
 // over a row spread across ~18K tokens and stray ~3% from the reference on long diffuse rows), else the shared path
-fn sdpa(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+pub(crate) fn sdpa(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let head_dim = q.dim(D::Minus1)?;
     #[cfg(feature = "cuda")]
     if q.device().is_cuda() {
@@ -336,7 +336,7 @@ impl Block {
         rope: &Rope,
         kv: &CrossKv,
     ) -> Result<Tensor> {
-        use super::dit_cuda::{bias_gelu, heads, ln_mod, residual};
+        use super::dit_cuda::{Rotation, bias_gelu, heads, ln_mod, residual};
         // chunks of the modulation: shift, scale and gate for attention, then for the MLP
         const SHIFT_MSA: usize = 0;
         const SCALE_MSA: usize = 1;
@@ -350,7 +350,12 @@ impl Block {
         let h = ln_mod(xs, None, Some((&m, SCALE_MSA, SHIFT_MSA)), ln_eps)?;
         let (qkv, qkv_bias) = unbiased(&self.qkv, &h)?;
         let qkv = qkv.reshape((b, n, 3, self.heads, ()))?;
-        let rot = Some((&rope.cos, &rope.sin));
+        let rot = Some(Rotation {
+            cos: &rope.cos,
+            sin: &rope.sin,
+            per_head: false,
+            first: false,
+        });
         let q = heads(&qkv, qkv_bias, 0, Some(&self.q_norm.scale), rot, rms_eps)?;
         let k = heads(&qkv, qkv_bias, 1, Some(&self.k_norm.scale), rot, rms_eps)?;
         let v = heads(&qkv, qkv_bias, 2, None, None, rms_eps)?;

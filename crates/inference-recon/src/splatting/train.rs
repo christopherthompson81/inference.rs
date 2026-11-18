@@ -1162,35 +1162,9 @@ impl Exported {
         }
     }
 
-    /// Writes the splats as a 3DGS PLY (x y z, f_dc, opacity logit, log scales, unit wxyz quaternion); the count.
+    /// Writes the splats as a 3DGS PLY ([`super::spz::write_ply`]); the count.
     pub fn write_ply(&self, path: &Path) -> Result<usize> {
-        use std::io::Write;
-        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
-        write!(
-            out,
-            "ply\nformat binary_little_endian 1.0\nelement vertex {}\n",
-            self.means.len()
-        )?;
-        for name in [
-            "x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1",
-            "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
-        ] {
-            writeln!(out, "property float {name}")?;
-        }
-        writeln!(out, "end_header")?;
-        for i in 0..self.means.len() {
-            let values = self.means[i]
-                .iter()
-                .chain(&self.sh0[i])
-                .chain(std::iter::once(&self.logits[i]))
-                .chain(&self.log_scales[i])
-                .chain(&self.quats[i]);
-            for v in values {
-                out.write_all(&v.to_le_bytes())?;
-            }
-        }
-        out.flush()?;
-        Ok(self.means.len())
+        super::spz::write_ply(path, &self.rows())
     }
 }
 

@@ -7,6 +7,8 @@ use inference_tensor::{DType, Tensor};
 
 use super::parity::{Case, N_HEAD, QLayout, case, cuda, reference};
 
+// the head dims the f32 sums are built for
+const HEAD_DIMS: [usize; 2] = [64, 128];
 const HEAD_DIM: usize = 128;
 // Max |fattn - reference| / max |reference| with f32 sums: the f16 inputs and the rounded result remain
 const TOLERANCE: [(DType, f32); 2] = [(DType::F16, 2e-3), (DType::BF16, 8e-3)];
@@ -44,8 +46,15 @@ fn worst_over_peak(got: &Tensor, want: &Tensor) -> Result<f32> {
 }
 
 fn matches_the_reference() -> Result<()> {
+    for head_dim in HEAD_DIMS {
+        matches_the_reference_at(head_dim)?;
+    }
+    Ok(())
+}
+
+fn matches_the_reference_at(head_dim: usize) -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
-    let scale = 1. / (HEAD_DIM as f32).sqrt();
+    let scale = 1. / (head_dim as f32).sqrt();
     // short and long Q (16 to 64 columns), batch 1 for the stream-k fixups, causal through a mask and implicitly
     for (batch, seq_q, seq_kv, causal) in [
         (2, 5, 300, false),
@@ -58,10 +67,10 @@ fn matches_the_reference() -> Result<()> {
             batch,
             causal,
             q_layout: QLayout::Contiguous,
-            ..case(HEAD_DIM, N_HEAD, seq_q, seq_kv)
+            ..case(head_dim, N_HEAD, seq_q, seq_kv)
         };
         for (dtype, tolerance) in TOLERANCE {
-            let rand = |s: usize| Tensor::randn(0f32, 1., (batch, s, N_HEAD, HEAD_DIM), &dev);
+            let rand = |s: usize| Tensor::randn(0f32, 1., (batch, s, N_HEAD, head_dim), &dev);
             let (q, k, v) = (
                 rand(seq_q)?.to_dtype(dtype)?,
                 rand(seq_kv)?.to_dtype(dtype)?,
@@ -76,11 +85,17 @@ fn matches_the_reference() -> Result<()> {
                 mask: mask.clone(),
                 ..f32_opts(scale)
             };
-            assert!(supported(&q, &k, &v, &opts)?, "q {seq_q} kv {seq_kv}");
+            assert!(
+                supported(&q, &k, &v, &opts)?,
+                "head {head_dim} q {seq_q} kv {seq_kv}"
+            );
             let got = flash_attn(&q, &k, &v, &opts)?;
             let want = reference(&q, &k, &v, mask.as_ref(), None, &c, scale)?;
             let err = worst_over_peak(&got, &want)?;
-            assert!(err <= tolerance, "q {seq_q} kv {seq_kv} {dtype:?}: {err}");
+            assert!(
+                err <= tolerance,
+                "head {head_dim} q {seq_q} kv {seq_kv} {dtype:?}: {err}"
+            );
         }
     }
     Ok(())
@@ -127,14 +142,21 @@ fn even_rows_over_large_values_stay_exact() -> Result<()> {
 }
 
 fn diffuse_rows_beat_the_f16_sums() -> Result<()> {
+    for head_dim in HEAD_DIMS {
+        diffuse_rows_beat_the_f16_sums_at(head_dim)?;
+    }
+    Ok(())
+}
+
+fn diffuse_rows_beat_the_f16_sums_at(head_dim: usize) -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let (seq, heads) = (EVEN_KEYS, 2);
     // small queries spread each row over most keys; values offset from zero so the sums grow
-    let shape = (1, seq, heads, HEAD_DIM);
+    let shape = (1, seq, heads, head_dim);
     let q = (Tensor::randn(0f32, 0.1, shape, &dev)?).to_dtype(DType::BF16)?;
     let k = Tensor::randn(0f32, 1., shape, &dev)?.to_dtype(DType::BF16)?;
     let v = (Tensor::randn(0f32, 1., shape, &dev)? + 4.0)?.to_dtype(DType::BF16)?;
-    let scale = 1. / (HEAD_DIM as f32).sqrt();
+    let scale = 1. / (head_dim as f32).sqrt();
     let want = plain_reference(&q, &k, &v, scale)?;
     let f32_err = worst_over_peak(&flash_attn(&q, &k, &v, &f32_opts(scale))?, &want)?;
     let f16_err = worst_over_peak(
@@ -151,7 +173,7 @@ fn diffuse_rows_beat_the_f16_sums() -> Result<()> {
     )?;
     assert!(
         f32_err * 4.0 < f16_err,
-        "f32 sums {f32_err} against f16 sums {f16_err}"
+        "head {head_dim}: f32 sums {f32_err} against f16 sums {f16_err}"
     );
     Ok(())
 }
@@ -171,8 +193,8 @@ fn unbuilt_shapes_are_not_supported() -> Result<()> {
         let t = |h: usize| Tensor::randn(0f32, 1., (1, 64, h, d), &dev)?.to_dtype(DType::F16);
         Ok((t(N_HEAD)?, t(heads_kv)?, t(heads_kv)?))
     };
-    let (q, k, v) = qkv(64, N_HEAD)?;
-    assert!(!supported(&q, &k, &v, &opts)?, "head dim 64");
+    let (q, k, v) = qkv(80, N_HEAD)?;
+    assert!(!supported(&q, &k, &v, &opts)?, "head dim 80");
     let (q, k, v) = qkv(HEAD_DIM, 2)?;
     assert!(!supported(&q, &k, &v, &opts)?, "GQA");
     let (q, k, v) = qkv(HEAD_DIM, N_HEAD)?;
@@ -182,5 +204,7 @@ fn unbuilt_shapes_are_not_supported() -> Result<()> {
     };
     assert!(!supported(&q, &k, &v, &softcap)?, "softcap");
     assert!(supported(&q, &k, &v, &opts)?, "head 128 without GQA");
+    let (q, k, v) = qkv(64, N_HEAD)?;
+    assert!(supported(&q, &k, &v, &opts)?, "head 64 without GQA");
     Ok(())
 }

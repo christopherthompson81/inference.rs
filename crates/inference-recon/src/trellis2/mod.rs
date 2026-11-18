@@ -7,7 +7,7 @@ pub mod cleanup;
 pub mod decoder;
 pub mod dit;
 #[cfg(feature = "cuda")]
-mod dit_cuda;
+pub(crate) mod dit_cuda;
 pub mod encoder;
 pub mod glb;
 pub mod mesh;

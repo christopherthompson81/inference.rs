@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import ImageGallery, { type GalleryItem } from "../components/ImageGallery.svelte";
   import MeshViewer, { type MeshFormat } from "../components/MeshViewer.svelte";
-  import SplatViewer, { type SplatFrame } from "../components/SplatViewer.svelte";
+  import SplatViewer, { type SplatFrame, type SplatStart } from "../components/SplatViewer.svelte";
   import {
     cancelJob,
     deleteJob,
@@ -12,6 +12,7 @@
     jobFileUrl,
     listJobs,
     submitImageTo3d,
+    submitImageToSplat,
     submitReconstruct,
     submitTextureMesh,
     submitVoxels,
@@ -20,6 +21,7 @@
     type JobRecord,
     type JobStatus,
     type Placement,
+    type SplatImageMode,
     type Trellis2Sampler,
     type Trellis2Variant,
   } from "../services/queuedJobs";
@@ -32,6 +34,11 @@
   const WORLD_SPLATS = "splats/splats.spz";
   const WORLD_SPLAT_REPORT = "splats/splats.json";
   const RECONSTRUCTION_SPLATS = "reconstruction/gaussians.ply";
+  // an image-to-splat job's splats and the input's predicted camera
+  const OBJECT_SPLATS = "splat/splat.spz";
+  const OBJECT_META = "splat/meta.json";
+  const DEFAULT_SPLAT_SEED = 42;
+  const GAUSSIAN_COUNTS = [65536, 131072, 262144, 524288, 1048576];
   // the image jobs' meshes
   const MODEL_GLB = "model/model.glb";
   const SAMPLE_GLB = /^model\/(\d+)\/model\.glb$/;
@@ -46,10 +53,11 @@
     failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
     cancelled: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   };
-  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", voxels: "Voxels", texture_mesh: "Textured mesh" };
-  type Mode = "world" | "reconstruct" | "image_to_3d" | "voxels" | "texture_mesh";
+  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", voxels: "Voxels", texture_mesh: "Textured mesh", image_to_splat: "Image to splats" };
+  type Mode = "world" | "reconstruct" | "image_to_3d" | "voxels" | "texture_mesh" | "image_to_splat";
   const MODES: { id: Mode; label: string }[] = [
     { id: "image_to_3d", label: "Object from an image" },
+    { id: "image_to_splat", label: "Splats from an image" },
     { id: "voxels", label: "Voxels from an image" },
     { id: "texture_mesh", label: "Texture a mesh" },
     { id: "world", label: "World from a panorama" },
@@ -101,6 +109,10 @@
   let removeBackground = $state(false);
   let voxelSteps = $state<number | null>(null);
   let voxelMesh = $state(true);
+  let splatMode = $state<SplatImageMode>("synthetic");
+  let gaussians = $state<number | null>(null);
+  let splatSteps = $state<number | null>(null);
+  let splatGuidance = $state<number | null>(null);
   let prompt = $state("");
   let scene = $state<"" | "indoor" | "outdoor">("");
   let seed = $state<number | null>(null);
@@ -112,7 +124,7 @@
   let status = $state("");
   let now = $state(Date.now() / 1000);
   let gallery = $state<{ items: GalleryItem[]; start: number } | null>(null);
-  let viewer = $state<{ url: string; frame: SplatFrame; sceneToSplats: number[][] | null; title: string } | null>(null);
+  let viewer = $state<{ url: string; frame: SplatFrame; sceneToSplats: number[][] | null; start?: SplatStart | null; title: string } | null>(null);
   let meshViewer = $state<{ url: string; format: MeshFormat; flat: boolean; title: string } | null>(null);
 
   let unfollow: (() => void) | null = null;
@@ -243,6 +255,15 @@
           texture_sampler: changed(samplers.texture),
           placement: room,
         });
+      case "image_to_splat":
+        return submitImageToSplat(image as File, {
+          seed,
+          mode: splatMode,
+          gaussians,
+          steps: typeof splatSteps === "number" && Number.isFinite(splatSteps) ? splatSteps : null,
+          guidance: typeof splatGuidance === "number" && Number.isFinite(splatGuidance) ? splatGuidance : null,
+          placement: room,
+        });
       case "voxels":
         return submitVoxels(image as File, { seed, steps: voxelSteps, remove_background: removeBackground || null, mesh: voxelMesh, placement: room });
     }
@@ -291,7 +312,10 @@
   async function view(job: JobRecord) {
     status = "";
     try {
-      if (job.outputs.some((output) => output.file === WORLD_SPLATS)) {
+      if (job.outputs.some((output) => output.file === OBJECT_SPLATS)) {
+        const meta = await fetch(jobFileUrl(job.id, OBJECT_META)).then((r) => r.json());
+        viewer = { url: jobFileUrl(job.id, OBJECT_SPLATS), frame: "opencv", sceneToSplats: null, start: objectStart(meta.camera), title: title(job) };
+      } else if (job.outputs.some((output) => output.file === WORLD_SPLATS)) {
         const report = await fetch(jobFileUrl(job.id, WORLD_SPLAT_REPORT)).then((r) => r.json());
         viewer = { url: jobFileUrl(job.id, WORLD_SPLATS), frame: "z_up", sceneToSplats: report.transform ?? null, title: title(job) };
       } else {
@@ -303,7 +327,15 @@
   }
 
   function viewable(job: JobRecord): boolean {
-    return job.outputs.some((output) => output.file === WORLD_SPLATS || output.file === RECONSTRUCTION_SPLATS);
+    return job.outputs.some((output) => [WORLD_SPLATS, RECONSTRUCTION_SPLATS, OBJECT_SPLATS].includes(output.file));
+  }
+
+  // Idol's camera sits on a sphere about the z-up object, yaw from +y toward +x; an OpenCV-framed file stands as y-up
+  function objectStart(camera: { yaw: number; pitch: number; radius: number; fov: number } | undefined): SplatStart | null {
+    if (!camera) return null;
+    const { yaw, pitch, radius, fov } = camera;
+    const [x, y, z] = [Math.sin(yaw) * Math.cos(pitch), Math.cos(yaw) * Math.cos(pitch), Math.sin(pitch)].map((v) => v * radius);
+    return { position: [x, z, -y], fov };
   }
 
   // the meshes a finished image job can be turned around in
@@ -383,7 +415,7 @@
           {/each}
         </div>
 
-        {#if mode === "image_to_3d" || mode === "voxels" || mode === "texture_mesh"}
+        {#if mode === "image_to_3d" || mode === "voxels" || mode === "texture_mesh" || mode === "image_to_splat"}
           {#if mode === "texture_mesh"}
             <p class="text-sm text-gray-600 dark:text-gray-400">
               TRELLIS.2 paints a mesh you supply from a photo of the object: the mesh is fitted to the unit cube, encoded, given PBR material under the photo, and baked onto its own texture coordinates (or an unwrap) in a GLB. About 20 s at 1024.
@@ -395,6 +427,10 @@
           {:else if mode === "image_to_3d"}
             <p class="text-sm text-gray-600 dark:text-gray-400">
               TRELLIS.2 builds a textured mesh of the object in one photo: its background removed with BiRefNet, then a voxel structure, the shape and its PBR material, baked into a GLB. About 40 s at 1024 on a 24 GB card, with a 6 GB GPU peak.
+            </p>
+          {:else if mode === "image_to_splat"}
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              Idol generates 3D Gaussian splats of the object in one photo (its background removed with BiRefNet), with the photo's camera. About a minute on a 24 GB card, with an 8 GB GPU peak.
             </p>
           {:else}
             <p class="text-sm text-gray-600 dark:text-gray-400">
@@ -438,6 +474,31 @@
                 <input type="checkbox" class="accent-blue-600" bind:checked={vertexColors} disabled={busy} />
                 Vertex colors
               </label>
+            {:else if mode === "image_to_splat"}
+              <label class="flex flex-col gap-1" title="How tightly the object is cropped">
+                <span class="text-[11px] text-gray-500">Image</span>
+                <select class={field} bind:value={splatMode} disabled={busy}>
+                  <option value="synthetic">A render or generated image</option>
+                  <option value="real">A photo</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Gaussians</span>
+                <select class={field} bind:value={gaussians} disabled={busy}>
+                  <option value={null}>262,144 (default)</option>
+                  {#each GAUSSIAN_COUNTS as count (count)}
+                    <option value={count}>{count.toLocaleString()}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Sampling steps</span>
+                <input type="number" min="1" max="200" class="w-24 {field}" bind:value={splatSteps} placeholder="50" disabled={busy} />
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Guidance</span>
+                <input type="number" min="0" step="0.5" class="w-24 {field}" bind:value={splatGuidance} placeholder="3" disabled={busy} />
+              </label>
             {:else if mode === "voxels"}
               <label class="flex flex-col gap-1">
                 <span class="text-[11px] text-gray-500">Sampling steps</span>
@@ -472,7 +533,7 @@
             {/if}
             <label class="flex flex-col gap-1">
               <span class="text-[11px] text-gray-500">Seed</span>
-              <input type="number" class="w-28 {field}" bind:value={seed} placeholder="0" disabled={busy} />
+              <input type="number" class="w-28 {field}" bind:value={seed} placeholder={mode === "image_to_splat" ? String(DEFAULT_SPLAT_SEED) : "0"} disabled={busy} />
             </label>
             {#if mode === "image_to_3d"}
               <label class="flex flex-col gap-1" title="Each result is seeded one past the last; the models load once for all of them">
@@ -480,10 +541,12 @@
                 <input type="number" min="1" max="8" class="w-20 {field}" bind:value={samples} placeholder="1" disabled={busy} />
               </label>
             {/if}
-            <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="An opaque photo always has its background removed">
-              <input type="checkbox" class="accent-blue-600" bind:checked={removeBackground} disabled={busy} />
-              Remove the background of a cut-out too
-            </label>
+            {#if mode !== "image_to_splat"}
+              <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="An opaque photo always has its background removed">
+                <input type="checkbox" class="accent-blue-600" bind:checked={removeBackground} disabled={busy} />
+                Remove the background of a cut-out too
+              </label>
+            {/if}
           </div>
           {#if mode === "image_to_3d" || mode === "texture_mesh"}
             <details class="text-sm">
@@ -681,5 +744,5 @@
   <MeshViewer url={meshViewer.url} format={meshViewer.format} flat={meshViewer.flat} title={meshViewer.title} onClose={() => (meshViewer = null)} />
 {/if}
 {#if viewer}
-  <SplatViewer url={viewer.url} frame={viewer.frame} sceneToSplats={viewer.sceneToSplats} title={viewer.title} onClose={() => (viewer = null)} />
+  <SplatViewer url={viewer.url} frame={viewer.frame} sceneToSplats={viewer.sceneToSplats} start={viewer.start ?? null} title={viewer.title} onClose={() => (viewer = null)} />
 {/if}

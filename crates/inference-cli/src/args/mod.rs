@@ -448,6 +448,60 @@ pub enum Command {
         cpu: bool,
     },
 
+    /// Gaussian splats of the object in one image with Idol: splat.ply (standard 3DGS), splat.spz, the image the model
+    /// saw and a meta.json with the input's predicted camera; an image without a transparent background has it removed
+    /// with the BiRefNet Idol ships
+    #[command(name = "image-to-splat")]
+    ImageToSplat {
+        /// The image (png, jpg, webp)
+        #[arg(long)]
+        image: PathBuf,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// `synthetic` (renders and generated images of one object: a tight crop) or `real` (photos: a looser crop)
+        #[arg(long, default_value = "synthetic")]
+        mode: String,
+
+        #[arg(long, default_value_t = inference_jobs::image_to_splat::IdolSettings::default().seed)]
+        seed: u64,
+
+        /// Gaussians to make, 32,768 to 1,048,576, rounded down to a multiple of 32
+        #[arg(long, default_value_t = inference_jobs::image_to_splat::IdolSettings::default().gaussians)]
+        gaussians: usize,
+
+        /// Sampling steps
+        #[arg(long, default_value_t = inference_jobs::image_to_splat::IdolSettings::default().steps)]
+        steps: usize,
+
+        /// Classifier-free guidance strength (0: none)
+        #[arg(long, default_value_t = inference_jobs::image_to_splat::IdolSettings::default().guidance)]
+        guidance: f64,
+
+        /// The time grid's shift toward high noise (1: uniform)
+        #[arg(long, default_value_t = inference_jobs::image_to_splat::IdolSettings::default().rescale_t)]
+        rescale_t: f64,
+
+        /// Idol's folder; fetched from speridlabs/idol when unset
+        #[arg(long)]
+        idol: Option<PathBuf>,
+
+        /// DINOv3 ViT-H+/16's model.safetensors; fetched from facebook/dinov3-vith16plus-pretrain-lvd1689m (gated) when
+        /// unset
+        #[arg(long)]
+        dinov3: Option<PathBuf>,
+
+        /// A FLUX.2 VAE's diffusion_pytorch_model.safetensors; fetched from black-forest-labs/FLUX.2-klein-4B when unset
+        #[arg(long)]
+        vae: Option<PathBuf>,
+
+        /// Run on the CPU (slow)
+        #[arg(long)]
+        cpu: bool,
+    },
+
     /// A textured 3D model of the object in one image with TRELLIS.2: model.glb (unwrapped mesh with baked PBR
     /// textures, or per-vertex color and material), mesh.ply, the cut-out image and a meta.json; an image without a
     /// transparent background has it removed with BiRefNet

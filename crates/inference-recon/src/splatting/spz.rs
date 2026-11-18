@@ -1,4 +1,4 @@
-//! Gaussian splats as SPZ (Niantic's open format, version 3): positions in 24-bit fixed point and every other attribute
+//! Gaussian splat exports: the standard 3DGS PLY, and SPZ (Niantic's open format, version 3): positions in 24-bit fixed point and every other attribute
 //! in a byte, gzipped, about a tenth of the PLY. Version 3 is the gzip form web viewers read; version 4 moved to zstd.
 
 use std::io::Write;
@@ -61,6 +61,42 @@ fn smallest_three(xyzw: [f32; 4]) -> u32 {
             | magnitude.min(max as u32);
     }
     packed
+}
+
+// a 3DGS PLY row: position, normal (zero), SH DC, opacity logit, log scales, quaternion
+const PLY_FIELDS: [&str; 17] = [
+    "x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1",
+    "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+];
+
+/// Writes `rows` as the standard 3D Gaussian Splatting PLY (binary little-endian floats); the splat count.
+pub fn write_ply(path: &Path, rows: &SplatRows) -> Result<usize> {
+    let n = rows.means.len();
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    write!(
+        out,
+        "ply\nformat binary_little_endian 1.0\nelement vertex {n}\n"
+    )?;
+    for name in PLY_FIELDS {
+        writeln!(out, "property float {name}")?;
+    }
+    writeln!(out, "end_header")?;
+    let mut body = Vec::with_capacity(n * PLY_FIELDS.len() * 4);
+    for i in 0..n {
+        let values = rows.means[i]
+            .iter()
+            .chain(&[0.0; 3])
+            .chain(&rows.sh0[i])
+            .chain(std::iter::once(&rows.logits[i]))
+            .chain(&rows.log_scales[i])
+            .chain(&rows.quats_wxyz[i]);
+        for v in values {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    out.write_all(&body)?;
+    out.flush()?;
+    Ok(n)
 }
 
 /// Writes `rows` to `path` as SPZ with no higher-order SH; the count written.

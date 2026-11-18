@@ -377,6 +377,63 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::ImageToSplat {
+            image,
+            out,
+            mode,
+            seed,
+            gaussians,
+            steps,
+            guidance,
+            rescale_t,
+            idol,
+            dinov3,
+            vae,
+            cpu,
+        } => {
+            use inference_jobs::image_to_splat::{
+                IdolSettings, MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS, MAX_STEPS,
+                MIN_GAUSSIANS, NoProgress, fetch_models, generate_splat_on,
+            };
+            let margin = match mode.as_str() {
+                "synthetic" => MARGIN_SYNTHETIC,
+                "real" => MARGIN_REAL,
+                other => anyhow::bail!("--mode must be synthetic or real, got `{other}`"),
+            };
+            if !(1..=MAX_STEPS).contains(&steps) {
+                anyhow::bail!("--steps must be 1 to {MAX_STEPS}");
+            }
+            if !(MIN_GAUSSIANS..=MAX_GAUSSIANS).contains(&gaussians) {
+                anyhow::bail!("--gaussians must be {MIN_GAUSSIANS} to {MAX_GAUSSIANS}");
+            }
+            let settings = IdolSettings {
+                seed,
+                steps,
+                guidance,
+                rescale_t,
+                gaussians,
+                margin,
+            };
+            let models = fetch_models(idol, dinov3, vae, &NoProgress)?;
+            let device = if cpu {
+                inference_tensor::Device::Cpu
+            } else {
+                inference_tensor::Device::cuda_if_available(0)?
+            };
+            let report = generate_splat_on(&models, &image, &out, &settings, &NoProgress, &device)?;
+            println!(
+                "{} Gaussians, seed {}, in {} ({:.1} s); camera yaw {:.3} pitch {:.3} radius {:.3} fov {:.1}",
+                report.gaussians,
+                report.seed,
+                out.display(),
+                report.total_seconds,
+                report.camera.yaw,
+                report.camera.pitch,
+                report.camera.radius,
+                report.camera.fov
+            );
+        }
+
         Command::TextureMesh {
             mesh,
             image,

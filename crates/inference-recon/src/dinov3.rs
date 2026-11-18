@@ -18,6 +18,10 @@ pub(crate) struct Dinov3Spec {
     pub patch: usize,
     pub registers: usize,
     pub rope_theta: f64,
+    /// A SwiGLU MLP (`gate_proj`, `up_proj`, `down_proj`) instead of GELU between `up_proj` and `down_proj`.
+    pub gated: bool,
+    /// The checkpoint's own final LayerNorm (`last_hidden_state`) before the plain one `forward` ends with.
+    pub final_norm: bool,
     pub dtype: DType,
 }
 
@@ -32,6 +36,24 @@ impl Dinov3Spec {
             patch: 16,
             registers: 4,
             rope_theta: 100.0,
+            gated: false,
+            final_norm: false,
+            dtype,
+        }
+    }
+
+    /// `facebook/dinov3-vith16plus-pretrain-lvd1689m`, as Idol reads it (`last_hidden_state`)
+    pub(crate) fn vith16plus(dtype: DType) -> Self {
+        Self {
+            dim: 1280,
+            depth: 32,
+            heads: 20,
+            mlp: 5120,
+            patch: 16,
+            registers: 4,
+            rope_theta: 100.0,
+            gated: true,
+            final_norm: true,
             dtype,
         }
     }
@@ -45,6 +67,7 @@ struct Layer {
     o: AmpLinear,
     scale1: Tensor,
     norm2: LayerNorm,
+    gate: Option<AmpLinear>,
     up: AmpLinear,
     down: AmpLinear,
     scale2: Tensor,
@@ -63,6 +86,10 @@ impl Layer {
             o: AmpLinear::load(c, c, true, dtype, attn.pp("o_proj"))?,
             scale1: vb.pp("layer_scale1").get(c, "lambda1")?,
             norm2: inference_tensor::nn::layer_norm(c, EPS, vb.pp("norm2"))?,
+            gate: spec
+                .gated
+                .then(|| AmpLinear::load(c, spec.mlp, true, dtype, vb.pp("mlp").pp("gate_proj")))
+                .transpose()?,
             up: AmpLinear::load(c, spec.mlp, true, dtype, vb.pp("mlp").pp("up_proj"))?,
             down: AmpLinear::load(spec.mlp, c, true, dtype, vb.pp("mlp").pp("down_proj"))?,
             scale2: vb.pp("layer_scale2").get(c, "lambda1")?,
@@ -96,7 +123,11 @@ impl Layer {
         let attn = self.o.forward(&attn.transpose(1, 2)?.reshape((b, n, c))?)?;
         let xs = (xs + attn.to_dtype(DType::F32)?.broadcast_mul(&self.scale1)?)?;
         let h = self.norm2.forward(&xs)?;
-        let mlp = self.down.forward(&self.up.forward(&h)?.gelu_erf()?)?;
+        let hidden = match &self.gate {
+            Some(gate) => (gate.forward(&h)?.silu()? * self.up.forward(&h)?)?,
+            None => self.up.forward(&h)?.gelu_erf()?,
+        };
+        let mlp = self.down.forward(&hidden)?;
         xs + mlp.to_dtype(DType::F32)?.broadcast_mul(&self.scale2)?
     }
 }
@@ -125,6 +156,7 @@ pub(crate) struct Dinov3 {
     cls_token: Tensor,
     register_tokens: Tensor,
     layers: Vec<Layer>,
+    norm: Option<LayerNorm>,
     spec: Dinov3Spec,
 }
 
@@ -146,6 +178,10 @@ impl Dinov3 {
             layers: (0..spec.depth)
                 .map(|i| Layer::load(spec, vb.pp("layer").pp(i)))
                 .collect::<Result<_>>()?,
+            norm: spec
+                .final_norm
+                .then(|| inference_tensor::nn::layer_norm(spec.dim, EPS, vb.pp("norm")))
+                .transpose()?,
             spec,
         })
     }
@@ -179,7 +215,8 @@ impl Dinov3 {
         ))
     }
 
-    /// Every token after the last layer, class token and registers first, through a LayerNorm with no affine
+    /// Every token after the last layer (and the checkpoint's final norm when the spec asks for it), class token and
+    /// registers first, through a LayerNorm with no affine
     /// (`[frames, 1 + registers + patches, dim]`, f32), for normalized images `[frames, 3, H, W]`.
     pub(crate) fn forward(&self, images: &Tensor) -> Result<Tensor> {
         let (frames, _, h, w) = images.dims4()?;
@@ -206,6 +243,9 @@ impl Dinov3 {
         let rope = self.rope(hp, wp, images.device())?;
         for layer in &self.layers {
             xs = layer.forward(&xs, &rope, prefix)?;
+        }
+        if let Some(norm) = &self.norm {
+            xs = norm.forward(&xs)?;
         }
         let ones = Tensor::ones(c, DType::F32, xs.device())?;
         let zeros = Tensor::zeros(c, DType::F32, xs.device())?;
