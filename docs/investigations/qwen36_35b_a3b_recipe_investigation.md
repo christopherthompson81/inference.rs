@@ -522,3 +522,73 @@ pad and the 9-slot floor is then allocated past it. The snapshot slots now come 
 ```
 
 No fewer-sequences warning; the tiny-model DFlash restore tests (memory and disk) pass with the smaller pool.
+
+## Run 16 - 2026-11-18 13:35
+
+Question: for an iGPU (780M, Vulkan) decode is GPU-bandwidth bound, and about 72% of the bytes read per token are
+non-expert tensors (GDN `attn_qkv`/`attn_gate`, `ssm_out`, full attention, shared experts, the head). Which of those
+can come down from R0 (IQ4_XS all experts, Q6_K head, Q8_0 the rest; Run 7) for the least KLD? Only types the Vulkan
+kernels take (k-quants, IQ4_XS, IQ3_S, legacy); no ik types, no MXFP4.
+
+The BF16 shards were gone; rebuilt from the HF safetensors with mainline `convert_hf_to_gguf.py --outtype bf16
+--no-mtp` (733 tensors, 69.4 GB, as Unsloth's). R0 rebuilt from it: 19,911,547,456 bytes, KLD 0.016889, the same
+as Run 4 (0.0168), so Run 2's reference and imatrix still apply.
+
+`igpu_sweep.sh`: R0 with one group lowered (a `--custom-q` rule prepended), quantize, `kld.sh`, delete. MB saved is
+also MB read less per token, as every tensor here is read on every token.
+
+```
+group / type          MB saved   mean KLD   median     99%      same top   MB per 0.001 KLD
+R0                         0     0.01689    0.00632    0.182    94.48%
+attn_qkv  Q6_K           121     0.01764    0.00626    0.190    94.59%     161
+attn_qkv  Q5_K           188     0.01825    0.00665    0.179    94.29%     138
+attn_qkv  IQ4_XS         267     0.02065    0.00795    0.214    93.63%      71
+attn_gate Q6_K            60     0.01758    0.00638    0.177    94.74%      87
+attn_gate Q5_K            94     0.01820    0.00657    0.181    94.32%      72
+attn_gate IQ4_XS         133     0.01875    0.00709    0.182    93.98%      72
+shexp     Q6_K            30     0.01701    0.00635    0.180    94.59%     ~240 (in the noise)
+shexp     Q5_K            47     0.01815    0.00675    0.186    94.58%      37
+shexp     IQ4_XS          66     0.01990    0.00797    0.191    93.94%      22
+output    Q5_K            67     0.01804    0.00751    0.184    94.26%      58
+output    Q4_K           131     0.02242    0.01146    0.193    93.13%      24
+attn q/k/v/o Q6_K         66     0.01687    0.00648    0.174    94.65%     free
+attn q/k/v/o Q5_K        102     0.01872    0.00696    0.190    94.30%      55
+attn q/k/v/o IQ4_XS      144     0.02141    0.00861    0.202    93.79%      32
+ssm_out   Q6_K            60     0.01747    0.00629    0.183    94.35%     103
+```
+
+Raw findings:
+
+- `attn_qkv` is the cheapest big group per KLD down to Q5_K; at IQ4_XS its cost per MB halves and its 99% tail grows.
+- Full attention at Q6_K costs nothing measurable; below that it is among the most expensive.
+- The shared experts are small and turn expensive below Q6_K; the head at Q4_K costs the most of any point.
+- `ssm_out` at Q6_K is cheaper per MB than `attn_gate` at any type here, against the Qwen3.5 sweep's "very
+  sensitive"; at Q6_K at least it is not.
+
+Picks (greedy by MB per 0.001 KLD, additivity assumed):
+
+- R1 (aim <= 0.020): attention Q6_K, shexp Q6_K, `attn_qkv` Q5_K, `ssm_out` Q6_K, `attn_gate` Q6_K. Sum of deltas
+  +0.0028 -> 0.0197, 404 MB.
+- R2 (aim <= 0.025): R1 with `attn_qkv` IQ4_XS, `attn_gate` IQ4_XS, head Q5_K. Sum +0.0075 -> 0.0244, 623 MB.
+
+Next: build and measure R1/R2, graft Unsloth's MTP block onto R0/R1/R2.
+
+## Run 17 - 2026-11-18 14:45
+
+Question: do the picked recipes land where the summed deltas say, and does our own `inference quantize gguf` give
+the same files as ik's `llama-quantize`?
+
+```
+          bytes (no MTP)   with MTP         mean KLD   median    99%     same top   summed estimate
+R1        19,504,405,056   19,928,405,888   0.01938    0.00704   0.201   94.05%     0.0197
+R2        19,285,473,856   19,709,474,688   0.02442    0.01026   0.236   93.34%     0.0244
+```
+
+The groups add close to linearly. MTP grafted onto R0/R1/R2 with `graft_mtp.py` (753 tensors each).
+
+R1 again with `inference quantize gguf` (same rules as `--tensor-type`, same `.dat` imatrix; dev build, 15.6 min,
+685 MB RSS): same tensor list and types; every Q8_0/F32 tensor byte-identical, all 371 Q5_K/Q6_K/IQ4_XS tensors
+different. `scripts/iq_quantize_parity.py` on those types: 0 bytes differing against mainline llama.cpp's
+`ggml_quantize_chunk` (plain and imatrix), 20-69% differing against ik_llama.cpp's. So ours is mainline's quantizer;
+ik changed its k-quant / IQ4_XS search. KLD of our R1: 0.01976, median 0.00745, 99% 0.220, same top 93.90%: ik's
+search is about 2% better on the mean and lighter in the tail. The published files use ik's.

@@ -4,6 +4,7 @@
 byte for byte.
 
 Usage: scripts/iq_quantize_parity.py <build lib dir> [type ...]   (default: iq4_nl iq4_xs; iq4_ks needs ik_llama.cpp)
+Against ik_llama.cpp's build ours runs its quantizer (`Quantizer::IkLlama`), against llama.cpp's ggml's.
   e.g. q4_k q6_k for the k-quants
 """
 
@@ -51,6 +52,11 @@ REQUIRES_IMATRIX = {"iq2_xxs", "iq2_xs", "iq1_s"}
 # ik_llama.cpp's quantize passes a zeroed `quantize_user_data`, which picks IQ2_KS's fast path; NULL picks the slow one
 USER_DATA = (ctypes.c_bool * 2)()
 ROWS, COLS = 64, 4096
+INIT_MEM = 1 << 20
+
+
+class InitParams(ctypes.Structure):
+    _fields_ = [("mem_size", ctypes.c_size_t), ("mem_buffer", ctypes.c_void_p), ("no_alloc", ctypes.c_bool)]
 SEED = 0
 
 
@@ -63,6 +69,8 @@ def ggml(lib_dir):
     if not names:
         sys.exit(f"no libggml-base.so or libggml.so in {lib_dir}")
     lib = ctypes.CDLL(os.path.join(lib_dir, names[0]))
+    # ik_llama.cpp's build is the one with libggml.so; ours follows its quantizer there
+    lib.ik = names[0] == "libggml.so"
     lib.ggml_quantize_chunk.restype = ctypes.c_size_t
     lib.ggml_quantize_chunk.argtypes = [
         ctypes.c_int,
@@ -76,6 +84,11 @@ def ggml(lib_dir):
     ]
     lib.ggml_row_size.restype = ctypes.c_size_t
     lib.ggml_row_size.argtypes = [ctypes.c_int, ctypes.c_int64]
+    # ik_llama.cpp's quantizers read fp16 through a table `ggml_init` fills; unfilled, every scale reads as 0
+    lib.ggml_init.restype = ctypes.c_void_p
+    lib.ggml_init.argtypes = [InitParams]
+    lib.ggml_free.argtypes = [ctypes.c_void_p]
+    lib.ggml_free(lib.ggml_init(InitParams(INIT_MEM, None, False)))
     return lib
 
 
@@ -126,7 +139,8 @@ def main():
                         values,
                         "-" if w is None else weights,
                         ours_path,
-                    ],
+                    ]
+                    + (["ik"] if lib.ik else []),
                     check=True,
                 )
                 ours = np.fromfile(ours_path, dtype=np.uint8)

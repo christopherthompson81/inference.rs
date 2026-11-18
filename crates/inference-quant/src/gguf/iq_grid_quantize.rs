@@ -328,6 +328,7 @@ pub(super) fn quantize_iq2_xxs(xbl: &[f32], qw: &[f32], out: &mut [u8]) {
             &xval,
             &mut lu,
             &weight,
+            inference_tensor::quantized::Quantizer::LlamaCpp,
         );
         // ggml starts from these levels, kept should no scale step beat them
         let mut l = lu.map(|l| l as i8);

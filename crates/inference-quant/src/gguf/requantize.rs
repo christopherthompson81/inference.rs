@@ -8,10 +8,11 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use half::{bf16, f16};
+pub use inference_tensor::quantized::Quantizer;
 use inference_tensor::quantized::gguf_file::{
     self, Header, TensorEntry, write_header, write_tensor_padding,
 };
-use inference_tensor::quantized::{GgmlDType, QTensor};
+use inference_tensor::quantized::{GgmlDType, QTensor, quantize_blocks};
 use inference_tensor::{Device, Result, Tensor};
 use rayon::prelude::*;
 use regex::Regex;
@@ -70,6 +71,7 @@ pub fn quantize_matrix(
     values: &[f32],
     imatrix: Option<&[f32]>,
     rows_per_slice: usize,
+    quantizer: Quantizer,
 ) -> Result<Vec<u8>> {
     let slice_values = rows_per_slice * cols;
     if let Some(w) = imatrix
@@ -84,7 +86,7 @@ pub fn quantize_matrix(
     let mut out = Vec::new();
     for (i, slice) in values.chunks(slice_values).enumerate() {
         let w = imatrix.map(|w| &w[i * cols..(i + 1) * cols]);
-        out.extend(quantize_slice(ty, cols, slice, w)?);
+        out.extend(quantize_slice(ty, cols, slice, w, quantizer)?);
     }
     Ok(out)
 }
@@ -94,6 +96,7 @@ fn quantize_slice(
     cols: usize,
     values: &[f32],
     imatrix: Option<&[f32]>,
+    quantizer: Quantizer,
 ) -> Result<Vec<u8>> {
     if iq_quantize::can_quantize(ty) {
         return iq_quantize::quantize_rows(ty, cols, values, imatrix);
@@ -101,25 +104,14 @@ fn quantize_slice(
     let Some(dtype) = ty.candle() else {
         inference_tensor::bail!("{ty:?} has no quantizer");
     };
-    // ggml's Q8_0 and float types ignore an imatrix
-    let weighted = !matches!(
-        dtype,
-        GgmlDType::Q8_0
-            | GgmlDType::Q8_1
-            | GgmlDType::Q8K
-            | GgmlDType::F32
-            | GgmlDType::F16
-            | GgmlDType::BF16
-    );
+    if !matches!(dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16) {
+        return quantize_blocks(dtype, values, imatrix, cols, quantizer);
+    }
     let chunks = values
         .par_chunks(ROWS_PER_TASK * cols)
         .map(|chunk| {
             let t = Tensor::from_slice(chunk, (chunk.len() / cols, cols), &Device::Cpu)?;
-            let q = match imatrix.filter(|_| weighted) {
-                Some(w) => QTensor::quantize_imatrix(&t, w, dtype)?,
-                None => QTensor::quantize(&t, dtype)?,
-            };
-            Ok(q.data()?.into_owned())
+            Ok(QTensor::quantize(&t, dtype)?.data()?.into_owned())
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(chunks.concat())
@@ -131,6 +123,7 @@ pub struct RequantizePlan {
     pub rules: Vec<(Regex, GgufType)>,
     /// llama.cpp's per-tensor importances (mean squared activations, an expert stack's experts one after another).
     pub imatrix: Option<HashMap<String, Vec<f32>>>,
+    pub quantizer: Quantizer,
 }
 
 #[derive(Debug, Default)]
@@ -304,7 +297,7 @@ pub fn requantize_gguf(
                 let expert = expert_rows.map_or(0, |e| first / e);
                 &w[expert * cols..(expert + 1) * cols]
             });
-            let out = quantize_slice(ty, cols, &to_f32(t.source_type, &bytes)?, w)
+            let out = quantize_slice(ty, cols, &to_f32(t.source_type, &bytes)?, w, plan.quantizer)
                 .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
             writer.write_all(&out)?;
             written += out.len();
@@ -529,6 +522,7 @@ mod tests {
                 (Regex::new(r".*").unwrap(), writable_type("q8_0")?),
             ],
             imatrix: Some(imatrix.clone()),
+            quantizer: Quantizer::LlamaCpp,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -553,7 +547,14 @@ mod tests {
         let row = GgufType::Iq4Ks.row_bytes(cols).unwrap();
         reader.read_exact(&mut bytes[..4 * row])?;
         let w = &imatrix["blk.0.ffn_up_exps.weight"];
-        let expected = quantize_matrix(GgufType::Iq4Ks, cols, &values, Some(w), 2)?;
+        let expected = quantize_matrix(
+            GgufType::Iq4Ks,
+            cols,
+            &values,
+            Some(w),
+            2,
+            Quantizer::LlamaCpp,
+        )?;
         assert_eq!(&bytes[..4 * row], expected.as_slice());
         // the second expert's rows weighed by the second slice, not the first
         let first_only =

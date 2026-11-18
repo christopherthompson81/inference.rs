@@ -137,6 +137,17 @@ pub struct GgufQuantizeOptions {
     /// llama.cpp's imatrix (`.dat` or `.gguf`), keyed by the source's tensor names
     #[arg(long)]
     pub imatrix: Option<PathBuf>,
+
+    /// Whose quantizer the bytes match: ik_llama.cpp's searches the scales of the k-quants (and others) further, for
+    /// lower error at the same size
+    #[arg(long, value_enum, default_value_t = QuantizerChoice::LlamaCpp)]
+    pub quantizer: QuantizerChoice,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum QuantizerChoice {
+    LlamaCpp,
+    IkLlama,
 }
 
 #[derive(Args, Clone)]

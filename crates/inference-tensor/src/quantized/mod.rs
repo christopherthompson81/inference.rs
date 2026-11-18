@@ -36,7 +36,7 @@ pub mod neon;
 pub mod utils;
 use half::{bf16, f16};
 
-pub use k_quants::GgmlType;
+pub use k_quants::{GgmlType, Quantizer};
 
 /// One block of 32 activations as Q8: the scale `max |x| / 127` (returned) and each value times its inverse,
 /// rounded half away from zero, as ggml's reference quantizer does.
@@ -486,6 +486,54 @@ pub enum GgmlDType {
     Q5K,
     Q6K,
     Q8K,
+}
+
+/// Rows of `n_per_row` values quantized on the CPU to `dtype`'s raw blocks as `quantizer` does it, whole rows to a
+/// thread; `imatrix` weighs a row's columns.
+pub fn quantize_blocks(
+    dtype: GgmlDType,
+    xs: &[f32],
+    imatrix: Option<&[f32]>,
+    n_per_row: usize,
+    quantizer: Quantizer,
+) -> Result<Vec<u8>> {
+    fn run<T: GgmlType>(
+        xs: &[f32],
+        imatrix: Option<&[f32]>,
+        n_per_row: usize,
+        quantizer: Quantizer,
+    ) -> Vec<u8> {
+        use rayon::prelude::*;
+        let mut ys = vec![T::zeros(); xs.len() / T::BLCK_SIZE];
+        let rows = (QUANTIZE_BLOCKS_PER_TASK * T::BLCK_SIZE / n_per_row).max(1);
+        xs.par_chunks(rows * n_per_row)
+            .zip(ys.par_chunks_mut(rows * n_per_row / T::BLCK_SIZE))
+            .for_each(|(xs, ys)| {
+                T::quantize_with(xs, ys, imatrix.map(|w| (w, n_per_row)), quantizer)
+            });
+        let bytes = std::mem::size_of_val(ys.as_slice());
+        // the blocks are plain bytes (repr(C), no padding), as the GGUF layout is
+        unsafe { std::slice::from_raw_parts(ys.as_ptr() as *const u8, bytes) }.to_vec()
+    }
+    if !n_per_row.is_multiple_of(dtype.block_size()) || !xs.len().is_multiple_of(n_per_row) {
+        crate::bail!(
+            "{} values in rows of {n_per_row} for {dtype:?} blocks",
+            xs.len()
+        )
+    }
+    Ok(match dtype {
+        GgmlDType::Q4_0 => run::<BlockQ4_0>(xs, imatrix, n_per_row, quantizer),
+        GgmlDType::Q4_1 => run::<BlockQ4_1>(xs, imatrix, n_per_row, quantizer),
+        GgmlDType::Q5_0 => run::<BlockQ5_0>(xs, imatrix, n_per_row, quantizer),
+        GgmlDType::Q5_1 => run::<BlockQ5_1>(xs, imatrix, n_per_row, quantizer),
+        GgmlDType::Q8_0 => run::<BlockQ8_0>(xs, None, n_per_row, quantizer),
+        GgmlDType::Q2K => run::<BlockQ2K>(xs, imatrix, n_per_row, quantizer),
+        GgmlDType::Q3K => run::<BlockQ3K>(xs, imatrix, n_per_row, quantizer),
+        GgmlDType::Q4K => run::<BlockQ4K>(xs, imatrix, n_per_row, quantizer),
+        GgmlDType::Q5K => run::<BlockQ5K>(xs, imatrix, n_per_row, quantizer),
+        GgmlDType::Q6K => run::<BlockQ6K>(xs, imatrix, n_per_row, quantizer),
+        _ => crate::bail!("quantize_blocks: no block quantizer for {dtype:?}"),
+    })
 }
 
 /// The types a GGUF writer offers, by llama.cpp's lowercase names.

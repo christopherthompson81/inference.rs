@@ -1,10 +1,12 @@
 use super::GgmlDType;
 use super::utils::{
-    get_scale_min_k4, group_for_dequantization, group_for_quantization, make_q3_quants,
-    make_qkx2_quants, make_qx_quants, nearest_int,
+    get_scale_min_k4, group_for_dequantization, group_for_quantization, madd, make_q3_quants,
+    make_qkx2_quants, make_qx_quants, nearest_int, nearest_int_mul,
 };
 use crate::Result;
-use crate::quantized::utils::{QKX3_SEARCH, QkxSearch, make_qkx3_quants, make_qp_quants};
+use crate::quantized::utils::{
+    QKX3_SEARCH, QkxSearch, make_qkx3_quants, make_qkx3_quants_ik, make_qp_quants,
+};
 use byteorder::{ByteOrder, LittleEndian};
 use half::{bf16, f16, slice::HalfFloatSliceExt};
 
@@ -28,6 +30,19 @@ pub const QK5_1: usize = 32;
 pub const QK8_0: usize = 32;
 pub const QK8_1: usize = 32;
 
+// ik_llama.cpp's Q2_K: the imatrix weights' share of the block's mean square, and the error fraction under which it
+// takes the values as ternary
+const Q2K_SIGMA_IK: f32 = 0.75;
+const Q2K_TERNARY_FIT: f32 = 0.1;
+
+/// Whose quantizer the bytes follow: llama.cpp's ggml, or ik_llama.cpp's, which searches scales further for some types.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Quantizer {
+    #[default]
+    LlamaCpp,
+    IkLlama,
+}
+
 pub trait GgmlType: Sized + Clone + Send + Sync {
     const DTYPE: GgmlDType;
     const BLCK_SIZE: usize;
@@ -50,6 +65,19 @@ pub trait GgmlType: Sized + Clone + Send + Sync {
             "`from_float_imatrix` is unimplemented for {:?}",
             Self::DTYPE
         );
+    }
+
+    /// `from_float`, or `from_float_imatrix` with the weights and row length, as `quantizer` quantizes.
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        _quantizer: Quantizer,
+    ) {
+        match imatrix {
+            Some((w, n_per_row)) => Self::from_float_imatrix(xs, ys, w, n_per_row),
+            None => Self::from_float(xs, ys),
+        }
     }
 
     fn direct_copy(_xs: &[f32], _ys: &mut [Self]) {}
@@ -306,8 +334,17 @@ impl GgmlType for BlockQ4_0 {
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
         for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
             let mut l = [0i8; 32];
-            let d =
-                unsafe { make_qx_quants(32, 8, xb.as_ptr(), l.as_mut_ptr(), 1, weight.as_ptr()) };
+            let d = unsafe {
+                make_qx_quants(
+                    32,
+                    8,
+                    xb.as_ptr(),
+                    l.as_mut_ptr(),
+                    1,
+                    weight.as_ptr(),
+                    Quantizer::LlamaCpp,
+                )
+            };
             block.d = f16::from_f32(d);
             for j in 0..16 {
                 block.qs[j] = l[j] as u8 | ((l[j + 16] as u8) << 4);
@@ -545,8 +582,17 @@ impl GgmlType for BlockQ5_0 {
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
         for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
             let mut l = [0i8; 32];
-            let d =
-                unsafe { make_qx_quants(32, 16, xb.as_ptr(), l.as_mut_ptr(), 1, weight.as_ptr()) };
+            let d = unsafe {
+                make_qx_quants(
+                    32,
+                    16,
+                    xb.as_ptr(),
+                    l.as_mut_ptr(),
+                    1,
+                    weight.as_ptr(),
+                    Quantizer::LlamaCpp,
+                )
+            };
             block.d = f16::from_f32(d);
             block.qh = pack_q5_high_bits(&l.map(|v| v as u8), &mut block.qs);
         });
@@ -921,6 +967,44 @@ impl GgmlType for BlockQ8_1 {
     }
 }
 
+/// ik_llama.cpp's ternary check: when `{-max, 0, max}` already fits the values to a tenth of their energy, each block
+/// stores `max` as both scales and the three levels directly. Returns whether it did.
+fn quantize_q2k_ternary(xs: &[f32], ys: &mut [BlockQ2K]) -> bool {
+    let q = Quantizer::IkLlama;
+    let max = xs.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let level = |v: f32| {
+        if v < -0.5 * max {
+            -1
+        } else if v < 0.5 * max {
+            0
+        } else {
+            1
+        }
+    };
+    let (mut mse0, mut mse) = (0f32, 0f32);
+    for &v in xs {
+        mse0 = madd(q, v, v, mse0);
+        let diff = madd(q, -max, level(v) as f32, v);
+        mse = madd(q, diff, diff, mse);
+    }
+    if mse >= Q2K_TERNARY_FIT * mse0 {
+        return false;
+    }
+    for (y, x) in ys.iter_mut().zip(xs.as_chunks::<QK_K>().0) {
+        y.d = f16::from_f32(max);
+        y.dmin = f16::from_f32(max);
+        y.scales.fill(1 | (1 << 4));
+        let l: [u8; QK_K] = std::array::from_fn(|j| (level(x[j]) + 1) as u8);
+        for j in (0..QK_K).step_by(128) {
+            for i in 0..32 {
+                y.qs[j / 4 + i] =
+                    l[j + i] | (l[j + i + 32] << 2) | (l[j + i + 64] << 4) | (l[j + i + 96] << 6);
+            }
+        }
+    }
+    true
+}
+
 impl GgmlType for BlockQ2K {
     const DTYPE: GgmlDType = GgmlDType::Q2K;
     const BLCK_SIZE: usize = QK_K;
@@ -993,74 +1077,96 @@ impl GgmlType for BlockQ2K {
 
     // https://github.com/ggerganov/llama.cpp/blob/8183159cf3def112f6d1fe94815fce70e1bffa12/k_quants.c#L279
     fn from_float(xs: &[f32], ys: &mut [Self]) {
-        const Q4SCALE: f32 = 15.0;
-
-        for (block, x) in group_for_quantization(xs, ys) {
-            let mut big_l: [u8; QK_K] = [0; QK_K];
-            //calculate scales and mins
-            let mut mins: [f32; QK_K / 16] = [0.0; QK_K / 16];
-            let mut scales: [f32; QK_K / 16] = [0.0; QK_K / 16];
-
-            for (j, x_scale_slice) in x.chunks(16).enumerate() {
-                let weights = x_scale_slice.iter().map(|v| v.abs()).collect::<Vec<_>>();
-                (scales[j], mins[j]) = make_qkx2_quants(
-                    3,
-                    x_scale_slice,
-                    &weights,
-                    Q2K_SEARCH,
-                    &mut big_l[16 * j..16 * (j + 1)],
-                );
-            }
-            // get max scale and max min and ensure they are >= 0.0
-            let max_scale = scales.iter().fold(0.0, |max, &val| val.max(max));
-            let max_min = mins.iter().fold(0.0, |max, &val| val.max(max));
-
-            if max_scale > 0.0 {
-                let iscale = Q4SCALE / max_scale;
-                for (j, scale) in scales.iter().enumerate().take(QK_K / 16) {
-                    block.scales[j] = nearest_int(iscale * scale) as u8;
-                }
-                block.d = f16::from_f32(max_scale / Q4SCALE);
-            } else {
-                block.scales[..QK_K / 16].fill(0);
-                block.d = f16::from_f32(0.0);
-            }
-
-            if max_min > 0.0 {
-                let iscale = Q4SCALE / max_min;
-                for (j, scale) in block.scales.iter_mut().enumerate() {
-                    let l = nearest_int(iscale * mins[j]) as u8;
-                    *scale |= l << 4;
-                }
-                block.dmin = f16::from_f32(max_min / Q4SCALE);
-            } else {
-                block.dmin = f16::from_f32(0.0);
-            }
-
-            for j in 0..QK_K / 16 {
-                let d = block.d.to_f32() * (block.scales[j] & 0xF) as f32;
-                if d == 0.0 {
-                    continue;
-                }
-                let dm = block.dmin.to_f32() * (block.scales[j] >> 4) as f32;
-                for ii in 0..16 {
-                    let ll = nearest_int((x[16 * j + ii] + dm) / d).clamp(0, 3);
-                    big_l[16 * j + ii] = ll as u8;
-                }
-            }
-
-            for j in (0..QK_K).step_by(128) {
-                for ll in 0..32 {
-                    block.qs[j / 4 + ll] = big_l[j + ll]
-                        | (big_l[j + ll + 32] << 2)
-                        | (big_l[j + ll + 64] << 4)
-                        | (big_l[j + ll + 96] << 6);
-                }
-            }
-        }
+        Self::quantize_with(xs, ys, None, Quantizer::LlamaCpp)
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
+        let Some((imatrix_weights, n_per_row)) = imatrix else {
+            const Q4SCALE: f32 = 15.0;
+            if quantizer == Quantizer::IkLlama && quantize_q2k_ternary(xs, ys) {
+                return;
+            }
+
+            for (block, x) in group_for_quantization(xs, ys) {
+                let mut big_l: [u8; QK_K] = [0; QK_K];
+                //calculate scales and mins
+                let mut mins: [f32; QK_K / 16] = [0.0; QK_K / 16];
+                let mut scales: [f32; QK_K / 16] = [0.0; QK_K / 16];
+
+                for (j, x_scale_slice) in x.chunks(16).enumerate() {
+                    let weights = x_scale_slice.iter().map(|v| v.abs()).collect::<Vec<_>>();
+                    (scales[j], mins[j]) = make_qkx2_quants(
+                        3,
+                        x_scale_slice,
+                        &weights,
+                        Q2K_SEARCH,
+                        &mut big_l[16 * j..16 * (j + 1)],
+                        quantizer,
+                    );
+                }
+                // get max scale and max min and ensure they are >= 0.0
+                let max_scale = scales.iter().fold(0.0, |max, &val| val.max(max));
+                let max_min = mins.iter().fold(0.0, |max, &val| val.max(max));
+
+                if max_scale > 0.0 {
+                    let iscale = Q4SCALE / max_scale;
+                    for (j, scale) in scales.iter().enumerate().take(QK_K / 16) {
+                        block.scales[j] = nearest_int_mul(quantizer, iscale, *scale) as u8;
+                    }
+                    block.d = f16::from_f32(max_scale / Q4SCALE);
+                } else {
+                    block.scales[..QK_K / 16].fill(0);
+                    block.d = f16::from_f32(0.0);
+                }
+
+                if max_min > 0.0 {
+                    let iscale = Q4SCALE / max_min;
+                    for (j, scale) in block.scales.iter_mut().enumerate() {
+                        let l = nearest_int_mul(quantizer, iscale, mins[j]) as u8;
+                        *scale |= l << 4;
+                    }
+                    block.dmin = f16::from_f32(max_min / Q4SCALE);
+                } else {
+                    block.dmin = f16::from_f32(0.0);
+                }
+
+                for j in 0..QK_K / 16 {
+                    let d = block.d.to_f32() * (block.scales[j] & 0xF) as f32;
+                    if d == 0.0 {
+                        continue;
+                    }
+                    let dm = block.dmin.to_f32() * (block.scales[j] >> 4) as f32;
+                    for ii in 0..16 {
+                        let ll = nearest_int((x[16 * j + ii] + dm) / d).clamp(0, 3);
+                        big_l[16 * j + ii] = ll as u8;
+                    }
+                }
+
+                for j in (0..QK_K).step_by(128) {
+                    for ll in 0..32 {
+                        block.qs[j / 4 + ll] = big_l[j + ll]
+                            | (big_l[j + ll + 32] << 2)
+                            | (big_l[j + ll + 64] << 4)
+                            | (big_l[j + ll + 96] << 6);
+                    }
+                }
+            }
+            return;
+        };
         for (sblk_idx, (block, x)) in group_for_quantization(xs, ys).into_iter().enumerate() {
             let mut big_l: [u8; QK_K] = [0; QK_K];
             let mut mins: [f32; QK_K / 16] = [0.0; QK_K / 16];
@@ -1071,27 +1177,39 @@ impl GgmlType for BlockQ2K {
             let mut lm: [u8; QK_K / 16] = [0; QK_K / 16];
 
             let sum_x2 = x.iter().map(|x| x * x).sum::<f32>();
-            let sigma2 = sum_x2 / QK_K as f32;
+            let sigma2 = match quantizer {
+                Quantizer::LlamaCpp => sum_x2 / QK_K as f32,
+                Quantizer::IkLlama => Q2K_SIGMA_IK * sum_x2 / QK_K as f32,
+            };
             let (x_chunks, _) = x.as_chunks::<16>();
             for (j, x_scale_slice) in x_chunks.iter().enumerate() {
                 for (l, (w_elem, x_elem)) in weights.iter_mut().zip(x_scale_slice).enumerate() {
                     let imatrix_row = sblk_idx % (n_per_row / QK_K);
                     let imatrix_w = imatrix_weights[imatrix_row * QK_K + 16 * j + l];
-                    *w_elem = imatrix_w * (sigma2 + x_elem * x_elem).sqrt();
+                    *w_elem = imatrix_w * madd(quantizer, *x_elem, *x_elem, sigma2).sqrt();
                 }
                 let sumw = weights.iter().sum::<f32>();
                 sw[j] = sumw;
-                (scales[j], mins[j]) = make_qkx3_quants(
-                    3,
-                    x_scale_slice,
-                    Some(&weights),
-                    QKX3_SEARCH,
-                    &mut big_l[16 * j..16 * (j + 1)],
-                );
+                (scales[j], mins[j]) = match quantizer {
+                    Quantizer::LlamaCpp => make_qkx3_quants(
+                        3,
+                        x_scale_slice,
+                        Some(&weights),
+                        QKX3_SEARCH,
+                        &mut big_l[16 * j..16 * (j + 1)],
+                    ),
+                    Quantizer::IkLlama => make_qkx3_quants_ik(
+                        3,
+                        x_scale_slice,
+                        Some(&weights),
+                        QKX3_SEARCH,
+                        &mut big_l[16 * j..16 * (j + 1)],
+                    ),
+                };
             }
 
-            let d_block = make_qp_quants(QK_K / 16, 15, &scales, &mut ls, &sw);
-            let m_block = make_qp_quants(QK_K / 16, 15, &mins, &mut lm, &sw);
+            let d_block = make_qp_quants(QK_K / 16, 15, &scales, &mut ls, &sw, quantizer);
+            let m_block = make_qp_quants(QK_K / 16, 15, &mins, &mut lm, &sw, quantizer);
 
             block.d = f16::from_f32(d_block);
             block.dmin = f16::from_f32(m_block);
@@ -1101,14 +1219,25 @@ impl GgmlType for BlockQ2K {
             }
 
             for j in 0..QK_K / 16 {
+                let xb = &x[16 * j..16 * (j + 1)];
+                let levels = &mut big_l[16 * j..16 * (j + 1)];
+                if quantizer == Quantizer::IkLlama {
+                    // ik_llama.cpp's levels follow the unrounded scales, times their inverse
+                    let d = d_block * ls[j] as f32;
+                    let m = m_block * lm[j] as f32;
+                    let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+                    for (l, &v) in levels.iter_mut().zip(xb) {
+                        *l = nearest_int_mul(quantizer, v + m, id).clamp(0, 3) as u8;
+                    }
+                    continue;
+                }
                 let d = block.d.to_f32() * (block.scales[j] & 0xF) as f32;
                 if d == 0.0 {
                     continue;
                 }
                 let dm = block.dmin.to_f32() * (block.scales[j] >> 4) as f32;
-                for ii in 0..16 {
-                    let ll = nearest_int((x[16 * j + ii] + dm) / d).clamp(0, 3);
-                    big_l[16 * j + ii] = ll as u8;
+                for (l, &v) in levels.iter_mut().zip(xb) {
+                    *l = nearest_int((v + dm) / d).clamp(0, 3) as u8;
                 }
             }
 
@@ -1122,6 +1251,7 @@ impl GgmlType for BlockQ2K {
             }
         }
     }
+
     // https://github.com/ggerganov/llama.cpp/blob/8183159cf3def112f6d1fe94815fce70e1bffa12/k_quants.c#L354
     fn to_float(xs: &[Self], ys: &mut [f32]) {
         for (block, y) in group_for_dequantization(xs, ys) {
@@ -1159,6 +1289,88 @@ impl GgmlType for BlockQ2K {
 
                     shift += 2;
                 }
+            }
+        }
+    }
+}
+
+// Q3_K without an imatrix, as `quantizer` does it
+fn quantize_q3k(xs: &[f32], ys: &mut [BlockQ3K], quantizer: Quantizer) {
+    for (block, x) in group_for_quantization(xs, ys) {
+        let mut scales: [f32; QK_K / 16] = [0.0; QK_K / 16];
+        let (x_chunks, _) = x.as_chunks::<16>();
+        for (j, x_scale_slice) in x_chunks.iter().enumerate() {
+            scales[j] = make_q3_quants(x_scale_slice, 4, true, quantizer);
+        }
+
+        // Get max scale by absolute value.
+        let mut max_scale: f32 = 0.0;
+        for &scale in scales.iter() {
+            if scale.abs() > max_scale.abs() {
+                max_scale = scale;
+            }
+        }
+
+        block.scales.fill(0);
+
+        if max_scale != 0.0 {
+            let iscale = -32.0 / max_scale;
+            for (j, scale) in scales.iter().enumerate() {
+                let l_val = nearest_int_mul(quantizer, iscale, *scale);
+                let l_val = l_val.clamp(-32, 31) + 32;
+                if j < 8 {
+                    block.scales[j] = (l_val & 0xF) as u8;
+                } else {
+                    block.scales[j - 8] |= ((l_val & 0xF) << 4) as u8;
+                }
+                let l_val = l_val >> 4;
+                block.scales[j % 4 + 8] |= (l_val << (2 * (j / 4))) as u8;
+            }
+            block.d = f16::from_f32(1.0 / iscale);
+        } else {
+            block.d = f16::from_f32(0.0);
+        }
+
+        let mut l: [i8; QK_K] = [0; QK_K];
+
+        for j in 0..QK_K / 16 {
+            let sc = if j < 8 {
+                block.scales[j] & 0xF
+            } else {
+                block.scales[j - 8] >> 4
+            };
+            let sc = (sc | (((block.scales[8 + j % 4] >> (2 * (j / 4))) & 3) << 4)) as i8 - 32;
+            let d = block.d.to_f32() * sc as f32;
+            if d != 0.0 {
+                for ii in 0..16 {
+                    let l_val = nearest_int(x[16 * j + ii] / d);
+                    l[16 * j + ii] = (l_val.clamp(-4, 3) + 4) as i8;
+                }
+            }
+        }
+
+        block.hmask.fill(0);
+        let mut m = 0;
+        let mut hm = 1;
+
+        for ll in l.iter_mut() {
+            if *ll > 3 {
+                block.hmask[m] |= hm;
+                *ll -= 4;
+            }
+            m += 1;
+            if m == QK_K / 8 {
+                m = 0;
+                hm <<= 1;
+            }
+        }
+
+        for j in (0..QK_K).step_by(128) {
+            for l_val in 0..32 {
+                block.qs[j / 4 + l_val] = (l[j + l_val]
+                    | (l[j + l_val + 32] << 2)
+                    | (l[j + l_val + 64] << 4)
+                    | (l[j + l_val + 96] << 6)) as u8;
             }
         }
     }
@@ -1305,88 +1517,28 @@ impl GgmlType for BlockQ3K {
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
-        for (block, x) in group_for_quantization(xs, ys) {
-            let mut scales: [f32; QK_K / 16] = [0.0; QK_K / 16];
-            let (x_chunks, _) = x.as_chunks::<16>();
-            for (j, x_scale_slice) in x_chunks.iter().enumerate() {
-                scales[j] = make_q3_quants(x_scale_slice, 4, true);
-            }
-
-            // Get max scale by absolute value.
-            let mut max_scale: f32 = 0.0;
-            for &scale in scales.iter() {
-                if scale.abs() > max_scale.abs() {
-                    max_scale = scale;
-                }
-            }
-
-            block.scales.fill(0);
-
-            if max_scale != 0.0 {
-                let iscale = -32.0 / max_scale;
-                for (j, scale) in scales.iter().enumerate() {
-                    let l_val = nearest_int(iscale * scale);
-                    let l_val = l_val.clamp(-32, 31) + 32;
-                    if j < 8 {
-                        block.scales[j] = (l_val & 0xF) as u8;
-                    } else {
-                        block.scales[j - 8] |= ((l_val & 0xF) << 4) as u8;
-                    }
-                    let l_val = l_val >> 4;
-                    block.scales[j % 4 + 8] |= (l_val << (2 * (j / 4))) as u8;
-                }
-                block.d = f16::from_f32(1.0 / iscale);
-            } else {
-                block.d = f16::from_f32(0.0);
-            }
-
-            let mut l: [i8; QK_K] = [0; QK_K];
-
-            for j in 0..QK_K / 16 {
-                let sc = if j < 8 {
-                    block.scales[j] & 0xF
-                } else {
-                    block.scales[j - 8] >> 4
-                };
-                let sc = (sc | (((block.scales[8 + j % 4] >> (2 * (j / 4))) & 3) << 4)) as i8 - 32;
-                let d = block.d.to_f32() * sc as f32;
-                if d != 0.0 {
-                    for ii in 0..16 {
-                        let l_val = nearest_int(x[16 * j + ii] / d);
-                        l[16 * j + ii] = (l_val.clamp(-4, 3) + 4) as i8;
-                    }
-                }
-            }
-
-            block.hmask.fill(0);
-            let mut m = 0;
-            let mut hm = 1;
-
-            for ll in l.iter_mut() {
-                if *ll > 3 {
-                    block.hmask[m] |= hm;
-                    *ll -= 4;
-                }
-                m += 1;
-                if m == QK_K / 8 {
-                    m = 0;
-                    hm <<= 1;
-                }
-            }
-
-            for j in (0..QK_K).step_by(128) {
-                for l_val in 0..32 {
-                    block.qs[j / 4 + l_val] = (l[j + l_val]
-                        | (l[j + l_val + 32] << 2)
-                        | (l[j + l_val + 64] << 4)
-                        | (l[j + l_val + 96] << 6))
-                        as u8;
-                }
-            }
-        }
+        quantize_q3k(xs, ys, Quantizer::LlamaCpp)
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
+        let Some((imatrix_weights, n_per_row)) = imatrix else {
+            return quantize_q3k(xs, ys, quantizer);
+        };
+        let q = quantizer;
         for (sblk_idx, (block, x)) in group_for_quantization(xs, ys).into_iter().enumerate() {
             let mut scales: [f32; QK_K / 16] = [0.0; QK_K / 16];
             let mut weights: [f32; 16] = [0.0; 16];
@@ -1402,7 +1554,7 @@ impl GgmlType for BlockQ3K {
                 for (l_idx, (w_elem, x_elem)) in weights.iter_mut().zip(x_scale_slice).enumerate() {
                     let imatrix_row = sblk_idx % (n_per_row / QK_K);
                     let imatrix_w = imatrix_weights[imatrix_row * QK_K + 16 * j + l_idx];
-                    *w_elem = imatrix_w * (sigma2 + x_elem * x_elem).sqrt();
+                    *w_elem = imatrix_w * madd(q, *x_elem, *x_elem, sigma2).sqrt();
                 }
                 let sumw = weights.iter().sum::<f32>();
                 sw[j] = sumw;
@@ -1414,6 +1566,7 @@ impl GgmlType for BlockQ3K {
                         l.as_mut_ptr().add(16 * j),
                         1,
                         weights.as_ptr(),
+                        q,
                     )
                 };
             }
@@ -1427,6 +1580,7 @@ impl GgmlType for BlockQ3K {
                     ls.as_mut_ptr(),
                     1,
                     sw.as_ptr(),
+                    q,
                 )
             };
             block.d = f16::from_f32(d_block);
@@ -1663,73 +1817,92 @@ impl GgmlType for BlockQ4K {
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
-        for (block, x) in group_for_quantization(xs, ys) {
-            let mut l: [u8; QK_K] = [0; QK_K];
-            let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
-            let mut scales: [f32; QK_K / 32] = [0.0; QK_K / 32];
-
-            let (x_chunks, _) = x.as_chunks::<32>();
-            for (j, x_scale_slice) in x_chunks.iter().enumerate() {
-                let weights = qkx2_weights(x_scale_slice);
-                (scales[j], mins[j]) = make_qkx2_quants(
-                    15,
-                    x_scale_slice,
-                    &weights,
-                    Q4K_SEARCH,
-                    &mut l[32 * j..32 * (j + 1)],
-                );
-            }
-
-            // get max scale and max min and ensure they are >= 0.0
-            let max_scale = scales.iter().fold(0.0, |max, &val| val.max(max));
-            let max_min = mins.iter().fold(0.0, |max, &val| val.max(max));
-
-            let inv_scale = if max_scale > 0.0 {
-                63.0 / max_scale
-            } else {
-                0.0
-            };
-            let inv_min = if max_min > 0.0 { 63.0 / max_min } else { 0.0 };
-
-            for j in 0..QK_K / 32 {
-                let ls = nearest_int(inv_scale * scales[j]).min(63) as u8;
-                let lm = nearest_int(inv_min * mins[j]).min(63) as u8;
-                if j < 4 {
-                    block.scales[j] = ls;
-                    block.scales[j + 4] = lm;
-                } else {
-                    block.scales[j + 4] = (ls & 0xF) | ((lm & 0xF) << 4);
-                    block.scales[j - 4] |= (ls >> 4) << 6;
-                    block.scales[j] |= (lm >> 4) << 6;
-                }
-            }
-
-            block.d = f16::from_f32(max_scale / 63.0);
-            block.dmin = f16::from_f32(max_min / 63.0);
-
-            for j in 0..QK_K / 32 {
-                let (sc, m) = get_scale_min_k4(j, &block.scales);
-                let d = block.d.to_f32() * sc as f32;
-                if d != 0.0 {
-                    let dm = block.dmin.to_f32() * m as f32;
-                    for ii in 0..32 {
-                        let l_val = nearest_int((x[32 * j + ii] + dm) / d);
-                        l[32 * j + ii] = l_val.clamp(0, 15) as u8;
-                    }
-                }
-            }
-
-            let q = &mut block.qs;
-            for j in (0..QK_K).step_by(64) {
-                for l_val in 0..32 {
-                    let offset_index = (j / 64) * 32 + l_val;
-                    q[offset_index] = l[j + l_val] | (l[j + l_val + 32] << 4);
-                }
-            }
-        }
+        Self::quantize_with(xs, ys, None, Quantizer::LlamaCpp)
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
+        let Some((imatrix_weights, n_per_row)) = imatrix else {
+            for (block, x) in group_for_quantization(xs, ys) {
+                let mut l: [u8; QK_K] = [0; QK_K];
+                let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
+                let mut scales: [f32; QK_K / 32] = [0.0; QK_K / 32];
+
+                let (x_chunks, _) = x.as_chunks::<32>();
+                for (j, x_scale_slice) in x_chunks.iter().enumerate() {
+                    let weights = qkx2_weights(x_scale_slice);
+                    (scales[j], mins[j]) = make_qkx2_quants(
+                        15,
+                        x_scale_slice,
+                        &weights,
+                        Q4K_SEARCH,
+                        &mut l[32 * j..32 * (j + 1)],
+                        quantizer,
+                    );
+                }
+
+                // get max scale and max min and ensure they are >= 0.0
+                let max_scale = scales.iter().fold(0.0, |max, &val| val.max(max));
+                let max_min = mins.iter().fold(0.0, |max, &val| val.max(max));
+
+                let inv_scale = if max_scale > 0.0 {
+                    63.0 / max_scale
+                } else {
+                    0.0
+                };
+                let inv_min = if max_min > 0.0 { 63.0 / max_min } else { 0.0 };
+
+                for j in 0..QK_K / 32 {
+                    let ls = nearest_int_mul(quantizer, inv_scale, scales[j]).min(63) as u8;
+                    let lm = nearest_int_mul(quantizer, inv_min, mins[j]).min(63) as u8;
+                    if j < 4 {
+                        block.scales[j] = ls;
+                        block.scales[j + 4] = lm;
+                    } else {
+                        block.scales[j + 4] = (ls & 0xF) | ((lm & 0xF) << 4);
+                        block.scales[j - 4] |= (ls >> 4) << 6;
+                        block.scales[j] |= (lm >> 4) << 6;
+                    }
+                }
+
+                block.d = f16::from_f32(max_scale / 63.0);
+                block.dmin = f16::from_f32(max_min / 63.0);
+
+                for j in 0..QK_K / 32 {
+                    let (sc, m) = get_scale_min_k4(j, &block.scales);
+                    let d = block.d.to_f32() * sc as f32;
+                    if d != 0.0 {
+                        let dm = block.dmin.to_f32() * m as f32;
+                        for ii in 0..32 {
+                            let l_val = nearest_int((x[32 * j + ii] + dm) / d);
+                            l[32 * j + ii] = l_val.clamp(0, 15) as u8;
+                        }
+                    }
+                }
+
+                let q = &mut block.qs;
+                for j in (0..QK_K).step_by(64) {
+                    for l_val in 0..32 {
+                        let offset_index = (j / 64) * 32 + l_val;
+                        q[offset_index] = l[j + l_val] | (l[j + l_val + 32] << 4);
+                    }
+                }
+            }
+            return;
+        };
         for (sblk_idx, (block, x)) in group_for_quantization(xs, ys).into_iter().enumerate() {
             let mut l: [u8; QK_K] = [0; QK_K];
             let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
@@ -1747,21 +1920,30 @@ impl GgmlType for BlockQ4K {
                 for (l, (w_elem, x_elem)) in weights.iter_mut().zip(x_scale_slice).enumerate() {
                     let imatrix_row = sblk_idx % (n_per_row / QK_K);
                     let imatrix_w = imatrix_weights[imatrix_row * QK_K + 32 * j + l];
-                    *w_elem = imatrix_w * (sigma2 + x_elem * x_elem).sqrt();
+                    *w_elem = imatrix_w * madd(quantizer, *x_elem, *x_elem, sigma2).sqrt();
                 }
                 let sumw = weights.iter().sum::<f32>();
                 sw[j] = sumw;
-                (scales[j], mins[j]) = make_qkx3_quants(
-                    15,
-                    x_scale_slice,
-                    Some(&weights),
-                    QKX3_SEARCH,
-                    &mut l[32 * j..32 * (j + 1)],
-                );
+                (scales[j], mins[j]) = match quantizer {
+                    Quantizer::LlamaCpp => make_qkx3_quants(
+                        15,
+                        x_scale_slice,
+                        Some(&weights),
+                        QKX3_SEARCH,
+                        &mut l[32 * j..32 * (j + 1)],
+                    ),
+                    Quantizer::IkLlama => make_qkx3_quants_ik(
+                        15,
+                        x_scale_slice,
+                        Some(&weights),
+                        QKX3_SEARCH,
+                        &mut l[32 * j..32 * (j + 1)],
+                    ),
+                };
             }
 
-            let d_block = make_qp_quants(QK_K / 32, 63, &scales, &mut ls, &sw);
-            let m_block = make_qp_quants(QK_K / 32, 63, &mins, &mut lm, &sw);
+            let d_block = make_qp_quants(QK_K / 32, 63, &scales, &mut ls, &sw, quantizer);
+            let m_block = make_qp_quants(QK_K / 32, 63, &mins, &mut lm, &sw, quantizer);
             for j in 0..QK_K / 32 {
                 let ls_val = ls[j];
                 let lm_val = lm[j];
@@ -1798,6 +1980,7 @@ impl GgmlType for BlockQ4K {
             }
         }
     }
+
     // https://github.com/ggerganov/llama.cpp/blob/8183159cf3def112f6d1fe94815fce70e1bffa12/k_quants.c#L735
     fn to_float(xs: &[Self], ys: &mut [f32]) {
         for (block, y) in group_for_dequantization(xs, ys) {
@@ -1939,88 +2122,107 @@ impl GgmlType for BlockQ5K {
 
     // https://github.com/ggerganov/llama.cpp/blob/8183159cf3def112f6d1fe94815fce70e1bffa12/k_quants.c#L793
     fn from_float(xs: &[f32], ys: &mut [Self]) {
-        for (block, x) in group_for_quantization(xs, ys) {
-            let mut l: [u8; QK_K] = [0; QK_K];
-            let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
-            let mut scales: [f32; QK_K / 32] = [0.0; QK_K / 32];
-
-            let (x_chunks, _) = x.as_chunks::<32>();
-            for (j, x_scale_slice) in x_chunks.iter().enumerate() {
-                let weights = qkx2_weights(x_scale_slice);
-                (scales[j], mins[j]) = make_qkx2_quants(
-                    31,
-                    x_scale_slice,
-                    &weights,
-                    Q5K_SEARCH,
-                    &mut l[32 * j..32 * (j + 1)],
-                );
-            }
-
-            // get max scale and max min and ensure they are >= 0.0
-            let max_scale = scales.iter().fold(0.0, |max, &val| val.max(max));
-            let max_min = mins.iter().fold(0.0, |max, &val| val.max(max));
-
-            let inv_scale = if max_scale > 0.0 {
-                63.0 / max_scale
-            } else {
-                0.0
-            };
-            let inv_min = if max_min > 0.0 { 63.0 / max_min } else { 0.0 };
-            for j in 0..QK_K / 32 {
-                let ls = nearest_int(inv_scale * scales[j]).min(63) as u8;
-                let lm = nearest_int(inv_min * mins[j]).min(63) as u8;
-                if j < 4 {
-                    block.scales[j] = ls;
-                    block.scales[j + 4] = lm;
-                } else {
-                    block.scales[j + 4] = (ls & 0xF) | ((lm & 0xF) << 4);
-                    block.scales[j - 4] |= (ls >> 4) << 6;
-                    block.scales[j] |= (lm >> 4) << 6;
-                }
-            }
-            block.d = f16::from_f32(max_scale / 63.0);
-            block.dmin = f16::from_f32(max_min / 63.0);
-            for j in 0..QK_K / 32 {
-                let (sc, m) = get_scale_min_k4(j, &block.scales);
-                let d = block.d.to_f32() * sc as f32;
-                if d == 0.0 {
-                    continue;
-                }
-                let dm = block.dmin.to_f32() * m as f32;
-                for ii in 0..32 {
-                    let ll = nearest_int((x[32 * j + ii] + dm) / d);
-                    l[32 * j + ii] = ll.clamp(0, 31) as u8;
-                }
-            }
-
-            let qh = &mut block.qh;
-            let ql = &mut block.qs;
-            qh.fill(0);
-
-            let mut m1 = 1;
-            let mut m2 = 2;
-            for n in (0..QK_K).step_by(64) {
-                let offset = (n / 64) * 32;
-                for j in 0..32 {
-                    let mut l1 = l[n + j];
-                    if l1 > 15 {
-                        l1 -= 16;
-                        qh[j] |= m1;
-                    }
-                    let mut l2 = l[n + j + 32];
-                    if l2 > 15 {
-                        l2 -= 16;
-                        qh[j] |= m2;
-                    }
-                    ql[offset + j] = l1 | (l2 << 4);
-                }
-                m1 <<= 2;
-                m2 <<= 2;
-            }
-        }
+        Self::quantize_with(xs, ys, None, Quantizer::LlamaCpp)
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
+        let Some((imatrix_weights, n_per_row)) = imatrix else {
+            for (block, x) in group_for_quantization(xs, ys) {
+                let mut l: [u8; QK_K] = [0; QK_K];
+                let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
+                let mut scales: [f32; QK_K / 32] = [0.0; QK_K / 32];
+
+                let (x_chunks, _) = x.as_chunks::<32>();
+                for (j, x_scale_slice) in x_chunks.iter().enumerate() {
+                    let weights = qkx2_weights(x_scale_slice);
+                    (scales[j], mins[j]) = make_qkx2_quants(
+                        31,
+                        x_scale_slice,
+                        &weights,
+                        Q5K_SEARCH,
+                        &mut l[32 * j..32 * (j + 1)],
+                        quantizer,
+                    );
+                }
+
+                // get max scale and max min and ensure they are >= 0.0
+                let max_scale = scales.iter().fold(0.0, |max, &val| val.max(max));
+                let max_min = mins.iter().fold(0.0, |max, &val| val.max(max));
+
+                let inv_scale = if max_scale > 0.0 {
+                    63.0 / max_scale
+                } else {
+                    0.0
+                };
+                let inv_min = if max_min > 0.0 { 63.0 / max_min } else { 0.0 };
+                for j in 0..QK_K / 32 {
+                    let ls = nearest_int_mul(quantizer, inv_scale, scales[j]).min(63) as u8;
+                    let lm = nearest_int_mul(quantizer, inv_min, mins[j]).min(63) as u8;
+                    if j < 4 {
+                        block.scales[j] = ls;
+                        block.scales[j + 4] = lm;
+                    } else {
+                        block.scales[j + 4] = (ls & 0xF) | ((lm & 0xF) << 4);
+                        block.scales[j - 4] |= (ls >> 4) << 6;
+                        block.scales[j] |= (lm >> 4) << 6;
+                    }
+                }
+                block.d = f16::from_f32(max_scale / 63.0);
+                block.dmin = f16::from_f32(max_min / 63.0);
+                for j in 0..QK_K / 32 {
+                    let (sc, m) = get_scale_min_k4(j, &block.scales);
+                    let d = block.d.to_f32() * sc as f32;
+                    if d == 0.0 {
+                        continue;
+                    }
+                    let dm = block.dmin.to_f32() * m as f32;
+                    for ii in 0..32 {
+                        let ll = nearest_int((x[32 * j + ii] + dm) / d);
+                        l[32 * j + ii] = ll.clamp(0, 31) as u8;
+                    }
+                }
+
+                let qh = &mut block.qh;
+                let ql = &mut block.qs;
+                qh.fill(0);
+
+                let mut m1 = 1;
+                let mut m2 = 2;
+                for n in (0..QK_K).step_by(64) {
+                    let offset = (n / 64) * 32;
+                    for j in 0..32 {
+                        let mut l1 = l[n + j];
+                        if l1 > 15 {
+                            l1 -= 16;
+                            qh[j] |= m1;
+                        }
+                        let mut l2 = l[n + j + 32];
+                        if l2 > 15 {
+                            l2 -= 16;
+                            qh[j] |= m2;
+                        }
+                        ql[offset + j] = l1 | (l2 << 4);
+                    }
+                    m1 <<= 2;
+                    m2 <<= 2;
+                }
+            }
+            return;
+        };
         for (sblk_idx, (block, x)) in group_for_quantization(xs, ys).into_iter().enumerate() {
             let mut l: [u8; QK_K] = [0; QK_K];
             let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
@@ -2038,21 +2240,30 @@ impl GgmlType for BlockQ5K {
                 for (l, (w_elem, x_elem)) in weights.iter_mut().zip(x_scale_slice).enumerate() {
                     let imatrix_row = sblk_idx % (n_per_row / QK_K);
                     let imatrix_w = imatrix_weights[imatrix_row * QK_K + 32 * j + l];
-                    *w_elem = imatrix_w * (sigma2 + x_elem * x_elem).sqrt();
+                    *w_elem = imatrix_w * madd(quantizer, *x_elem, *x_elem, sigma2).sqrt();
                 }
                 let sumw = weights.iter().sum::<f32>();
                 sw[j] = sumw;
-                (scales[j], mins[j]) = make_qkx3_quants(
-                    31,
-                    x_scale_slice,
-                    Some(&weights),
-                    QKX3_SEARCH,
-                    &mut l[32 * j..32 * (j + 1)],
-                );
+                (scales[j], mins[j]) = match quantizer {
+                    Quantizer::LlamaCpp => make_qkx3_quants(
+                        31,
+                        x_scale_slice,
+                        Some(&weights),
+                        QKX3_SEARCH,
+                        &mut l[32 * j..32 * (j + 1)],
+                    ),
+                    Quantizer::IkLlama => make_qkx3_quants_ik(
+                        31,
+                        x_scale_slice,
+                        Some(&weights),
+                        QKX3_SEARCH,
+                        &mut l[32 * j..32 * (j + 1)],
+                    ),
+                };
             }
 
-            let d_block = make_qp_quants(QK_K / 32, 63, &scales, &mut ls, &sw);
-            let m_block = make_qp_quants(QK_K / 32, 63, &mins, &mut lm, &sw);
+            let d_block = make_qp_quants(QK_K / 32, 63, &scales, &mut ls, &sw, quantizer);
+            let m_block = make_qp_quants(QK_K / 32, 63, &mins, &mut lm, &sw, quantizer);
             for j in 0..QK_K / 32 {
                 let ls_val = ls[j].min(63);
                 let lm_val = lm[j].min(63);
@@ -2253,153 +2464,72 @@ impl GgmlType for BlockQ6K {
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
-        debug_assert_eq!(
-            xs.len(),
-            ys.len() * Self::BLCK_SIZE,
-            "quantize_row_q6k: size mismatch {} {} {}",
-            xs.len(),
-            ys.len(),
-            Self::BLCK_SIZE
-        );
-        let mut l = [0i8; QK_K];
-        let mut scales = [0f32; QK_K / 16];
-        let mut x = xs.as_ptr();
-        let l = l.as_mut_ptr();
-        unsafe {
-            for y in ys.iter_mut() {
-                let mut max_scale = 0f32;
-                let mut max_abs_scale = 0f32;
-                for (ib, scale_) in scales.iter_mut().enumerate() {
-                    let scale =
-                        make_qx_quants(16, 32, x.add(16 * ib), l.add(16 * ib), 1, std::ptr::null());
-                    *scale_ = scale;
-                    let abs_scale = scale.abs();
-                    if abs_scale > max_abs_scale {
-                        max_abs_scale = abs_scale;
-                        max_scale = scale
-                    }
-                }
-
-                let iscale = -128f32 / max_scale;
-                y.d = f16::from_f32(1.0 / iscale);
-
-                for (y_scale, scale) in y.scales.iter_mut().zip(scales.iter()) {
-                    *y_scale = nearest_int(iscale * scale).min(127) as i8
-                }
-
-                for (j, &y_scale) in y.scales.iter().enumerate() {
-                    let d = y.d.to_f32() * y_scale as f32;
-                    if d == 0. {
-                        continue;
-                    }
-                    for ii in 0..16 {
-                        let ll = nearest_int(*x.add(16 * j + ii) / d).clamp(-32, 31);
-                        *l.add(16 * j + ii) = (ll + 32) as i8
-                    }
-                }
-
-                let mut ql = y.ql.as_mut_ptr();
-                let mut qh = y.qh.as_mut_ptr();
-
-                for j in (0..QK_K).step_by(128) {
-                    for l_idx in 0..32 {
-                        let q1 = *l.add(j + l_idx) & 0xF;
-                        let q2 = *l.add(j + l_idx + 32) & 0xF;
-                        let q3 = *l.add(j + l_idx + 64) & 0xF;
-                        let q4 = *l.add(j + l_idx + 96) & 0xF;
-                        *ql.add(l_idx) = (q1 | (q3 << 4)) as u8;
-                        *ql.add(l_idx + 32) = (q2 | (q4 << 4)) as u8;
-                        *qh.add(l_idx) = ((*l.add(j + l_idx) >> 4)
-                            | ((*l.add(j + l_idx + 32) >> 4) << 2)
-                            | ((*l.add(j + l_idx + 64) >> 4) << 4)
-                            | ((*l.add(j + l_idx + 96) >> 4) << 6))
-                            as u8;
-                    }
-                    ql = ql.add(64);
-                    qh = qh.add(32);
-                }
-
-                x = x.add(QK_K)
-            }
-        }
+        Self::quantize_with(xs, ys, None, Quantizer::LlamaCpp)
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
         debug_assert_eq!(
             xs.len(),
             ys.len() * Self::BLCK_SIZE,
-            "quantize_row_q6k imatrix: size mismatch {} {} {}",
-            xs.len(),
-            ys.len(),
-            Self::BLCK_SIZE
+            "quantize_row_q6k: size mismatch"
         );
         let mut l = [0i8; QK_K];
         let mut scales = [0f32; QK_K / 16];
-        let mut x = xs.as_ptr();
-        let imatrix_weights = imatrix_weights.as_ptr();
-        let l = l.as_mut_ptr();
-        unsafe {
-            for (sblk_idx, y) in ys.iter_mut().enumerate() {
-                let mut max_scale = 0f32;
-                let mut max_abs_scale = 0f32;
-                for (ib, scale_) in scales.iter_mut().enumerate() {
-                    let imatrix_row = sblk_idx % (n_per_row / QK_K);
-                    let scale = make_qx_quants(
-                        16,
-                        32,
-                        x.add(16 * ib),
-                        l.add(16 * ib),
-                        1,
-                        imatrix_weights.add(QK_K * imatrix_row + 16 * ib),
-                    );
-                    *scale_ = scale;
-                    let abs_scale = scale.abs();
-                    if abs_scale > max_abs_scale {
-                        max_abs_scale = abs_scale;
-                        max_scale = scale
-                    }
+        for (sblk_idx, (y, x)) in ys.iter_mut().zip(xs.as_chunks::<QK_K>().0).enumerate() {
+            let qw = imatrix.map(|(w, n_per_row)| &w[QK_K * (sblk_idx % (n_per_row / QK_K))..]);
+            let mut max_scale = 0f32;
+            let mut max_abs_scale = 0f32;
+            for (ib, scale_) in scales.iter_mut().enumerate() {
+                let qw = qw.map_or(std::ptr::null(), |w| w[16 * ib..].as_ptr());
+                let (x, l) = (x[16 * ib..].as_ptr(), l[16 * ib..].as_mut_ptr());
+                let scale = unsafe { make_qx_quants(16, 32, x, l, 1, qw, quantizer) };
+                *scale_ = scale;
+                if scale.abs() > max_abs_scale {
+                    max_abs_scale = scale.abs();
+                    max_scale = scale
                 }
+            }
 
-                let iscale = -128f32 / max_scale;
-                y.d = f16::from_f32(1.0 / iscale);
+            let iscale = -128f32 / max_scale;
+            y.d = f16::from_f32(1.0 / iscale);
+            for (y_scale, scale) in y.scales.iter_mut().zip(scales.iter()) {
+                *y_scale = nearest_int_mul(quantizer, iscale, *scale).min(127) as i8
+            }
 
-                for (y_scale, scale) in y.scales.iter_mut().zip(scales.iter()) {
-                    *y_scale = nearest_int(iscale * scale).min(127) as i8
+            for (j, &y_scale) in y.scales.iter().enumerate() {
+                let d = y.d.to_f32() * y_scale as f32;
+                if d == 0. {
+                    continue;
                 }
-
-                for (j, &y_scale) in y.scales.iter().enumerate() {
-                    let d = y.d.to_f32() * y_scale as f32;
-                    if d == 0. {
-                        continue;
-                    }
-                    for ii in 0..16 {
-                        let ll = nearest_int(*x.add(16 * j + ii) / d).clamp(-32, 31);
-                        *l.add(16 * j + ii) = (ll + 32) as i8
-                    }
+                for ii in 0..16 {
+                    l[16 * j + ii] = (nearest_int(x[16 * j + ii] / d).clamp(-32, 31) + 32) as i8
                 }
+            }
 
-                let mut ql = y.ql.as_mut_ptr();
-                let mut qh = y.qh.as_mut_ptr();
-
-                for j in (0..QK_K).step_by(128) {
-                    for l_idx in 0..32 {
-                        let q1 = *l.add(j + l_idx) & 0xF;
-                        let q2 = *l.add(j + l_idx + 32) & 0xF;
-                        let q3 = *l.add(j + l_idx + 64) & 0xF;
-                        let q4 = *l.add(j + l_idx + 96) & 0xF;
-                        *ql.add(l_idx) = (q1 | (q3 << 4)) as u8;
-                        *ql.add(l_idx + 32) = (q2 | (q4 << 4)) as u8;
-                        *qh.add(l_idx) = ((*l.add(j + l_idx) >> 4)
-                            | ((*l.add(j + l_idx + 32) >> 4) << 2)
-                            | ((*l.add(j + l_idx + 64) >> 4) << 4)
-                            | ((*l.add(j + l_idx + 96) >> 4) << 6))
-                            as u8;
-                    }
-                    ql = ql.add(64);
-                    qh = qh.add(32);
+            for (h, j) in (0..QK_K).step_by(128).enumerate() {
+                let ql = &mut y.ql[64 * h..64 * (h + 1)];
+                let qh = &mut y.qh[32 * h..32 * (h + 1)];
+                for i in 0..32 {
+                    let [q1, q2, q3, q4] = [0, 32, 64, 96].map(|o| l[j + i + o]);
+                    ql[i] = ((q1 & 0xF) | ((q3 & 0xF) << 4)) as u8;
+                    ql[i + 32] = ((q2 & 0xF) | ((q4 & 0xF) << 4)) as u8;
+                    qh[i] =
+                        ((q1 >> 4) | ((q2 >> 4) << 2) | ((q3 >> 4) << 4) | ((q4 >> 4) << 6)) as u8;
                 }
-
-                x = x.add(QK_K)
             }
         }
     }
