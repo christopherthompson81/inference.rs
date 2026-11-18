@@ -1108,6 +1108,7 @@ pub(crate) fn block_type(kind: crate::vulkan::BlockKind) -> BlockType {
         K::Iq4Xs => BlockType::IQ4XS,
         K::Iq3S => BlockType::IQ3S,
         K::Q3K => BlockType::Q3K,
+        K::Mxfp4 => BlockType::MXFP4,
     }
 }
 
@@ -1125,8 +1126,12 @@ pub(crate) fn block_kind(ty: BlockType) -> crate::vulkan::BlockKind {
         BlockType::IQ4XS => K::Iq4Xs,
         BlockType::IQ3S => K::Iq3S,
         BlockType::Q3K => K::Q3K,
+        BlockType::MXFP4 => K::Mxfp4,
     }
 }
+
+// an MXFP4 block in a GGUF file: its E8M0 scale byte and 16 bytes of nibbles
+const MXFP4_FILE_BLOCK_BYTES: usize = 17;
 
 // `bytes` of `kind` blocks, `(experts, rows, cols)`, in `device`'s memory
 pub(crate) fn block_weight(
@@ -1136,15 +1141,29 @@ pub(crate) fn block_weight(
     bytes: &[u8],
 ) -> Result<Arc<Buffer>> {
     let ty = block_type(kind);
+    let file_block = match ty {
+        BlockType::MXFP4 => MXFP4_FILE_BLOCK_BYTES,
+        _ => ty.block_bytes(),
+    };
     if !cols.is_multiple_of(ty.block_values())
-        || bytes.len() != experts * rows * cols / ty.block_values() * ty.block_bytes()
+        || bytes.len() != experts * rows * cols / ty.block_values() * file_block
     {
         crate::bail!(
             "{kind:?} ({experts}, {rows}, {cols}) does not take {} bytes",
             bytes.len()
         );
     }
-    device.as_vulkan_device()?.weight_copy(bytes)
+    let device = device.as_vulkan_device()?;
+    if ty != BlockType::MXFP4 {
+        return device.weight_copy(bytes);
+    }
+    // the scale byte padded to two, so every block and its nibble words start on a u16
+    let mut widened = Vec::with_capacity(bytes.len() / file_block * ty.block_bytes());
+    for block in bytes.chunks_exact(file_block) {
+        widened.extend_from_slice(&[block[0], 0]);
+        widened.extend_from_slice(&block[1..]);
+    }
+    device.weight_copy(&widened)
 }
 
 // the rows of a `vocab x cols` weight of `ty` blocks at the u32 `ids`

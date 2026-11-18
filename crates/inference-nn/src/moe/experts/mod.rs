@@ -802,6 +802,9 @@ mod vulkan_block_tests {
     // a fused kernel against the separate ones, over the same int8 activations
     const FUSED_TOLERANCE: f32 = 1e-5;
 
+    // MXFP4's smallest test exponent: 2^(119 - 128) = 2^-9
+    const MXFP4_EXPONENT: u8 = 119;
+
     // random blocks with each block's leading f16 scale small and finite
     fn blocks(ty: GgufType, rows: usize, seed: u64) -> Vec<u8> {
         let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -820,6 +823,11 @@ mod vulkan_block_tests {
             0
         };
         for block in bytes.chunks_exact_mut(ty.type_size()) {
+            if ty == GgufType::Mxfp4 {
+                // an E8M0 exponent: 2^-9 to 2^-6, halved, the order of the others' d
+                block[0] = MXFP4_EXPONENT + block[3] % 4;
+                continue;
+            }
             let d = half::f16::from_f32(0.002 + f32::from(block[3]) * 1e-5);
             block[d_at..d_at + 2].copy_from_slice(&d.to_le_bytes());
         }
@@ -871,6 +879,7 @@ mod vulkan_block_tests {
             (GgufType::Iq4Xs, BlockKind::Iq4Xs),
             (GgufType::Iq3S, BlockKind::Iq3S),
             (GgufType::Q3K, BlockKind::Q3K),
+            (GgufType::Mxfp4, BlockKind::Mxfp4),
         ] {
             let bytes = blocks(ty, EXPERTS * ROWS, 7);
             let w = reference(ty, &bytes, (EXPERTS, ROWS, COLS))?;
@@ -944,7 +953,7 @@ mod vulkan_block_tests {
             };
             pairs.push((format!("{dtype:?}"), [layer()?, layer()?]));
         }
-        for ty in [GgufType::Iq4Xs, GgufType::Iq3S] {
+        for ty in [GgufType::Iq4Xs, GgufType::Iq3S, GgufType::Mxfp4] {
             let layer = |seed: u64| -> Result<Arc<dyn QuantMethod>> {
                 let raw = inference_quant::RawGgufTensor::new(
                     ty,
@@ -995,7 +1004,7 @@ mod vulkan_block_tests {
             return Ok(());
         };
         let cpu = Device::Cpu;
-        for ty in [GgufType::Iq4Xs, GgufType::Iq3S] {
+        for ty in [GgufType::Iq4Xs, GgufType::Iq3S, GgufType::Mxfp4] {
             let bytes = blocks(ty, ROWS, 11);
             let w = Tensor::from_vec(
                 inference_quant::dequantize_rows(ty, COLS, &bytes)?,

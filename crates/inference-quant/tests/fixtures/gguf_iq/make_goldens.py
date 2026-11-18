@@ -22,6 +22,8 @@ IQ1_M_SCALES = 48
 # NVFP4 leads with four UE4M3 sub-block scales; unsigned, so encoders write none past 0x7E
 NVFP4_SCALES = 4
 UE4M3_MAX = 0x7E
+# MXFP4 leads with an E8M0 exponent, a power of two: weights sit near 2^-8, so values here stay near 1e-3..1
+E8M0_RANGE = (118, 136)
 
 
 def block(name: str, type_size: int) -> bytes:
@@ -30,6 +32,8 @@ def block(name: str, type_size: int) -> bytes:
     scale = np.float16(rng.uniform(-0.05, 0.05)).view(np.uint16)
     if name == "NVFP4":
         raw[0:NVFP4_SCALES] = rng.integers(0, UE4M3_MAX + 1, NVFP4_SCALES, dtype=np.uint8).tobytes()
+    elif name == "MXFP4":
+        raw[0] = int(rng.integers(*E8M0_RANGE))
     elif name == "IQ1_M":
         for k in range(4):
             at = IQ1_M_SCALES + 2 * k
@@ -52,6 +56,7 @@ for name, block_size, type_size in [
     ("IQ1_S", 256, 50),
     ("IQ1_M", 256, 56),
     ("NVFP4", 64, 36),
+    ("MXFP4", 32, 17),
 ]:
     qtype = GGMLQuantizationType[name]
     data = b"".join(block(name, type_size) for _ in range(BLOCKS))
