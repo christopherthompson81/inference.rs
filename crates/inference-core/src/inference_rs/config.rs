@@ -222,7 +222,14 @@ impl ModelLoaderConfig {
     ) -> BoxFuture<'a, anyhow::Result<PipelineLoad>> {
         Box::pin(async move {
             let before = device_used_bytes(&self.device);
-            let pipeline = self.load_inner(loader, mtp_runtime).await?;
+            // a failed load's weights are freed into the pool's cache, which a later load's free-memory check can't see
+            let pipeline = match self.load_inner(loader, mtp_runtime).await {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    device_used_bytes(&self.device);
+                    return Err(error);
+                }
+            };
             let footprint = match (before, device_used_bytes(&self.device)) {
                 (Some(before), Some(after)) => {
                     self.device
