@@ -264,6 +264,7 @@ fn for_each_weighted_block32<T>(
     ys: &mut [T],
     imatrix_weights: &[f32],
     n_per_row: usize,
+    quantizer: Quantizer,
     mut encode: impl FnMut(&mut T, &[f32; 32], &[f32; 32]),
 ) {
     for (row, blocks) in xs
@@ -278,7 +279,7 @@ fn for_each_weighted_block32<T>(
         {
             let mut weight = [0f32; 32];
             for j in 0..32 {
-                weight[j] = qw[j] * (sigma2 + xb[j] * xb[j]).sqrt();
+                weight[j] = qw[j] * madd(quantizer, xb[j], xb[j], sigma2).sqrt();
             }
             encode(block, xb, &weight);
         }
@@ -332,24 +333,48 @@ impl GgmlType for BlockQ4_0 {
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
-        for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
-            let mut l = [0i8; 32];
-            let d = unsafe {
-                make_qx_quants(
-                    32,
-                    8,
-                    xb.as_ptr(),
-                    l.as_mut_ptr(),
-                    1,
-                    weight.as_ptr(),
-                    Quantizer::LlamaCpp,
-                )
-            };
-            block.d = f16::from_f32(d);
-            for j in 0..16 {
-                block.qs[j] = l[j] as u8 | ((l[j + 16] as u8) << 4);
-            }
-        });
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
+        let Some((imatrix_weights, n_per_row)) = imatrix else {
+            return Self::from_float(xs, ys);
+        };
+        for_each_weighted_block32(
+            xs,
+            ys,
+            imatrix_weights,
+            n_per_row,
+            quantizer,
+            |block, xb, weight| {
+                let mut l = [0i8; 32];
+                let d = unsafe {
+                    make_qx_quants(
+                        32,
+                        8,
+                        xb.as_ptr(),
+                        l.as_mut_ptr(),
+                        1,
+                        weight.as_ptr(),
+                        quantizer,
+                    )
+                };
+                block.d = f16::from_f32(d);
+                for j in 0..16 {
+                    block.qs[j] = l[j] as u8 | ((l[j + 16] as u8) << 4);
+                }
+            },
+        );
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
@@ -464,15 +489,46 @@ impl GgmlType for BlockQ4_1 {
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
-        for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
-            let mut l = [0u8; 32];
-            let (d, min) = make_qkx3_quants(15, xb, Some(weight), QKX3_SEARCH, &mut l);
-            block.d = f16::from_f32(d);
-            block.m = f16::from_f32(-min);
-            for j in 0..16 {
-                block.qs[j] = l[j] | (l[j + 16] << 4);
-            }
-        });
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
+        let Some((imatrix_weights, n_per_row)) = imatrix else {
+            return Self::from_float(xs, ys);
+        };
+        for_each_weighted_block32(
+            xs,
+            ys,
+            imatrix_weights,
+            n_per_row,
+            quantizer,
+            |block, xb, weight| {
+                let mut l = [0u8; 32];
+                let (d, min) = match quantizer {
+                    Quantizer::LlamaCpp => {
+                        make_qkx3_quants(15, xb, Some(weight), QKX3_SEARCH, &mut l)
+                    }
+                    Quantizer::IkLlama => {
+                        make_qkx3_quants_ik(15, xb, Some(weight), QKX3_SEARCH, &mut l)
+                    }
+                };
+                block.d = f16::from_f32(d);
+                block.m = f16::from_f32(-min);
+                for j in 0..16 {
+                    block.qs[j] = l[j] | (l[j + 16] << 4);
+                }
+            },
+        );
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
@@ -580,22 +636,46 @@ impl GgmlType for BlockQ5_0 {
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
-        for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
-            let mut l = [0i8; 32];
-            let d = unsafe {
-                make_qx_quants(
-                    32,
-                    16,
-                    xb.as_ptr(),
-                    l.as_mut_ptr(),
-                    1,
-                    weight.as_ptr(),
-                    Quantizer::LlamaCpp,
-                )
-            };
-            block.d = f16::from_f32(d);
-            block.qh = pack_q5_high_bits(&l.map(|v| v as u8), &mut block.qs);
-        });
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
+        let Some((imatrix_weights, n_per_row)) = imatrix else {
+            return Self::from_float(xs, ys);
+        };
+        for_each_weighted_block32(
+            xs,
+            ys,
+            imatrix_weights,
+            n_per_row,
+            quantizer,
+            |block, xb, weight| {
+                let mut l = [0i8; 32];
+                let d = unsafe {
+                    make_qx_quants(
+                        32,
+                        16,
+                        xb.as_ptr(),
+                        l.as_mut_ptr(),
+                        1,
+                        weight.as_ptr(),
+                        quantizer,
+                    )
+                };
+                block.d = f16::from_f32(d);
+                block.qh = pack_q5_high_bits(&l.map(|v| v as u8), &mut block.qs);
+            },
+        );
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
@@ -706,13 +786,44 @@ impl GgmlType for BlockQ5_1 {
     }
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
-        for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
-            let mut l = [0u8; 32];
-            let (d, min) = make_qkx3_quants(31, xb, Some(weight), QKX3_SEARCH, &mut l);
-            block.d = f16::from_f32(d);
-            block.m = f16::from_f32(-min);
-            block.qh = pack_q5_high_bits(&l, &mut block.qs);
-        });
+        Self::quantize_with(
+            xs,
+            ys,
+            Some((imatrix_weights, n_per_row)),
+            Quantizer::LlamaCpp,
+        )
+    }
+
+    fn quantize_with(
+        xs: &[f32],
+        ys: &mut [Self],
+        imatrix: Option<(&[f32], usize)>,
+        quantizer: Quantizer,
+    ) {
+        let Some((imatrix_weights, n_per_row)) = imatrix else {
+            return Self::from_float(xs, ys);
+        };
+        for_each_weighted_block32(
+            xs,
+            ys,
+            imatrix_weights,
+            n_per_row,
+            quantizer,
+            |block, xb, weight| {
+                let mut l = [0u8; 32];
+                let (d, min) = match quantizer {
+                    Quantizer::LlamaCpp => {
+                        make_qkx3_quants(31, xb, Some(weight), QKX3_SEARCH, &mut l)
+                    }
+                    Quantizer::IkLlama => {
+                        make_qkx3_quants_ik(31, xb, Some(weight), QKX3_SEARCH, &mut l)
+                    }
+                };
+                block.d = f16::from_f32(d);
+                block.m = f16::from_f32(-min);
+                block.qh = pack_q5_high_bits(&l, &mut block.qs);
+            },
+        );
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
