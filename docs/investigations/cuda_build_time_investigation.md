@@ -1069,3 +1069,35 @@ change took 7 min 29 s (every quant, nn and paged-attention line changed; fattn'
 **Next.** Flash attention's compile weight is the open item: splitting each instance file per head size (6 per
 file) would cut its 540 s tail without cutting the work; cutting the work means compiling each K/V mode as its own
 kernels instead of every kernel carrying all of them, a performance-sensitive redesign.
+
+## Run 53 - 2026-11-18 23:30
+
+**Question:** can the flash-attention instances (Run 52: 9x upstream's compile time, half the cold build) compile
+faster without losing a path or speed?
+
+**Attribution.** `hk/fa/attr.py` (scratchpad) compiles copies of the tree with one runtime K/V path disabled each,
+on `fattn-mma-f16-instance-ncols1_8-ncols2_1.cu` (ten at once, so times run long):
+
+```
+as is 340.0 s 282,080 instr     no fp8 loop 202.4 s 233,184     no paged/packed loop 198.3 s 229,688
+no bf16 in-load conversion 195.7 s 242,728     no quantized path (already out of line) 325.5 s 251,928
+all four removed 71.0 s 128,792 (upstream llama.cpp: 24 s alone, 63,016)
+```
+
+Each inline loop variant is instantiated at every K and V load of every processing step (3 fixup variants x 2
+last-iteration variants per kernel), and compile time grows faster than the code.
+
+**Variants** (old and new `bench::` binaries alternating three rounds, median per row, geomean new/base by column):
+
+- All three synchronous loops out of line, one flat work-item loop: 37.6 s compile, but 867K instructions (the row
+  width became a runtime argument, so all six unrolled granularities compiled); as a column-per-thread loop with a
+  4-row load batch, 176K instructions, but bf16 1.126, paged 1.160, dense 1.093 (fp8 0.862). The out-of-line call costs
+  the bf16 paths too much.
+- Only fp8 out of line, the batched column loop: 127.1 s compile (was 223 s alone), 240,704 instructions. fp8 0.875,
+  dense 0.970, bf16 0.976, paged 0.985, quant 0.988, f16 0.983; the worst single rows +3-5%. Kept.
+
+**Rebuild after a real header edit** (an unused device function appended to `fattn-mma-f16.cuh`; a comment does not
+count, ccache's preprocessed check absorbs it): 145 compiles, 321 s span at mean concurrency 14.1 of 16, 4,531 CPU-s
+(Run 52: 6,398). Splitting each instance file per head size (127 files) gave 337 s against 331 s: the rebuild is now
+bound by total work, not the slowest file, so the split was dropped. The heaviest files left are `fattn.cu` (164 s)
+and the head-128 single-column instances (88-159 s), which carry the f32-value-sum and quantized-staging cases.
