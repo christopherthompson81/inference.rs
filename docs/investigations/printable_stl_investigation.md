@@ -88,3 +88,13 @@ splat surface that is every small density bump, so each one grew outward. The sa
 splats: smooth, watertight, one body, 242,160 faces (260,112 before), 75.9 cm3, 2.2 s. Splats are always sealed by the
 flood, so they keep no open walls to thicken; TRELLIS.2's voxel shells keep the step.
 
+## Run 10 - 2026-11-18 16:50
+
+Question: the same cat image in `synthetic` mode printed with small holes into the body.
+
+Its STL was 23.3 cm3 and 453,016 faces against 75.9 cm3 in `real` mode: a hollow shell, the flood having leaked in
+through a gap in the splats; the holes opened onto the hollow inside. The closing (steps grown before the flood and
+back after) on that run: 1: 23.3 cm3 (hollow); 2: 79.8 cm3, 250,860 faces; 3: 79.8; 4: 79.8. Splats now close by 3
+(gaps up to about 6 cells, 2.3 mm at 100 mm); the `real` run is unchanged by it (75.9 at 1, 2 and 3). Unit case: the
+Gaussian sphere with a gap at its top fails at 1 and passes at 3.
+
