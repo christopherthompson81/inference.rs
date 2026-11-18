@@ -626,7 +626,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // inference-fattn: f32 value sums run on the mma kernel's own instances (fattn_mma_f32_values_built), or not at all
     if (lay.f32_values) {
         const bool kv_ok = (K->type == GGML_TYPE_F16 || K->type == GGML_TYPE_BF16) && V->type == K->type && !narrow;
-        return kv_ok && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) && K->ne[0] == 128 && V->ne[0] == 128
+        return kv_ok && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) && (K->ne[0] == 128 || K->ne[0] == 64)
+            && V->ne[0] == K->ne[0]
             && gqa_ratio == 1 && logit_softcap == 0.0f ? BEST_FATTN_KERNEL_MMA_F16 : BEST_FATTN_KERNEL_NONE;
     }
     if (!narrow && (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type))) {

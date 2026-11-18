@@ -35,7 +35,7 @@ pub struct FattnOptions {
     /// Each query sees only the `window_left` keys before it (FA2's `window_size_left`), and with `causal` none
     /// after; tiles wholly before the window are still computed. Excludes `mask`.
     pub window_left: Option<usize>,
-    /// Sum the softmax-weighted values in f32 rather than f16, on the mma kernel's own instances: head dim 128, no GQA,
+    /// Sum the softmax-weighted values in f32 rather than f16, on the mma kernel's own instances: head dim 64 or 128, no GQA,
     /// an NVIDIA card from Turing on; `supported` is false elsewhere. f16 sums lose precision over a row spread across
     /// many keys and overflow (65504) once a row's values add up past it. f32 accumulation runs the P.V products at
     /// half the f16 rate on GeForce cards: about 1.25x the attention time at head dim 128.

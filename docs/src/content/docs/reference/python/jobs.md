@@ -24,6 +24,21 @@ TRELLIS.2's textured mesh of the object in the job's one image.
 | `vertex_colors` | `bool \| None` | optional |
 
 
+## `ImageToSplatJob`
+
+Idol's Gaussian splats of the object in the job's one image.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `gaussians` | `int \| None` | optional |
+| `guidance` | `float \| None` | optional |
+| `mode` | `SplatImageMode \| None` | optional |
+| `placement` | `Placement \| None` | optional |
+| `rescale_t` | `float \| None` | optional |
+| `seed` | `int \| None` | optional |
+| `steps` | `int \| None` | optional |
+
+
 ## `JobDeleted`
 
 A job removed with its folder.
@@ -200,8 +215,11 @@ Where jobs keep their folders and which weights they run.
 | `birefnet` | `str \| None` | optional |
 | `devices` | `list[int] \| None` | optional |
 | `dinov3` | `str \| None` | optional |
+| `dinov3_hplus` | `str \| None` | optional |
 | `dir` | `str \| None` | optional |
 | `drain_timeout_secs` | `int \| None` | `120` |
+| `flux2_vae` | `str \| None` | optional |
+| `idol` | `str \| None` | optional |
 | `jovox` | `str \| None` | optional |
 | `lpips` | `str \| None` | optional |
 | `models_repo` | `str \| None` | optional |
@@ -250,6 +268,18 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `SceneKind.INDOOR` | `'indoor'` |
 | `SceneKind.OUTDOOR` | `'outdoor'` |
+
+
+## `SplatImageMode`
+
+How an image-to-splat job crops its image around the object.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `SplatImageMode.SYNTHETIC` | `'synthetic'` |
+| `SplatImageMode.REAL` | `'real'` |
 
 
 ## `TextureMeshJob`

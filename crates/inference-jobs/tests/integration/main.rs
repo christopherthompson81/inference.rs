@@ -3,6 +3,7 @@
 #![allow(clippy::duplicate_mod)]
 
 mod image_to_3d_job;
+mod image_to_splat_job;
 mod jobs;
 mod voxels_job;
 mod world_job;

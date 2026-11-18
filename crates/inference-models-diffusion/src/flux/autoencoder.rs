@@ -2,7 +2,7 @@
 
 use inference_quant::{Convolution, ShardedVarBuilder};
 use inference_tensor::nn::{Conv2d, GroupNorm};
-use inference_tensor::{D, Result, Tensor};
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use crate::layers::{MatMul, conv2d, group_norm};
 
@@ -433,5 +433,120 @@ impl AutoEncoder {
 impl inference_tensor::Module for AutoEncoder {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         self.decode(&self.encode(xs)?)
+    }
+}
+
+// FLUX.2's `AutoencoderKLFlux2`: the FLUX.1 encoder's layout under diffusers' names, a 1x1 `quant_conv` after it, and
+// the latents' batch-norm statistics after a 2x2 patchify
+const FLUX2_LATENT_CHANNELS: usize = 32;
+const FLUX2_PATCH: usize = 2;
+
+/// The FLUX.2 VAE's encoder (`vae/diffusion_pytorch_model.safetensors` of a FLUX.2 checkpoint).
+#[derive(Debug, Clone)]
+pub struct Flux2Encoder {
+    encoder: Encoder,
+    quant_conv: Conv2d,
+    bn_mean: Tensor,
+    bn_std: Tensor,
+}
+
+// a diffusers encoder tensor's name in FLUX.1's layout, which `Encoder` reads
+fn flux1_encoder_name(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("encoder.")?;
+    let parts: Vec<&str> = rest.split('.').collect();
+    let mapped = match parts.as_slice() {
+        ["down_blocks", i, "resnets", j, tail @ ..] => {
+            let tail = tail.join(".").replace("conv_shortcut", "nin_shortcut");
+            format!("down.{i}.block.{j}.{tail}")
+        }
+        ["down_blocks", i, "downsamplers", "0", tail @ ..] => {
+            format!("down.{i}.downsample.{}", tail.join("."))
+        }
+        ["mid_block", "resnets", j, tail @ ..] => {
+            let block = if *j == "0" { "block_1" } else { "block_2" };
+            format!("mid.{block}.{}", tail.join("."))
+        }
+        ["mid_block", "attentions", "0", layer, tail @ ..] => {
+            let layer = match *layer {
+                "group_norm" => "norm",
+                "to_q" => "q",
+                "to_k" => "k",
+                "to_v" => "v",
+                "to_out" => return Some(format!("encoder.mid.attn_1.proj_out.{}", tail.last()?)),
+                _ => return None,
+            };
+            format!("mid.attn_1.{layer}.{}", tail.join("."))
+        }
+        ["conv_norm_out", tail @ ..] => format!("norm_out.{}", tail.join(".")),
+        _ => rest.to_string(),
+    };
+    Some(format!("encoder.{mapped}"))
+}
+
+impl Flux2Encoder {
+    pub fn load(path: &std::path::Path, dtype: DType, device: &Device) -> Result<Self> {
+        let file = unsafe { inference_tensor::safetensors::MmapedSafetensors::new(path)? };
+        let mut tensors = std::collections::HashMap::new();
+        for (name, _) in file.tensors() {
+            let Some(mapped) = flux1_encoder_name(&name) else {
+                continue;
+            };
+            let mut tensor = file.load(&name, device)?;
+            // the attention projections are linears here and 1x1 convolutions in FLUX.1's layout
+            if mapped.contains(".attn_1.") && mapped.ends_with(".weight") && tensor.rank() == 2 {
+                tensor = tensor.unsqueeze(2)?.unsqueeze(3)?;
+            }
+            tensors.insert(mapped, tensor);
+        }
+        let quant_conv_weight = file.load("quant_conv.weight", device)?;
+        let quant_conv_bias = file.load("quant_conv.bias", device)?;
+        let channels = FLUX2_LATENT_CHANNELS * FLUX2_PATCH * FLUX2_PATCH;
+        let eps = 1e-4;
+        let bn_mean = file
+            .load("bn.running_mean", device)?
+            .to_dtype(DType::F32)?
+            .reshape((1, channels, 1, 1))?;
+        let bn_std = ((file.load("bn.running_var", device)?.to_dtype(DType::F32)? + eps)?
+            .sqrt()?)
+        .reshape((1, channels, 1, 1))?;
+        let vb = inference_quant::ShardedSafeTensors::wrap(tensors, dtype, device.clone());
+        let config = Config {
+            latent_channels: FLUX2_LATENT_CHANNELS,
+            ..Config::flux()
+        };
+        Ok(Self {
+            encoder: Encoder::new(&config, vb.pp("encoder"))?,
+            quant_conv: Conv2d::new(
+                quant_conv_weight.to_dtype(dtype)?,
+                Some(quant_conv_bias.to_dtype(dtype)?),
+                Default::default(),
+            ),
+            bn_mean,
+            bn_std,
+        })
+    }
+
+    /// The latent distribution's mean and standard deviation (`[b, 32, h/8, w/8]` each, f32) of images in [-1, 1].
+    pub fn moments(&self, images: &Tensor) -> Result<(Tensor, Tensor)> {
+        let moments = Convolution.forward_2d(&self.quant_conv, &self.encoder.forward(images)?)?;
+        let moments = moments.to_dtype(DType::F32)?;
+        let mean = moments.narrow(1, 0, FLUX2_LATENT_CHANNELS)?;
+        let log_var = moments
+            .narrow(1, FLUX2_LATENT_CHANNELS, FLUX2_LATENT_CHANNELS)?
+            .clamp(-30f32, 20f32)?;
+        Ok((mean, (log_var * 0.5)?.exp()?))
+    }
+
+    /// Latents `[b, 32, h, w]` patchified 2x2 to `[b, 128, h/2, w/2]` and normalized by the batch-norm statistics.
+    pub fn normalize(&self, latents: &Tensor) -> Result<Tensor> {
+        let (b, c, h, w) = latents.dims4()?;
+        let p = FLUX2_PATCH;
+        let patched = latents
+            .reshape((b, c, h / p, p, w / p, p))?
+            .permute((0, 1, 3, 5, 2, 4))?
+            .reshape((b, c * p * p, h / p, w / p))?;
+        patched
+            .broadcast_sub(&self.bn_mean)?
+            .broadcast_div(&self.bn_std)
     }
 }

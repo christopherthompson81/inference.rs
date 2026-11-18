@@ -96,6 +96,18 @@ export interface ImageTo3dOptions {
   placement: Placement | null;
 }
 
+/** How an image-to-splat job crops around the object: tightly for renders and generated images, loosely for photos. */
+export type SplatImageMode = "synthetic" | "real";
+
+export interface ImageToSplatOptions {
+  seed: number | null;
+  mode: SplatImageMode | null;
+  gaussians: number | null;
+  steps: number | null;
+  guidance: number | null;
+  placement: Placement | null;
+}
+
 export interface VoxelOptions {
   seed: number | null;
   steps: number | null;
@@ -152,6 +164,11 @@ export function submitReconstruct(files: File[], options: ReconstructOptions): P
 /** TRELLIS.2's textured mesh (GLB) of the object in one image. */
 export function submitImageTo3d(image: File, options: ImageTo3dOptions): Promise<JobRecord> {
   return submit("image_to_3d", options, [image]);
+}
+
+/** Idol's Gaussian splats of the object in one image. */
+export function submitImageToSplat(image: File, options: ImageToSplatOptions): Promise<JobRecord> {
+  return submit("image_to_splat", options, [image]);
 }
 
 export interface TextureMeshOptions {

@@ -419,6 +419,13 @@ class SpeechLoaderType(str, Enum):
     QWEN3_TTS = "qwen3_tts"
 
 
+class SplatImageMode(str, Enum):
+    """How an image-to-splat job crops its image around the object."""
+
+    SYNTHETIC = "synthetic"
+    REAL = "real"
+
+
 class TimestampGranularity(str, Enum):
     WORD = "word"
     SEGMENT = "segment"
@@ -1432,6 +1439,19 @@ class ImageTo3dJob:
 
 
 @dataclass(kw_only=True)
+class ImageToSplatJob:
+    """Idol's Gaussian splats of the object in the job's one image."""
+
+    gaussians: int | None = None
+    guidance: float | None = None
+    mode: SplatImageMode | None = None
+    placement: Placement | None = None
+    rescale_t: float | None = None
+    seed: int | None = None
+    steps: int | None = None
+
+
+@dataclass(kw_only=True)
 class IncompleteDetails:
     """Details about incomplete responses"""
 
@@ -1576,8 +1596,11 @@ class JobsConfig:
     birefnet: str | None = None
     devices: list[int] | None = None
     dinov3: str | None = None
+    dinov3_hplus: str | None = None
     dir: str | None = None
     drain_timeout_secs: int | None = 120
+    flux2_vae: str | None = None
+    idol: str | None = None
     jovox: str | None = None
     lpips: str | None = None
     models_repo: str | None = None

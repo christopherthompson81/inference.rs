@@ -7005,6 +7005,75 @@
           }
         }
       },
+      "ImageToSplatJob": {
+        "type": "object",
+        "description": "Idol's Gaussian splats of the object in the job's one image.",
+        "properties": {
+          "gaussians": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Gaussians to make, 32,768 to 1,048,576 (262,144 by default), rounded down to a multiple of 32",
+            "minimum": 0
+          },
+          "guidance": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Classifier-free guidance strength (3 by default; 0: none)"
+          },
+          "mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SplatImageMode"
+              }
+            ]
+          },
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "How much it may displace to run, in place of the server's setting"
+              }
+            ]
+          },
+          "rescale_t": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The time grid's shift toward high noise (3 by default; 1: uniform)"
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Sampling steps (50 by default)",
+            "minimum": 0
+          }
+        }
+      },
       "IncludeOption": {
         "type": "string",
         "description": "Include options for response content.\n\nThis enum specifies additional content to include in the response.\nBy default, certain content may be omitted for efficiency.",
@@ -7529,6 +7598,29 @@
               }
             ],
             "description": "A mesh painted from an image with TRELLIS.2"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ImageToSplatJob",
+                "description": "Idol's Gaussian splats of the object in one image"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "image_to_splat"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Idol's Gaussian splats of the object in one image"
           }
         ],
         "description": "What a job does."
@@ -7628,6 +7720,14 @@
             "description": "DINOv3 ViT-L/16, JoVox's image encoder; fetched from its gated repository when unset",
             "default": null
           },
+          "dinov3_hplus": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "DINOv3 ViT-H+/16's `model.safetensors`, Idol's image encoder; fetched from its gated repository when unset",
+            "default": null
+          },
           "dir": {
             "type": [
               "string",
@@ -7642,6 +7742,22 @@
             "description": "How long a job waits for the models on its device to go quiet before it fails, in seconds",
             "default": 120,
             "minimum": 0
+          },
+          "flux2_vae": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A FLUX.2 VAE's `diffusion_pytorch_model.safetensors`, Idol's other encoder; fetched when unset",
+            "default": null
+          },
+          "idol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Idol's folder, for image-to-splat jobs; fetched from its repository when unset",
+            "default": null
           },
           "jovox": {
             "type": [
@@ -15409,6 +15525,14 @@
             "type": "string"
           }
         }
+      },
+      "SplatImageMode": {
+        "type": "string",
+        "description": "How an image-to-splat job crops its image around the object.",
+        "enum": [
+          "synthetic",
+          "real"
+        ]
       },
       "StopTokens": {
         "oneOf": [

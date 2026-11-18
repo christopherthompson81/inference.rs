@@ -1,6 +1,8 @@
 <script lang="ts" module>
   /** How a splat file's axes sit: a world job's scene frame is +z up, a reconstruction's the first camera's (OpenCV). */
   export type SplatFrame = "z_up" | "opencv";
+  /** Where the camera starts, looking at the origin, in the viewer's y-up frame; vertical field of view in degrees. */
+  export type SplatStart = { position: [number, number, number]; fov: number };
 </script>
 
 <script lang="ts">
@@ -16,6 +18,7 @@
     url,
     frame,
     sceneToSplats = null,
+    start: startView = null,
     title,
     onClose,
   }: {
@@ -23,6 +26,7 @@
     frame: SplatFrame;
     /** Row-major, from the scene frame to the frame the splats were trained in; undone so the scene stands upright. */
     sceneToSplats?: number[][] | null;
+    start?: SplatStart | null;
     title: string;
     onClose: () => void;
   } = $props();
@@ -47,7 +51,11 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x101014);
-    const camera = new THREE.PerspectiveCamera(70, 1, 0.01, 1000);
+    const camera = new THREE.PerspectiveCamera(startView?.fov ?? 70, 1, 0.01, 1000);
+    if (startView) {
+      camera.position.set(...startView.position);
+      camera.lookAt(0, 0, 0);
+    }
     scene.add(new SparkRenderer({ renderer }));
 
     const splats = new SplatMesh({ url, fileName: url.split("/").pop() });
