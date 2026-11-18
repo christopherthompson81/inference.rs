@@ -24,8 +24,9 @@ const SMOOTH_INFLATE: f32 = -0.53;
 const SMOOTH_ROUNDS: usize = 10;
 // a cell's three faces at its lower corner, their corners (x fastest) in cyclic order
 const CELL_FACES: [[usize; 4]; 3] = [[0, 1, 3, 2], [0, 1, 5, 4], [0, 2, 6, 4]];
-// face-neighbour steps the occupied points grow by before the flood, and the flood after, closing small gaps
-const SPLAT_CLOSING: usize = 1;
+// face-neighbour steps the occupied points grow by before the flood, and the flood after, closing gaps up to about
+// twice as wide: an Idol shell can have a gap of 3 or 4 cells, which would let the flood hollow it out
+const SPLAT_CLOSING: usize = 3;
 const VOXEL_CLOSING: usize = 1;
 // half the thinnest wall, in voxels: thinner parts of a voxel shell grow to about twice this plus one (a TRELLIS.2 object
 // can be an open shell, whose walls would not survive the blur or a printer); not for splats, whose sealed surface has
@@ -850,6 +851,9 @@ mod tests {
         }
     }
 
+    // where the sphere's gap starts, as the cosine of its angular radius
+    const GAP_Z: f32 = 0.985;
+
     #[test]
     fn a_shell_of_flat_gaussians_fills_and_drops_a_stray_one() {
         // flat discs tiling a sphere, each turned so its thin axis (z) points outward, and one far floater
@@ -865,6 +869,10 @@ mod tests {
         let count = 6000;
         for i in 0..count {
             let z = 1.0 - 2.0 * (i as f32 + 0.5) / count as f32;
+            // a gap a few voxels wide at the top, which the flood must not get through
+            if z > GAP_Z {
+                continue;
+            }
             let r = (1.0 - z * z).sqrt();
             let n = [
                 r * (golden * i as f32).cos(),

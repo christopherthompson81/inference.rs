@@ -174,7 +174,8 @@ on z = 0. The web UI shows it under **View printable** and sets its size as **Pr
 It is made on a grid over the object (384 cells across for TRELLIS.2, 256 for Idol). The grid's points are marked
 from the source: TRELLIS.2's sparse voxels at 1024 (its meshes leave gaps where a cell's neighbours are missing, and
 the voxels don't), or Idol's Gaussians, their opacity summed. A flood from outside, closed over gaps of a couple of
-cells, finds everything it can't reach, so hollow interiors fill. For TRELLIS.2, parts thinner than about five cells
+cells (up to about six for Idol, whose shells can have gaps that would hollow the object out), finds everything it
+can't reach, so hollow interiors fill. For TRELLIS.2, parts thinner than about five cells
 (open shells, rods, a rope) are thickened to that, about 1.3 mm at 100 mm, while thicker parts keep their size; Idol's
 sealed splats are left as they are (thickening counts the small bumps of their surface as thin and grows them into
 warts). The largest piece is kept, and its surface extracted (surface nets on the blurred solid, cells that touch only
