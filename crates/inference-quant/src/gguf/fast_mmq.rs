@@ -1825,6 +1825,8 @@ mod bench {
     ];
     // decode, 1-8 row verifies, and the 9-16 row ones only the tensor-core matvec takes past dp4a's 8
     const ROWS: [usize; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16];
+    // comma-separated row counts in place of ROWS
+    const ROWS_ENV: &str = "GGUF_BENCH_ROWS";
     const WARMUP: usize = 5;
     const ITERS: usize = 50;
 
@@ -1867,7 +1869,14 @@ mod bench {
             let tiled = crate::gguf::raw::RawGgufTensor::can_tile(ty, &dims, &dev)
                 .then(|| crate::gguf::raw::RawGgufTensor::tiled(&dims, data.bytes(), &dev))
                 .transpose()?;
-            for rows in ROWS {
+            let rows_list = match std::env::var(ROWS_ENV) {
+                Ok(list) => list
+                    .split(',')
+                    .map(|r| r.parse().expect("a row count"))
+                    .collect(),
+                Err(_) => ROWS.to_vec(),
+            };
+            for rows in rows_list {
                 let xs =
                     Tensor::randn(0f32, 1., (rows, in_features), &dev)?.to_dtype(DType::BF16)?;
                 let mmvq =

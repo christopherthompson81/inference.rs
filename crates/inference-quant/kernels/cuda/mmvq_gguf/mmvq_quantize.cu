@@ -1,11 +1,10 @@
 #include "mmvq_gguf.cuh"
+#include "mmvq_tc_act.cuh"
 
 // Padding-aware BF16/F16/F32 -> Q8_1 quantize kernels.
 
 // input rows mmvq_tc.cuh's activation layout holds (the mma's B columns)
 #define MMVQ_TC_QUANTIZE_ROWS 8
-// one half's bytes per 32-value block: 32 lanes' int2 fragments, 8 rows' f32 scales and int32 sums
-#define MMVQ_TC_QUANTIZE_HALF_BYTES (32 * 8 + 8 * 4 + 8 * 4)
 
 extern "C" __global__ void
 mmvq_gguf_quantize_q8_1_bf16(const __nv_bfloat16 *__restrict__ x,
@@ -165,7 +164,7 @@ static __global__ void mmvq_tc_quantize(const src_t *__restrict__ x, void *__res
   const int col = ib * QK8_1 + k;
   // each 8-row half of the rows in its own layout, the second right after the first
   const int input_row = blockIdx.y * MMVQ_TC_QUANTIZE_ROWS + row;
-  vy = (char *)vy + (int64_t)blockIdx.y * nb * MMVQ_TC_QUANTIZE_HALF_BYTES;
+  vy = (char *)vy + (int64_t)blockIdx.y * nb * MMVQ_TC_ACT_HALF_BLOCK_BYTES;
   const float xi =
       (input_row < num_rows && col < kx) ? tc_quantize_load(x[(int64_t)input_row * kx + col]) : 0.0f;
   const float amax = warp_reduce_max_f32(fabsf(xi));
@@ -176,11 +175,11 @@ static __global__ void mmvq_tc_quantize(const src_t *__restrict__ x, void *__res
   // the block's row sums, which the matvec scales by a table offset (IQ4_KS's upper table half is the lower plus 4)
   const int sum = __reduce_add_sync(0xffffffffu, (int)qi);
   int2 *qs = (int2 *)vy;
-  float *ds = (float *)(qs + (int64_t)nb * WARP_SIZE);
-  int *ss = (int *)(ds + (int64_t)nb * MMVQ_TC_QUANTIZE_ROWS);
+  half *ds = (half *)(qs + (int64_t)nb * WARP_SIZE);
+  int16_t *ss = (int16_t *)(ds + (int64_t)nb * MMVQ_TC_QUANTIZE_ROWS);
   if (k == 0) {
-    ds[ib * MMVQ_TC_QUANTIZE_ROWS + row] = d;
-    ss[ib * MMVQ_TC_QUANTIZE_ROWS + row] = sum;
+    ds[ib * MMVQ_TC_QUANTIZE_ROWS + row] = __float2half(d);
+    ss[ib * MMVQ_TC_QUANTIZE_ROWS + row] = (int16_t)sum;
   }
   __syncthreads();
   if (row == 0) {

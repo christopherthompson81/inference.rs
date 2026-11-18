@@ -2,8 +2,8 @@
 
 // Adapted from vLLM revision c8438a3d40168ce1d9eade0dc15ccbe5d27adb68.
 // Copyright contributors to the vLLM project; Apache-2.0. See third_party/flashinfer_gdn.
-// The fused verify's dynamic shared memory for up to MAX_TOKENS verify rows: the state chunk, then per row its
-// query, key, value and output, decay and beta, then the pending rows a direct-transition step applies first.
+// The fused verify's dynamic shared memory for up to MAX_TOKENS verify rows: per row its query, key, value and
+// output, decay and beta, then the pending rows a direct-transition step applies first.
 __host__ __device__ constexpr size_t gdn_align16(size_t bytes) {
   return (bytes + 15) & ~(size_t)15;
 }
@@ -13,8 +13,7 @@ __host__ __device__ constexpr size_t gdn_spec_fused_shared_bytes() {
   constexpr size_t K = GDN_DECODE_VALUE_MAJOR_K;
   constexpr size_t V = GDN_DECODE_VALUE_MAJOR_V;
   constexpr size_t PENDING = DIRECT_TRANSITIONS ? MAX_TOKENS : 1;
-  return gdn_align16(sizeof(StateT) * GDN_SPEC_FUSED_VALUE_CHUNK * K) +
-         2 * gdn_align16(sizeof(float) * MAX_TOKENS * K) +
+  return 2 * gdn_align16(sizeof(float) * MAX_TOKENS * K) +
          2 * gdn_align16(sizeof(T) * MAX_TOKENS * V) +
          2 * gdn_align16(sizeof(float) * MAX_TOKENS) +
          gdn_align16(sizeof(float) * PENDING * (DIRECT_TRANSITIONS ? K : 1)) +
@@ -51,7 +50,6 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
         int checkpoint_lanes, int tiled_v_heads, float norm_eps) {
   constexpr int K = GDN_DECODE_VALUE_MAJOR_K;
   constexpr int V = GDN_DECODE_VALUE_MAJOR_V;
-  constexpr int VALUES_PER_WARP = GDN_SPEC_FUSED_VALUES_PER_WARP;
   const int batch_idx = blockIdx.x;
   const int value_head = blockIdx.y;
   const int tid = threadIdx.x;
@@ -160,8 +158,6 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
     cursor += gdn_align16(bytes);
     return start;
   };
-  auto shared_state = reinterpret_cast<StateT(*)[K]>(
-      carve(sizeof(StateT) * GDN_SPEC_FUSED_VALUE_CHUNK * K));
   auto shared_query =
       reinterpret_cast<float(*)[K]>(carve(sizeof(float) * MAX_TOKENS * K));
   auto shared_key =
@@ -205,8 +201,6 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
           pending_key_banks + (published_key_bank ^ 1u) * key_bank_stride;
     }
   }
-
-  gdn_spec_copy_state_chunk(&shared_state[0][0], source, 0, tid);
 
   if constexpr (DIRECT_TRANSITIONS) {
     if (apply_pending) {
@@ -337,190 +331,161 @@ __global__ __launch_bounds__(GDN_SPEC_FUSED_THREADS, 2)
     }
   }
 
-  const int key_base = lane * 4;
-  int value_rows[VALUES_PER_WARP];
+  // eight lanes split a value row's keys, so a dot product takes three shuffles and each shuffle serves the warp's
+  // four row groups at once (a 32-lane split took five per row, which throttled the SM's shuffle pipe)
+  const int key_slice = lane & (GDN_SPEC_ROW_LANES - 1);
+  const int row_group = lane / GDN_SPEC_ROW_LANES;
+  const int key_base = key_slice * GDN_SPEC_KEYS_PER_LANE;
+  int values[GDN_SPEC_ROWS_PER_GROUP];
 #pragma unroll
-  for (int row = 0; row < VALUES_PER_WARP; row++) {
-    value_rows[row] = warp + row * GDN_SPEC_FUSED_WARPS;
+  for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
+    values[row] = (warp * GDN_SPEC_GROUPS_PER_WARP + row_group) *
+                      GDN_SPEC_ROWS_PER_GROUP +
+                  row;
+  }
+  float4 state[GDN_SPEC_ROWS_PER_GROUP][GDN_SPEC_KEY_VECTORS];
+#pragma unroll
+  for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
+#pragma unroll
+    for (int c = 0; c < GDN_SPEC_KEY_VECTORS; c++) {
+      state[row][c] = gdn_load_state_x4(source + (size_t)values[row] * K +
+                                        key_base + c * 4);
+    }
+  }
+  auto load_keys = [&](const float *keys, float4(&out)[GDN_SPEC_KEY_VECTORS]) {
+#pragma unroll
+    for (int c = 0; c < GDN_SPEC_KEY_VECTORS; c++) {
+      out[c] = *reinterpret_cast<const float4 *>(keys + key_base + c * 4);
+    }
+  };
+  auto row_dot = [&](const float4(&row_state)[GDN_SPEC_KEY_VECTORS],
+                     const float4(&keys)[GDN_SPEC_KEY_VECTORS]) {
+    float dot = 0.0f;
+#pragma unroll
+    for (int c = 0; c < GDN_SPEC_KEY_VECTORS; c++) {
+      dot = __fmaf_rn(row_state[c].x, keys[c].x, dot);
+      dot = __fmaf_rn(row_state[c].y, keys[c].y, dot);
+      dot = __fmaf_rn(row_state[c].z, keys[c].z, dot);
+      dot = __fmaf_rn(row_state[c].w, keys[c].w, dot);
+    }
+    return dot;
+  };
+  auto row_sums = [](float(&dots)[GDN_SPEC_ROWS_PER_GROUP]) {
+#pragma unroll
+    for (int offset = GDN_SPEC_ROW_LANES / 2; offset > 0; offset >>= 1) {
+#pragma unroll
+      for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
+        dots[row] += __shfl_xor_sync(0xffffffff, dots[row], offset);
+      }
+    }
+  };
+  auto add_scaled = [](float4(&row_state)[GDN_SPEC_KEY_VECTORS],
+                       const float4(&keys)[GDN_SPEC_KEY_VECTORS], float delta,
+                       float decay) {
+#pragma unroll
+    for (int c = 0; c < GDN_SPEC_KEY_VECTORS; c++) {
+      row_state[c].x = __fmaf_rn(keys[c].x, delta, row_state[c].x * decay);
+      row_state[c].y = __fmaf_rn(keys[c].y, delta, row_state[c].y * decay);
+      row_state[c].z = __fmaf_rn(keys[c].z, delta, row_state[c].z * decay);
+      row_state[c].w = __fmaf_rn(keys[c].w, delta, row_state[c].w * decay);
+    }
+  };
+
+  if constexpr (DIRECT_TRANSITIONS) {
+    if (apply_pending) {
+      for (int position = 0; position < pending_rows; position++) {
+        float4 key[GDN_SPEC_KEY_VECTORS];
+        load_keys(shared_pending_key[position], key);
+        const float decay = shared_pending_decay[position];
+#pragma unroll
+        for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
+          add_scaled(state[row], key,
+                     shared_pending_delta[position][values[row]], decay);
+        }
+      }
+#pragma unroll
+      for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
+#pragma unroll
+        for (int c = 0; c < GDN_SPEC_KEY_VECTORS; c++) {
+          gdn_store_state_x4(source + (size_t)values[row] * K + key_base +
+                                 c * 4,
+                             state[row][c]);
+          if constexpr (sizeof(StateT) < sizeof(float)) {
+            state[row][c].x = (float)(StateT)state[row][c].x;
+            state[row][c].y = (float)(StateT)state[row][c].y;
+            state[row][c].z = (float)(StateT)state[row][c].z;
+            state[row][c].w = (float)(StateT)state[row][c].w;
+          }
+        }
+      }
+    }
   }
 
+  for (int position = 0; position < seq_len; position++) {
+    const float decay = shared_decay[position];
+    const float beta = shared_beta[position];
+    float4 key[GDN_SPEC_KEY_VECTORS];
+    load_keys(shared_key[position], key);
+    float dots[GDN_SPEC_ROWS_PER_GROUP];
 #pragma unroll
-  for (int chunk = 0; chunk < GDN_SPEC_FUSED_VALUE_CHUNKS; chunk++) {
-    gdn_cp_async_wait();
-    __syncthreads();
-
-    float4 state[VALUES_PER_WARP];
+    for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
 #pragma unroll
-    for (int row = 0; row < VALUES_PER_WARP; row++) {
-      state[row] = gdn_load_state_x4(
-          &shared_state[value_rows[row]][key_base]);
+      for (int c = 0; c < GDN_SPEC_KEY_VECTORS; c++) {
+        state[row][c].x *= decay;
+        state[row][c].y *= decay;
+        state[row][c].z *= decay;
+        state[row][c].w *= decay;
+      }
+      dots[row] = row_dot(state[row], key);
     }
-    __syncthreads();
-    if (chunk + 1 < GDN_SPEC_FUSED_VALUE_CHUNKS) {
-      gdn_spec_copy_state_chunk(&shared_state[0][0], source, chunk + 1, tid);
-    }
-
-    if constexpr (DIRECT_TRANSITIONS) {
-      if (apply_pending) {
-        for (int position = 0; position < pending_rows; position++) {
-          const float4 key = *reinterpret_cast<const float4 *>(
-              &shared_pending_key[position][key_base]);
-          const float decay = shared_pending_decay[position];
+    row_sums(dots);
 #pragma unroll
-          for (int row = 0; row < VALUES_PER_WARP; row++) {
-            const int value = chunk * GDN_SPEC_FUSED_VALUE_CHUNK +
-                              value_rows[row];
-            const float delta = shared_pending_delta[position][value];
-            state[row].x = __fmaf_rn(key.x, delta, state[row].x * decay);
-            state[row].y = __fmaf_rn(key.y, delta, state[row].y * decay);
-            state[row].z = __fmaf_rn(key.z, delta, state[row].z * decay);
-            state[row].w = __fmaf_rn(key.w, delta, state[row].w * decay);
-          }
-        }
-#pragma unroll
-        for (int row = 0; row < VALUES_PER_WARP; row++) {
-          const int value =
-              chunk * GDN_SPEC_FUSED_VALUE_CHUNK + value_rows[row];
-          gdn_store_state_x4(source + (size_t)value * K + key_base,
-                             state[row]);
-          if constexpr (sizeof(StateT) < sizeof(float)) {
-            state[row].x = (float)(StateT)state[row].x;
-            state[row].y = (float)(StateT)state[row].y;
-            state[row].z = (float)(StateT)state[row].z;
-            state[row].w = (float)(StateT)state[row].w;
-          }
+    for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
+      const float delta =
+          ((float)shared_value[position][values[row]] - dots[row]) * beta;
+      add_scaled(state[row], key, delta, 1.0f);
+      if (key_slice == 0) {
+        if constexpr (DIRECT_TRANSITIONS) {
+          pending_delta[(((size_t)active_slot * max_pending_rows + position) *
+                             num_v_heads +
+                         value_head) *
+                            V +
+                        values[row]] = delta;
+        } else if (transition_delta != nullptr) {
+          transition_delta[((transition_row_base + position) * num_v_heads +
+                            value_head) *
+                               V +
+                           values[row]] = delta;
         }
       }
     }
-
-    for (int position = 0; position < seq_len; position++) {
-      const float4 query = *reinterpret_cast<const float4 *>(
-          &shared_query[position][key_base]);
-      const float4 key = *reinterpret_cast<const float4 *>(
-          &shared_key[position][key_base]);
-      float state_dot_key[VALUES_PER_WARP];
+    float4 query[GDN_SPEC_KEY_VECTORS];
+    load_keys(shared_query[position], query);
 #pragma unroll
-      for (int row = 0; row < VALUES_PER_WARP; row++) {
-        state[row].x *= shared_decay[position];
-        state[row].y *= shared_decay[position];
-        state[row].z *= shared_decay[position];
-        state[row].w *= shared_decay[position];
-        float dot = state[row].x * key.x;
-        dot = __fmaf_rn(state[row].y, key.y, dot);
-        dot = __fmaf_rn(state[row].z, key.z, dot);
-        state_dot_key[row] = __fmaf_rn(state[row].w, key.w, dot);
+    for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
+      dots[row] = row_dot(state[row], query);
+    }
+    row_sums(dots);
+    if (key_slice == 0) {
+#pragma unroll
+      for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
+        shared_output[position][values[row]] = (T)dots[row];
       }
-      if constexpr (PAIRED_REDUCTIONS) {
-        const float2 state_dot_key01 =
-            gdn_spec_warp_sum_pair(state_dot_key[0], state_dot_key[1]);
-        const float2 state_dot_key23 =
-            gdn_spec_warp_sum_pair(state_dot_key[2], state_dot_key[3]);
-        state_dot_key[0] = state_dot_key01.x;
-        state_dot_key[1] = state_dot_key01.y;
-        state_dot_key[2] = state_dot_key23.x;
-        state_dot_key[3] = state_dot_key23.y;
+    }
 
-        float state_dot_query[VALUES_PER_WARP];
+    if constexpr (!DIRECT_TRANSITIONS) {
+      if (transition_delta == nullptr) {
+        StateT *destination =
+            state_pool +
+            (((base_slot + position) * num_v_heads + value_head) *
+             state_head_elements);
 #pragma unroll
-        for (int row = 0; row < VALUES_PER_WARP; row++) {
-          const int value =
-              chunk * GDN_SPEC_FUSED_VALUE_CHUNK + value_rows[row];
-          const float delta =
-              ((float)shared_value[position][value] - state_dot_key[row]) *
-              shared_beta[position];
-          state[row].x = __fmaf_rn(key.x, delta, state[row].x);
-          state[row].y = __fmaf_rn(key.y, delta, state[row].y);
-          state[row].z = __fmaf_rn(key.z, delta, state[row].z);
-          state[row].w = __fmaf_rn(key.w, delta, state[row].w);
-          if (lane == 0) {
-            if constexpr (DIRECT_TRANSITIONS) {
-              pending_delta[(((size_t)active_slot * max_pending_rows +
-                              position) *
-                                 num_v_heads +
-                             value_head) *
-                                V +
-                            value] = delta;
-            } else if (transition_delta != nullptr) {
-              transition_delta[((transition_row_base + position) *
-                                    num_v_heads +
-                                value_head) *
-                                   V +
-                               value] = delta;
-            }
-          }
-          float dot = state[row].x * query.x;
-          dot = __fmaf_rn(state[row].y, query.y, dot);
-          dot = __fmaf_rn(state[row].z, query.z, dot);
-          state_dot_query[row] = __fmaf_rn(state[row].w, query.w, dot);
-        }
-        const float2 state_dot_query01 =
-            gdn_spec_warp_sum_pair(state_dot_query[0], state_dot_query[1]);
-        const float2 state_dot_query23 =
-            gdn_spec_warp_sum_pair(state_dot_query[2], state_dot_query[3]);
-        state_dot_query[0] = state_dot_query01.x;
-        state_dot_query[1] = state_dot_query01.y;
-        state_dot_query[2] = state_dot_query23.x;
-        state_dot_query[3] = state_dot_query23.y;
-        if (lane == 0) {
+        for (int row = 0; row < GDN_SPEC_ROWS_PER_GROUP; row++) {
 #pragma unroll
-          for (int row = 0; row < VALUES_PER_WARP; row++) {
-            const int value =
-                chunk * GDN_SPEC_FUSED_VALUE_CHUNK + value_rows[row];
-            shared_output[position][value] = (T)state_dot_query[row];
-          }
-        }
-      } else {
-#pragma unroll
-        for (int row = 0; row < VALUES_PER_WARP; row++) {
-          state_dot_key[row] = gdn_warp_sum<32>(state_dot_key[row]);
-          const int value = chunk * GDN_SPEC_FUSED_VALUE_CHUNK +
-                            value_rows[row];
-          const float delta =
-              ((float)shared_value[position][value] - state_dot_key[row]) *
-              shared_beta[position];
-          state[row].x = __fmaf_rn(key.x, delta, state[row].x);
-          state[row].y = __fmaf_rn(key.y, delta, state[row].y);
-          state[row].z = __fmaf_rn(key.z, delta, state[row].z);
-          state[row].w = __fmaf_rn(key.w, delta, state[row].w);
-          if (lane == 0) {
-            if constexpr (DIRECT_TRANSITIONS) {
-              pending_delta[(((size_t)active_slot * max_pending_rows +
-                              position) *
-                                 num_v_heads +
-                             value_head) *
-                                V +
-                            value] = delta;
-            } else if (transition_delta != nullptr) {
-              transition_delta[((transition_row_base + position) *
-                                    num_v_heads +
-                                value_head) *
-                                   V +
-                               value] = delta;
-            }
-          }
-          float dot = state[row].x * query.x;
-          dot = __fmaf_rn(state[row].y, query.y, dot);
-          dot = __fmaf_rn(state[row].z, query.z, dot);
-          const float state_dot_query =
-              gdn_warp_sum<32>(__fmaf_rn(state[row].w, query.w, dot));
-          if (lane == 0) {
-            shared_output[position][value] = (T)state_dot_query;
-          }
-        }
-      }
-
-      if constexpr (!DIRECT_TRANSITIONS) {
-        if (transition_delta == nullptr) {
-          StateT *destination =
-              state_pool +
-              (((base_slot + position) * num_v_heads + value_head) *
-               state_head_elements);
-#pragma unroll
-          for (int row = 0; row < VALUES_PER_WARP; row++) {
-            const int value = chunk * GDN_SPEC_FUSED_VALUE_CHUNK +
-                              value_rows[row];
-            gdn_store_state_x4(destination + (size_t)value * K + key_base,
-                               state[row]);
+          for (int c = 0; c < GDN_SPEC_KEY_VECTORS; c++) {
+            gdn_store_state_x4(destination + (size_t)values[row] * K +
+                                   key_base + c * 4,
+                               state[row][c]);
           }
         }
       }

@@ -7,12 +7,12 @@
 
 #pragma once
 #include "mmvq_gguf.cuh"
+#include "mmvq_tc_act.cuh"
 
 #define MMVQ_TCK_ROWS 16
 #define MMVQ_TCK_BLOCKS 8
 // input rows one mma covers; 9-16 rows run each weight block's mma again over a second 8-row activation half
 #define MMVQ_TCK_HALF_ROWS 8
-#define MMVQ_TCK_HALF_BLOCK_BYTES (WARP_SIZE * 8 + 8 * 4 + 8 * 4)
 
 static __device__ __forceinline__ void
 tck_mma_k32(int (&c)[4], const uint32_t a0, const uint32_t a1,
@@ -191,8 +191,8 @@ template <typename Q, int GROUPS> struct TckStage {
 // each 8-row input half's activations: B fragments, row scales, row sums
 template <int HALVES> struct TckActs {
   const int2 *yq[HALVES];
-  const float2 *yd[HALVES];
-  const int2 *ys[HALVES];
+  const half2 *yd[HALVES];
+  const int *ys[HALVES];
 };
 
 template <typename Q, int j, int GROUPS, int HALVES>
@@ -205,8 +205,8 @@ tck_blocks(const TckStage<Q, GROUPS> &st, const TckActs<HALVES> &y,
 #pragma unroll
     for (int h = 0; h < HALVES; ++h) {
       const int2 bq = y.yq[h][(int64_t)ib * WARP_SIZE + lane];
-      const float2 dy = y.yd[h][(int64_t)ib * (WARP_SIZE / 8) + t];
-      const int2 xs = y.ys[h][(int64_t)ib * (WARP_SIZE / 8) + t];
+      const float2 dy = __half22float2(y.yd[h][(int64_t)ib * (WARP_SIZE / 8) + t]);
+      const int2 xs = tc_unpack_sums(y.ys[h][(int64_t)ib * (WARP_SIZE / 8) + t]);
 #pragma unroll
       for (int n = 0; n < GROUPS; ++n)
         TckBlocks<Q>::template run<j>(st.a[n], st.b[n], bq, dy, xs,
@@ -239,9 +239,9 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
 #pragma unroll
   for (int h = 0; h < HALVES; ++h) {
     y.yq[h] = (const int2 *)((const char *)vy +
-                             (int64_t)h * nb * MMVQ_TCK_HALF_BLOCK_BYTES);
-    y.yd[h] = (const float2 *)(y.yq[h] + (int64_t)nb * WARP_SIZE);
-    y.ys[h] = (const int2 *)(y.yd[h] + (int64_t)nb * (WARP_SIZE / 8));
+                             (int64_t)h * nb * MMVQ_TC_ACT_HALF_BLOCK_BYTES);
+    y.yd[h] = (const half2 *)(y.yq[h] + (int64_t)nb * WARP_SIZE);
+    y.ys[h] = (const int *)(y.yd[h] + (int64_t)nb * (WARP_SIZE / 8));
   }
 
   const char *ra[GROUPS], *rb[GROUPS];

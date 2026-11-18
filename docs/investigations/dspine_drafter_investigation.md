@@ -363,3 +363,44 @@ a step: 3.634 sampled tokens against chain 7's 3.223 in 28.9 ms is 113.6 against
 acceptance runs deep), and the cap may take part of whatever a faster matvec saves. Not worth the kernel work for one
 stream; a 16-row matvec gain would also serve two speculating sequences (2 x 8 rows), which is the stronger reason to
 revisit it.
+
+## Run 17 - 2026-11-17 19:40
+
+**Question:** do Run 16's fixes recover the 16-row cost?
+
+Each item measured before changing code:
+
+- **IQ4_KS matvec.** `ncu` (base clocks, `small_batch_mmvq_vs_mmq` with the new `GGUF_BENCH_ROWS`): 65.4 us at 8 rows
+  (8x1x6, DRAM 82%) against 71.0 at 16 (8x2x2, DRAM 77%), instructions only +10%, long-scoreboard stalls equal, L2
+  throughput 36% -> 52%. Three hypotheses tested and dropped: a shallow activation ring (activations need their deep
+  prefetch: 8 rows 63.7 -> 80.7 us), activation L2 traffic (a throwaway build reading a cache-hot 4-block window: 16
+  rows still 71-75 us), and two blocks per SM forced onto 8x1x6 (`__launch_bounds__` 2: spills, 102 us). What did help:
+  the activation layout's per-row scales as f16 (as q8_1's) and block sums as packed int16 (32 int8 values fit), which
+  cuts a prefetched block's activation registers from 6 to 4 a half (8x1x6 at 16 rows 144 -> 126 registers) and makes
+  8x2x3 the fastest 16-row shape: FFN 68-70 us against 70.6-75. The layout moved into `mmvq_tc_act.cuh` (three copies of
+  its size before); relative errors against MMQ unchanged to two digits at every shape, the matvec tests pass.
+- **GDN recurrence.** `ncu` inside a serve: 48 blocks (one per value head) on 82 SMs, 70% of cycles with no eligible
+  warp. Sixteen-warp blocks (half the serial value chunks) changed nothing (53.8 -> 54.2 us), so source counters: 37% of
+  stall samples are MIO throttle on `SHFL`, the 32-lane reductions (two per token and value row, five steps each,
+  about 20K warp shuffles a head on one SM's pipe). Rewritten with eight lanes a value row (16 keys a lane, the head's
+  whole state in registers, no staged chunks): three shuffles a reduction, each serving the warp's four row groups.
+  32.5 -> 25.6 us at 8 rows, 53.8 -> 37.0 at 16. Against master's kernel on the test's inputs: f32 states equal to
+  9e-8 relative, bf16/f16 states and outputs within one rounding step. The checkpoint test now also runs 16 rows. (Its
+  serial reference rounds q, k and v to bf16, so its absolute bound cannot be tightened to catch a 1% update error; a
+  20% one fails it.)
+- **Q6_K head at 16 rows.** Four more row-major configs swept (8x2, 4x4, 2x4, 4x2 without prefetch): best 1.53 ms
+  against MMQ's 1.50-1.53 and 1.34 at 8 rows; wider groups collapse (4x4 5.6 ms). Left on MMQ.
+- **Time outside kernels.** Idle per step 0.82 ms at 8 rows and 0.84 at 16 (`wide/gaps.py`): nothing 16-row-specific.
+
+End to end, master and branch binaries alternating, each server started at or under 48 C, 400 sampled tokens over the
+six prompts, no thermal slowdown in any sample (step time from accepted counts, so independent of the text sampled):
+
+```
+             master                   branch                   change
+7 drafts     27.80 / 27.93 / 27.90 ms   27.64 / 27.56 / 27.54 ms   -0.30 ms (-1.1%)
+15 drafts    32.73 / 32.72 / 32.76 ms   31.52 / 31.54 / 31.70 ms   -1.15 ms (-3.5%)
+```
+
+(An earlier hot run, 40% of samples in thermal slowdown, read only 0.2-0.3 ms either way.) With Run 15's sampled
+tokens per step, depth 7 is 3.223 / 27.58 ms = 116.9 tok/s and depth 15 3.634 / 31.59 ms = 115.0: depth 15 goes from
+5% behind to under 2% behind, so 7 stays the default.
