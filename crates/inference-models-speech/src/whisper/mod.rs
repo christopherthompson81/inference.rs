@@ -9,7 +9,7 @@ mod timing;
 
 use std::path::{Path, PathBuf};
 
-use inference_audio::whisper::{LogMelMax, WhisperLogMel};
+use inference_audio::whisper::WhisperLogMel;
 use inference_nn::audio::whisper::WhisperEncoder;
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder};
 use inference_tensor::{DType, Device, Error, Result, Tensor};
@@ -564,19 +564,16 @@ impl Whisper {
         sample_rate: u32,
         options: &TranscriptionOptions,
     ) -> Result<Transcription> {
-        let pcm = if sample_rate == SAMPLE_RATE {
-            pcm.to_vec()
-        } else {
-            inference_audio::mel::resample(pcm, sample_rate, SAMPLE_RATE)
-                .map_err(msg)?
-                .into_owned()
-        };
+        let pcm = inference_audio::mel::resample(pcm, sample_rate, SAMPLE_RATE).map_err(msg)?;
         let duration = pcm.len() as f64 / f64::from(SAMPLE_RATE);
         let content_frames = pcm.len() / HOP_LENGTH;
-        // OpenAI pads a window of silence after the audio before its log-mel, whose floor is the whole clip's peak
-        let mut padded = pcm;
+        // OpenAI pads a window of silence after the audio before its log-mel, whose floor is the whole clip's peak;
+        // each window's frames are made as it is reached, so a long recording's log-mel is never held whole
+        let mut padded = Vec::with_capacity(pcm.len() + WINDOW_SAMPLES);
+        padded.extend_from_slice(&pcm);
+        drop(pcm);
         padded.resize(padded.len() + WINDOW_SAMPLES, 0.0);
-        let frames = self.log_mel.frames(&padded, LogMelMax::Clip);
+        let peak = self.log_mel.peak(&padded);
         let n_mels = self.log_mel.n_mels;
         let mut language = match options.language.as_deref() {
             Some(l) if options.language_identified => self.language_code(l).ok(),
@@ -614,7 +611,10 @@ impl Whisper {
             let window_frames = WINDOW_FRAMES.min(content_frames - seek);
             // OpenAI's `pad_or_trim`: a window short of 30 s is zeros past the audio, not the padding's log-mel
             let mut mel = vec![0.0f32; n_mels * WINDOW_FRAMES];
-            for (t, frame) in frames[seek..seek + window_frames].iter().enumerate() {
+            let frames = self
+                .log_mel
+                .frames_in(&padded, seek..seek + window_frames, peak);
+            for (t, frame) in frames.iter().enumerate() {
                 for (m, &value) in frame.iter().enumerate() {
                     mel[m * WINDOW_FRAMES + t] = value;
                 }

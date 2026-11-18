@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use inference_audio::nemo::{NemoMel, NemoMelConfig};
+use inference_audio::nemo::{NemoFeatureReader, NemoMel, NemoMelConfig};
 use inference_quant::QuantMethod;
 use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, ops};
 use inference_tensor::{D, DType, Device, Error, Result, Tensor};
@@ -726,24 +726,29 @@ impl Nemotron3Diarizer {
 
     /// `(frames, speakers)` speech logits of mono `pcm` at the model's rate, chunk by chunk behind the cache.
     pub fn logits(&self, pcm: &[f32]) -> Result<Tensor> {
-        let (features, frames) = self.features(pcm)?;
-        self.logits_of_features(&features, frames)?
+        let mut features = NemoFeatureReader::new(&self.mel, pcm).map_err(msg)?;
+        let frames = features.frames();
+        self.logits_reporting(&mut features, None)?
             .narrow(0, 0, frames)
     }
 
     /// As [`Self::logits`], from `frames` rows of [`Self::features`] (or features computed alike), for every frame
     /// of the whole encoder steps they fill (the last one's zero-padded frames too).
     pub fn logits_of_features(&self, features: &[f32], frames: usize) -> Result<Tensor> {
-        self.logits_reporting(features, frames, None)
+        self.logits_reporting(
+            &mut NemoFeatureReader::from_features(&self.mel, features, frames),
+            None,
+        )
     }
 
-    // `logits_of_features`, reporting each chunk's end to `progress`
+    // `(frames, speakers)` logits for every frame of the whole encoder steps the features fill (the last one's
+    // zero-padded frames too), each chunk's features made as it is reached; each chunk's end reported to `progress`
     fn logits_reporting(
         &self,
-        features: &[f32],
-        frames: usize,
+        features: &mut NemoFeatureReader<'_>,
         progress: Option<&super::DiarizationProgressFn>,
     ) -> Result<Tensor> {
+        let frames = features.frames();
         let duration = frames as f64 * self.frame_seconds;
         let factor = self.config.audio_config.subsampling_factor;
         let total = frames.div_ceil(factor);
@@ -754,7 +759,10 @@ impl Nemotron3Diarizer {
         for start in (0..total).step_by(chunk) {
             let frames_here = chunk.min(total - start);
             let seen = (frames_here + context).min(total - start);
-            let chunk_embeds = self.encoder.embed(features, start, seen)?;
+            let window = features
+                .range(start * factor, (start + seen) * factor)
+                .map_err(msg)?;
+            let chunk_embeds = self.encoder.embed(window, 0, seen)?;
             let cached = cache.embeds()?;
             let cached_len = cached.as_ref().map_or(Ok(0), |c| c.dim(0))?;
             let input = match cached {
@@ -800,9 +808,10 @@ impl Nemotron3Diarizer {
     ) -> Result<Diarization> {
         let pcm =
             inference_audio::mel::resample(pcm, sample_rate, self.sample_rate()).map_err(msg)?;
-        let (features, frames) = self.features(&pcm)?;
+        let mut features = NemoFeatureReader::new(&self.mel, &pcm).map_err(msg)?;
+        let frames = features.frames();
         let logits = self
-            .logits_reporting(&features, frames, progress)?
+            .logits_reporting(&mut features, progress)?
             .narrow(0, 0, frames)?;
         let probabilities = ops::sigmoid(&logits)?
             .to_dtype(DType::F32)?

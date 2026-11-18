@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::Stream;
 use inference_core::{
-    AudioInput, Diarization, DiarizationOptions, DiarizationProgressHook, RequestCancellation,
-    RequestMessage, Response, TranscriptionOptions, TranscriptionProgress,
-    TranscriptionProgressHook,
+    AudioInput, Diarization, DiarizationOptions, DiarizationProgressHook, MAX_SPEECH_SECONDS,
+    RequestCancellation, RequestMessage, Response, SPEECH_SAMPLE_RATE, TranscriptionOptions,
+    TranscriptionProgress, TranscriptionProgressHook,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -32,10 +32,6 @@ use crate::{
     types::SharedInferenceRsState,
 };
 
-/// The rate a file is decoded to: the speech models' own (another model resamples from it).
-const STREAM_SAMPLE_RATE: u32 = 16_000;
-/// The longest recording a stream reads: 12 hours at [`STREAM_SAMPLE_RATE`], ~2.8 GB decoded.
-const MAX_STREAM_SAMPLES: usize = 12 * 60 * 60 * STREAM_SAMPLE_RATE as usize;
 // the request fields a stream takes beyond its request's own
 const PATH_FIELD: &str = "path";
 const FROM_SECONDS_FIELD: &str = "from_seconds";
@@ -245,10 +241,12 @@ async fn load_audio(
 ) -> Result<AudioInput, ApiError> {
     let path = source.path;
     let audio = tokio::task::spawn_blocking(move || match (path, bytes) {
-        (Some(path), _) => {
-            AudioInput::from_file_mono(&path, STREAM_SAMPLE_RATE, MAX_STREAM_SAMPLES)
-                .map_err(audio_error)
-        }
+        (Some(path), _) => AudioInput::from_file_mono(
+            &path,
+            SPEECH_SAMPLE_RATE,
+            MAX_SPEECH_SECONDS * SPEECH_SAMPLE_RATE as usize,
+        )
+        .map_err(audio_error),
         (None, Some(bytes)) => decode_audio(&bytes),
         (None, None) => unreachable!("checked when the stream opened"),
     })

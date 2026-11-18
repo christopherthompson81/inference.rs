@@ -189,6 +189,9 @@ impl FrameScratch {
     }
 }
 
+// samples a feature reader streams at once
+const FEED_SAMPLES: usize = 1 << 16;
+
 /// [`NemoMel::features`] over audio that arrives in pieces: each frame is emitted once its samples are all in, and
 /// the frames together equal the offline features of the whole audio. Normalisation needs the whole utterance, so
 /// a normalising config is refused.
@@ -281,9 +284,125 @@ impl NemoMelStream {
     }
 }
 
+/// [`NemoMel::features`] of `samples` read a range of frames at a time, as a model's chunk loop moves forward:
+/// streamed when the config allows ([`NemoMelStream`]), so only the frames a range needs are held, else the whole
+/// recording's at once (normalisation needs them all).
+pub struct NemoFeatureReader<'a> {
+    mel: &'a NemoMel,
+    samples: &'a [f32],
+    fed: usize,
+    stream: Option<NemoMelStream>,
+    // row-major frames from `first` on
+    held: std::borrow::Cow<'a, [f32]>,
+    first: usize,
+    frames: usize,
+}
+
+impl<'a> NemoFeatureReader<'a> {
+    pub fn new(mel: &'a NemoMel, samples: &'a [f32]) -> Result<Self> {
+        let NemoMelConfig {
+            n_fft, hop_length, ..
+        } = mel.config;
+        let streamable = mel.stream().ok();
+        let frames = (samples.len() + 2 * (n_fft / 2)).saturating_sub(n_fft) / hop_length;
+        let (stream, held, frames) = match streamable {
+            // a clip too short for two frames fails as the offline features do
+            Some(stream) if frames >= 2 => (Some(stream), Vec::new(), frames),
+            _ => {
+                let (held, frames) = mel.features(samples)?;
+                (None, held, frames)
+            }
+        };
+        let held = std::borrow::Cow::Owned(held);
+        Ok(Self {
+            mel,
+            samples,
+            fed: 0,
+            stream,
+            held,
+            first: 0,
+            frames,
+        })
+    }
+
+    /// A reader over `frames` rows of features already made, as [`NemoMel::features`] gives them.
+    pub fn from_features(mel: &'a NemoMel, features: &'a [f32], frames: usize) -> Self {
+        Self {
+            mel,
+            samples: &[],
+            fed: 0,
+            stream: None,
+            held: std::borrow::Cow::Borrowed(features),
+            first: 0,
+            frames,
+        }
+    }
+
+    /// The recording's frame count, as [`NemoMel::features`] gives it.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Frames `start..end` (as many as there are), row-major. The frames before `start` are let go, so a later range
+    /// must not start before this one's.
+    pub fn range(&mut self, start: usize, end: usize) -> Result<&[f32]> {
+        let n_mels = self.mel.config.n_mels;
+        if start < self.first {
+            bail!(
+                "features from frame {start} were already let go (held from {})",
+                self.first
+            );
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            while self.first + self.held.len() / n_mels < end && stream.frames() < self.frames {
+                let more = if self.fed < self.samples.len() {
+                    let to = (self.fed + FEED_SAMPLES).min(self.samples.len());
+                    let out = stream.push(self.mel, &self.samples[self.fed..to]);
+                    self.fed = to;
+                    out
+                } else {
+                    stream.finish(self.mel)
+                };
+                self.held.to_mut().extend(more);
+            }
+            let drop = ((start - self.first) * n_mels).min(self.held.len());
+            self.held.to_mut().drain(..drop);
+            self.first = start;
+        }
+        let from = (start - self.first) * n_mels;
+        let to = ((end - self.first) * n_mels).min(self.held.len());
+        Ok(&self.held[from.min(to)..to])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // a forward-moving reader over a streamable config gives the offline features, range by range
+    #[test]
+    fn a_feature_reader_gives_the_offline_features_by_range() {
+        let mel = NemoMel::new(NemoMelConfig {
+            normalize: false,
+            ..*parakeet().config()
+        });
+        let samples: Vec<f32> = (0..200_000)
+            .map(|i| (i as f32 * 0.013).sin() * 0.3)
+            .collect();
+        let (whole, frames) = mel.features(&samples).unwrap();
+        let mut reader = NemoFeatureReader::new(&mel, &samples).unwrap();
+        assert_eq!(reader.frames(), frames);
+        let n_mels = mel.config().n_mels;
+        for start in (0..frames).step_by(113) {
+            let end = (start + 160).min(frames);
+            assert_eq!(
+                reader.range(start, end).unwrap(),
+                &whole[start * n_mels..end * n_mels],
+                "{start}"
+            );
+        }
+        assert!(reader.range(0, 1).is_err());
+    }
 
     fn parakeet() -> NemoMel {
         NemoMel::new(NemoMelConfig {

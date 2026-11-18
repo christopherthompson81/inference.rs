@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use inference_audio::nemo::NemoMel;
+use inference_audio::nemo::{NemoFeatureReader, NemoMel};
 use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, ops};
 use inference_tensor::{DType, Device, Error, Result, Tensor};
 
@@ -305,7 +305,9 @@ impl SortformerDiarizer {
     ) -> Result<Vec<f32>> {
         let duration = pcm.len() as f64 / f64::from(self.sample_rate());
         let m = &self.config.sortformer_modules;
-        let (features, frames) = self.features(pcm)?;
+        // each chunk's features made as it is reached, so a long recording's are never held whole
+        let mut features = NemoFeatureReader::new(&self.mel, pcm).map_err(msg)?;
+        let frames = features.frames();
         let mels = self.config.preprocessor.features;
         let sub = self.subsampling;
         let s = m.num_spks;
@@ -316,7 +318,7 @@ impl SortformerDiarizer {
             let left = (m.chunk_left_context * sub).min(start);
             let end = (start + m.chunk_len * sub).min(frames);
             let right = (m.chunk_right_context * sub).min(frames - end);
-            let slice = &features[(start - left) * mels..(end + right) * mels];
+            let slice = features.range(start - left, end + right).map_err(msg)?;
             let xs = Tensor::from_slice(slice, (1, slice.len() / mels, mels), &self.device)?
                 .to_dtype(self.positions.dtype())?;
             let chunk = self.encoder.subsample(&xs)?.squeeze(0)?;

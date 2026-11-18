@@ -26,6 +26,8 @@ const SPEECH_START: &str = "<|object_ref_start|>";
 const SPEECH_END: &str = "<|object_ref_end|>";
 const CHUNK_END: &str = "<|text_chunk_end|>";
 const EOS: &str = "<|endoftext|>";
+// windows of audio `transcribe` hands `push` at once
+const FEED_WINDOWS: usize = 8;
 // the special tokens the reference strips from each window's text
 const STRIPPED: [&str; 7] = [
     "<|text_chunk_end|>",
@@ -347,12 +349,15 @@ impl VibeVoiceStreaming {
     pub fn push(&self, session: &mut StreamingSession, pcm: &[f32]) -> Result<Vec<WindowText>> {
         session.pending.extend_from_slice(pcm);
         let mut out = Vec::new();
-        while session.pending.len() >= self.window_samples {
-            let window = session.pending[..self.window_samples].to_vec();
+        // the windows advance through `pending`, which is drained once after, not shifted per window
+        let mut start = 0;
+        while session.pending.len() - start >= self.window_samples {
+            let window = session.pending[start..start + self.window_samples].to_vec();
             out.push(self.run_window(session, &window)?);
-            session.pending.drain(..self.chunk_samples);
+            start += self.chunk_samples;
             session.consumed += self.chunk_samples;
         }
+        session.pending.drain(..start);
         Ok(out)
     }
 
@@ -377,7 +382,10 @@ impl VibeVoiceStreaming {
     /// The whole of `pcm` at the model's rate, window by window.
     pub fn transcribe(&self, pcm: &[f32], context: Option<&str>) -> Result<StreamingTranscript> {
         let mut session = self.start(context)?;
-        self.push(&mut session, pcm)?;
+        // fed a few windows at a time, so `pending` holds a block, not the whole recording again
+        for block in pcm.chunks(self.window_samples * FEED_WINDOWS) {
+            self.push(&mut session, block)?;
+        }
         Ok(self.finish(session)?.1)
     }
 }

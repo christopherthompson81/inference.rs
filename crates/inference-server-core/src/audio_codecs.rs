@@ -1,6 +1,9 @@
 //! Uploads in codecs the engine's decoder has none for, decoded to WAV before they reach it: Opus (Ogg, Matroska,
-//! WebM) and AC-3 / E-AC-3 (Matroska).
+//! WebM) and AC-3 / E-AC-3 (Matroska). The WAV is mono, at no more than a speech model's rate, made as the packets
+//! decode, so a long recording never sits whole at its source rate and channel count.
 
+use inference_audio::mel::StreamResampler;
+use inference_audio::{MAX_SPEECH_RATE, MAX_SPEECH_SECONDS};
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 use symphonia::core::{
     codecs::{CODEC_TYPE_NULL, CODEC_TYPE_OPUS},
@@ -33,22 +36,55 @@ const HEAD_PRE_SKIP: usize = 10;
 // the longest Opus packet: 120 ms at 48 kHz
 const MAX_PACKET_FRAMES: usize = 5760;
 const PCM16_SCALE: f32 = 32768.0;
-// the engine's own decoded-sample limit, 30 minutes of 48 kHz stereo, so a small file can't expand past it here
-const MAX_DECODED_SAMPLES: usize = 48_000 * 2 * 30 * 60;
 
+// decoded audio as the speech models take it: each packet's frames averaged to mono and resampled as they arrive
 struct Pcm {
     samples: Vec<f32>,
     rate: u32,
-    channels: usize,
+    resampler: StreamResampler,
+    // the source frames still to drop from the start (Opus's pre-skip)
+    skip: usize,
 }
 
 impl Pcm {
-    fn push(&mut self, samples: impl ExactSizeIterator<Item = f32>) -> anyhow::Result<()> {
-        if self.samples.len() + samples.len() > MAX_DECODED_SAMPLES {
-            anyhow::bail!("audio exceeds the {MAX_DECODED_SAMPLES} decoded sample limit");
+    fn new(source_rate: u32, skip: usize) -> anyhow::Result<Self> {
+        let rate = source_rate.min(MAX_SPEECH_RATE);
+        Ok(Self {
+            samples: Vec::new(),
+            rate,
+            resampler: StreamResampler::new(source_rate, rate)?,
+            skip,
+        })
+    }
+
+    // interleaved samples of `channels`
+    fn push(&mut self, interleaved: &[f32], channels: usize) -> anyhow::Result<()> {
+        let mono: Vec<f32> = interleaved
+            .chunks_exact(channels.max(1))
+            .skip(self.skip)
+            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+            .collect();
+        self.skip = self
+            .skip
+            .saturating_sub(interleaved.len() / channels.max(1));
+        let out = self.resampler.push(&mono)?;
+        self.extend(out)
+    }
+
+    fn extend(&mut self, out: Vec<f32>) -> anyhow::Result<()> {
+        let max = MAX_SPEECH_SECONDS * self.rate as usize;
+        if self.samples.len() + out.len() > max {
+            anyhow::bail!("audio exceeds the {max} decoded sample limit");
         }
-        self.samples.extend(samples);
+        self.samples.extend(out);
         Ok(())
+    }
+
+    // the samples and their rate
+    fn finish(mut self) -> anyhow::Result<(Vec<f32>, u32)> {
+        let rest = self.resampler.finish()?;
+        self.extend(rest)?;
+        Ok((self.samples, self.rate))
     }
 }
 
@@ -80,7 +116,7 @@ pub(crate) fn as_wav(bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         Codec::Ac3 | Codec::Eac3 => dolby(format.as_mut(), codec)?,
     };
     match pcm {
-        Some(pcm) => wav(&pcm),
+        Some((pcm, rate)) => wav(&pcm, rate),
         None => Ok(bytes),
     }
 }
@@ -103,7 +139,7 @@ fn each_packet(
     }
 }
 
-fn opus(format: &mut dyn FormatReader) -> anyhow::Result<Option<Pcm>> {
+fn opus(format: &mut dyn FormatReader) -> anyhow::Result<Option<(Vec<f32>, u32)>> {
     let Some(track) = format
         .tracks()
         .iter()
@@ -131,22 +167,16 @@ fn opus(format: &mut dyn FormatReader) -> anyhow::Result<Option<Pcm>> {
     };
     let mut decoder = opus::Decoder::new(OPUS_RATE, layout)?;
     let mut frame = vec![0f32; MAX_PACKET_FRAMES * channels];
-    let mut pcm = Pcm {
-        samples: Vec::new(),
-        rate: OPUS_RATE,
-        channels,
-    };
+    let mut pcm = Pcm::new(OPUS_RATE, pre_skip)?;
     each_packet(format, track_id, |packet| {
         let frames = decoder.decode_float(packet, &mut frame, false)?;
-        pcm.push(frame[..frames * channels].iter().copied())
+        pcm.push(&frame[..frames * channels], channels)
     })?;
-    pcm.samples
-        .drain(..(pre_skip * channels).min(pcm.samples.len()));
-    Ok(Some(pcm))
+    Ok(Some(pcm.finish()?))
 }
 
 // symphonia reads the Matroska track but has no AC-3 codec for it, so the track shows as an audio one with none
-fn dolby(format: &mut dyn FormatReader, codec: Codec) -> anyhow::Result<Option<Pcm>> {
+fn dolby(format: &mut dyn FormatReader, codec: Codec) -> anyhow::Result<Option<(Vec<f32>, u32)>> {
     let Some((track_id, rate)) = format.tracks().iter().find_map(|t| {
         let rate = t.codec_params.sample_rate?;
         (t.codec_params.codec == CODEC_TYPE_NULL).then_some((t.id, rate))
@@ -161,11 +191,8 @@ fn dolby(format: &mut dyn FormatReader, codec: Codec) -> anyhow::Result<Option<P
         oxideav_ac3::CODEC_ID_STR
     };
     let mut decoder = registry.first_decoder(&CodecParameters::audio(CodecId::new(id)))?;
-    let mut pcm = Pcm {
-        samples: Vec::new(),
-        rate,
-        channels: 0,
-    };
+    let mut pcm = Pcm::new(rate, 0)?;
+    let mut heard = false;
     each_packet(format, track_id, |packet| {
         decoder.send_packet(&Packet::new(
             0,
@@ -175,34 +202,36 @@ fn dolby(format: &mut dyn FormatReader, codec: Codec) -> anyhow::Result<Option<P
         // a frame is the decoder's interleaved 16-bit samples, in the source's own channel count
         while let Ok(Frame::Audio(frame)) = decoder.receive_frame() {
             let bytes = &frame.data[0];
-            if frame.samples > 0 {
-                pcm.channels = bytes.len() / size_of::<i16>() / frame.samples as usize;
+            if frame.samples == 0 {
+                continue;
             }
+            heard = true;
+            let channels = bytes.len() / size_of::<i16>() / frame.samples as usize;
             let (samples, _) = bytes.as_chunks::<2>();
-            pcm.push(
-                samples
-                    .iter()
-                    .map(|&b| f32::from(i16::from_le_bytes(b)) / PCM16_SCALE),
-            )?;
+            let samples: Vec<f32> = samples
+                .iter()
+                .map(|&b| f32::from(i16::from_le_bytes(b)) / PCM16_SCALE)
+                .collect();
+            pcm.push(&samples, channels)?;
         }
         Ok(())
     })?;
-    if pcm.channels == 0 {
+    if !heard {
         anyhow::bail!("the AC-3 track holds no audio");
     }
-    Ok(Some(pcm))
+    Ok(Some(pcm.finish()?))
 }
 
-fn wav(pcm: &Pcm) -> anyhow::Result<Vec<u8>> {
+fn wav(samples: &[f32], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
     let spec = hound::WavSpec {
-        channels: u16::try_from(pcm.channels)?,
-        sample_rate: pcm.rate,
+        channels: 1,
+        sample_rate,
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
     let mut wav = std::io::Cursor::new(Vec::new());
     let mut writer = hound::WavWriter::new(&mut wav, spec)?;
-    for &sample in &pcm.samples {
+    for &sample in samples {
         writer.write_sample(sample)?;
     }
     writer.finalize()?;
@@ -214,7 +243,7 @@ mod tests {
     use super::*;
 
     // synthetic 0.5 s 440 Hz tones made with ffmpeg (`-f lavfi -i sine=440:duration=0.5`): mono Ogg Opus, and
-    // stereo AC-3 in Matroska beside a 16x16 video track
+    // stereo AC-3 in Matroska beside a 16x16 video track; both 48 kHz, coming out mono at the speech models' highest rate
     const OPUS_TONE: &[u8] = include_bytes!("../tests/data/tone_440hz.opus");
     const AC3_TONE: &[u8] = include_bytes!("../tests/data/tone_440hz_ac3.mkv");
 
@@ -251,14 +280,14 @@ mod tests {
     #[test]
     fn an_opus_upload_becomes_a_wav_of_its_tone() {
         let (rate, channels, samples) = decoded(OPUS_TONE);
-        assert_eq!((rate, channels), (OPUS_RATE, 1));
+        assert_eq!((rate, channels), (MAX_SPEECH_RATE, 1));
         assert_tone(&samples, rate);
     }
 
     #[test]
     fn an_ac3_track_in_a_video_becomes_a_wav_of_its_tone() {
         let (rate, channels, samples) = decoded(AC3_TONE);
-        assert_eq!((rate, channels), (48_000, 2));
+        assert_eq!((rate, channels), (MAX_SPEECH_RATE, 1));
         assert_tone(&samples, rate);
     }
 
