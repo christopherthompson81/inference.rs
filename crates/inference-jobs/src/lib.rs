@@ -27,6 +27,7 @@ use crate::reconstruction::{
 
 pub mod image_to_3d;
 pub mod image_to_splat;
+pub mod print;
 pub mod reconstruction;
 pub mod texture_mesh;
 pub mod voxels;
@@ -512,6 +513,9 @@ pub struct ImageTo3dJob {
     /// Results to make, 1 to 8 (the `i`th seeded `seed + i`); more than one go in folders `model/1`, `model/2`, ...
     #[serde(default)]
     pub samples: Option<u32>,
+    /// The printable STL's longest side in millimetres, 5 to 2000 (100 by default)
+    #[serde(default)]
+    pub print_size_mm: Option<f64>,
     /// The sparse structure flow's sampler
     #[serde(default)]
     pub structure_sampler: Option<Trellis2Sampler>,
@@ -558,6 +562,9 @@ pub struct ImageToSplatJob {
     /// The time grid's shift toward high noise (3 by default; 1: uniform)
     #[serde(default)]
     pub rescale_t: Option<f64>,
+    /// The printable STL's longest side in millimetres, 5 to 2000 (100 by default)
+    #[serde(default)]
+    pub print_size_mm: Option<f64>,
     /// How much it may displace to run, in place of the server's setting
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -1564,8 +1571,10 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
             FACES_RANGE.end()
         )));
     }
+    let print_size_mm = print_size(job.print_size_mm)?;
     let options = ImageTo3dOptions {
         settings,
+        print_size_mm,
         faces,
         remove_background: job.remove_background.unwrap_or(false),
         bake: (!job.vertex_colors.unwrap_or(false)).then(|| BakeOptions {
@@ -1619,6 +1628,7 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
             for (name, file) in [
                 ("model", crate::image_to_3d::GLB_FILE),
                 ("mesh", crate::image_to_3d::MESH_FILE),
+                ("printable (stl)", crate::print::PRINT_FILE),
                 ("meta", crate::image_to_3d::META_FILE),
             ] {
                 let name = if samples == 1 {
@@ -1639,13 +1649,27 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
     Ok((prepare, work))
 }
 
+// a job's printable size, the default when not given
+fn print_size(asked: Option<f64>) -> Result<f64, ApiError> {
+    let size = asked.unwrap_or(crate::print::DEFAULT_PRINT_SIZE_MM);
+    let range = crate::print::PRINT_SIZE_RANGE_MM;
+    if !range.contains(&size) {
+        return Err(ApiError::invalid_request(format!(
+            "print_size_mm must be {} to {}",
+            range.start(),
+            range.end()
+        )));
+    }
+    Ok(size)
+}
+
 fn image_to_splat_work(
     config: &JobsConfig,
     job: ImageToSplatJob,
 ) -> Result<(Prepare, Work), ApiError> {
     use crate::image_to_splat::{
-        MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS, MAX_STEPS, MIN_GAUSSIANS, fetch_models,
-        generate_splat_on,
+        ImageToSplatOptions, MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS, MAX_STEPS,
+        MIN_GAUSSIANS, fetch_models, generate_splat_on,
     };
     let defaults = inference_recon::idol::IdolSettings::default();
     let settings = inference_recon::idol::IdolSettings {
@@ -1674,6 +1698,10 @@ fn image_to_splat_work(
             "guidance must be at least 0 and rescale_t above 0",
         ));
     }
+    let options = ImageToSplatOptions {
+        settings,
+        print_size_mm: print_size(job.print_size_mm)?,
+    };
     let fetched = Arc::new(std::sync::OnceLock::new());
     let (base, slot) = (config.clone(), fetched.clone());
     let prepare: Prepare = Box::new(move |ctx: &JobContext| {
@@ -1695,11 +1723,12 @@ fn image_to_splat_work(
             .next()
             .ok_or_else(|| anyhow::anyhow!("an image-to-splat job takes one image"))?;
         let out = ctx.dir().join(IMAGE_TO_SPLAT_DIR);
-        let report = generate_splat_on(models, &image, &out, &settings, ctx, &device)?;
+        let report = generate_splat_on(models, &image, &out, &options, ctx, &device)?;
         let dir = ctx.dir();
         let outputs = [
             ("splats", crate::image_to_splat::SPZ_FILE),
             ("splats (ply)", crate::image_to_splat::PLY_FILE),
+            ("printable (stl)", crate::print::PRINT_FILE),
             ("prepared image", crate::image_to_splat::PREPARED_FILE),
             ("meta", crate::image_to_splat::META_FILE),
         ]

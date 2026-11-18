@@ -278,8 +278,9 @@ fn collapse_point(v0: V3, v1: V3, b0: bool, b1: bool) -> V3 {
     add(scale(v0, w0), scale(v1, 1.0 - w0))
 }
 
-/// One round of collapses.
-fn simplify_round(mesh: &mut Mesh, threshold: f32) {
+/// One round of collapses; `manifold` also skips an edge whose ends share more neighbours than its faces' third
+/// corners (the link condition), whose collapse would pinch a closed surface.
+fn simplify_round(mesh: &mut Mesh, threshold: f32, manifold: bool) {
     let vf = VertFaces::new(mesh.vertices.len(), &mesh.faces);
     let (edges, counts) = edges_by_vertex(&vf, &mesh.faces);
     let mut boundary = vec![false; mesh.vertices.len()];
@@ -369,7 +370,7 @@ fn simplify_round(mesh: &mut Mesh, threshold: f32) {
                 vf.of(v)
                     .iter()
                     .all(|&f| best[f as usize].load(Ordering::Relaxed) == p)
-            })
+            }) && (!manifold || links(&vf, faces, e0, e1))
         })
         .collect();
     let mut vertex_kept = vec![true; verts.len()];
@@ -413,6 +414,32 @@ fn simplify_round(mesh: &mut Mesh, threshold: f32) {
     mesh.vertices = new_verts;
 }
 
+// whether the neighbours `a` and `b` share are just the third corners of the faces on edge a-b
+fn links(vf: &VertFaces, faces: &[[u32; 3]], a: u32, b: u32) -> bool {
+    let around = |v: u32| -> Vec<u32> {
+        let mut out: Vec<u32> = vf
+            .of(v)
+            .iter()
+            .flat_map(|&f| faces[f as usize])
+            .filter(|&w| w != v)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    };
+    let (na, nb) = (around(a), around(b));
+    let shared = na
+        .iter()
+        .filter(|w| **w != b && nb.binary_search(w).is_ok())
+        .count();
+    let on_edge = vf
+        .of(a)
+        .iter()
+        .filter(|&&f| faces[f as usize].contains(&b))
+        .count();
+    shared == on_edge
+}
+
 /// [`simplify`] on `device`: on the GPU for a CUDA device (same result), else on the host.
 pub fn simplify_on(
     mesh: &mut Mesh,
@@ -430,15 +457,29 @@ pub fn simplify_on(
 
 /// Collapses edges until at most `target` faces remain.
 pub fn simplify(mesh: &mut Mesh, target: usize) {
+    simplify_rounds(mesh, target, false);
+}
+
+/// [`simplify`] keeping a closed manifold surface closed and manifold: it stops when no collapse passes the link
+/// condition, possibly above `target`.
+pub fn simplify_manifold(mesh: &mut Mesh, target: usize) {
+    simplify_rounds(mesh, target, true);
+}
+
+fn simplify_rounds(mesh: &mut Mesh, target: usize, manifold: bool) {
     let mut threshold = START_THRESHOLD;
     let mut faces = mesh.faces.len();
     if faces <= target {
         return;
     }
     loop {
-        simplify_round(mesh, threshold);
+        simplify_round(mesh, threshold, manifold);
         let now = mesh.faces.len();
         if now <= target {
+            break;
+        }
+        // past every cost, a round that removes nothing has only blocked collapses left
+        if now == faces && threshold.is_infinite() {
             break;
         }
         if ((faces - now) as f64) / (faces as f64) < SLOW_ROUND {
@@ -641,6 +682,23 @@ mod tests {
         assert_eq!(mesh.vertices[25], [0.375, 0.375, 0.0]);
         fill_holes(&mut big, 0.5);
         assert_eq!(big.faces.len(), before);
+    }
+
+    #[test]
+    fn the_link_condition_refuses_a_collapse_that_would_pinch() {
+        // a double pyramid: equator x, y, z (0, 1, 2), poles p, q (3, 4), wound outward
+        let faces = vec![
+            [0, 1, 3],
+            [1, 2, 3],
+            [2, 0, 3],
+            [1, 0, 4],
+            [2, 1, 4],
+            [0, 2, 4],
+        ];
+        let vf = VertFaces::new(5, &faces);
+        // x and y share z, p and q, but only p and q close the faces on x-y
+        assert!(!links(&vf, &faces, 0, 1));
+        assert!(links(&vf, &faces, 0, 3));
     }
 
     #[test]

@@ -12,6 +12,7 @@ TRELLIS.2's textured mesh of the object in the job's one image.
 | --- | --- | --- |
 | `faces` | `int \| None` | optional |
 | `placement` | `Placement \| None` | optional |
+| `print_size_mm` | `float \| None` | optional |
 | `remesh` | `bool \| None` | optional |
 | `remove_background` | `bool \| None` | optional |
 | `samples` | `int \| None` | optional |
@@ -34,6 +35,7 @@ Idol's Gaussian splats of the object in the job's one image.
 | `guidance` | `float \| None` | optional |
 | `mode` | `SplatImageMode \| None` | optional |
 | `placement` | `Placement \| None` | optional |
+| `print_size_mm` | `float \| None` | optional |
 | `rescale_t` | `float \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `steps` | `int \| None` | optional |

@@ -6913,6 +6913,14 @@
               }
             ]
           },
+          "print_size_mm": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The printable STL's longest side in millimetres, 5 to 2000 (100 by default)"
+          },
           "remesh": {
             "type": [
               "boolean",
@@ -7046,6 +7054,14 @@
                 "description": "How much it may displace to run, in place of the server's setting"
               }
             ]
+          },
+          "print_size_mm": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The printable STL's longest side in millimetres, 5 to 2000 (100 by default)"
           },
           "rescale_t": {
             "type": [
