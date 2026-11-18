@@ -99,7 +99,7 @@ fn quantize_slice(
     quantizer: Quantizer,
 ) -> Result<Vec<u8>> {
     if iq_quantize::can_quantize(ty) {
-        return iq_quantize::quantize_rows(ty, cols, values, imatrix);
+        return iq_quantize::quantize_rows(ty, cols, values, imatrix, quantizer);
     }
     let Some(dtype) = ty.candle() else {
         inference_tensor::bail!("{ty:?} has no quantizer");
@@ -557,8 +557,13 @@ mod tests {
         )?;
         assert_eq!(&bytes[..4 * row], expected.as_slice());
         // the second expert's rows weighed by the second slice, not the first
-        let first_only =
-            iq_quantize::quantize_rows(GgufType::Iq4Ks, cols, &values, Some(&w[..cols]))?;
+        let first_only = iq_quantize::quantize_rows(
+            GgufType::Iq4Ks,
+            cols,
+            &values,
+            Some(&w[..cols]),
+            Quantizer::LlamaCpp,
+        )?;
         assert_ne!(&bytes[2 * row..4 * row], &first_only[2 * row..]);
 
         let dat = dir.path().join("imatrix.dat");
