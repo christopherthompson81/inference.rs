@@ -27,8 +27,9 @@ const CELL_FACES: [[usize; 4]; 3] = [[0, 1, 3, 2], [0, 1, 5, 4], [0, 2, 6, 4]];
 // face-neighbour steps the occupied points grow by before the flood, and the flood after, closing small gaps
 const SPLAT_CLOSING: usize = 1;
 const VOXEL_CLOSING: usize = 1;
-// half the thinnest wall, in voxels: thinner parts grow to about twice this plus one (a TRELLIS.2 object can be an open
-// shell, and its walls, rods and Idol's thin parts would not survive the blur or a printer)
+// half the thinnest wall, in voxels: thinner parts of a voxel shell grow to about twice this plus one (a TRELLIS.2 object
+// can be an open shell, whose walls would not survive the blur or a printer); not for splats, whose sealed surface has
+// small bumps the opening would count as thin and grow into warts
 const MIN_WALL: usize = 2;
 /// Summed Gaussian density at which a point counts as occupied
 const DENSITY_THRESHOLD: f32 = 0.5;
@@ -205,7 +206,7 @@ impl Solid {
             }
         }
         let occupied: Vec<bool> = density.iter().map(|&d| d >= DENSITY_THRESHOLD).collect();
-        solid.seal(occupied, SPLAT_CLOSING);
+        solid.seal(occupied, SPLAT_CLOSING, false);
         solid
     }
 
@@ -251,7 +252,7 @@ impl Solid {
                 occupied[solid.index(nearest)] = true;
             }
         }
-        solid.seal(occupied, VOXEL_CLOSING);
+        solid.seal(occupied, VOXEL_CLOSING, true);
         solid
     }
 
@@ -324,9 +325,9 @@ impl Solid {
     }
 
     // what a flood from the border through free points misses is solid, closed over gaps up to about twice `closing`
-    // voxels (the occupied points grown, flooded around, and the flood grown back), its thin parts thickened; keeps the
-    // largest piece
-    fn seal(&mut self, occupied: Vec<bool>, closing: usize) {
+    // voxels (the occupied points grown, flooded around, and the flood grown back), its thin parts thickened when
+    // `thicken`; keeps the largest piece
+    fn seal(&mut self, occupied: Vec<bool>, closing: usize, thicken: bool) {
         let occupied = self.dilate(occupied, closing);
         let mut labels = vec![0u32; self.len()];
         // the corner is free: the padding keeps the border empty, and it is all one piece
@@ -334,7 +335,11 @@ impl Solid {
         let outside: Vec<bool> = labels.iter().map(|&l| l == 1).collect();
         let outside = self.dilate(outside, closing);
         let remains: Vec<bool> = outside.iter().map(|&o| !o).collect();
-        let walled = self.thicken(remains);
+        let walled = if thicken {
+            self.thicken(remains)
+        } else {
+            remains
+        };
         self.inside = self.largest_piece(&walled);
     }
 

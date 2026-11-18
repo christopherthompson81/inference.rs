@@ -78,3 +78,13 @@ per-point flood over the 60M-point grid), diagonal join 0.8 s, surface 1.0 s, si
 Fix: frame the grid around the object's bounds instead of the cube, run the passes row-parallel without per-point
 division, flood with coordinates on the stack. Robot: 3.1 s (run 43.6 s), 466,524 faces, watertight; the well (as
 large as its cube, hollow): 12.0 s; Idol chair: 3.3 s, 122,468 faces, one body, watertight.
+
+## Run 9 - 2026-11-18 16:30
+
+Question: an Idol cat (a photo, `real` mode) printed "warty": bumps the size of a few Gaussians all over the body.
+
+The thickening (Run 7) treats whatever an opening by a 2-step cube removes as thin and grows it 2 steps: on a sealed
+splat surface that is every small density bump, so each one grew outward. The same cat with the thickening off for
+splats: smooth, watertight, one body, 242,160 faces (260,112 before), 75.9 cm3, 2.2 s. Splats are always sealed by the
+flood, so they keep no open walls to thicken; TRELLIS.2's voxel shells keep the step.
+
