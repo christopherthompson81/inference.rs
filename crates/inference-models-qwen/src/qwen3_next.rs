@@ -1068,7 +1068,11 @@ impl Model {
                                 pool.state_layout(),
                             )
                         } else {
-                            GdnLayerCache::checkout(pool, &indices)?
+                            GdnLayerCache::checkout(
+                                pool,
+                                &indices,
+                                recurrent_metadata.state_indices_host(),
+                            )?
                         };
 
                         x = layer.forward_linear(

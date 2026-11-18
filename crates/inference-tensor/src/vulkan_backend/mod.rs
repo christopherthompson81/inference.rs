@@ -614,13 +614,14 @@ pub(crate) fn rope(
         None if cos.elem_count() == tokens * rot => inference_vulkan::RopeRows::Tokens,
         None => inference_vulkan::RopeRows::Sequence,
     };
-    // the kernel binds a positions buffer either way
+    // the kernel binds a positions buffer either way, unread without positions (an f32 to u32 cast would round-trip
+    // through the host)
     let positions = match positions {
         Some(p) => p
             .to_dtype(DType::U32)?
             .to_device(x.device())?
             .contiguous()?,
-        None => cos.zeros_like()?.to_dtype(DType::U32)?,
+        None => Tensor::zeros(1, DType::U32, x.device())?,
     };
     let x = x.contiguous()?;
     let [xb, cb, sb, pb] = [

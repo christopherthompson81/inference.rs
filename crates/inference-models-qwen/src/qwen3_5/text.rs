@@ -3303,7 +3303,11 @@ impl Qwen3_5TextModel {
                                 pool.state_layout(),
                             )
                         } else {
-                            GdnLayerCache::checkout(pool, &indices)?
+                            GdnLayerCache::checkout(
+                                pool,
+                                &indices,
+                                recurrent_metadata.state_indices_host(),
+                            )?
                         };
 
                         let mut projected_stash = None;
