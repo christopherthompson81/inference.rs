@@ -527,7 +527,8 @@ pub(super) fn make_qkx3_quants_ik(
         sum_l2 = wl.mul_add(li, sum_l2);
         sum_xl = wl.mul_add(x[i] as f64, sum_xl);
     }
-    // the weighted fit gain 2 s Sxl + 2 m Sx - 2 s m Sl - s^2 Sl2 - m^2 Sw (higher is a smaller error)
+    // the weighted fit gain from the sums, 2 s sum_xl + 2 m sum_x - 2 s m sum_l - s^2 sum_l2 - m^2 sum_w (higher is a
+    // smaller error)
     let gain = |s: f64, m: f64, sum_l: f64, sum_l2: f64, sum_xl: f64| {
         let g = madd2_64(2.0 * s, sum_xl, 2.0 * m, sum_x);
         let g = (-2.0 * s * m).mul_add(sum_l, g);

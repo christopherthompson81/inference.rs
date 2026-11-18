@@ -144,6 +144,11 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         QuantizerChoice::LlamaCpp => gguf_requantize::Quantizer::LlamaCpp,
         QuantizerChoice::IkLlama => gguf_requantize::Quantizer::IkLlama,
     };
+    for (_, ty) in &rules {
+        if !gguf_requantize::follows_quantizer(*ty, quantizer) {
+            warn!("{ty:?} has no ik_llama.cpp search here yet; it is written with llama.cpp's");
+        }
+    }
     let plan = gguf_requantize::RequantizePlan {
         rules,
         imatrix,

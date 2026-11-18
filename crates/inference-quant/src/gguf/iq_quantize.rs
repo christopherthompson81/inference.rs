@@ -815,7 +815,7 @@ mod tests {
     }
 
     fn rms_error(ty: GgufType, cols: usize, x: &[f32], imatrix: Option<&[f32]>) -> (f32, Vec<f32>) {
-        let bytes = quantize_rows(ty, cols, x, imatrix).unwrap();
+        let bytes = quantize_rows(ty, cols, x, imatrix, Quantizer::LlamaCpp).unwrap();
         let back = super::super::raw::dequantize_rows(ty, cols, &bytes).unwrap();
         let err = x
             .iter()
@@ -934,7 +934,7 @@ mod tests {
         let x = values(256, 5);
         for ty in LOW_BIT {
             assert_eq!(
-                quantize_rows(ty, 256, &x, None).is_err(),
+                quantize_rows(ty, 256, &x, None, Quantizer::LlamaCpp).is_err(),
                 requires_imatrix(ty),
                 "{ty:?}"
             );
