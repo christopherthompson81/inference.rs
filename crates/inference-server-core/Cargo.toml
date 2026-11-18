@@ -26,6 +26,7 @@ http-body-util.workspace = true
 futures.workspace = true
 hound.workspace = true
 inference-api.workspace = true
+inference-audio.workspace = true
 inference-http.workspace = true
 inference-chat-protocols.workspace = true
 inference-jobs.workspace = true

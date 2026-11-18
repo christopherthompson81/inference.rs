@@ -156,7 +156,7 @@ pub use files::{
 pub use gguf::mmproj_writer::{MmprojSummary, mmproj_architectures, write_mmproj};
 pub use gguf::nemotron_transcribe_bindings::write_nemotron_transcribe_audio_gguf;
 pub use gguf::{GGUF_MULTI_FILE_DELIMITER, GGUFArchitecture};
-pub use inference_audio::AudioInput;
+pub use inference_audio::{AudioInput, MAX_SPEECH_RATE, MAX_SPEECH_SECONDS, SPEECH_SAMPLE_RATE};
 pub use inference_code_exec::{
     CodeExecutionConfig, DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS, ShellConfig,
 };

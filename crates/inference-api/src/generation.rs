@@ -5,10 +5,10 @@ use futures::future::BoxFuture;
 use inference_core::{
     AudioInput, Diarization, DiarizationOptions, DiffusionGenerationParams, ImageChoice,
     ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, LANGUAGE_ID_MAX_SECONDS,
-    LanguageIdentification, MAX_REFERENCE_IMAGES, NormalRequest, ReferenceImages, Request,
-    RequestMessage, Response, SamplingParams, SegmentOptions, SpeakerSegment, SpeechOptions,
-    SpeechReference, TimedText, Transcription, TranscriptionOptions, VoiceActivity,
-    WordTimestampsRequest,
+    LanguageIdentification, MAX_REFERENCE_IMAGES, MAX_SPEECH_RATE, MAX_SPEECH_SECONDS,
+    NormalRequest, ReferenceImages, Request, RequestMessage, Response, SamplingParams,
+    SegmentOptions, SpeakerSegment, SpeechOptions, SpeechReference, TimedText, Transcription,
+    TranscriptionOptions, VoiceActivity, WordTimestampsRequest,
     speech_utils::{self, Sample},
 };
 
@@ -1357,8 +1357,9 @@ fn speech_reference(
     })))
 }
 
+// speech input decoded to mono as it reads, no higher than a speech model's rate, so a long or wide recording stays small
 pub(crate) fn decode_audio(audio: &[u8]) -> Result<AudioInput, ApiError> {
-    AudioInput::from_bytes(audio).map_err(audio_error)
+    AudioInput::from_bytes_mono(audio, MAX_SPEECH_RATE, MAX_SPEECH_SECONDS).map_err(audio_error)
 }
 
 pub(crate) fn audio_error(error: anyhow::Error) -> ApiError {

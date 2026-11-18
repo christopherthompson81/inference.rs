@@ -23,6 +23,14 @@ use symphonia::core::{
 const PCM16_SCALE: f32 = 32_768.0;
 // 30 minutes of 48 kHz stereo; compressed input can otherwise expand to tens of GB
 const MAX_DECODED_AUDIO_SAMPLES: usize = 48_000 * 2 * 30 * 60;
+/// The rate a speech stream decodes a file to: most speech models' own (a model at another rate resamples from it).
+pub const SPEECH_SAMPLE_RATE: u32 = 16_000;
+/// The highest rate a speech model takes (VibeVoice-ASR's 24 kHz): uploaded speech above it is decoded down to it,
+/// below it kept at its own.
+pub const MAX_SPEECH_RATE: u32 = 24_000;
+/// The longest speech recording decoded: the guard against a small compressed file that decodes to days of audio,
+/// not a length the models need.
+pub const MAX_SPEECH_SECONDS: usize = 24 * 60 * 60;
 
 /// Raw audio input consisting of PCM samples and a sample rate.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -89,7 +97,32 @@ impl AudioInput {
     ) -> Result<Self> {
         let file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
-        let mut decoder = Decoder::open(Box::new(file), len)?;
+        Self::mono_from_source(Box::new(file), len, sample_rate, max_samples)
+    }
+
+    /// Encoded bytes decoded to mono as they read, at their own rate or `max_rate` where theirs is higher, and at most
+    /// `max_seconds` long: speech the way the models take it, a long or wide recording never held whole as it came.
+    pub fn from_bytes_mono(bytes: &[u8], max_rate: u32, max_seconds: usize) -> Result<Self> {
+        let cursor = std::io::Cursor::new(bytes.to_vec());
+        let decoder = Decoder::open(Box::new(cursor), bytes.len() as u64)?;
+        let rate = decoder.sample_rate.min(max_rate);
+        Self::mono_from_decoder(decoder, rate, max_seconds.saturating_mul(rate as usize))
+    }
+
+    fn mono_from_source(
+        source: Box<dyn symphonia::core::io::MediaSource>,
+        len: u64,
+        sample_rate: u32,
+        max_samples: usize,
+    ) -> Result<Self> {
+        Self::mono_from_decoder(Decoder::open(source, len)?, sample_rate, max_samples)
+    }
+
+    fn mono_from_decoder(
+        mut decoder: Decoder,
+        sample_rate: u32,
+        max_samples: usize,
+    ) -> Result<Self> {
         let mut resampler = mel::StreamResampler::new(decoder.sample_rate, sample_rate)?;
         let ratio = f64::from(sample_rate) / f64::from(decoder.sample_rate);
         let stated = (decoder.stated_frames() as f64 * ratio) as usize;
@@ -563,8 +596,8 @@ mod tests {
     use hound::{SampleFormat, WavSpec, WavWriter};
     use std::io::Cursor;
 
-    // a 48 kHz stereo file decoded to 16 kHz mono as it reads: as decoding it whole, downmixing and resampling, and
-    // capped where asked
+    // a 48 kHz stereo file (or its bytes) decoded to 16 kHz mono as it reads: as decoding it whole, downmixing and
+    // resampling, and capped where asked
     #[test]
     fn a_file_decodes_to_mono_at_the_asked_rate() {
         const RATE: u32 = 48_000;
@@ -606,6 +639,15 @@ mod tests {
             .fold(0f32, f32::max);
         assert!(worst < 1e-3, "worst {worst}");
         assert!(AudioInput::from_file_mono(&path, 16_000, 1000).is_err());
+        // bytes in memory decode as the file does, taken down to a lower rate but never up to a higher one
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            AudioInput::from_bytes_mono(&bytes, 16_000, usize::MAX / RATE as usize).unwrap(),
+            streamed
+        );
+        let own = AudioInput::from_bytes_mono(&bytes, 96_000, usize::MAX / RATE as usize).unwrap();
+        assert_eq!((own.sample_rate, own.samples.len()), (RATE, FRAMES));
+        assert!(AudioInput::from_bytes_mono(&bytes, 16_000, 1).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
