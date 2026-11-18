@@ -2691,11 +2691,21 @@ extern DECL_FATTN_MMA_F16_CASE(576, 512, 1, 16);
 extern DECL_FATTN_MMA_F16_CASE(576, 512, 2, 16);
 extern DECL_FATTN_MMA_F16_CASE(576, 512, 4, 16);
 
+// head 192 with value head 128; their instance files hold them, so fattn.cu must not compile them again
+extern DECL_FATTN_MMA_F16_CASE(192, 128, 1,  8);
+extern DECL_FATTN_MMA_F16_CASE(192, 128, 2,  8);
+extern DECL_FATTN_MMA_F16_CASE(192, 128, 4,  8);
+extern DECL_FATTN_MMA_F16_CASE(192, 128, 8,  8);
+extern DECL_FATTN_MMA_F16_CASE(192, 128, 1, 16);
+extern DECL_FATTN_MMA_F16_CASE(192, 128, 2, 16);
+extern DECL_FATTN_MMA_F16_CASE(192, 128, 4, 16);
+
 // Mistral Small 4 (DKQ=320, DV=256), GQA=32-only build:
 extern DECL_FATTN_MMA_F16_CASE(320, 256,  1, 32);
 extern DECL_FATTN_MMA_F16_CASE(320, 256,  2, 32);
 
 // For GLM 4.7 Flash
+extern DECL_FATTN_MMA_F16_CASE(576, 512,  2,  4);
 extern DECL_FATTN_MMA_F16_CASE(576, 512,  4,  4);
 extern DECL_FATTN_MMA_F16_CASE(576, 512,  8,  4);
 extern DECL_FATTN_MMA_F16_CASE(576, 512, 16,  4);
