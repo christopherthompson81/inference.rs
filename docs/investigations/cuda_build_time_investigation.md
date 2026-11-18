@@ -1101,3 +1101,24 @@ count, ccache's preprocessed check absorbs it): 145 compiles, 321 s span at mean
 (Run 52: 6,398). Splitting each instance file per head size (127 files) gave 337 s against 331 s: the rebuild is now
 bound by total work, not the slowest file, so the split was dropped. The heaviest files left are `fattn.cu` (164 s)
 and the head-128 single-column instances (88-159 s), which carry the f32-value-sum and quantized-staging cases.
+
+## Run 54 - 2026-11-18 03:10
+
+**Question:** with fp8 out of line (#994), what is left of the flash-attention rebuild, and can it shrink further?
+
+The Run 53 header-edit rebuild log by family: the 127 mma instance cases 4,367 CPU-s (96%), `fattn.cu` 164 s, the
+rest ccache hits (they do not include `fattn-mma-f16.cuh`).
+
+- **`fattn.cu`** compiled 16 mma kernels itself (192,864 of its 262,304 SASS instructions): the seven head 192/128
+  cases and `(576, 512, 2, 4)` had no extern declaration, so it instantiated them beside their instance files. Declared
+  extern (#996), it compiles in 11.5 s instead of 58 s alone; the kernels are unchanged.
+- **Unreachable cases:** none. On NVIDIA from Turing, selection reaches every `ncols2` the instances hold (1-8, 16
+  and 32 for a few heads) with each `ncols1` that query rows pick (8/16/32/64 columns, 128 for a quantized cache).
+- **One row loop for dense and paged rows** (always the general lookup, both the synchronous and the cp.async loop):
+  `ncols1_8-ncols2_1` 134 -> 70 s (241K -> 204K instructions), `ncols1_8-ncols2_4` 83 -> 63 s. The fattn benches,
+  alternating three rounds, geomean new/base: f32 value sums 1.425, plain fattn 1.045, dense 1.024, paged 0.963, bf16
+  0.994; worst rows +16-24% (dense and bf16 prefill), best -10-17% (one-row decode). Dropped: the dense
+  instantiation is what keeps prefill and the f32-sum path fast, as its comment says.
+
+What remains is each case's own weight (the inline bf16 and paged loads, implicit masks): about twice upstream's
+instructions per kernel, and every one of those paths is hot.
