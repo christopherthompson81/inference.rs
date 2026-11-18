@@ -62,6 +62,12 @@ async fn an_image_to_3d_job_takes_one_image() -> anyhow::Result<()> {
     });
     let refused = queue.submit(&model, many, vec![image()]);
     assert!(refused.is_err_and(|e| e.to_string().contains("samples must be")));
+    let tiny_print = JobRequest::ImageTo3d(ImageTo3dJob {
+        print_size_mm: Some(1.0),
+        ..Default::default()
+    });
+    let refused = queue.submit(&model, tiny_print, vec![image()]);
+    assert!(refused.is_err_and(|e| e.to_string().contains("print_size_mm must be")));
     let texture = |job: TextureMeshJob| JobRequest::TextureMesh(job);
     let file = |name: &str| JobInput::Bytes {
         name: name.into(),
@@ -159,12 +165,14 @@ async fn an_image_to_3d_job_writes_a_textured_model() -> anyhow::Result<()> {
     assert_eq!(done.report["resolution"], 512);
     let faces = done.report["faces"].as_u64().unwrap_or(0);
     assert!(faces > 0 && faces <= FACES as u64, "{faces} faces");
-    for name in ["model", "mesh", "prepared image", "meta"] {
+    for name in ["model", "mesh", "printable (stl)", "prepared image", "meta"] {
         let output = done.outputs.iter().find(|o| o.name == name);
         let output = output.ok_or_else(|| anyhow::anyhow!("no {name} output"))?;
         assert!(std::fs::metadata(queue.file(&model, &done.id, &output.file)?)?.len() > 0);
     }
     assert_eq!(done.report["texture_size"], 2048);
+    let volume = done.report["print"]["volume_cm3"].as_f64().unwrap_or(0.0);
+    assert!(volume > 0.0, "printable volume {volume}");
     let model_file = done
         .outputs
         .iter()

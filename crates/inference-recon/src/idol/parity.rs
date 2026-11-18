@@ -242,5 +242,18 @@ fn generates_gaussians_end_to_end() -> Result<()> {
     std::fs::create_dir_all(&out)?;
     crate::splatting::spz::write_ply(&out.join("idol.ply"), &data.rows())?;
     crate::splatting::spz::write_spz(&out.join("idol.spz"), &data.rows())?;
+    let start = std::time::Instant::now();
+    let solid =
+        crate::printable::Solid::from_gaussians(&result.gaussians, crate::printable::SPLAT_GRID);
+    let print = solid
+        .printable(crate::printable::DEFAULT_PRINT_SIZE_MM)
+        .expect("a solid to print");
+    println!(
+        "printable: {} faces, {:.1} cm3, {:.2} s",
+        print.faces,
+        print.volume_mm3 / 1000.0,
+        start.elapsed().as_secs_f64()
+    );
+    std::fs::write(out.join("idol.stl"), print.stl)?;
     Ok(())
 }

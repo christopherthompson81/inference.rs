@@ -14,7 +14,8 @@ Four commands turn an image of an object into 3D:
   (geometry only).
 
 All four remove the background of an opaque image with BiRefNet first, and take an object on a transparent background as
-it is.
+it is. `image-to-3d` and `image-to-splat` also write the object as a closed solid to 3D print
+([Printable STL](#printable-stl)).
 
 ## TRELLIS.2 end to end
 
@@ -33,6 +34,7 @@ inference image-to-3d --image chair.png --out chair/ --variant 512 --seed 3
 | `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about 5 s faster |
 | `--faces` | 1000000 | Faces the exported mesh is simplified to (1000 to 10 million) |
 | `--samples` | 1 | Results to make, up to 8: the i-th is seeded `--seed` + i and matches a run of one with that seed; each model loads once for all of them, and more than one go in folders `1`, `2`, ... under `--out` |
+| `--print-size` | 100 | The printable STL's longest side in millimetres (5 to 2000); see [Printable STL](#printable-stl) |
 | `--{structure,shape,texture}-steps` | 12 | Sampling steps of that flow (1 to 100) |
 | `--{structure,shape,texture}-guidance` | 7.5, 7.5, 1 | Classifier-free guidance strength (1: none) |
 | `--{structure,shape,texture}-guidance-rescale` | 0.7, 0.5, 0 | How far the guided prediction is rescaled toward the conditioned one's spread (0 to 1) |
@@ -56,8 +58,8 @@ unwrap time for an atlas of the same quality); each covered texel is placed on
 the extracted surface and given the volume's trilinear attributes, and the texels between charts are inpainted so
 seams don't bleed.
 
-On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 40 s (the export's cleanup, unwrap and inpainting march
-run on the CPU while the texture is sampled, leaving about 2.5 s after it) at a 6.1 GB GPU peak and 2.5 GB of host
+On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 40 s, plus 3 s for the printable STL (the
+export's cleanup, unwrap and inpainting march run on the CPU while the texture is sampled, leaving about 2.5 s after it) at a 6.1 GB GPU peak and 2.5 GB of host
 memory; `--remesh` 45 s at 6.5 GB (its remesh outlasts the texture stage); `--vertex-colors` 38 s. `512` takes
 20 s plus its export, `1024` 38 s at 6.4 GB. Two samples of `1024-cascade` take 76 s, against 82 s for two runs, at
 the same peaks. `1536-cascade` takes 98 s at 9.4 GB: its 18,700 cells make the second
@@ -69,8 +71,9 @@ chair/
   model.glb      the unwrapped mesh with normals, a base color + alpha texture and a metallic-roughness texture
                  (with --vertex-colors: COLOR_0 = base color and alpha, _METALLIC and _ROUGHNESS per vertex)
   mesh.ply       the GLB's mesh, geometry only
+  print.stl      the object as one closed solid to 3D print, in millimetres, +z up, standing on z = 0
   prepared.png   the object as cut out
-  meta.json      variant, resolution, cell and face counts, timing
+  meta.json      variant, resolution, cell and face counts, the print's size, faces and volume, timing
 ```
 
 The GLB sits in the unit cube centered on the origin, y up as glTF expects (the PLY keeps TRELLIS's z up). The baked
@@ -78,7 +81,8 @@ material is opaque, and double-sided unless remeshed. With `--vertex-colors`, gl
 and roughness factors are the vertices' means.
 
 As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `variant` (`"1024_cascade"`,
-`"1536_cascade"`, `"1024"` or `"512"`), `remove_background`, `vertex_colors`, `texture_size`, `remesh`, `faces`, `samples` (several go under `model/1`,
+`"1536_cascade"`, `"1024"` or `"512"`), `remove_background`, `vertex_colors`, `texture_size`, `remesh`, `faces`,
+`print_size_mm`, `samples` (several go under `model/1`,
 `model/2`, ..., the report then a `samples` list), and
 `structure_sampler`, `shape_sampler` and `texture_sampler` (each with optional `steps`, `guidance_strength`,
 `guidance_rescale` and `rescale_t`); outputs under `model/`. The web UI's 3D tab has these under **Advanced**.
@@ -134,6 +138,7 @@ inference image-to-splat --image photo.jpg --out chair/ --mode real --gaussians 
 | `--steps` | 50 | Euler steps of the flow (1 to 200) |
 | `--guidance` | 3 | Classifier-free guidance strength (0: none) |
 | `--rescale-t` | 3 | The time grid's shift toward high noise (1: uniform) |
+| `--print-size` | 100 | The printable STL's longest side in millimetres (5 to 2000); see [Printable STL](#printable-stl) |
 | `--idol`, `--dinov3`, `--vae` | fetched | Idol's folder, DINOv3 ViT-H+/16's `model.safetensors`, a FLUX.2 VAE's `diffusion_pytorch_model.safetensors` |
 | `--cpu` | off | Run on the CPU (very slow) |
 
@@ -145,19 +150,39 @@ tokens of f16 sums drift the velocity by 4%).
 chair/
   splat.ply      standard 3DGS PLY (degree-0 color, logit opacity, log scales), y down as 3DGS viewers expect
   splat.spz      the same splats as SPZ
+  print.stl      the solid the splats enclose, to 3D print, in millimetres, +z up, standing on z = 0
   prepared.png   what the model saw: the object cut out on black, 1024 x 1024
   meta.json      seed, Gaussian count, settings, timing and the input's camera (yaw, pitch, radius, vertical fov)
 ```
 
 The camera is Idol's z-up object frame: the eye sits at `radius * (sin yaw cos pitch, cos yaw cos pitch, sin pitch)`
 looking at the origin. On an RTX 3090 a default run takes 53 s (the 50 sampling steps most of it; the reference takes
-49 s) at an 8.1 GB GPU peak.
+49 s) at an 8.1 GB GPU peak, plus about 3 s on the CPU for the printable STL.
 
 As a server job: `{"kind": "image_to_splat"}` with one image, optionally `seed`, `mode` (`"synthetic"` or `"real"`),
-`gaussians`, `steps`, `guidance`, `rescale_t` and `placement`; outputs under `splat/`. The web UI's 3D tab has it as
-**Splats from an image**, opening in the splat viewer from the input's camera. With `--world-models <folder>`,
+`gaussians`, `steps`, `guidance`, `rescale_t`, `print_size_mm` and `placement`; outputs under `splat/`. The web UI's
+3D tab has it as **Splats from an image**, opening in the splat viewer from the input's camera. With `--world-models <folder>`,
 checkpoints found there as `idol`, `dinov3-vith16plus-pretrain-lvd1689m/model.safetensors` and
 `FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors` are used instead of fetching them.
+
+## Printable STL
+
+Both image jobs write `print.stl` beside their models: the object as one closed, single-shell solid that slicers take
+as it is, in millimetres with its longest side `--print-size` (100 by default), centered over the origin and standing
+on z = 0. The web UI shows it under **View printable** and sets its size as **Print size (mm)**.
+
+It is made on a grid over the object (384 cells across for TRELLIS.2, 256 for Idol). The grid's points are marked
+from the source: TRELLIS.2's sparse voxels at 1024 (its meshes leave gaps where a cell's neighbours are missing, and
+the voxels don't), or Idol's Gaussians, their opacity summed. A flood from outside, closed over gaps of a couple of
+cells, finds everything it can't reach, so hollow interiors fill. Parts thinner than about five cells (open shells, rods,
+a rope) are thickened to that, about 1.3 mm at 100 mm for TRELLIS.2 and 2 mm for Idol, while thicker parts keep their
+size. The largest piece is kept, and its surface extracted (surface nets on the blurred solid, cells that touch only
+diagonally joined so no edge has more than two faces), smoothed, and simplified toward 500,000 faces (about 25 MB)
+without collapses that would pinch it.
+
+The surface sits within about one cell of the source's, and details finer than a couple of cells are softened. Color
+is not carried: STL has none. On an 8-core CPU the export takes about 3 s for the robot or an Idol chair, and up to
+12 s for an object as large as its cube with hollow walls (2.7 million faces before simplifying).
 
 ## JoVox voxels
 

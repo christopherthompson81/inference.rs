@@ -269,6 +269,7 @@ async fn main() -> Result<()> {
             remesh,
             faces,
             samples,
+            print_size,
             structure_steps,
             structure_guidance,
             structure_guidance_rescale,
@@ -340,8 +341,10 @@ async fn main() -> Result<()> {
                     FACES_RANGE.end()
                 );
             }
+            check_print_size(print_size)?;
             let options = ImageTo3dOptions {
                 settings,
+                print_size_mm: print_size,
                 faces,
                 remove_background,
                 bake: (!vertex_colors).then(|| BakeOptions {
@@ -360,7 +363,7 @@ async fn main() -> Result<()> {
             let reports = generate_3d_on(&models, &image, &out, &options, &NoProgress, &device)?;
             for (i, report) in reports.iter().enumerate() {
                 println!(
-                    "{} vertices, {} faces ({} extracted) at {}^3{}, seed {}, in {} ({:.1} s)",
+                    "{} vertices, {} faces ({} extracted) at {}^3{}, seed {}, in {} ({:.1} s){}",
                     report.vertices,
                     report.faces,
                     report.raw_faces,
@@ -372,7 +375,8 @@ async fn main() -> Result<()> {
                     },
                     report.seed,
                     sample_dir(&out, i, reports.len()).display(),
-                    report.total_seconds
+                    report.total_seconds,
+                    print_line(report.print.as_ref())
                 );
             }
         }
@@ -386,14 +390,15 @@ async fn main() -> Result<()> {
             steps,
             guidance,
             rescale_t,
+            print_size,
             idol,
             dinov3,
             vae,
             cpu,
         } => {
             use inference_jobs::image_to_splat::{
-                IdolSettings, MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS, MAX_STEPS,
-                MIN_GAUSSIANS, NoProgress, fetch_models, generate_splat_on,
+                IdolSettings, ImageToSplatOptions, MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS,
+                MAX_STEPS, MIN_GAUSSIANS, NoProgress, fetch_models, generate_splat_on,
             };
             let margin = match mode.as_str() {
                 "synthetic" => MARGIN_SYNTHETIC,
@@ -406,13 +411,17 @@ async fn main() -> Result<()> {
             if !(MIN_GAUSSIANS..=MAX_GAUSSIANS).contains(&gaussians) {
                 anyhow::bail!("--gaussians must be {MIN_GAUSSIANS} to {MAX_GAUSSIANS}");
             }
-            let settings = IdolSettings {
-                seed,
-                steps,
-                guidance,
-                rescale_t,
-                gaussians,
-                margin,
+            check_print_size(print_size)?;
+            let options = ImageToSplatOptions {
+                settings: IdolSettings {
+                    seed,
+                    steps,
+                    guidance,
+                    rescale_t,
+                    gaussians,
+                    margin,
+                },
+                print_size_mm: print_size,
             };
             let models = fetch_models(idol, dinov3, vae, &NoProgress)?;
             let device = if cpu {
@@ -420,9 +429,9 @@ async fn main() -> Result<()> {
             } else {
                 inference_tensor::Device::cuda_if_available(0)?
             };
-            let report = generate_splat_on(&models, &image, &out, &settings, &NoProgress, &device)?;
+            let report = generate_splat_on(&models, &image, &out, &options, &NoProgress, &device)?;
             println!(
-                "{} Gaussians, seed {}, in {} ({:.1} s); camera yaw {:.3} pitch {:.3} radius {:.3} fov {:.1}",
+                "{} Gaussians, seed {}, in {} ({:.1} s); camera yaw {:.3} pitch {:.3} radius {:.3} fov {:.1}{}",
                 report.gaussians,
                 report.seed,
                 out.display(),
@@ -430,7 +439,8 @@ async fn main() -> Result<()> {
                 report.camera.yaw,
                 report.camera.pitch,
                 report.camera.radius,
-                report.camera.fov
+                report.camera.fov,
+                print_line(report.print.as_ref())
             );
         }
 
@@ -683,6 +693,33 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn check_print_size(mm: f64) -> Result<()> {
+    let range = inference_jobs::print::PRINT_SIZE_RANGE_MM;
+    if !range.contains(&mm) {
+        anyhow::bail!(
+            "--print-size must be {} to {} mm",
+            range.start(),
+            range.end()
+        );
+    }
+    Ok(())
+}
+
+// the printable STL's line of a run's summary
+fn print_line(print: Option<&inference_jobs::print::PrintReport>) -> String {
+    match print {
+        Some(p) => format!(
+            "; {}: longest side {:.0} mm, {} faces, {:.1} cm3, {:.1} s",
+            inference_jobs::print::PRINT_FILE,
+            p.size_mm,
+            p.faces,
+            p.volume_cm3,
+            p.seconds
+        ),
+        None => "; nothing solid to print".to_string(),
+    }
 }
 
 fn init_tracing(verbose: u8) {

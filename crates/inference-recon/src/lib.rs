@@ -9,6 +9,7 @@ mod geometry;
 pub mod idol;
 pub mod jovox;
 pub mod moge;
+pub mod printable;
 pub mod progress;
 pub mod splatting;
 pub mod trellis2;

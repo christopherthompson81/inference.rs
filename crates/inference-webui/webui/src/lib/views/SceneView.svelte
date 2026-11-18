@@ -42,6 +42,11 @@
   // the image jobs' meshes
   const MODEL_GLB = "model/model.glb";
   const SAMPLE_GLB = /^model\/(\d+)\/model\.glb$/;
+  // the image jobs' printable solids
+  const MODEL_PRINT = "model/print.stl";
+  const SAMPLE_PRINT = /^model\/(\d+)\/print\.stl$/;
+  const OBJECT_PRINT = "splat/print.stl";
+  const DEFAULT_PRINT_SIZE_MM = 100;
   const VOXELS_PLY = "voxels/voxels.ply";
   const VOXELS_MESH = "voxels/mesh.ply";
   const DEFAULT_VOXEL_STEPS = 72;
@@ -113,6 +118,7 @@
   let gaussians = $state<number | null>(null);
   let splatSteps = $state<number | null>(null);
   let splatGuidance = $state<number | null>(null);
+  let printSize = $state<number | null>(null);
   let prompt = $state("");
   let scene = $state<"" | "indoor" | "outdoor">("");
   let seed = $state<number | null>(null);
@@ -240,6 +246,7 @@
           remesh: remesh || null,
           faces: typeof faces === "number" && Number.isFinite(faces) ? faces : null,
           samples: typeof samples === "number" && Number.isFinite(samples) ? samples : null,
+          print_size_mm: typeof printSize === "number" && Number.isFinite(printSize) ? printSize : null,
           structure_sampler: changed(samplers.structure),
           shape_sampler: changed(samplers.shape),
           texture_sampler: changed(samplers.texture),
@@ -262,6 +269,7 @@
           gaussians,
           steps: typeof splatSteps === "number" && Number.isFinite(splatSteps) ? splatSteps : null,
           guidance: typeof splatGuidance === "number" && Number.isFinite(splatGuidance) ? splatGuidance : null,
+          print_size_mm: typeof printSize === "number" && Number.isFinite(printSize) ? printSize : null,
           placement: room,
         });
       case "voxels":
@@ -348,6 +356,12 @@
       const n = output.file.match(SAMPLE_GLB)?.[1];
       if (n) out.push({ label: `View model ${n}`, file: output.file, format: "glb", flat: false });
     }
+    if (made(MODEL_PRINT)) out.push({ label: "View printable", file: MODEL_PRINT, format: "stl", flat: false });
+    for (const output of job.outputs) {
+      const n = output.file.match(SAMPLE_PRINT)?.[1];
+      if (n) out.push({ label: `View printable ${n}`, file: output.file, format: "stl", flat: false });
+    }
+    if (made(OBJECT_PRINT)) out.push({ label: "View printable", file: OBJECT_PRINT, format: "stl", flat: false });
     if (made(VOXELS_PLY)) out.push({ label: "View voxels", file: VOXELS_PLY, format: "ply", flat: true });
     if (made(VOXELS_MESH)) out.push({ label: "View mesh", file: VOXELS_MESH, format: "ply", flat: false });
     return out;
@@ -539,6 +553,12 @@
               <label class="flex flex-col gap-1" title="Each result is seeded one past the last; the models load once for all of them">
                 <span class="text-[11px] text-gray-500">Results</span>
                 <input type="number" min="1" max="8" class="w-20 {field}" bind:value={samples} placeholder="1" disabled={busy} />
+              </label>
+            {/if}
+            {#if mode === "image_to_3d" || mode === "image_to_splat"}
+              <label class="flex flex-col gap-1" title="The printable STL's longest side; it stands on the bed, solid, with thin parts thickened">
+                <span class="text-[11px] text-gray-500">Print size (mm)</span>
+                <input type="number" min="5" max="2000" class="w-24 {field}" bind:value={printSize} placeholder={String(DEFAULT_PRINT_SIZE_MM)} disabled={busy} />
               </label>
             {/if}
             {#if mode !== "image_to_splat"}

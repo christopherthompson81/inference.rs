@@ -1426,6 +1426,7 @@ class ImageTo3dJob:
 
     faces: int | None = None
     placement: Placement | None = None
+    print_size_mm: float | None = None
     remesh: bool | None = None
     remove_background: bool | None = None
     samples: int | None = None
@@ -1446,6 +1447,7 @@ class ImageToSplatJob:
     guidance: float | None = None
     mode: SplatImageMode | None = None
     placement: Placement | None = None
+    print_size_mm: float | None = None
     rescale_t: float | None = None
     seed: int | None = None
     steps: int | None = None

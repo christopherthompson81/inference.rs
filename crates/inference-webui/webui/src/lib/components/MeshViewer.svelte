@@ -1,6 +1,7 @@
 <script lang="ts" module>
-  /** A GLB as exported (+y up), or a PLY in TRELLIS's +z-up frame (an image job's mesh, or its voxels). */
-  export type MeshFormat = "glb" | "ply";
+  /** A GLB as exported (+y up), or a PLY in TRELLIS's +z-up frame (an image job's mesh, or its voxels), or a printable
+   * STL (+z up). */
+  export type MeshFormat = "glb" | "ply" | "stl";
 </script>
 
 <script lang="ts">
@@ -91,8 +92,18 @@
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
       model = (await new GLTFLoader().loadAsync(url)).scene;
     } else {
-      const { PLYLoader } = await import("three/examples/jsm/loaders/PLYLoader.js");
-      const geometry = await new PLYLoader().loadAsync(url);
+      let geometry: import("three").BufferGeometry;
+      if (format === "stl") {
+        const { STLLoader } = await import("three/examples/jsm/loaders/STLLoader.js");
+        const { mergeVertices } = await import("three/examples/jsm/utils/BufferGeometryUtils.js");
+        // STL repeats each corner per face: shared again, so the shading runs smooth across them
+        const loaded = await new STLLoader().loadAsync(url);
+        loaded.deleteAttribute("normal");
+        geometry = mergeVertices(loaded);
+      } else {
+        const { PLYLoader } = await import("three/examples/jsm/loaders/PLYLoader.js");
+        geometry = await new PLYLoader().loadAsync(url);
+      }
       geometry.computeVertexNormals();
       const material = new THREE.MeshStandardMaterial({ color: CLAY, roughness: CLAY_ROUGHNESS, flatShading: flat, side: THREE.DoubleSide });
       model = new THREE.Mesh(geometry, material);

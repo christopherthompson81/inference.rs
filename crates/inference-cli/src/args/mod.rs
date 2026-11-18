@@ -484,6 +484,10 @@ pub enum Command {
         #[arg(long, default_value_t = inference_jobs::image_to_splat::IdolSettings::default().rescale_t)]
         rescale_t: f64,
 
+        /// The printable STL's (print.stl) longest side, in millimetres
+        #[arg(long, default_value_t = inference_jobs::print::DEFAULT_PRINT_SIZE_MM)]
+        print_size: f64,
+
         /// Idol's folder; fetched from speridlabs/idol when unset
         #[arg(long)]
         idol: Option<PathBuf>,
@@ -543,6 +547,10 @@ pub enum Command {
         /// Results to make (up to 8), the i-th seeded seed + i; more than one go in folders 1, 2, ... under --out
         #[arg(long, default_value_t = 1)]
         samples: usize,
+
+        /// The printable STL's (print.stl) longest side, in millimetres
+        #[arg(long, default_value_t = inference_jobs::print::DEFAULT_PRINT_SIZE_MM)]
+        print_size: f64,
 
         /// The sparse structure flow's sampling steps (pipeline.json's when unset)
         #[arg(long)]

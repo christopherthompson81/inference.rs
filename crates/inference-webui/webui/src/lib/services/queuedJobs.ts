@@ -90,6 +90,8 @@ export interface ImageTo3dOptions {
   remesh: boolean | null;
   faces: number | null;
   samples: number | null;
+  /** The printable STL's longest side, in millimetres */
+  print_size_mm: number | null;
   structure_sampler: Trellis2Sampler | null;
   shape_sampler: Trellis2Sampler | null;
   texture_sampler: Trellis2Sampler | null;
@@ -105,6 +107,8 @@ export interface ImageToSplatOptions {
   gaussians: number | null;
   steps: number | null;
   guidance: number | null;
+  /** The printable STL's longest side, in millimetres */
+  print_size_mm: number | null;
   placement: Placement | null;
 }
 

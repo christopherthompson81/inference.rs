@@ -66,6 +66,12 @@ async fn an_image_to_splat_job_takes_one_image() -> anyhow::Result<()> {
     };
     let refused = queue.submit(&model, job(unshifted), vec![image()]);
     assert!(refused.is_err_and(|e| e.to_string().contains("rescale_t")));
+    let huge = ImageToSplatJob {
+        print_size_mm: Some(5000.0),
+        ..Default::default()
+    };
+    let refused = queue.submit(&model, job(huge), vec![image()]);
+    assert!(refused.is_err_and(|e| e.to_string().contains("print_size_mm must be")));
     let parsed: JobRequest =
         serde_json::from_value(serde_json::json!({"kind": "image_to_splat", "mode": "real"}))?;
     assert!(matches!(
@@ -122,7 +128,15 @@ async fn an_image_to_splat_job_writes_splats() -> anyhow::Result<()> {
     assert_eq!(done.report["gaussians"], GAUSSIANS);
     let fov = done.report["camera"]["fov"].as_f64().unwrap_or(0.0);
     assert!(fov > 0.0 && fov < 180.0, "fov {fov}");
-    for name in ["splats", "splats (ply)", "prepared image", "meta"] {
+    let volume = done.report["print"]["volume_cm3"].as_f64().unwrap_or(0.0);
+    assert!(volume > 0.0, "printable volume {volume}");
+    for name in [
+        "splats",
+        "splats (ply)",
+        "printable (stl)",
+        "prepared image",
+        "meta",
+    ] {
         let output = done.outputs.iter().find(|o| o.name == name);
         let output = output.ok_or_else(|| anyhow::anyhow!("no {name} output"))?;
         assert!(std::fs::metadata(queue.file(&model, &done.id, &output.file)?)?.len() > 0);

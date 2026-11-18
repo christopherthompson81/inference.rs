@@ -1,11 +1,12 @@
 //! Image to 3D with TRELLIS.2 end to end: the object cut out (BiRefNet unless it already has transparency), its
 //! sparse structure, shape and texture latents, and the mesh they decode to with its PBR attributes. Writes a GLB (the
 //! mesh cleaned, unwrapped and its PBR volume baked into textures, or per-vertex color and material), the extracted
-//! mesh as a PLY, the prepared image and a `meta.json`.
+//! mesh as a PLY, a printable STL of the solid it encloses, the prepared image and a `meta.json`.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use inference_recon::printable::{Solid, VOXEL_GRID};
 use inference_recon::trellis2::bake;
 use inference_recon::trellis2::glb::{to_glb, to_textured_glb};
 use inference_recon::trellis2::mesh::Mesh;
@@ -13,6 +14,7 @@ use inference_recon::trellis2::pipeline::{self, Trellis2Paths};
 use inference_tensor::Device;
 use serde::Serialize;
 
+pub use crate::print::{DEFAULT_PRINT_SIZE_MM, PRINT_FILE, PRINT_SIZE_RANGE_MM, PrintReport};
 pub use inference_recon::progress::{NoProgress, Progress};
 pub use inference_recon::trellis2::bake::{BakeOptions, DECIMATION_TARGET};
 pub use inference_recon::trellis2::pipeline::{
@@ -44,6 +46,8 @@ pub struct ImageTo3dOptions {
     pub faces: usize,
     /// Bake textures (`None`: per-vertex color and material instead); its decimation target is `faces`
     pub bake: Option<BakeOptions>,
+    /// The printable STL's longest side, in millimetres
+    pub print_size_mm: f64,
 }
 
 impl Default for ImageTo3dOptions {
@@ -53,6 +57,7 @@ impl Default for ImageTo3dOptions {
             remove_background: false,
             faces: DECIMATION_TARGET,
             bake: Some(BakeOptions::default()),
+            print_size_mm: DEFAULT_PRINT_SIZE_MM,
         }
     }
 }
@@ -72,6 +77,8 @@ pub struct ImageTo3dReport {
     pub faces: usize,
     /// The GLB's textures' size, when baked
     pub texture_size: Option<usize>,
+    /// The printable STL, unless nothing came out solid
+    pub print: Option<PrintReport>,
     /// The export after generation; a bake's cleanup and unwrap run beside the texture stage and are not counted
     pub export_seconds: f64,
     pub total_seconds: f64,
@@ -157,7 +164,8 @@ pub fn sample_dir(out_dir: &Path, index: usize, samples: usize) -> PathBuf {
 
 /// The 3D object in `image` into `out_dir`: `prepared.png` (the cut-out object), and for each sample (see
 /// [`sample_dir`]) `model.glb` (baked: base color and metallic-roughness textures; otherwise per-vertex base color and
-/// alpha as `COLOR_0`, metallic and roughness as custom attributes), `mesh.ply` and `meta.json`. One report per sample.
+/// alpha as `COLOR_0`, metallic and roughness as custom attributes), `mesh.ply`, `print.stl` and `meta.json`. One
+/// report per sample.
 pub fn generate_3d_on(
     models: &ImageTo3dModels,
     image: &Path,
@@ -260,6 +268,13 @@ pub fn generate_3d_on(
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(GLB_FILE), glb)?;
         std::fs::write(dir.join(MESH_FILE), mesh.to_ply())?;
+        progress.stage("printable solid", 0);
+        // the decoder's cells: the meshes leave gaps where a cell's neighbours are missing
+        let print = crate::print::write_print(
+            || Solid::from_voxels(&out.voxels, out.resolution, VOXEL_GRID),
+            &dir,
+            options.print_size_mm,
+        )?;
         let report = ImageTo3dReport {
             variant: options.settings.variant.name().to_string(),
             resolution: out.resolution,
@@ -271,6 +286,7 @@ pub fn generate_3d_on(
             vertices: mesh.vertices.len(),
             faces: mesh.faces.len(),
             texture_size: options.bake.map(|b| b.texture_size),
+            print,
             export_seconds: export.elapsed().as_secs_f64(),
             total_seconds: start.elapsed().as_secs_f64(),
         };
