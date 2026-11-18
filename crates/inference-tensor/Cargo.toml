@@ -70,3 +70,7 @@ metal = [
 ]
 metal-debug-labels = ["metal", "candle-metal-kernels/debug-labels"]
 vulkan = ["dep:inference-vulkan", "inference-vulkan/vulkan"]
+
+[package.metadata.cargo-machete]
+# only switches on gemm-f32's x86-v4 kernels for the gemm crate
+ignored = ["gemm-f32"]
