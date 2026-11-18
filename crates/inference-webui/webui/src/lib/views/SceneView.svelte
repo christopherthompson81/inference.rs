@@ -37,6 +37,8 @@
   // an image-to-splat job's splats and the input's predicted camera
   const OBJECT_SPLATS = "splat/splat.spz";
   const OBJECT_META = "splat/meta.json";
+  // the narrowest lens the object view starts with, degrees
+  const NARROWEST_FOV = 30;
   const DEFAULT_SPLAT_SEED = 42;
   const GAUSSIAN_COUNTS = [65536, 131072, 262144, 524288, 1048576];
   // the image jobs' meshes
@@ -340,10 +342,18 @@
     return job.outputs.some((output) => [WORLD_SPLATS, RECONSTRUCTION_SPLATS, OBJECT_SPLATS].includes(output.file));
   }
 
-  // Idol's camera sits on a sphere about the z-up object, yaw from +y toward +x; an OpenCV-framed file stands as y-up
+  // Idol's camera sits on a sphere about the z-up object, yaw from +y toward +x; an OpenCV-framed file stands as y-up.
+  // A long lens (an orthographic guess is 1000 away at a fraction of a degree) becomes NARROWEST_FOV's lens at the
+  // distance that frames the same width, so the object sits inside the viewer's clipping range
   function objectStart(camera: { yaw: number; pitch: number; radius: number; fov: number } | undefined): SplatStart | null {
     if (!camera) return null;
-    const { yaw, pitch, radius, fov } = camera;
+    const { yaw, pitch } = camera;
+    let { radius, fov } = camera;
+    if (fov < NARROWEST_FOV) {
+      const halfWidth = radius * Math.tan(((fov / 2) * Math.PI) / 180);
+      fov = NARROWEST_FOV;
+      radius = halfWidth / Math.tan(((fov / 2) * Math.PI) / 180);
+    }
     const [x, y, z] = [Math.sin(yaw) * Math.cos(pitch), Math.cos(yaw) * Math.cos(pitch), Math.sin(pitch)].map((v) => v * radius);
     return { position: [x, z, -y], fov };
   }

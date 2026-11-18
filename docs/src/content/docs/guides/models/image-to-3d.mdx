@@ -158,7 +158,9 @@ chair/
 ```
 
 The camera is Idol's z-up object frame: the eye sits at `radius * (sin yaw cos pitch, cos yaw cos pitch, sin pitch)`
-looking at the origin. On an RTX 3090 a default run takes 53 s (the 50 sampling steps most of it; the reference takes
+looking at the origin. When Idol takes the photo for an orthographic view, its camera is reported 1000 away with a field
+of view of a fraction of a degree; the web UI's viewer starts from the same direction and framing through a 30 degree
+lens. On an RTX 3090 a default run takes 53 s (the 50 sampling steps most of it; the reference takes
 49 s) at an 8.1 GB GPU peak, plus about 2 s on the CPU for the printable STL and 5 s for the textured model.
 
 The textured model is the printable solid's surface (in the unit cube, simplified toward 200,000 faces), unwrapped and
@@ -184,7 +186,9 @@ It is made on a grid over the object (384 cells across for TRELLIS.2, 256 for Id
 from the source: TRELLIS.2's sparse voxels at 1024 (its meshes leave gaps where a cell's neighbours are missing, and
 the voxels don't), or Idol's Gaussians, their opacity summed. A flood from outside, closed over gaps of a couple of
 cells (up to about six for Idol, whose shells can have gaps that would hollow the object out), finds everything it
-can't reach, so hollow interiors fill. For TRELLIS.2, parts thinner than about five cells
+can't reach, so hollow interiors fill. For Idol, so does what the shell surrounds in five of the six axis directions,
+kept where it is wider than a narrow channel: a shell left open where the image showed nothing, such as an
+underside, still prints solid. For TRELLIS.2, parts thinner than about five cells
 (open shells, rods, a rope) are thickened to that, about 1.3 mm at 100 mm, while thicker parts keep their size; Idol's
 sealed splats are left as they are (thickening counts the small bumps of their surface as thin and grows them into
 warts). The largest piece is kept, and its surface extracted (surface nets on the blurred solid, cells that touch only

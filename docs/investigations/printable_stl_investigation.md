@@ -98,3 +98,27 @@ back after) on that run: 1: 23.3 cm3 (hollow); 2: 79.8 cm3, 250,860 faces; 3: 79
 (gaps up to about 6 cells, 2.3 mm at 100 mm); the `real` run is unchanged by it (75.9 at 1, 2 and 3). Unit case: the
 Gaussian sphere with a gap at its top fails at 1 and passes at 3.
 
+## Run 11 - 2026-11-18 18:30
+
+Question: a crouching cat photographed from above (`real`): the splat viewer showed nothing, and the STL was 11.2 cm3
+against a convex hull of 172.
+
+The viewer: Idol predicted an orthographic camera (radius 1000, fov 0.106 degrees), beyond the viewer's far plane; it
+now starts any view narrower than 30 degrees at 30 degrees, from the distance that frames the same width.
+
+The STL: the filled volume against the closing (grid points): 3: 212,948; 4: 217,710; 5: 222,946; 6: 230,740; 8: 248,377;
+10: 267,689; 12: 286,498; 16: 322,483. No jump at any closing, so not a crack but a wide opening (the unseen
+underside). Fill by votes instead: a free point the (grown) shell meets in at least 5 of the 6 axis directions is
+inside. First try: the grown shell's own points voted too, putting back its outer layer (a unit sphere 4 voxels
+oversized); then free points only, but the closing's trim of the shell's inner side left a gap and the core came out
+a separate piece; then the voted core grown back across the shell by the closing; then a nub where the test sphere's
+gap plugged (votes fill a narrow channel out to the grown shell's outside): the voted set is now opened by the closing
+(kept where wider than twice it).
+
+    the photo:        104.2 cm3, hull 173.1, 289,540 faces, one body, watertight
+    cat, synthetic:    80.5 cm3 (79.8 before)
+    cat, real:         76.4 cm3 (75.9 before)
+    armchair:         321.7 cm3, 109,572 faces
+
+Unit case: a sphere of discs open below z = -0.6 r fills (it came out hollow without the votes).
+

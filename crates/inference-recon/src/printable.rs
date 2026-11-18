@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use rayon::prelude::*;
 
 use crate::idol::Gaussians;
@@ -27,6 +29,8 @@ const CELL_FACES: [[usize; 4]; 3] = [[0, 1, 3, 2], [0, 1, 5, 4], [0, 2, 6, 4]];
 // face-neighbour steps the occupied points grow by before the flood, and the flood after, closing gaps up to about
 // twice as wide: an Idol shell can have a gap of 3 or 4 cells, which would let the flood hollow it out
 const SPLAT_CLOSING: usize = 3;
+// axis directions (of six) in which a point must meet the shell to count as inside it: one may be open
+const ENCLOSED_VOTES: u8 = 5;
 const VOXEL_CLOSING: usize = 1;
 // half the thinnest wall, in voxels: thinner parts of a voxel shell grow to about twice this plus one (a TRELLIS.2 object
 // can be an open shell, whose walls would not survive the blur or a printer); not for splats, whose sealed surface has
@@ -48,6 +52,16 @@ pub const DEFAULT_PRINT_SIZE_MM: f64 = 100.0;
 /// The grids printable solids are made on: Idol's splats, TRELLIS.2's voxels
 pub const SPLAT_GRID: usize = 256;
 pub const VOXEL_GRID: usize = 384;
+
+// what fills a source's shell past the flood from outside
+#[derive(Clone, Copy)]
+enum Fill {
+    // splats: also every point the shell surrounds in ENCLOSED_VOTES of the six axis directions, so a shell left open
+    // where the image showed nothing (an underside) still fills
+    Voted,
+    // voxels: thin parts grown to a printable wall (a TRELLIS.2 object can be an open shell meant as walls)
+    Thickened,
+}
 
 /// The solid points of a grid with `res` cells across the unit cube, framed around what it holds and padded on every
 /// side.
@@ -208,7 +222,7 @@ impl Solid {
             }
         }
         let occupied: Vec<bool> = density.iter().map(|&d| d >= DENSITY_THRESHOLD).collect();
-        solid.seal(occupied, SPLAT_CLOSING, false);
+        solid.seal(occupied, SPLAT_CLOSING, Fill::Voted);
         solid
     }
 
@@ -254,7 +268,7 @@ impl Solid {
                 occupied[solid.index(nearest)] = true;
             }
         }
-        solid.seal(occupied, VOXEL_CLOSING, true);
+        solid.seal(occupied, VOXEL_CLOSING, Fill::Thickened);
         solid
     }
 
@@ -329,20 +343,63 @@ impl Solid {
     // what a flood from the border through free points misses is solid, closed over gaps up to about twice `closing`
     // voxels (the occupied points grown, flooded around, and the flood grown back), its thin parts thickened when
     // `thicken`; keeps the largest piece
-    fn seal(&mut self, occupied: Vec<bool>, closing: usize, thicken: bool) {
+    fn seal(&mut self, occupied: Vec<bool>, closing: usize, fill: Fill) {
         let occupied = self.dilate(occupied, closing);
         let mut labels = vec![0u32; self.len()];
         // the corner is free: the padding keeps the border empty, and it is all one piece
         self.fill(0, 1, &mut labels, |j| !occupied[j]);
         let outside: Vec<bool> = labels.iter().map(|&l| l == 1).collect();
         let outside = self.dilate(outside, closing);
-        let remains: Vec<bool> = outside.iter().map(|&o| !o).collect();
-        let walled = if thicken {
-            self.thicken(remains)
-        } else {
-            remains
+        let mut remains: Vec<bool> = outside.iter().map(|&o| !o).collect();
+        let walled = match fill {
+            Fill::Voted => {
+                let blocked = self.blocked_directions(&occupied);
+                // the free points voted inside (the grown shell's own would vote its outer layer back in), grown back
+                // across the shell's inner layer the closing took off
+                let voted: Vec<bool> = blocked
+                    .iter()
+                    .zip(&occupied)
+                    .map(|(&b, &o)| !o && b >= ENCLOSED_VOTES)
+                    .collect();
+                // kept where it is more than twice `closing` across: a narrow channel through the shell (a gap the
+                // closing plugged, a dimple) would otherwise fill out to the grown shell's outside
+                let unvoted: Vec<bool> = voted.iter().map(|&v| !v).collect();
+                let core: Vec<bool> = self.dilate(unvoted, closing).iter().map(|&u| !u).collect();
+                let voted = self.dilate(core, closing);
+                let reached = self.dilate(voted.clone(), closing);
+                for (i, r) in remains.iter_mut().enumerate() {
+                    *r |= voted[i] || (reached[i] && occupied[i]);
+                }
+                remains
+            }
+            Fill::Thickened => self.thicken(remains),
         };
         self.inside = self.largest_piece(&walled);
+    }
+
+    // for each point, how many of the six axis directions meet an occupied point beyond it
+    fn blocked_directions(&self, occupied: &[bool]) -> Vec<u8> {
+        let strides = self.strides();
+        let counts: Vec<AtomicU8> = (0..self.len()).map(|_| AtomicU8::new(0)).collect();
+        for a in 0..3 {
+            let (stride, length) = (strides[a], self.dims[a]);
+            // every line along `a`, walked both ways, marking the points with something occupied behind them
+            self.points()
+                .filter(|&(_, c)| c[a] == 0)
+                .for_each(|(start, _)| {
+                    for forward in [true, false] {
+                        let mut seen = false;
+                        for k in 0..length {
+                            let i = start + stride * if forward { k } else { length - 1 - k };
+                            if seen {
+                                counts[i].fetch_add(1, Ordering::Relaxed);
+                            }
+                            seen |= occupied[i];
+                        }
+                    }
+                });
+        }
+        counts.into_iter().map(AtomicU8::into_inner).collect()
     }
 
     // parts of `solid` thinner than a printable wall (what an opening by a cube of MIN_WALL steps removes: an open
@@ -860,11 +917,13 @@ mod tests {
 
     // where the sphere's gap starts, as the cosine of its angular radius
     const GAP_Z: f32 = 0.985;
+    // where an opening wider than any closing starts, below
+    const OPENING_Z: f32 = -0.6;
+    const SPHERE_RADIUS: f32 = 0.3;
 
-    #[test]
-    fn a_shell_of_flat_gaussians_fills_and_drops_a_stray_one() {
-        // flat discs tiling a sphere, each turned so its thin axis (z) points outward, and one far floater
-        let radius = 0.3f32;
+    // flat discs tiling a sphere, each turned so its thin axis (z) points outward, those at heights `keep` refuses left
+    // out
+    fn sphere_of_discs(keep: impl Fn(f32) -> bool) -> Gaussians {
         let mut g = Gaussians {
             xyz: Vec::new(),
             dc: Vec::new(),
@@ -876,8 +935,7 @@ mod tests {
         let count = 6000;
         for i in 0..count {
             let z = 1.0 - 2.0 * (i as f32 + 0.5) / count as f32;
-            // a gap a few voxels wide at the top, which the flood must not get through
-            if z > GAP_Z {
+            if !keep(z) {
                 continue;
             }
             let r = (1.0 - z * z).sqrt();
@@ -888,12 +946,32 @@ mod tests {
             ];
             // the quaternion taking +z to n
             let (w, axis) = (1.0 + n[2], [-n[1], n[0], 0.0]);
-            g.xyz.push(n.map(|c| c * radius));
+            g.xyz.push(n.map(|c| c * SPHERE_RADIUS));
             g.dc.push([0.0; 3]);
             g.scaling.push([0.012, 0.012, 0.0005]);
             g.rotation.push([w, axis[0], axis[1], axis[2]]);
             g.opacity.push(0.9);
         }
+        g
+    }
+
+    #[test]
+    fn a_shell_open_underneath_still_fills() {
+        let surface = Solid::from_gaussians(&sphere_of_discs(|z| z > OPENING_Z), 64).surface();
+        assert_closed(&surface);
+        let sphere = 4.0 / 3.0 * std::f64::consts::PI * f64::from(SPHERE_RADIUS).powi(3);
+        let volume = signed_volume(&surface);
+        assert!(
+            volume > 0.75 * sphere,
+            "{volume} of a {sphere} sphere: hollow"
+        );
+    }
+
+    #[test]
+    fn a_shell_of_flat_gaussians_fills_and_drops_a_stray_one() {
+        // a gap a few voxels wide at the top, which the flood must not get through, and one far floater
+        let mut g = sphere_of_discs(|z| z <= GAP_Z);
+        let radius = SPHERE_RADIUS;
         g.xyz.push([0.45, 0.45, 0.45]);
         g.dc.push([0.0; 3]);
         g.scaling.push([0.01; 3]);
@@ -919,6 +997,7 @@ mod tests {
             "worst distance from the sphere: {:.2} voxels",
             off * res as f32
         );
+
         assert!(off * (res as f32) < 2.5, "{off}");
     }
 
