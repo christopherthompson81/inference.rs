@@ -1451,6 +1451,7 @@ class ImageToSplatJob:
     rescale_t: float | None = None
     seed: int | None = None
     steps: int | None = None
+    texture_size: int | None = None
 
 
 @dataclass(kw_only=True)

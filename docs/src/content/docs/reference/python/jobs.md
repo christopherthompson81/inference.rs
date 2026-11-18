@@ -39,6 +39,7 @@ Idol's Gaussian splats of the object in the job's one image.
 | `rescale_t` | `float \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `steps` | `int \| None` | optional |
+| `texture_size` | `int \| None` | optional |
 
 
 ## `JobDeleted`

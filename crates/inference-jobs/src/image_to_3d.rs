@@ -270,10 +270,12 @@ pub fn generate_3d_on(
         std::fs::write(dir.join(MESH_FILE), mesh.to_ply())?;
         progress.stage("printable solid", 0);
         // the decoder's cells: the meshes leave gaps where a cell's neighbours are missing
+        let started = Instant::now();
         let print = crate::print::write_print(
-            || Solid::from_voxels(&out.voxels, out.resolution, VOXEL_GRID),
+            &Solid::from_voxels(&out.voxels, out.resolution, VOXEL_GRID),
             &dir,
             options.print_size_mm,
+            started,
         )?;
         let report = ImageTo3dReport {
             variant: options.settings.variant.name().to_string(),

@@ -59,7 +59,8 @@ pub struct Solid {
     inside: Vec<bool>,
 }
 
-fn rotation([w, x, y, z]: [f32; 4]) -> [[f32; 3]; 3] {
+/// A unit quaternion (w x y z, normalized here) as a rotation matrix; its columns are the rotated axes.
+pub(crate) fn rotation([w, x, y, z]: [f32; 4]) -> [[f32; 3]; 3] {
     let norm = (w * w + x * x + y * y + z * z)
         .sqrt()
         .max(f32::MIN_POSITIVE);
@@ -608,21 +609,27 @@ pub struct Printable {
 }
 
 impl Solid {
-    /// The solid's surface as an STL whose longest side is `size_mm`, simplified to about PRINT_FACES when that keeps
-    /// it closed; `None` when nothing is solid.
-    pub fn printable(&self, size_mm: f64) -> Option<Printable> {
+    /// The solid's closed surface in the unit cube (+z up), simplified toward `faces` when that keeps it closed; `None`
+    /// when nothing is solid.
+    pub fn surface_mesh(&self, faces: usize) -> Option<Mesh> {
         if self.is_empty() {
             return None;
         }
         let mut surface = self.surface();
-        if surface.faces.len() > PRINT_FACES {
+        if surface.faces.len() > faces {
             let mut simpler = surface.clone();
-            crate::trellis2::cleanup::simplify_manifold(&mut simpler, PRINT_FACES);
-            let closed = is_closed(&simpler);
-            if closed {
+            crate::trellis2::cleanup::simplify_manifold(&mut simpler, faces);
+            if is_closed(&simpler) {
                 surface = simpler;
             }
         }
+        Some(surface)
+    }
+
+    /// The solid's surface as an STL whose longest side is `size_mm`, simplified to about PRINT_FACES when that keeps
+    /// it closed; `None` when nothing is solid.
+    pub fn printable(&self, size_mm: f64) -> Option<Printable> {
+        let surface = self.surface_mesh(PRINT_FACES)?;
         Some(Printable {
             stl: to_stl(&surface, size_mm),
             faces: surface.faces.len(),

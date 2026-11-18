@@ -109,6 +109,8 @@ export interface ImageToSplatOptions {
   guidance: number | null;
   /** The printable STL's longest side, in millimetres */
   print_size_mm: number | null;
+  /** The textured model's texture width and height */
+  texture_size: number | null;
   placement: Placement | null;
 }
 

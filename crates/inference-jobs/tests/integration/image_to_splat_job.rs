@@ -72,6 +72,12 @@ async fn an_image_to_splat_job_takes_one_image() -> anyhow::Result<()> {
     };
     let refused = queue.submit(&model, job(huge), vec![image()]);
     assert!(refused.is_err_and(|e| e.to_string().contains("print_size_mm must be")));
+    let odd_texture = ImageToSplatJob {
+        texture_size: Some(1000),
+        ..Default::default()
+    };
+    let refused = queue.submit(&model, job(odd_texture), vec![image()]);
+    assert!(refused.is_err_and(|e| e.to_string().contains("texture_size must be")));
     let parsed: JobRequest =
         serde_json::from_value(serde_json::json!({"kind": "image_to_splat", "mode": "real"}))?;
     assert!(matches!(
@@ -130,10 +136,13 @@ async fn an_image_to_splat_job_writes_splats() -> anyhow::Result<()> {
     assert!(fov > 0.0 && fov < 180.0, "fov {fov}");
     let volume = done.report["print"]["volume_cm3"].as_f64().unwrap_or(0.0);
     assert!(volume > 0.0, "printable volume {volume}");
+    let faces = done.report["textured"]["faces"].as_u64().unwrap_or(0);
+    assert!(faces > 0, "textured faces {faces}");
     for name in [
         "splats",
         "splats (ply)",
         "printable (stl)",
+        "textured model",
         "prepared image",
         "meta",
     ] {

@@ -93,3 +93,19 @@ Question: where do the 20 s over the reference's 49 s go?
 
 Left: the learned rope's own ops (f32 LayerNorm, three small f32 GEMMs, index_select, cos, sin) run unfused every
 block; ~4 s over the reference remains.
+
+## Run 8 - 2026-11-18 17:50
+
+Question: can Idol give a textured mesh, the printable solid's surface with the splats' colors?
+
+TRELLIS.2's bake takes any mesh (`prepare_given` unwraps it) and samples a sparse volume of attributes. A color volume
+from the splats (`idol::color_cells`, 256^3: each Gaussian's base-SH color over the cells within one standard
+deviation, weighted by opacity, then 3 rounds of growth into empty neighbours) feeds it; the surface is the printable
+solid's, simplified toward 200K faces.
+
+Cat image, `synthetic`: `model.glb` 191,030 faces, 2048^2 texture, 4.9 s on the CPU; the tuxedo markings, white paws and
+chest, pink ears and green eyes all land where the photo has them; the back (unseen) shows Idol's own white streaks.
+
+The unit case caught a gap: a Gaussian smaller than a cell near a cell's corner reached no cell centre within one
+standard deviation and left no color. The cell holding the centre now always takes it; the cat unchanged (5.0 s).
+

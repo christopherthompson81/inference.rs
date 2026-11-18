@@ -565,6 +565,9 @@ pub struct ImageToSplatJob {
     /// The printable STL's longest side in millimetres, 5 to 2000 (100 by default)
     #[serde(default)]
     pub print_size_mm: Option<f64>,
+    /// The textured model's texture width and height: 1024, 2048 (the default) or 4096
+    #[serde(default)]
+    pub texture_size: Option<u32>,
     /// How much it may displace to run, in place of the server's setting
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -1668,8 +1671,8 @@ fn image_to_splat_work(
     job: ImageToSplatJob,
 ) -> Result<(Prepare, Work), ApiError> {
     use crate::image_to_splat::{
-        ImageToSplatOptions, MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS, MAX_STEPS,
-        MIN_GAUSSIANS, fetch_models, generate_splat_on,
+        DEFAULT_TEXTURE_SIZE, ImageToSplatOptions, MARGIN_REAL, MARGIN_SYNTHETIC, MAX_GAUSSIANS,
+        MAX_STEPS, MIN_GAUSSIANS, TEXTURE_SIZES, fetch_models, generate_splat_on,
     };
     let defaults = inference_recon::idol::IdolSettings::default();
     let settings = inference_recon::idol::IdolSettings {
@@ -1698,9 +1701,18 @@ fn image_to_splat_work(
             "guidance must be at least 0 and rescale_t above 0",
         ));
     }
+    let texture_size = job
+        .texture_size
+        .map_or(DEFAULT_TEXTURE_SIZE, |s| s as usize);
+    if !TEXTURE_SIZES.contains(&texture_size) {
+        return Err(ApiError::invalid_request(format!(
+            "texture_size must be one of {TEXTURE_SIZES:?}"
+        )));
+    }
     let options = ImageToSplatOptions {
         settings,
         print_size_mm: print_size(job.print_size_mm)?,
+        texture_size,
     };
     let fetched = Arc::new(std::sync::OnceLock::new());
     let (base, slot) = (config.clone(), fetched.clone());
@@ -1729,6 +1741,7 @@ fn image_to_splat_work(
             ("splats", crate::image_to_splat::SPZ_FILE),
             ("splats (ply)", crate::image_to_splat::PLY_FILE),
             ("printable (stl)", crate::print::PRINT_FILE),
+            ("textured model", crate::image_to_splat::GLB_FILE),
             ("prepared image", crate::image_to_splat::PREPARED_FILE),
             ("meta", crate::image_to_splat::META_FILE),
         ]
