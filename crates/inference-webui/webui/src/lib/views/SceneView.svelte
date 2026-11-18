@@ -124,7 +124,7 @@
   let status = $state("");
   let now = $state(Date.now() / 1000);
   let gallery = $state<{ items: GalleryItem[]; start: number } | null>(null);
-  let viewer = $state<{ url: string; frame: SplatFrame; sceneToSplats: number[][] | null; start?: SplatStart | null; title: string } | null>(null);
+  let viewer = $state<{ url: string; frame: SplatFrame; sceneToSplats: number[][] | null; start?: SplatStart | null; orbit?: boolean; title: string } | null>(null);
   let meshViewer = $state<{ url: string; format: MeshFormat; flat: boolean; title: string } | null>(null);
 
   let unfollow: (() => void) | null = null;
@@ -314,7 +314,7 @@
     try {
       if (job.outputs.some((output) => output.file === OBJECT_SPLATS)) {
         const meta = await fetch(jobFileUrl(job.id, OBJECT_META)).then((r) => r.json());
-        viewer = { url: jobFileUrl(job.id, OBJECT_SPLATS), frame: "opencv", sceneToSplats: null, start: objectStart(meta.camera), title: title(job) };
+        viewer = { url: jobFileUrl(job.id, OBJECT_SPLATS), frame: "opencv", sceneToSplats: null, start: objectStart(meta.camera), orbit: true, title: title(job) };
       } else if (job.outputs.some((output) => output.file === WORLD_SPLATS)) {
         const report = await fetch(jobFileUrl(job.id, WORLD_SPLAT_REPORT)).then((r) => r.json());
         viewer = { url: jobFileUrl(job.id, WORLD_SPLATS), frame: "z_up", sceneToSplats: report.transform ?? null, title: title(job) };
@@ -744,5 +744,5 @@
   <MeshViewer url={meshViewer.url} format={meshViewer.format} flat={meshViewer.flat} title={meshViewer.title} onClose={() => (meshViewer = null)} />
 {/if}
 {#if viewer}
-  <SplatViewer url={viewer.url} frame={viewer.frame} sceneToSplats={viewer.sceneToSplats} start={viewer.start ?? null} title={viewer.title} onClose={() => (viewer = null)} />
+  <SplatViewer url={viewer.url} frame={viewer.frame} sceneToSplats={viewer.sceneToSplats} start={viewer.start ?? null} orbit={viewer.orbit ?? false} title={viewer.title} onClose={() => (viewer = null)} />
 {/if}

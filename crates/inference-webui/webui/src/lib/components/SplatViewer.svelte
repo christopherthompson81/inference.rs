@@ -13,12 +13,16 @@
   const MOVE_FRACTION = 0.25;
   // splats sampled for that median
   const SPEED_SAMPLES = 20000;
+  // an object view's camera when the job gave none, as a direction from the object and a distance in its units
+  const ORBIT_DIRECTION: [number, number, number] = [0, 0.35, 1];
+  const ORBIT_DISTANCE = 2;
 
   let {
     url,
     frame,
     sceneToSplats = null,
     start: startView = null,
+    orbit = false,
     title,
     onClose,
   }: {
@@ -27,6 +31,8 @@
     /** Row-major, from the scene frame to the frame the splats were trained in; undone so the scene stands upright. */
     sceneToSplats?: number[][] | null;
     start?: SplatStart | null;
+    /** One object at the origin: turn it around instead of walking through a scene. */
+    orbit?: boolean;
     title: string;
     onClose: () => void;
   } = $props();
@@ -52,10 +58,9 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x101014);
     const camera = new THREE.PerspectiveCamera(startView?.fov ?? 70, 1, 0.01, 1000);
-    if (startView) {
-      camera.position.set(...startView.position);
-      camera.lookAt(0, 0, 0);
-    }
+    if (startView) camera.position.set(...startView.position);
+    else if (orbit) camera.position.set(...ORBIT_DIRECTION).normalize().multiplyScalar(ORBIT_DISTANCE);
+    camera.lookAt(0, 0, 0);
     scene.add(new SparkRenderer({ renderer }));
 
     const splats = new SplatMesh({ url, fileName: url.split("/").pop() });
@@ -66,11 +71,29 @@
     splats.matrixAutoUpdate = false;
     splats.matrix.multiplyMatrices(axes, placement);
     scene.add(splats);
-    const controls = new SparkControls({ canvas });
+    let update: () => void;
+    let release = () => {};
+    let walk: InstanceType<typeof SparkControls> | null = null;
+    if (orbit) {
+      const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
+      const controls = new OrbitControls(camera, canvas);
+      controls.enableDamping = true;
+      controls.target.set(0, 0, 0);
+      const distance = camera.position.length();
+      controls.minDistance = distance / 8;
+      controls.maxDistance = distance * 4;
+      controls.update();
+      update = () => controls.update();
+      release = () => controls.dispose();
+    } else {
+      const controls = new SparkControls({ canvas });
+      walk = controls;
+      update = () => controls.update(camera);
+    }
     splats.initialized.then(
       () => {
-        const distance = medianDistance(splats, THREE);
-        if (distance > 0) controls.fpsMovement.moveSpeed = distance * MOVE_FRACTION;
+        const distance = walk ? medianDistance(splats, THREE) : 0;
+        if (walk && distance > 0) walk.fpsMovement.moveSpeed = distance * MOVE_FRACTION;
         status = "";
       },
       (error: unknown) => (status = `Could not load the splats: ${error instanceof Error ? error.message : error}`),
@@ -86,12 +109,13 @@
     observer.observe(canvas);
     resize();
     renderer.setAnimationLoop(() => {
-      controls.update(camera);
+      update();
       renderer.render(scene, camera);
     });
     stop = () => {
       renderer.setAnimationLoop(null);
       observer.disconnect();
+      release();
       splats.dispose();
       renderer.dispose();
     };
@@ -129,7 +153,9 @@
 >
   <div class="flex shrink-0 items-center gap-3 px-4 py-3 text-sm text-white">
     <span class="min-w-0 flex-1 truncate">{title}</span>
-    <span class="hidden text-xs text-white/60 sm:inline">Drag to look, WASD to move, E and Q for up and down, Shift to go faster</span>
+    <span class="hidden text-xs text-white/60 sm:inline">
+      {orbit ? "Drag to turn, scroll to zoom, right-drag to move" : "Drag to look, WASD to move, E and Q for up and down, Shift to go faster"}
+    </span>
     <button class="rounded-md border border-white/30 px-3 py-1.5 hover:bg-white/10" onclick={onClose} aria-label="Close viewer">Close</button>
   </div>
   <div class="relative min-h-0 flex-1">
