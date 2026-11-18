@@ -1,5 +1,17 @@
 use std::path::PathBuf;
 
+/// The `architectures` entry naming a DSpine drafter (`DSpineDraftModel`).
+pub const DSPINE_ARCHITECTURE: &str = "DSpine";
+
+/// Whether an `architectures` entry names a drafter checkpoint the drafters crate loads: DFlash, DFlash 2, DSpark or
+/// DSpine.
+pub fn is_drafter_architecture(name: &str) -> bool {
+    name.contains("DFlash")
+        || name.contains("Dflash")
+        || name.contains("DSpark")
+        || name.contains(DSPINE_ARCHITECTURE)
+}
+
 #[derive(Clone, Debug)]
 pub enum SpeculativeConfig {
     Off,
