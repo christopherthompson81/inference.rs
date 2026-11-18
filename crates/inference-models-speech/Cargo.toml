@@ -45,3 +45,7 @@ mimalloc.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+
+[package.metadata.cargo-machete]
+# only makes flate2's zlib static
+ignored = ["libz-sys"]

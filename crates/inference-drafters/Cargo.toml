@@ -36,3 +36,7 @@ cuda = [
     "inference-nn/cuda",
 ]
 metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]
+
+[package.metadata.cargo-machete]
+# inference_json::FromJson's derive implements Deserialize through serde
+ignored = ["serde"]

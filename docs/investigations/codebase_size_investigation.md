@@ -3266,3 +3266,25 @@ Finding:
 
 Implication: the server chain is api -> http -> server-core -> CLI. What's left of a core edit's cycle is
 server-core's own build and the CLI link, and the CUDA suite's 52 s is still the bigger cost.
+
+## Run 108 - 2026-11-18 01:40
+
+**Round** (with `cuda_build_time_investigation.md` Runs 52-53, which took the kernel build items: #993, #994).
+
+`scripts/housekeeping.sh`: 28,929 duplicated lines (Run 106: 25,276 after #733); top pairs are the cuTile fused-MoE
+fp8 copy (deliberate dtype arms), tiny recurrent-model tests, and six audio input processors sharing a ~92-line span
+(MERaLiON-2, GLM-ASR, Voxtral, Qwen2-Audio, and 54 + 33 lines with Ultravox and Nemotron Transcribe).
+
+- **Unused dependencies** (`cargo machete`, each checked by hand): removed inference-models-qwen's `inference-fattn` and
+  `inference-paged-attn` (they only forwarded `cuda` features inference-nn already enables), `metrics`, `rand`, and
+  inference-server-core's `http-body`, `metrics-exporter-prometheus` (the recorder moved to inference-http), `sha2`.
+  Three are real and now listed under `[package.metadata.cargo-machete]`: inference-tensor's `gemm-f32` (switches on
+  its x86-v4 kernels), inference-models-speech's `libz-sys` (static zlib), inference-drafters' `serde` (`FromJson`'s
+  derive implements `Deserialize` through it). Machete is clean.
+- **Audio input processors**: the shared steps moved to `inference_nn::media_inputs::audio_prompt` behind an
+  `AudioPrompt` trait (model name, sample rate, prompt expansion), as three non-generic functions: `plan_audio_prompts`,
+  `step_audio_clips` (the checks, each prompt's expansion, the clips the step encodes) and `audio_step_output`. Each
+  processor keeps its clip encoding and its args type. -112 lines; the scan reads 28,845 (what still matches is the
+  trait methods' signatures and the `TextInputs` literal).
+- **Quant headers** (Run 52: `gguf_iq_tables.cuh` reaches 56 files, the MMQ headers 35): commits touching them since
+  2026-09-18 are 1 and 1-6, against 14-18 for the fattn headers, so no restructuring.

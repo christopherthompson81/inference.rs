@@ -1,11 +1,127 @@
 //! Expanding an audio-in model's per-clip placeholder into the run of tokens its encoder output fills.
 
+use std::{any::Any, sync::Arc};
+
 use inference_audio::AudioInput;
 use tokenizers::Tokenizer;
 
 use super::media::build_mm_features_from_ranges;
-use super::processor::{InputsProcessorValidationError, MediaSequence};
+use super::processor::{
+    InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence, TextInputs,
+    TextOnlyInputs,
+};
+use crate::gdn::RecurrentBatchKind;
 use crate::paged_attention::{PagedAttentionMeta, block_hash::MultimodalKind};
+
+/// What an audio language model adds to the input-processor steps every such model shares.
+pub trait AudioPrompt {
+    /// The model name errors carry.
+    fn model(&self) -> &'static str;
+    /// The rate clips are resampled to.
+    fn sample_rate(&self) -> u32;
+    /// Expands `seq`'s audio placeholders into the token runs `clips` fill.
+    fn expand_prompt(
+        &self,
+        tokenizer: &Tokenizer,
+        seq: &mut dyn MediaSequence,
+        clips: &[Vec<f32>],
+        paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+    ) -> anyhow::Result<()>;
+}
+
+fn require_tokenizer(
+    prompt: &dyn AudioPrompt,
+    tokenizer: Option<Arc<Tokenizer>>,
+) -> anyhow::Result<Arc<Tokenizer>> {
+    tokenizer
+        .ok_or_else(|| anyhow::anyhow!("{} audio processor requires a tokenizer", prompt.model()))
+}
+
+/// `prepare_for_paged_prompt_planning` for an audio prompt: each new prompt's placeholders expanded for its clips.
+pub fn plan_audio_prompts(
+    prompt: &dyn AudioPrompt,
+    tokenizer: Option<Arc<Tokenizer>>,
+    input_seqs: &mut [&mut dyn MediaSequence],
+    mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+) -> anyhow::Result<()> {
+    let tokenizer = require_tokenizer(prompt, tokenizer)?;
+    for seq in input_seqs {
+        if !seq.has_audios() || seq.multimodal().has_changed_prompt {
+            continue;
+        }
+        let clips = mono_clips(&**seq, prompt.sample_rate())?;
+        prompt.expand_prompt(
+            &tokenizer,
+            &mut **seq,
+            &clips,
+            paged_attn_metadata.as_deref_mut(),
+        )?;
+    }
+    Ok(())
+}
+
+/// A step's audio: on a prompt step, each sequence's placeholders expanded and the clips the step encodes, in order.
+pub fn step_audio_clips(
+    prompt: &dyn AudioPrompt,
+    tokenizer: Option<Arc<Tokenizer>>,
+    input_seqs: &mut [&mut dyn MediaSequence],
+    is_prompt: bool,
+    no_kv_cache: bool,
+    mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    if no_kv_cache {
+        anyhow::bail!("{} must have a kv cache.", prompt.model());
+    }
+    let tokenizer = require_tokenizer(prompt, tokenizer)?;
+    let mut active = Vec::new();
+    if is_prompt {
+        for seq in input_seqs.iter_mut().filter(|seq| seq.has_audios()) {
+            let mut clips = mono_clips(&**seq, prompt.sample_rate())?;
+            prompt.expand_prompt(
+                &tokenizer,
+                &mut **seq,
+                &clips,
+                paged_attn_metadata.as_deref_mut(),
+            )?;
+            let range = active_clip_range(&**seq, clips.len(), prompt.model())?;
+            active.extend(clips.drain(range));
+        }
+    }
+    Ok(active)
+}
+
+/// The step's inputs around the encoded audio its model reads from `model_specific_args`.
+pub fn audio_step_output(
+    host: &dyn InputsHost,
+    input_seqs: &mut [&mut dyn MediaSequence],
+    is_prompt: bool,
+    no_kv_cache: bool,
+    text: TextInputs<'_>,
+    model_specific_args: Box<dyn Any>,
+) -> anyhow::Result<InputProcessorOutput> {
+    let toks = input_seqs
+        .iter()
+        .map(|seq| seq.get_toks())
+        .collect::<Vec<_>>()
+        .into();
+    let step = host.step_inputs(toks, input_seqs, text, is_prompt, no_kv_cache)?;
+    let inputs = step.inputs;
+    Ok(TextOnlyInputs {
+        input_ids: inputs.input,
+        seqlen_offsets: inputs.positions,
+        context_lens: inputs.context_lens,
+        position_ids: inputs.position_ids,
+        paged_attn_meta: inputs.paged_attn_meta,
+        flash_meta: inputs.flash_meta,
+        recurrent_batch_kind: if is_prompt {
+            RecurrentBatchKind::Prefill
+        } else {
+            RecurrentBatchKind::Decode
+        },
+        seq_indices: step.seq_indices,
+    }
+    .into_output(model_specific_args))
+}
 
 /// The placeholder a prompt names each clip with, and the token it tokenizes to.
 #[derive(Clone, Copy)]

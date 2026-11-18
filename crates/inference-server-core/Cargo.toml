@@ -22,7 +22,6 @@ opus.workspace = true
 # AC-3 and E-AC-3, pure Rust: symphonia has no decoder for either
 oxideav-ac3.workspace = true
 oxideav-core.workspace = true
-http-body = { workspace = true }
 http-body-util.workspace = true
 futures.workspace = true
 hound.workspace = true
@@ -31,7 +30,6 @@ inference-http.workspace = true
 inference-chat-protocols.workspace = true
 inference-jobs.workspace = true
 serde.workspace = true
-sha2.workspace = true
 symphonia.workspace = true
 # The served document keeps docs/openapi.json's key order.
 serde_json = { workspace = true, features = ["preserve_order"] }
@@ -40,7 +38,6 @@ tower-http = { workspace = true, features = ["cors", "fs"] }
 tower = { workspace = true, features = ["util"] }
 tracing.workspace = true
 metrics.workspace = true
-metrics-exporter-prometheus.workspace = true
 url.workspace = true
 utoipa = { workspace = true, features = ["axum_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["axum"], optional = true }

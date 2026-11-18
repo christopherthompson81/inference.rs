@@ -6,10 +6,12 @@ use tokenizers::Tokenizer;
 
 use crate::device_map::DeviceMapper;
 use crate::media_inputs::{
-    audio_prompt::{AudioPlaceholder, active_clip_range, expand_audio_placeholders, mono_clips},
+    audio_prompt::{
+        AudioPlaceholder, AudioPrompt, audio_step_output, expand_audio_placeholders,
+        plan_audio_prompts, step_audio_clips,
+    },
     processor::{
-        InputProcessorOutput, InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor,
-        TextInputs,
+        InputProcessorOutput, InputsHost, MediaSequence, MultimodalInputsProcessor, TextInputs,
     },
 };
 use crate::paged_attention::PagedAttentionMeta;
@@ -54,26 +56,6 @@ impl VoxtralChatInputsProcessor {
         ac.max_source_positions * ac.hidden_size / config.stacked_width()
     }
 
-    fn expand_prompt(
-        &self,
-        tokenizer: &Tokenizer,
-        seq: &mut dyn MediaSequence,
-        clips: &[Vec<f32>],
-        paged_attn_metadata: Option<&mut PagedAttentionMeta>,
-    ) -> anyhow::Result<()> {
-        let per_chunk = Self::tokens_per_chunk(&self.config);
-        let counts = clips
-            .iter()
-            .map(|clip| chunk_count(clip.len()) * per_chunk)
-            .collect::<Vec<_>>();
-        let placeholder = AudioPlaceholder {
-            model: MODEL,
-            text: AUDIO_TOKEN,
-            token: self.config.audio_token_id,
-        };
-        expand_audio_placeholders(tokenizer, seq, placeholder, &counts, paged_attn_metadata)
-    }
-
     // one log-mel over the padded clip (one peak for every chunk), cut into (chunks, n_mels, frames)
     fn clip_features(&self, clip: &[f32], device: &Device) -> anyhow::Result<Tensor> {
         let chunks = chunk_count(clip.len());
@@ -96,6 +78,36 @@ impl VoxtralChatInputsProcessor {
     }
 }
 
+impl AudioPrompt for VoxtralChatInputsProcessor {
+    fn model(&self) -> &'static str {
+        MODEL
+    }
+
+    fn sample_rate(&self) -> u32 {
+        SAMPLE_RATE
+    }
+
+    fn expand_prompt(
+        &self,
+        tokenizer: &Tokenizer,
+        seq: &mut dyn MediaSequence,
+        clips: &[Vec<f32>],
+        paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+    ) -> anyhow::Result<()> {
+        let per_chunk = Self::tokens_per_chunk(&self.config);
+        let counts = clips
+            .iter()
+            .map(|clip| chunk_count(clip.len()) * per_chunk)
+            .collect::<Vec<_>>();
+        let placeholder = AudioPlaceholder {
+            model: MODEL,
+            text: AUDIO_TOKEN,
+            token: self.config.audio_token_id,
+        };
+        expand_audio_placeholders(tokenizer, seq, placeholder, &counts, paged_attn_metadata)
+    }
+}
+
 impl MultimodalInputsProcessor for VoxtralChatInputsProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
@@ -103,24 +115,9 @@ impl MultimodalInputsProcessor for VoxtralChatInputsProcessor {
         input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         _other_config: Option<Arc<dyn Any>>,
-        mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+        paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
-        let Some(tokenizer) = tokenizer else {
-            anyhow::bail!("{MODEL} audio processor requires a tokenizer");
-        };
-        for seq in input_seqs {
-            if !seq.has_audios() || seq.multimodal().has_changed_prompt {
-                continue;
-            }
-            let clips = mono_clips(&**seq, SAMPLE_RATE)?;
-            self.expand_prompt(
-                &tokenizer,
-                &mut **seq,
-                &clips,
-                paged_attn_metadata.as_deref_mut(),
-            )?;
-        }
-        Ok(())
+        plan_audio_prompts(self, tokenizer, input_seqs, paged_attn_metadata)
     }
 
     fn process_inputs(
@@ -138,29 +135,18 @@ impl MultimodalInputsProcessor for VoxtralChatInputsProcessor {
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
     ) -> anyhow::Result<InputProcessorOutput> {
-        if no_kv_cache {
-            anyhow::bail!("{MODEL} must have a kv cache.");
-        }
-        let Some(tokenizer) = tokenizer else {
-            anyhow::bail!("{MODEL} audio processor requires a tokenizer");
-        };
-        let mut audio = Vec::new();
-        if is_prompt {
-            for seq in input_seqs.iter_mut().filter(|seq| seq.has_audios()) {
-                let clips = mono_clips(&**seq, SAMPLE_RATE)?;
-                self.expand_prompt(&tokenizer, &mut **seq, &clips, paged_attn_metadata.as_mut())?;
-                let range = active_clip_range(&**seq, clips.len(), MODEL)?;
-                for clip in &clips[range] {
-                    audio.push(self.clip_features(clip, device)?);
-                }
-            }
-        }
-
-        let toks = input_seqs
+        let clips = step_audio_clips(
+            self,
+            tokenizer,
+            input_seqs,
+            is_prompt,
+            no_kv_cache,
+            paged_attn_metadata.as_mut(),
+        )?;
+        let audio = clips
             .iter()
-            .map(|seq| seq.get_toks())
-            .collect::<Vec<_>>()
-            .into();
+            .map(|clip| self.clip_features(clip, device))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let text = TextInputs {
             device,
             last_n_context_len,
@@ -169,36 +155,13 @@ impl MultimodalInputsProcessor for VoxtralChatInputsProcessor {
             mapper,
             sliding_window,
         };
-        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
-            inputs:
-                inference_nn::media_inputs::processor::InputMetadata {
-                    input,
-                    positions,
-                    context_lens,
-                    position_ids,
-                    paged_attn_meta,
-                    flash_meta,
-                },
-            seq_indices,
-        } = host.step_inputs(toks, input_seqs, text, is_prompt, no_kv_cache)?;
-
-        Ok(InputProcessorOutput {
-            inputs: Box::new(ModelInputs {
-                input_ids: input,
-                seqlen_offsets: positions,
-                context_lens,
-                position_ids,
-                pixel_values: None,
-                model_specific_args: Box::new(VoxtralChatSpecificArgs { audio }),
-                paged_attn_meta,
-                flash_meta,
-                recurrent_batch_kind: if is_prompt {
-                    crate::gdn::RecurrentBatchKind::Prefill
-                } else {
-                    crate::gdn::RecurrentBatchKind::Decode
-                },
-            }),
-            seq_indices,
-        })
+        audio_step_output(
+            host,
+            input_seqs,
+            is_prompt,
+            no_kv_cache,
+            text,
+            Box::new(VoxtralChatSpecificArgs { audio }),
+        )
     }
 }
