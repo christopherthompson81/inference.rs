@@ -294,3 +294,40 @@ Checks: lint, CPU (3149) and CUDA (3352) suites pass; the Vulkan set (655) passe
 parallel run: one of `a_vulkan_weight_holds_its_blocks_once` or `vulkan_quantized_cache_scores_as_its_dequantized_rows`
 (q4/q4 decode, max diff 0.0013) fails ~1 run in 10, each taking ~3.5 s against ~0.3 s alone. Master's code fails the
 same way (1 of 15 runs, the storage test), and this branch with the pool wait off does too (1 of 15): not from here.
+
+## Run 13 - 2026-11-18 12:00 (laptop: Radeon 780M iGPU)
+
+Question: Qwen3.6-35B-A3B on the 780M, from the local `Qwen3.6-35B-A3B-MXFP4_MOE.gguf` (20.2 GiB: routed gate/up
+MXFP4, down Q5_K / Q6_K, everything else Q8_0, F32 router; no MTP block). llama.cpp Vulkan (2cbca389f) on the same
+file: pp512 409 +- 25, tg64 21.8 +- 0.5 tok/s.
+
+First load: "MXFP4 is supported only through its explicit GPT-OSS binding". MXFP4 became a raw GGUF type beside NVFP4
+(CPU dequantize against gguf-py goldens; on Vulkan its 17-byte blocks widened to 18 at upload so blocks start on u16s,
+kernels for every block path through a shared kvalues_fp4 table). Greedy against llama.cpp's CPU over three prompts:
+52/52, 120/120 and 33 tokens before a near tie (logprob -0.69 against -0.73), mean |dlogprob| 0.003-0.015.
+
+`bench --vulkan`, 512-token prompt: 437 tok/s, decode 16.5. Profile (`INFERENCE_VULKAN_PROFILE=1`): 44.7 ms of GPU work
+a token in a 56-60 ms token, ~1100 dispatches; the dense Q8_0 matvecs at 70-80 GB/s, the 248320-row head 6.7 ms. The
+CPU ran ~0.25 of a core. Temporary wait counters (removed): ~50 synchronizes a token, 79 % of the wall waiting. Frame
+pointer profile: GDN `checkout` read its lone state index back (30 a token), and Vulkan RoPE without positions made
+its placeholder by an f32 -> u32 cast, which has no device kernel (10 a token). Checkout takes the host's indices (as
+commit does) and the placeholder is a u32 zero: two drains a token are left.
+
+```
+512-token prompt, 128 decoded      prefill      decode
+before                             439 tok/s    16.7 tok/s (60.1 ms)
+after                              443          22.6 (44.3 ms)
+llama.cpp Vulkan                   409          21.8
+```
+
+Greedy text and logprobs byte identical across the change.
+
+A decode token reads ~2.85 GB at ~78 GB/s; the tensors every token reads are ~72 % of it (attn_qkv and full-attention
+q 713 MB, head 540, ssm_out and attention output 356, attn_gate 267, shared experts ~134), the routed experts ~580.
+Tried and reverted: the expert matvec splitting its 32 threads over two rows where a row has 16 blocks (the experts'
+down projection, k = 512, half the threads idle): Q5_K 131 -> 125 us, Q6_K 130 -> 138, MXFP4 66.8 -> 68 (with 64
+threads: 77); not kept.
+
+Next: a recipe that lowers the per-token tensors (Lightning's Run 8 sweep in nemotron_lightning_cpu_investigation:
+head, ssm_in and the shared expert pay best per KLD; ssm_out is the most sensitive; MXFP4 the weakest 4-bit type),
+swept for KLD on the desktop from qwen36_35b_a3b_recipe_investigation's IQ4_XS file, then timed here with its MTP block.

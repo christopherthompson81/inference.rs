@@ -19,7 +19,7 @@ use crate::{
 const EXPERT_TENSOR_SUFFIX: &str = "_exps.weight";
 // No per-rank column count is a multiple of this, so tensor parallelism replicates row-scaled weights
 const ROW_SCALED_SHARD_ALIGNMENT: usize = usize::MAX;
-const DIRECT_GGUF_DTYPES: &str = "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, NVFP4, IQ1_KT through IQ4_KT, IQ2_K through IQ6_K, and the IQ*_KS / IQ4_KSS / IQ2_KL types";
+const DIRECT_GGUF_DTYPES: &str = "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, NVFP4, MXFP4, IQ1_KT through IQ4_KT, IQ2_K through IQ6_K, and the IQ*_KS / IQ4_KSS / IQ2_KL types";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GgufTensorBinding {
@@ -1303,8 +1303,7 @@ fn validate_binding_storage(
             if dtype.gguf_type().is_none() {
                 inference_tensor::bail!(
                     "GGUF tensor `{name}` uses dtype {} ({}) for native binding `{native_name}`; \
-                     direct GGUF loading currently supports {DIRECT_GGUF_DTYPES}, while \
-                     MXFP4 is supported only through its explicit GPT-OSS binding",
+                     direct GGUF loading currently supports {DIRECT_GGUF_DTYPES}",
                     dtype.name(),
                     dtype.raw()
                 );

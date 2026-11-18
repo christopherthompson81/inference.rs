@@ -73,7 +73,12 @@ impl GdnLayerCache {
 
     /// Check out the rows `indices` of `pool` for one layer forward. On CUDA the kernels update the
     /// pool in place through the slot table; elsewhere this is a gathered copy that `commit` scatters back.
-    pub fn checkout(pool: &RecurrentStatePool, indices: &Tensor) -> Result<Self> {
+    /// `host_indices`, the same rows held on the host, spares a device's read back of a lone row.
+    pub fn checkout(
+        pool: &RecurrentStatePool,
+        indices: &Tensor,
+        host_indices: Option<&[u32]>,
+    ) -> Result<Self> {
         if pool.device().is_cuda() {
             let mut cache = Self::pooled(
                 pool.conv_state.clone(),
@@ -86,7 +91,10 @@ impl GdnLayerCache {
             return Ok(cache);
         }
         if indices.dims1()? == 1 {
-            let row = indices.to_vec1::<u32>()?[0] as usize;
+            let row = match host_indices {
+                Some(&[row]) => row,
+                _ => indices.to_vec1::<u32>()?[0],
+            } as usize;
             let mut cache = Self::gathered(
                 pool.conv_state.narrow(0, row, 1)?,
                 pool.recurrent_state.narrow(0, row, 1)?,

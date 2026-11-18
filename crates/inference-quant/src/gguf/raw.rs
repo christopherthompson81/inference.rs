@@ -26,6 +26,8 @@ const IQ4_XS_QS: std::ops::Range<usize> = 8..136;
 const MATRIX_ROW_PADDING: usize = 512;
 // Blocks per rayon task in the CPU dequantizers; one block is 32 to 256 values, too little work to schedule alone
 // ggml-common.h's kvalues_fp4: E2M1 doubled, which the UE4M3 scale halves back
+// 2^-128's f32 bits (a denormal), the halved scale of E8M0's 0
+const E8M0_HALF_DENORMAL: u32 = 0x0020_0000;
 const KVALUES_FP4: [i8; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
 const NVFP4_SCALES: usize = 4;
 const NVFP4_SUB_BLOCK: usize = 16;
@@ -610,6 +612,7 @@ fn metal_tag(ty: GgufType) -> Result<&'static str> {
         GgufType::Iq3Ks => "iq3_ks",
         GgufType::Iq2Kl => "iq2_kl",
         GgufType::Nvfp4 => inference_tensor::bail!("NVFP4 GGUF tensors have no Metal kernel"),
+        GgufType::Mxfp4 => inference_tensor::bail!("MXFP4 GGUF tensors have no Metal kernel"),
         other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
     })
 }
@@ -681,6 +684,7 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
         GgufType::Iq1S => super::iq_dequant::iq1_s,
         GgufType::Iq1M => super::iq_dequant::iq1_m,
         GgufType::Nvfp4 => dequantize_nvfp4,
+        GgufType::Mxfp4 => dequantize_mxfp4,
         other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
     };
     let mut out = vec![0f32; bytes.len() / size * block];
@@ -708,6 +712,25 @@ fn dequantize_nvfp4(block: &[u8], values: &mut [f32]) {
             *hi = d * f32::from(KVALUES_FP4[usize::from(q >> 4)]);
         }
     }
+}
+
+// block_mxfp4: an E8M0 scale, then 16 bytes, value j in byte j % 16's low (j < 16) or high half
+fn dequantize_mxfp4(block: &[u8], values: &mut [f32]) {
+    let (&e, qs) = block.split_first().expect("a whole MXFP4 block");
+    let d = e8m0_to_f32_half(e);
+    let (low, high) = values.split_at_mut(qs.len());
+    for ((q, lo), hi) in qs.iter().zip(low).zip(high) {
+        *lo = d * f32::from(KVALUES_FP4[usize::from(q & 0x0F)]);
+        *hi = d * f32::from(KVALUES_FP4[usize::from(q >> 4)]);
+    }
+}
+
+// ggml_e8m0_to_fp32_half: 2^(e - 127), halved for the doubled E2M1 table
+fn e8m0_to_f32_half(e: u8) -> f32 {
+    f32::from_bits(match e {
+        0 | 1 => E8M0_HALF_DENORMAL << e,
+        _ => u32::from(e - 1) << 23,
+    })
 }
 
 // ggml_ue4m3_to_fp32: E4M3 without its sign, halved for the doubled E2M1 table; 0x7F (NaN) reads as zero
@@ -1066,6 +1089,8 @@ mod tests {
 
     // UE4M3 exponent 2 (2^-5), mantissa 0
     const NVFP4_TEST_SCALE: u8 = 0x10;
+    // 2^(119 - 128) = 2^-9, MXFP4's halved scale
+    const MXFP4_TEST_EXPONENT: u8 = 119;
 
     // Blocks and expected values from gguf-py's IQ dequantizers (tests/fixtures/gguf_iq/make_goldens.py).
     const GOLDENS: &str = include_str!("../../tests/fixtures/gguf_iq/goldens.json");
@@ -1131,6 +1156,9 @@ mod tests {
                             | ((scale >> (4 * k)) & 0xF) << 12;
                         block[at..at + 2].copy_from_slice(&word.to_le_bytes());
                     }
+                } else if ty == GgufType::Mxfp4 {
+                    // E8M0 scales of 2^-9 to 2^-6 (halved), the order of the others' f16 scales
+                    block[0] = MXFP4_TEST_EXPONENT + (i % 4) as u8;
                 } else if ty == GgufType::Nvfp4 {
                     // UE4M3 scales of 2^-5 times 1 to 1.875, halved: the order of the others' f16 scales
                     for (k, scale) in block[..NVFP4_SCALES].iter_mut().enumerate() {
@@ -1145,6 +1173,11 @@ mod tests {
     }
 
     // The CPU and whichever GPUs this build and machine have
+    // MXFP4's raw blocks have CPU and Vulkan kernels alone
+    fn has_gpu_kernels(ty: GgufType) -> bool {
+        ty != GgufType::Mxfp4
+    }
+
     fn devices() -> Vec<Device> {
         std::iter::once(Device::Cpu)
             .chain(Device::new_cuda(0).ok().filter(|_| cfg!(feature = "cuda")))
@@ -1197,6 +1230,7 @@ mod tests {
         };
         for (ty, cols) in GgufType::RAW_BLOCKS
             .into_iter()
+            .filter(|&ty| has_gpu_kernels(ty))
             .map(|ty| (ty, COLS))
             .chain([(GgufType::Iq4Nl, NL_COLS)])
             .chain(KT_TAIL_TYPES.map(|ty| (ty, KT_TAIL_COLS)))
@@ -1432,7 +1466,7 @@ mod tests {
                 .dequantize(&Device::Cpu)?
                 .embedding(&ids.flatten_all()?)?
                 .reshape((2, 3, cols))?;
-            for device in &devices {
+            for device in devices.iter().filter(|d| d.is_cpu() || has_gpu_kernels(ty)) {
                 let weight = RawGgufTensor::new(ty, &[ROWS, cols], bytes.clone(), device)?;
                 let actual = weight
                     .embedding(&ids.to_device(device)?)?
@@ -1486,7 +1520,7 @@ mod tests {
                     .dequantize(&Device::Cpu)?;
             let shared = Tensor::randn(0f32, 1f32, (tokens, 1, COLS), &Device::Cpu)?;
             let per_slot = Tensor::randn(0f32, 1f32, (tokens, k, COLS), &Device::Cpu)?;
-            for device in &devices {
+            for device in devices.iter().filter(|d| d.is_cpu() || has_gpu_kernels(ty)) {
                 let layer = GgufRawMatMul::new(
                     RawGgufTensor::new(ty, &[EXPERTS, ROWS, COLS], bytes.clone(), device)?,
                     None,
@@ -1714,7 +1748,10 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn every_raw_type_dequantizes_on_the_gpu() {
-        for ty in GgufType::RAW_BLOCKS {
+        for ty in GgufType::RAW_BLOCKS
+            .into_iter()
+            .filter(|&ty| has_gpu_kernels(ty))
+        {
             assert!(
                 super::super::fast_mmvq::can_dequantize(ty, DType::F32),
                 "{ty:?}"
@@ -1732,6 +1769,7 @@ mod tests {
         };
         let cases = GgufType::RAW_BLOCKS
             .into_iter()
+            .filter(|&ty| has_gpu_kernels(ty))
             .map(|ty| (ty, COLS))
             .chain(KT_TAIL_TYPES.map(|ty| (ty, KT_TAIL_COLS)));
         for (ty, cols) in cases {
@@ -1769,7 +1807,7 @@ mod tests {
         let metal = Device::new_metal(0)?;
         for (ty, cols) in GgufType::RAW_BLOCKS
             .into_iter()
-            .filter(|&ty| ty != GgufType::Nvfp4)
+            .filter(|&ty| !matches!(ty, GgufType::Nvfp4 | GgufType::Mxfp4))
             .map(|ty| (ty, COLS))
             .chain([(GgufType::Iq4Nl, NL_COLS)])
             .chain([GgufType::Iq3Kt, GgufType::Iq4Kt].map(|ty| (ty, 480)))
@@ -1817,7 +1855,7 @@ mod tests {
         let metal = Device::new_metal(0)?;
         let cases = GgufType::RAW_BLOCKS
             .into_iter()
-            .filter(|&ty| ty != GgufType::Nvfp4)
+            .filter(|&ty| !matches!(ty, GgufType::Nvfp4 | GgufType::Mxfp4))
             .map(|ty| (ty, COLS))
             .chain([GgufType::Iq3Kt, GgufType::Iq4Kt].map(|ty| (ty, 480)));
         for (ty, cols) in cases {

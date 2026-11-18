@@ -434,7 +434,8 @@ impl Model {
                     let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(layer_idx) else {
                         inference_tensor::bail!("Kimi-Linear layer {layer_idx} is not recurrent");
                     };
-                    let mut state = GdnLayerCache::checkout(pool, &indices)?;
+                    let mut state =
+                        GdnLayerCache::checkout(pool, &indices, metadata.state_indices_host())?;
                     let out = kda.forward(&xn, &mut state, metadata.batch_kind())?;
                     state.commit(pool, &indices, metadata.state_indices_host())?;
                     out
