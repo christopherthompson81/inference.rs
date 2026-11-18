@@ -34,6 +34,7 @@ const FILE_TYPES: &[(&str, &str)] = &[
     ("ply", "application/octet-stream"),
     ("glb", "model/gltf-binary"),
     ("spz", "application/octet-stream"),
+    ("stl", "model/stl"),
     ("npy", "application/octet-stream"),
 ];
 
@@ -275,5 +276,31 @@ pub async fn job_file(
             response
         }
         Err(infallible) => match infallible {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FILE_TYPES;
+
+    #[test]
+    fn every_image_job_output_is_served() {
+        use inference_jobs::{image_to_3d, image_to_splat, print, voxels};
+        for file in [
+            image_to_3d::GLB_FILE,
+            image_to_3d::MESH_FILE,
+            image_to_3d::PREPARED_FILE,
+            image_to_3d::META_FILE,
+            image_to_splat::PLY_FILE,
+            image_to_splat::SPZ_FILE,
+            print::PRINT_FILE,
+            voxels::VOXELS_FILE,
+        ] {
+            let extension = file.rsplit('.').next().unwrap_or_default();
+            assert!(
+                FILE_TYPES.iter().any(|(e, _)| *e == extension),
+                "{file} is not served"
+            );
+        }
     }
 }
