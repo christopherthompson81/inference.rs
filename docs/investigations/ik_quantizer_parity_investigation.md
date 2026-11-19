@@ -96,3 +96,22 @@ Result: `the_ik_quantizer_writes_ik_llamas_bytes` pins the seven grid types too 
 `ggml_quantize_chunk`); the parity script shows 0 differing against ik's build and against llama.cpp's for every
 grid type. `--quantizer ik-llama` now covers every type `quantize gguf` writes, so the fallback warning is gone.
 
+
+## Run 5 - 2026-11-19 10:30
+
+Question: IQ4_KSS, which `quantize gguf` could not write (a Qwen3.6-35B-A3B allocation sweep's IQ4_KSS expert points
+failed on it).
+
+Port of `quantize_row_iq4_kss_impl` (scalar in ik, no AVX2 path): IQ4_KS's per-block search, with each four indices
+(x[2k], x[2k+16], x[2k+1], x[2k+17]) pruned to even parity by `prune_iq4ks` (one index moved up to two steps to the
+cheapest fix; its current error measured on the unshifted codebook whichever is in use, as ik has it), and stored
+through ik's scramble table (15 bits whose `j ^ (j << 1)` rebuilds them, computed here as a prefix xor rather than
+ik's quadratic search) above one bit of the block's 8-bit scale.
+
+First try, against ik's own build (`iq_quantize_parity.py ... iq4_kss`): 192 / 191 bytes differing of 131,328. Every
+block and word matched; only the row scales differed: IQ4_KSS's fudge factor is 1.01 (IQ4_KS's 1.0). With it, plain
+rows matched and 1-4 imatrix rows per seed still differed in the row scale: gcc leaves this function's `sigma2` sum
+unfused (it fuses the same loop in IQ4_KS's). With that, 0 bytes differing on 16 seeds, plain and imatrix.
+
+Result: IQ4_KSS (and IQ4_KS, until now checked only by the script) pinned in `the_ik_quantizer_writes_ik_llamas_bytes`
+to hashes from ik's `ggml_quantize_chunk` on the pinned layer.
