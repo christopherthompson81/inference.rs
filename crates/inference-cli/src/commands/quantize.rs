@@ -150,9 +150,12 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         quantizer,
         reuse: options.reuse.clone(),
         only: options.only.as_deref().map(regex::Regex::new).transpose()?,
-        gpu: (!options.cpu)
+        gpu: (!options.cpu || options.hessians.is_some())
             .then(|| inference_tensor::Device::new_cuda(0).ok())
             .flatten(),
+        hessians: options.hessians.clone(),
+        hessian_weights_only: options.hessian_weights_only,
+        gptq_damp: options.gptq_damp,
     };
     let requantize = || {
         gguf_requantize::requantize_gguf(

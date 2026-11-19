@@ -228,3 +228,50 @@ embeddings: Q4_K `token_embd` cost +0.0005 alone but +0.0014 on top of the 20.27
 noise at ~0.0003). IQ4_KSS gate/up was the cheapest single saving per byte (+0.0020 for 645 MB), but IQ4_KSS down
 inside the 19.5 GB recipe measured no better than without it. A pick should be measured before it is trusted; with
 GPU quantizing that is ~1-3 min a recipe.
+
+## Run 9 - 2026-11-19 14:30
+
+Question (#1013 item 2): does GPTQ-style error feedback, kept inside the GGUF formats, lower KLD?
+
+Method: full input Hessians (`X^T X / n`) of every text linear of Qwen3.5-2B, collected with forward hooks in a
+transformers prototype (scratch `collect_hessians.py`, 128 chunks of 512 tokens, keyed by llama.cpp's GGUF names;
+the 35B's V-head reorder of `ssm_out`'s input columns applied when key and value heads differ). `quantize gguf
+--hessians` then quantizes a matrix a block of columns at a time with the type's own byte-exact quantizer (the
+Hessian's diagonal as its importances) and carries each block's error onto the columns not yet quantized:
+`W_rest -= E U_bb^-1 U_b,rest`, `U` the inverse Hessian's upper Cholesky factor (cuSOLVER). `--hessian-weights-only`
+keeps the diagonal weighting without the feedback, the baseline. Only types whose blocks carry their own scales for
+now (the K-quants, Q4_0-Q8_0, IQ4_NL, IQ4_XS); about a minute for the 2B.
+
+First run, WikiText-train calibration, scored on WikiText test (same domain), then on the repo's docs (another):
+
+```
+2B, uniform type      none              Hessian weights   GPTQ (damp 0.01)
+Q4_K   wiki / docs    0.0688 / 0.0598   0.0414 / 0.0405   0.0298 / 0.0443
+IQ4_XS wiki / docs    0.0646 / 0.0593   0.0505 / 0.0442   0.0317 / 0.0462
+```
+
+The feedback fit the calibration's domain (-28% / -37%) and lost on the other (+9% / +5%): GPTQ's calibration
+overfitting. Held-out sets for the next grid: WikiText test, the docs' even-numbered files (docs B), and 400 Rust
+sources from the repo (never calibrated on); a second calibration mixes WikiText train with the docs' odd files in
+4 KB pieces. Q4_K:
+
+```
+calibration, method          wiki     docs B   rust
+none                         0.06880  0.05461  0.04984
+wiki, Hessian weights        0.04143  0.03819  0.03349
+wiki, GPTQ damp 0.01         0.02975  0.04371  0.04214
+wiki, GPTQ damp 0.1          0.03036  0.03835  0.03667
+wiki, GPTQ damp 1.0          0.03173  0.03618  0.03237
+mixed, Hessian weights       0.04234  0.03596  0.03080
+mixed, GPTQ damp 0.01        0.03346  0.02269  0.02226
+mixed, GPTQ damp 0.1         0.03209  0.02319  0.02208
+```
+
+Findings: with a varied calibration the feedback lowers KLD 24-37% against the same Hessians used as weights only, on
+every held-out set, Rust included; damping trades in-domain gain for robustness when the calibration is narrow (1.0
+on WikiText alone still beat the weights everywhere). `--gptq-damp` defaults to 0.1.
+
+Next: Hessian collection in the engine (the EXL3 writer's per-linear Hessians) rather than transformers; the row-scale
+types (IQ4_KS, IQ4_KSS, IQ3_KS: the row scale has to be fixed before the first block); MoE experts, whose per-expert
+gate/up Hessians would not fit on disk for the 35B (16 MB each, 10,240 of them), so the feedback would run as the
+engine collects, layer by layer, as the EXL3 writer does.

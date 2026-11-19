@@ -156,6 +156,19 @@ pub struct GgufQuantizeOptions {
     /// Quantize on the CPU even where a GPU quantizer writes the type (both write the same bytes)
     #[arg(long)]
     pub cpu: bool,
+
+    /// Input Hessians by tensor name (safetensors of `[cols, cols]` f32, `X^T X / n`): tensors with one, of types whose
+    /// blocks carry their own scales, are quantized with GPTQ-style error feedback on the GPU
+    #[arg(long)]
+    pub hessians: Option<PathBuf>,
+
+    /// With `--hessians`, weigh the quantizer by their diagonals only, without the error feedback
+    #[arg(long, requires = "hessians")]
+    pub hessian_weights_only: bool,
+
+    /// With `--hessians`, the share of each Hessian's mean diagonal added to it before the feedback (GPTQ's damping)
+    #[arg(long, default_value_t = inference_api::gguf_requantize::DEFAULT_GPTQ_DAMP, requires = "hessians")]
+    pub gptq_damp: f64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

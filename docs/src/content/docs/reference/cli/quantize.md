@@ -239,6 +239,9 @@ inference quantize gguf [OPTIONS] --model <MODEL> --output <OUTPUT_PATH> --tenso
 | `--reuse <REUSE>` |  | An earlier output from the same source, imatrix and quantizer, repeatable: tensors it holds at their planned type are copied from it rather than quantized again |
 | `--only <ONLY>` |  | Writes only the tensors whose names match this regex, as an overlay: listed after a model quantized from the same source (`--gguf model.gguf overlay.gguf`), its tensors replace the model's |
 | `--cpu` | `false` | Quantize on the CPU even where a GPU quantizer writes the type (both write the same bytes) |
+| `--hessians <HESSIANS>` |  | Input Hessians by tensor name (safetensors of `[cols, cols]` f32, `X^T X / n`): tensors with one, of types whose blocks carry their own scales, are quantized with GPTQ-style error feedback on the GPU |
+| `--hessian-weights-only` | `false` | With `--hessians`, weigh the quantizer by their diagonals only, without the error feedback |
+| `--gptq-damp <GPTQ_DAMP>` | `0.1` | With `--hessians`, the share of each Hessian's mean diagonal added to it before the feedback (GPTQ's damping) |
 
 ## inference quantize imatrix
 
