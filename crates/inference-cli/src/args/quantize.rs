@@ -147,6 +147,11 @@ pub struct GgufQuantizeOptions {
     /// type are copied from it rather than quantized again
     #[arg(long)]
     pub reuse: Vec<PathBuf>,
+
+    /// Writes only the tensors whose names match this regex, as an overlay: listed after a model quantized from the
+    /// same source (`--gguf model.gguf overlay.gguf`), its tensors replace the model's
+    #[arg(long)]
+    pub only: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

@@ -17,7 +17,7 @@ use inference_tensor::{Device, Result, Tensor};
 use rayon::prelude::*;
 use regex::Regex;
 
-use super::archive::GgufDType;
+use super::archive::{GgufDType, OVERLAY_GGUF_TYPE};
 use super::iq_quantize;
 use super::kernel::GgufType;
 
@@ -26,6 +26,8 @@ const ROWS_PER_TASK: usize = 64;
 // the source bytes read at once: one expert of an expert stack, else rows up to this
 const SLICE_BYTES: usize = 64 << 20;
 const GGUF_ALIGNMENT: u64 = 32;
+const GENERAL_ARCHITECTURE: &str = "general.architecture";
+const GENERAL_TYPE: &str = "general.type";
 
 // the formats `QTensor` encodes, each matching llama.cpp's encoder byte for byte
 const CANDLE_WRITABLE: [GgmlDType; 13] = [
@@ -127,6 +129,8 @@ pub struct RequantizePlan {
     /// Earlier outputs from the same source, imatrix and quantizer: a tensor one of them holds at its planned type is
     /// copied from it instead of quantized again.
     pub reuse: Vec<PathBuf>,
+    /// Writes only the tensors this matches, as an overlay the source's quantized model loads beside it.
+    pub only: Option<Regex>,
 }
 
 #[derive(Debug, Default)]
@@ -232,18 +236,32 @@ pub fn requantize_gguf(
     let tensors = header
         .tensor_order
         .iter()
+        .filter(|name| plan.only.as_ref().is_none_or(|only| only.is_match(name)))
         .map(|name| plan_tensor(name, &header, plan))
         .collect::<Result<Vec<_>>>()?;
 
     let mut kv_bytes = vec![0u8; (header.metadata_span.end - header.metadata_span.start) as usize];
     reader.seek(SeekFrom::Start(header.metadata_span.start))?;
     reader.read_exact(&mut kv_bytes)?;
-    let kv_count = {
+    let mut kv_count = {
         reader.seek(SeekFrom::Start(16))?;
         let mut count = [0u8; 8];
         reader.read_exact(&mut count)?;
         u64::from_le_bytes(count) as usize
     };
+    if plan.only.is_some() {
+        let architecture = header
+            .metadata
+            .get(GENERAL_ARCHITECTURE)
+            .ok_or_else(|| inference_tensor::Error::msg("the source has no architecture"))?;
+        let overlay = gguf_file::Value::String(OVERLAY_GGUF_TYPE.to_string());
+        let metadata = [
+            (GENERAL_ARCHITECTURE, architecture),
+            (GENERAL_TYPE, &overlay),
+        ];
+        kv_bytes = gguf_file::metadata_bytes(&metadata)?;
+        kv_count = metadata.len();
+    }
     let mut reuse = plan
         .reuse
         .iter()
@@ -644,6 +662,7 @@ mod tests {
             imatrix: Some(imatrix.clone()),
             quantizer: Quantizer::LlamaCpp,
             reuse: Vec::new(),
+            only: None,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -657,6 +676,24 @@ mod tests {
         let summary_again = requantize_gguf(&src, &again, &plan, |_, _, _| {})?;
         assert_eq!(summary_again.reused, 2);
         assert_eq!(std::fs::read(&again)?, std::fs::read(&dst)?);
+        // an overlay of one tensor at another type replaces that tensor when listed after the model
+        let overlay = dst.with_extension("overlay.gguf");
+        let overlaying = RequantizePlan {
+            rules: vec![(Regex::new(r".*").unwrap(), writable_type("f16")?)],
+            imatrix: None,
+            quantizer: Quantizer::LlamaCpp,
+            reuse: Vec::new(),
+            only: Some(Regex::new(r"attn_q\.weight$").unwrap()),
+        };
+        let overlaid = requantize_gguf(&src, &overlay, &overlaying, |_, _, _| {})?;
+        assert_eq!(overlaid.tensors, 1);
+        let archive = super::super::archive::GgufArchive::open([&dst, &overlay])?;
+        let q = &archive.tensors()["blk.0.attn_q.weight"];
+        assert_eq!((q.dtype().raw(), q.shard_index()), (1, 1));
+        assert_eq!(
+            archive.tensors()["blk.0.ffn_up_exps.weight"].shard_index(),
+            0
+        );
 
         let mut reader = BufReader::new(File::open(&dst)?);
         let header = Header::read(&mut reader)?;
