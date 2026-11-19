@@ -65,6 +65,8 @@ layout(push_constant) uniform PushConstants {
     // a quantized cache's K and V bits
     uint k_bits;
     uint v_bits;
+    // a sliding window: a row attends to its last `window` positions (0 for all of them)
+    uint window;
 } pc;
 #ifdef CACHE_QUANT
 // the first word of an HND row: block `block`'s position `p` of kv head `kvh`
@@ -134,6 +136,11 @@ void main() {
     uint tile_len = pc.context - pc.rows + min(row0 + ROWS, pc.rows);
     uint start = split * pc.span;
     uint end = min(start + pc.span, tile_len);
+    // the tiles before the workgroup's first row's window hold nothing any of its rows sees
+    uint first_len = pc.context - pc.rows + row0 + 1;
+    if (pc.window != 0 && first_len > pc.window) {
+        start = max(start, (first_len - pc.window) / TILE * TILE);
+    }
 
     vec4 qv[HALF4];
     vec4 acc[HALF4];
@@ -215,7 +222,8 @@ void main() {
                 }
             }
             float sc = subgroupClusteredAdd(dot_half, LANES) * pc.scale;
-            s[p] = p0 + p < min(len, end) ? sc : MASKED;
+            bool seen = p0 + p < min(len, end) && (pc.window == 0 || p0 + p + pc.window >= len);
+            s[p] = seen ? sc : MASKED;
             tile_max = max(tile_max, s[p]);
         }
         if (tile_max > MASKED) {

@@ -193,6 +193,9 @@ kernels! {
     paged_decode_h256: PAGED_DECODE_H256, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_h256_f16: PAGED_DECODE_H256_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_h256_quant: PAGED_DECODE_H256_QUANT, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_h512: PAGED_DECODE_H512, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_h512_f16: PAGED_DECODE_H512_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_h512_quant: PAGED_DECODE_H512_QUANT, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_cache_write_quant: PAGED_CACHE_WRITE_QUANT, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_QUANT_PUSH_BYTES;
     hadamard_32: HADAMARD_32, ops::HADAMARD_BINDINGS, ops::HADAMARD_PUSH_BYTES;
 }
@@ -208,6 +211,13 @@ impl Kernels {
     }
 
     pub(crate) fn paged_decode(&self, shape: ops::CacheShape) -> &Pipeline {
+        if shape.head_size > ops::MAX_PAGED_WIDE_HEAD {
+            return match (shape.quant.is_some(), shape.f16) {
+                (true, _) => &self.paged_decode_h512_quant,
+                (false, true) => &self.paged_decode_h512_f16,
+                (false, false) => &self.paged_decode_h512,
+            };
+        }
         let wide = shape.head_size > ops::MAX_PAGED_NARROW_HEAD;
         match (shape.quant.is_some(), shape.f16, wide) {
             (true, _, false) => &self.paged_decode_quant,
@@ -313,7 +323,7 @@ pub(crate) struct CoopKernels {
     pub(crate) moe_gather_f16: Pipeline,
     // prompt attention over f32, f16 and quantized paged caches
     // f32, f16 and quantized caches, then the same for heads past 128
-    paged_prefill: [Pipeline; 6],
+    paged_prefill: [Pipeline; 9],
     // prompt attention over contiguous f32 keys and values
     pub(crate) flash_attn: Pipeline,
     // matmul_f32_tiled's product, its tiles in f16
@@ -332,7 +342,15 @@ pub(crate) struct CoopKernels {
     // by BlockType, the same: the prompt matmul on NV_cooperative_matrix2
     mul_mm_cm2: Vec<Option<Pipeline>>,
 }
-// the matrix-core prompt attention's cache types (f32, f16, quantized), a set for each head width
+/// The matrix-core prompt attention's builds: heads to 128, to 256, and 512.
+#[derive(Clone, Copy)]
+pub(crate) enum PrefillWidth {
+    Narrow,
+    Wide,
+    H512,
+}
+
+// the matrix-core prompt attention's cache types (f32, f16, quantized), a set for each PrefillWidth
 const PREFILL_CACHE_TYPES: usize = 3;
 // BlockType's variants
 const BLOCK_TYPES: usize = 12;
@@ -423,6 +441,15 @@ impl CoopKernels {
             (
                 shaders::PAGED_PREFILL_CM_WIDE_QUANT,
                 "paged_prefill_cm_wide_quant",
+            ),
+            (shaders::PAGED_PREFILL_CM_H512, "paged_prefill_cm_h512"),
+            (
+                shaders::PAGED_PREFILL_CM_H512_F16,
+                "paged_prefill_cm_h512_f16",
+            ),
+            (
+                shaders::PAGED_PREFILL_CM_H512_QUANT,
+                "paged_prefill_cm_h512_quant",
             ),
         ]
         .map(|(spirv, name)| {
@@ -588,7 +615,7 @@ impl CoopKernels {
         let mul_mmc = take(BLOCK_TYPES);
         let mul_mmcl = take(BLOCK_TYPES);
         let moe_mmc = take(BLOCK_TYPES);
-        let paged_prefill: [Pipeline; 6] = take(6).try_into().ok().expect("six prefill pipelines");
+        let paged_prefill: [Pipeline; 9] = take(9).try_into().ok().expect("nine prefill pipelines");
         let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
         let [matmul_f32, matmul_f32_bh, matmul_bf16_cm, matmul_f16_cm]: [Pipeline; 4] =
             take(4).try_into().ok().expect("four matmul pipelines");
@@ -634,9 +661,9 @@ impl CoopKernels {
         })
     }
 
-    /// Prompt attention over `shape`'s cache on matrix cores, where this device runs it; `wide` for heads past 128.
-    pub(crate) fn paged_prefill(&self, shape: ops::CacheShape, wide: bool) -> &Pipeline {
-        let at = if wide { PREFILL_CACHE_TYPES } else { 0 };
+    /// Prompt attention over `shape`'s cache on matrix cores, where this device runs it, for heads of `width`.
+    pub(crate) fn paged_prefill(&self, shape: ops::CacheShape, width: PrefillWidth) -> &Pipeline {
+        let at = width as usize * PREFILL_CACHE_TYPES;
         let [f32, f16, quant] = [0, 1, 2].map(|i| &self.paged_prefill[at + i]);
         if shape.quant.is_some() {
             quant

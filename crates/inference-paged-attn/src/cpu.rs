@@ -355,7 +355,8 @@ impl DecodeCall<'_> {
 }
 
 /// One query row per sequence (`q` `[seqs, heads, head_size]`) attending over its `context_lens[seq]` cached rows
-/// through `block_tables` (`[seqs, max_blocks]` u32); returns `q`'s shape and dtype.
+/// through `block_tables` (`[seqs, max_blocks]` u32), the last `sliding_window` of them where given (Vulkan only);
+/// returns `q`'s shape and dtype.
 #[allow(clippy::too_many_arguments)]
 pub fn paged_attention(
     q: &Tensor,
@@ -370,6 +371,7 @@ pub fn paged_attention(
     softmax_scale: f32,
     softcapping: f32,
     sinks: Option<&Tensor>,
+    sliding_window: Option<usize>,
 ) -> Result<Tensor> {
     if key_cache.device().is_vulkan() {
         check_vulkan_cache("paged_attention", key_cache, k_scale, v_scale)?;
@@ -386,8 +388,12 @@ pub fn paged_attention(
             context_lens,
             max_context: max_context_len,
             scale: softmax_scale,
+            window: sliding_window,
         })?
         .to_dtype(q.dtype());
+    }
+    if sliding_window.is_some() {
+        inference_tensor::bail!("paged_attention: the CPU kernel takes no sliding window");
     }
     check_cpu_cache("paged_attention", key_cache, k_scale, v_scale)?;
     let geom = CacheGeom::of(key_cache, value_cache)?;

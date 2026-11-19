@@ -1511,6 +1511,7 @@ fn paged_prefill_in_pieces(
             .record(|r| {
                 r.paged_prefill(&inference_vulkan::PagedPrefill {
                     shape,
+                    window: op.window,
                     rows: r1 - r0,
                     heads,
                     context,
@@ -1689,6 +1690,7 @@ pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor
         .record(|r| {
             r.paged_decode(&inference_vulkan::PagedDecode {
                 shape,
+                window: op.window,
                 seqs,
                 heads,
                 max_blocks,
@@ -2272,10 +2274,11 @@ impl BackendStorage for VulkanStorage {
             let (a_st, b_st) = (l.stride(), rhs_l.stride());
             let (ar, br) = (a_st.len(), b_st.len());
             let out = self.empty(batch * m * n, DType::F32)?;
+            let exact = crate::vulkan::exact_f32_products_active();
             self.device
                 .context
                 .record(|r| {
-                    r.matmul_f32(&MatMul {
+                    let op = MatMul {
                         batch,
                         m,
                         n,
@@ -2295,7 +2298,12 @@ impl BackendStorage for VulkanStorage {
                             col_stride: b_st[br - 1],
                         },
                         out: &out.buffer,
-                    })
+                    };
+                    if exact {
+                        r.matmul_f32_exact(&op)
+                    } else {
+                        r.matmul_f32(&op)
+                    }
                 })
                 .map_err(vk_err)?;
             return Ok(out);
@@ -3137,14 +3145,8 @@ mod tests {
         let got = x8
             .to_device(&vk)?
             .conv2d(&pointwise.to_device(&vk)?, 0, 1, 1, 1)?;
-        let rounded = |t: &Tensor| -> Result<Tensor> {
-            if vk.as_vulkan_device()?.context.has_matrix_cores() {
-                t.to_dtype(DType::F16)?.to_dtype(DType::F32)
-            } else {
-                Ok(t.clone())
-            }
-        };
-        let want = rounded(&x8)?.conv2d(&rounded(&pointwise)?, 0, 1, 1, 1)?;
+        // eight input channels: a product too short to take to the matrix cores, so in f32 throughout
+        let want = x8.conv2d(&pointwise, 0, 1, 1, 1)?;
         assert_close(&got, &want, DOT_TOLERANCE)?;
         check(&x8, &randn(&[6, 4, 3, 3])?, 2, 1, 2, 2)?;
         check(&x8.transpose(2, 3)?, &randn(&[8, 8, 3, 3])?, 1, 1, 1, 1)?;
@@ -3602,6 +3604,7 @@ mod tests {
             Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD, BLOCK), &vk)?.to_dtype(DType::F16)?;
         let table: Vec<u32> = (0..blocks as u32).rev().collect();
         let op = crate::vulkan::PagedPrefill {
+            window: None,
             q: &Tensor::randn(0f32, 1., (ROWS, HEADS, HEAD), &vk)?,
             key_cache: &kc,
             value_cache: &vc,

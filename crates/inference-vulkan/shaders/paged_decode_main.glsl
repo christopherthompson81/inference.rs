@@ -62,6 +62,8 @@ layout(push_constant) uniform PushConstants {
     // a quantized cache's K and V bits
     uint k_bits;
     uint v_bits;
+    // a sliding window's positions (the sequence's last `window`), or 0 for the whole context
+    uint window;
 } pc;
 #ifdef CACHE_QUANT
 // the first word of an HND row: block `block`'s position `p` of kv head `kvh`
@@ -72,6 +74,8 @@ uint quant_row(uint block, uint kvh, uint p, uint words) {
 
 const uint THREADS = 256;
 const uint CHUNK = 64;
+// a score outside the window: finite, as -inf scores came out wrong through exp on NVIDIA's driver
+const float WINDOW_MASKED = -1e30;
 // a multiple of the block size, so a tile holds whole blocks
 const uint TILE = 32;
 // a wide build (head size 256) defines both, its group bounded by the value heads a thread sums anyway
@@ -87,13 +91,26 @@ const uint SCORE_HEADS = MAX_GROUP / (THREADS / TILE);
 const uint MAX_OUT = 8;
 const uint LANES = THREADS / MAX_GROUP;
 
+// the dimensions a value thread sums (a head wider than the workgroup takes several a thread)
+#ifndef DECODE_DIM_STEPS
+#define DECODE_DIM_STEPS 1
+#endif
+const uint DIM_STEPS = DECODE_DIM_STEPS;
+// a 512-wide build reads the query in place and stages its tiles as f16, so its shared memory stays under 48 KB
+#ifdef DECODE_HEAD512
+#define STAGE4 f16vec4
+#define QS(i) q[pc.q_off + (seq * pc.heads + kvh * group) * hs4 + (i)]
+#else
+#define STAGE4 vec4
+#define QS(i) qs[i]
 // a kv head's query heads times the head size, at most 2048 floats (the op checks it)
 const uint MAX_Q4 = 512;
 shared vec4 qs[MAX_Q4];
+#endif
 // a tile's keys (a position a padded row of vec4s), then its values (a dimension a padded row of 4-position vec4s)
 const uint VALUE_ROW = TILE / 4 + 1;
 const uint KV_VEC4S = max(TILE * (MAX_HEAD4 + 1), 4 * MAX_HEAD4 * VALUE_ROW);
-shared vec4 keys[KV_VEC4S];
+shared STAGE4 keys[KV_VEC4S];
 shared vec4 scores[MAX_GROUP * CHUNK / 4];
 shared float stat_m[MAX_GROUP];
 shared float stat_l[MAX_GROUP];
@@ -111,6 +128,11 @@ void main() {
     uint len = context_lens[pc.lens_off + seq];
     uint start = c * CHUNK;
     uint n = start < len ? min(CHUNK, len - start) : 0;
+    // positions before `lo` are outside the window: a chunk wholly before it scores nothing
+    uint lo = pc.window != 0 && len > pc.window ? len - pc.window : 0;
+    if (start + n <= lo) {
+        n = 0;
+    }
     uint table = pc.tables_off + seq * pc.max_blocks;
     uint kv_slab = kvh * block_vec4s;
 #ifdef CACHE_QUANT
@@ -118,9 +140,11 @@ void main() {
     uint v_words = quant_row_words(pc.head_size, pc.v_bits);
 #endif
 
+#ifndef DECODE_HEAD512
     for (uint i = t; i < group * hs4; i += THREADS) {
         qs[i] = q[pc.q_off + (seq * pc.heads + kvh * group) * hs4 + i];
     }
+#endif
     for (uint i = t; i < MAX_GROUP * CHUNK / 4; i += THREADS) {
         scores[i] = vec4(0.0);
     }
@@ -137,7 +161,7 @@ void main() {
                 v = vec4(key_at(row, d, pc.k_bits, pc.head_size), key_at(row, d + 1, pc.k_bits, pc.head_size),
                          key_at(row, d + 2, pc.k_bits, pc.head_size), key_at(row, d + 3, pc.k_bits, pc.head_size));
             }
-            keys[p * hp4 + d / 4] = v;
+            keys[p * hp4 + d / 4] = STAGE4(v);
         }
 #else
         // a block's keys are contiguous as (d / 4, position) vec4s
@@ -150,7 +174,7 @@ void main() {
                 uint block = block_tables[table + first_block + bt];
                 v = vec4(key_cache[block * pc.kv_heads * block_vec4s + kv_slab + r]);
             }
-            keys[p * hp4 + key_dims(r, bs)] = v;
+            keys[p * hp4 + key_dims(r, bs)] = STAGE4(v);
         }
 #endif
         barrier();
@@ -162,11 +186,11 @@ void main() {
                 s[k] = 0.0;
             }
             for (uint d4 = 0; d4 < hs4; d4++) {
-                vec4 kv = keys[p * hp4 + d4];
+                vec4 kv = vec4(keys[p * hp4 + d4]);
                 [[unroll]] for (uint k = 0; k < SCORE_HEADS; k++) {
                     uint g = g0 + k * (THREADS / TILE);
                     if (g < group) {
-                        s[k] += dot(qs[g * hs4 + d4], kv);
+                        s[k] += dot(QS(g * hs4 + d4), kv);
                     }
                 }
             }
@@ -174,7 +198,7 @@ void main() {
                 uint g = g0 + k * (THREADS / TILE);
                 if (g < group) {
                     uint at = g * CHUNK + tile0 + p;
-                    scores[at / 4][at % 4] = s[k] * pc.scale;
+                    scores[at / 4][at % 4] = start + tile0 + p >= lo ? s[k] * pc.scale : WINDOW_MASKED;
                 }
             }
         }
@@ -206,12 +230,13 @@ void main() {
         }
     }
     barrier();
-    // thread t sums dimension t % head_size for heads t / head_size, + heads_step, ...
-    uint d = t % pc.head_size;
-    uint g0 = t / pc.head_size;
-    uint heads_step = THREADS / pc.head_size;
-    float acc[MAX_OUT];
-    [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
+    // thread t sums dimension t % span (+ span, ... up to DIM_STEPS) for heads t / span, + heads_step, ...
+    uint span = min(pc.head_size, THREADS);
+    uint d = t % span;
+    uint g0 = t / span;
+    uint heads_step = THREADS / span;
+    float acc[DIM_STEPS * MAX_OUT];
+    [[unroll]] for (uint k = 0; k < DIM_STEPS * MAX_OUT; k++) {
         acc[k] = 0.0;
     }
     for (uint tile0 = 0; tile0 < n; tile0 += TILE) {
@@ -228,7 +253,7 @@ void main() {
                     v[c] = value_at(row, dd, pc.v_bits, pc.head_size);
                 }
             }
-            keys[dd * VALUE_ROW + p4] = v;
+            keys[dd * VALUE_ROW + p4] = STAGE4(v);
         }
 #else
         // a block's values are contiguous as (d, position / 4) vec4s
@@ -247,28 +272,32 @@ void main() {
                     v = vec4(v.x, valid > 1 ? v.y : 0.0, valid > 2 ? v.z : 0.0, 0.0);
                 }
             }
-            keys[dd * VALUE_ROW + p4] = v;
+            keys[dd * VALUE_ROW + p4] = STAGE4(v);
         }
 #endif
         barrier();
         uint lim4 = (min(TILE, n - tile0) + 3) / 4;
         for (uint p4 = 0; p4 < lim4; p4++) {
-            vec4 v = keys[d * VALUE_ROW + p4];
-            [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
-                uint g = g0 + k * heads_step;
-                if (g < group) {
-                    acc[k] += dot(scores[(g * CHUNK + tile0) / 4 + p4], v);
+            [[unroll]] for (uint j = 0; j < DIM_STEPS; j++) {
+                vec4 v = vec4(keys[(d + j * span) * VALUE_ROW + p4]);
+                [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
+                    uint g = g0 + k * heads_step;
+                    if (g < group) {
+                        acc[j * MAX_OUT + k] += dot(scores[(g * CHUNK + tile0) / 4 + p4], v);
+                    }
                 }
             }
         }
         barrier();
     }
     uint stride = pc.head_size + 2;
-    [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
-        uint g = g0 + k * heads_step;
-        if (g < group) {
-            uint row = (seq * pc.heads + kvh * group + g) * pc.chunks + c;
-            part[row * stride + 2 + d] = acc[k];
+    [[unroll]] for (uint j = 0; j < DIM_STEPS; j++) {
+        [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
+            uint g = g0 + k * heads_step;
+            if (g < group) {
+                uint row = (seq * pc.heads + kvh * group + g) * pc.chunks + c;
+                part[row * stride + 2 + d + j * span] = acc[j * MAX_OUT + k];
+            }
         }
     }
     if (t < group) {

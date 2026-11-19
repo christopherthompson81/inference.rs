@@ -136,6 +136,12 @@ pub trait QuantizedWeightSource: Send + Sync {
     fn mapped_blocks(&self, _key: &str) -> Option<MappedBlocks> {
         None
     }
+
+    /// The one stored stack `gate` and `up` are the halves of (each expert's gate rows, then its up rows), as
+    /// [`Self::mapped_blocks`] reads it, `(experts, 2 rows, cols)`; `None` unless both are such halves of one tensor.
+    fn mapped_gate_up(&self, _gate: &str, _up: &str) -> Option<MappedBlocks> {
+        None
+    }
 }
 
 impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
@@ -178,6 +184,10 @@ impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
 
     fn mapped_blocks(&self, key: &str) -> Option<MappedBlocks> {
         (**self).mapped_blocks(key)
+    }
+
+    fn mapped_gate_up(&self, gate: &str, up: &str) -> Option<MappedBlocks> {
+        (**self).mapped_gate_up(gate, up)
     }
 }
 

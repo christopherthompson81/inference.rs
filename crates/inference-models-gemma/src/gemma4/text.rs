@@ -248,7 +248,8 @@ impl Gemma4Router {
         let normed = xs.apply(&self.norm)?;
 
         let router_input = normed.to_dtype(self.proj.weight().dtype())?;
-        let logits = router_input.apply(&self.proj)?;
+        let logits =
+            inference_tensor::vulkan::exact_f32_products(|| router_input.apply(&self.proj))?;
         let logits = match &self.proj_lora {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &router_input, logits)?,
             None => logits,

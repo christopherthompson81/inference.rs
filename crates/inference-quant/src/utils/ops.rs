@@ -2696,6 +2696,11 @@ pub fn softcap(input: &Tensor, cap: f32) -> Result<Tensor> {
     }
 
     let input = input.contiguous()?;
+    // Vulkan has no Softcap kernel, and the op would round-trip the logits through the host each step
+    if input.device().is_vulkan() {
+        let x = input.to_dtype(DType::F32)?;
+        return ((x / f64::from(cap))?.tanh()? * f64::from(cap))?.to_dtype(input.dtype());
+    }
     if input.device().is_cuda() && matches!(input.dtype(), DType::F32 | DType::F16 | DType::BF16) {
         input.apply_op1_no_bwd(&Softcap(cap))
     } else {

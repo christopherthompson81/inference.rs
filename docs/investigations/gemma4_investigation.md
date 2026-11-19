@@ -101,3 +101,38 @@ In its chat form, the prompt both render (26 tokens, thinking on, `<bos><|turn>s
 greedy reply matches ours for 34 of 40 tokens and parts at "all colors (spectrum)" against our "all colors." —
 where llama.cpp's reply is ours too (Run 1: 43 tokens equal). The q4_0 weights part from bf16 there, in both engines.
 Gemma 4 decodes correctly.
+
+## Run 4 - 2026-11-19 10:00
+
+**Question:** does the 26B-A4B run on Vulkan on a 780M (7840U, 64 GB), and how near llama.cpp's Vulkan build is it?
+
+Same GGUF (gemma-4-26B_q4_0-it.gguf), `inference bench --vulkan --pa-context-len 8192`, performance profile; llama.cpp
+Vulkan `llama-bench` on the same file.
+
+What we did, in order:
+
+1. **The experts failed** ("moe experts forward"): Gemma's fused `ffn_gate_up_exps` with GELU had no Vulkan path, and
+   the direct loader never tried Vulkan. Vulkan experts now take a fused gate/up stack (one matvec, then the halves)
+   and GELU as well as SiLU.
+2. **Global layers' attention failed** (head size 512): a 512-wide paged decode kernel (8 query heads per KV head,
+   two dims per thread) and a 512-wide build of the matrix-core prompt kernel (four subgroups per row tile).
+3. **Sliding layers copied their cache to the CPU every token**: Vulkan decode and the three prompt kernels took no
+   window. They now take one and skip tiles before it. A CUDA+Vulkan build already decoded on Vulkan there and
+   ignored the window; that was wrong past 1024 tokens. Windowed prompts and first chunks use the paged prompt kernel.
+4. **Host round trips**: the router with Gemma's per-expert scale, the unused per-layer-input masks and the logit
+   softcap each synced; all three stay on the device now. Decode is GPU-bound (~93% busy).
+5. **Long prompts drifted** (3979-token prompt, 21 tokens equal to the CPU's, mean |d logprob| 0.088): RoPE position
+   tables were a rank-1 f32 product run on matrix cores, which round inputs to f16 (integers exact to 2048). f32
+   products with k < 16 now run exact, and MoE router logits run exact f32 (llama.cpp keeps routers f32).
+
+```
+                      first run     now          llama.cpp Vulkan
+decode (tok/s)        5.2           22.5-24.9    27.8
+prefill 512 (tok/s)   343           393          527
+prefill 2048 (tok/s)  166           337
+3979-token prompt     21/120 tokens equal to CPU   111/120 equal to CPU, 120/120 equal to llama.cpp
+```
+
+Per decode token (44.5 ms): Q6_K head 9.7 ms (61 GB/s), MoE gate/up 7.1 ms, MoE down 4.8 ms (k = 704), ~300 RMS norms
+1.2 ms, windowed attention 1.85 ms. Not done here: the default context plans a 262k-token cache (56 GB, OOM on this
+machine) with full-context sliding layers; `--pa-context-len` is needed.

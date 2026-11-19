@@ -62,8 +62,20 @@ pub fn moe_router_topk(
     if logits.device().is_cpu() {
         return cpu_moe_router_topk(logits, config, selection_bias, expert_scale);
     }
-    if logits.device().is_vulkan() && expert_scale.is_none() && logits.rank() == 2 {
-        return vulkan_moe_router_topk(logits, config, selection_bias);
+    if logits.device().is_vulkan() {
+        // the kernel takes rows of experts' logits: leading dims flatten into them and come back
+        let (lead, experts) = logits.dims().split_at(logits.rank() - 1);
+        let rows = lead.iter().product::<usize>();
+        let flat = logits.reshape((rows, experts[0]))?;
+        let topk = vulkan_moe_router_topk(&flat, config, selection_bias)?;
+        let shape = [lead, &[config.top_k]].concat();
+        let values = topk.values.reshape(shape.as_slice())?;
+        let indices = topk.indices.reshape(shape.as_slice())?;
+        let values = match expert_scale {
+            Some(scale) => scale_routes(values, &indices, scale)?,
+            None => values,
+        };
+        return Ok(TopKOutput { values, indices });
     }
     tensor_moe_router_topk(logits, config, selection_bias, expert_scale)
 }
@@ -123,14 +135,19 @@ fn tensor_moe_router_topk(
         values = (values * config.output_scale as f64)?;
     }
     if let Some(expert_scale) = expert_scale {
-        let scales = expert_scale
-            .to_dtype(DType::F32)?
-            .index_select(&indices.flatten_all()?, 0)?
-            .reshape(indices.shape())?;
-        values = (values * scales)?;
+        values = scale_routes(values, &indices, expert_scale)?;
     }
 
     Ok(TopKOutput { values, indices })
+}
+
+// each route's weight times its expert's scale
+fn scale_routes(values: Tensor, indices: &Tensor, expert_scale: &Tensor) -> Result<Tensor> {
+    let scales = expert_scale
+        .to_dtype(DType::F32)?
+        .index_select(&indices.flatten_all()?, 0)?
+        .reshape(indices.shape())?;
+    values * scales
 }
 
 fn vulkan_moe_router_topk(
@@ -479,7 +496,8 @@ mod tests {
     const TOKENS: usize = 5;
     const TOLERANCE: f32 = 1e-6;
 
-    // Vulkan's router kernel against the CPU's, every score and weight function, with and without the bias and clip
+    // Vulkan's router kernel against the CPU's, every score and weight function, with and without the bias, clip and
+    // expert scale
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn the_vulkan_router_routes_as_the_cpu_does() -> Result<()> {
@@ -505,6 +523,14 @@ mod tests {
             experts,
             &Device::Cpu,
         )?;
+        // Gemma 4's per-expert output scale
+        let scale = Tensor::from_vec(
+            (0..experts)
+                .map(|e| 0.5 + e as f32 * 0.03)
+                .collect::<Vec<_>>(),
+            experts,
+            &Device::Cpu,
+        )?;
         for score_function in [
             MoeRouterScoreFunction::Raw,
             MoeRouterScoreFunction::Softmax,
@@ -515,9 +541,10 @@ mod tests {
                 MoeRouterSelectedWeight::Softmax,
                 MoeRouterSelectedWeight::Sigmoid,
             ] {
-                for (renormalize, clip, with_bias) in
-                    [(true, None, true), (false, Some((-1.5, 1.5)), false)]
-                {
+                for (renormalize, clip, with_bias, with_scale) in [
+                    (true, None, true, true),
+                    (false, Some((-1.5, 1.5)), false, false),
+                ] {
                     let config = MoeRouterTopKConfig {
                         top_k: 4,
                         score_function,
@@ -527,14 +554,18 @@ mod tests {
                         output_scale: 2.5,
                         logit_clip: clip,
                     };
-                    let want =
-                        cpu_moe_router_topk(&logits, config, with_bias.then_some(&bias), None)?;
-                    let vbias = bias.to_device(vk)?;
+                    let want = cpu_moe_router_topk(
+                        &logits,
+                        config,
+                        with_bias.then_some(&bias),
+                        with_scale.then_some(&scale),
+                    )?;
+                    let (vbias, vscale) = (bias.to_device(vk)?, scale.to_device(vk)?);
                     let got = moe_router_topk(
                         &logits.to_device(vk)?,
                         config,
                         with_bias.then_some(&vbias),
-                        None,
+                        with_scale.then_some(&vscale),
                     )?;
                     assert_eq!(
                         got.indices.to_vec2::<u32>()?,

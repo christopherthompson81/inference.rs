@@ -339,6 +339,7 @@ impl inference_tensor::CustomOp1 for PagedAttention {
 /// * `softmax_scale` - scaling factor
 /// * `softcapping`- Softcapping value as in Gemma 2. Using 1.0 means do nothing.
 /// * `alibi_slopes`- Optional alibi slopes, `(num_heads_q)`.
+/// * `sliding_window` - Must be `None`: windowed layers decode through the gather path on Metal.
 ///
 /// The resulting tensor has dimensions `(num_sequences, num_heads_q, head_size)`.
 #[allow(clippy::too_many_arguments)]
@@ -355,7 +356,11 @@ pub fn paged_attention(
     softmax_scale: f32,
     softcapping: f32,
     sinks: Option<&Tensor>,
+    sliding_window: Option<usize>,
 ) -> Result<Tensor> {
+    if sliding_window.is_some() {
+        inference_tensor::bail!("paged_attention: the Metal kernel takes no sliding window");
+    }
     let op = PagedAttention {
         softmax_scale,
         key_cache: key_cache.clone(),
