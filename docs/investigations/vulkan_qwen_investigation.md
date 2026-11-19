@@ -331,3 +331,39 @@ threads: 77); not kept.
 Next: a recipe that lowers the per-token tensors (Lightning's Run 8 sweep in nemotron_lightning_cpu_investigation:
 head, ssm_in and the shared expert pay best per KLD; ssm_out is the most sensitive; MXFP4 the weakest 4-bit type),
 swept for KLD on the desktop from qwen36_35b_a3b_recipe_investigation's IQ4_XS file, then timed here with its MTP block.
+
+## Run 14 - 2026-11-18 22:30 (laptop: Radeon 780M iGPU)
+
+Question: Run 13's next step. The desktop swept recipes for this card (from qwen36_35b_a3b_recipe_investigation's IQ4_XS
+file, same BF16 reference and imatrix; single groups add about linearly) and uploaded three with the MTP block:
+
+```
+R0  IQ4_XS experts (blk.34/38/39 down Q6_K), Q6_K head, the rest Q8_0             20.34 GB  KLD 0.0169
+R1  R0 with attention, shared experts, ssm_out, attn_gate Q6_K, attn_qkv Q5_K     19.93 GB  KLD 0.0194  -407 MB a token
+R2  R1 with attn_qkv and attn_gate IQ4_XS, head Q5_K                              19.71 GB  KLD 0.0244  -626 MB a token
+```
+
+`bench --vulkan` (512-token prompt, 128 decoded) and served greedy chat turns (prompts.txt's three, the 216-token turn
+quoted; tok/s over the request):
+
+```
+            prefill  decode   turn plain   turn --mtp 2   --mtp 3
+MXFP4_MOE   382      22.3     -            (no MTP block)
+R0          405      23.5     22.7         36.0-36.3      37.8
+R1          366      26.0     25.3         36.7-37.0      37.5
+R2          372      27.9     27.0         38.5-38.6      38.1
+```
+
+MTP acceptance 80-99 %; greedy text with `--mtp` byte identical to plain in all nine runs. A later repeat round fell to
+13-17 tok/s at Tctl 83 C with the zram swap full, and is not counted.
+
+Findings:
+- Without MTP the bytes pay as predicted (R2 +19 % over R0). With MTP the three land within ~7 %: the verify step reads
+  the per-token tensors once for several tokens, as Lightning's MTP gain shrank with its non-expert bytes (Lightning
+  CPU Run 9). R0 with `--mtp --mtp-n-predict 2` is kept: the best KLD at ~36 tok/s on a long turn.
+- Prefill on a cool machine, alternated over two rounds (512 / 2048 tokens): R0 440-445 / 391-394, R1 384-392 /
+  340-351, R2 400-420 / 354-367. A 4096-token prompt's profile: the iGPU's int8 tiled matmuls run Q8_0 at 5.1 TFLOPS,
+  Q5_K 4.2 and Q6_K 3.0 (a scale a 16 values splits every 32-value block's dot in two). R0's dense weights are Q8_0, so
+  it keeps the faster prompt.
+- R0's 4096-token prompt spends 28 % of its GPU time in `paged_prefill_h256_f16`: the 256-wide heads miss the
+  matrix-core prompt attention (heads up to 128, Run 37 of vulkan_backend_investigation), the lever for long prompts.
