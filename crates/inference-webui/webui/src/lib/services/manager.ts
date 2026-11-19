@@ -166,17 +166,19 @@ async function postForm<T>(path: string, form: FormData, signal?: AbortSignal): 
   return response.json();
 }
 
-/** Reads a POST's event stream, calling `onEvent` per event, until it ends or `signal` aborts it. */
+/** Reads a POST's event stream, calling `onEvent` per event, until it ends or `signal` aborts it; a `FormData` body
+ * goes as a multipart form, anything else as JSON. */
 async function postEvents(
   path: string,
   body: unknown,
   onEvent: (event: string, data: unknown) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  const form = body instanceof FormData;
   const response = await authedFetch(url(path), {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(body),
+    headers: form ? { Accept: "text/event-stream" } : { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: form ? body : JSON.stringify(body),
     signal,
   });
   if (!response.ok || !response.body) throw await failure(response);
@@ -293,27 +295,73 @@ export interface TranscriptWord {
   end: number;
 }
 
-/** The transcript of `audio` with its segments and timed words. */
-export function transcribe(
+/** How far a streamed transcription is: windows done of those planned, and the seconds of audio they cover. */
+export interface TranscriptionProgress {
+  done: number;
+  total: number;
+  secondsDone: number;
+  duration: number;
+}
+
+type TranscriptReply = {
+  text: string;
+  language?: string;
+  duration?: number;
+  segments?: (TranscriptSegment & { speaker?: number })[];
+  words?: (TranscriptWord & { speaker?: number })[];
+};
+
+/** [`transcribe`] over the stream route, `onProgress` told as each window of the recording finishes. */
+export async function transcribeStream(
   model: string,
   audio: Blob,
-  options: { language?: string; diarizationModel?: string; signal?: AbortSignal } = {},
-) {
+  options: {
+    language?: string;
+    diarizationModel?: string;
+    signal?: AbortSignal;
+    onProgress?: (progress: TranscriptionProgress) => void;
+  } = {},
+): Promise<TranscriptReply> {
   const form = new FormData();
   form.append("file", audio, audio instanceof File ? audio.name : "clip.wav");
   form.append("model", model);
-  form.append("response_format", "verbose_json");
   form.append("timestamp_granularities[]", "word");
   form.append("timestamp_granularities[]", "segment");
   if (options.language) form.append("language", options.language);
   if (options.diarizationModel) form.append("diarization_model", options.diarizationModel);
-  return postForm<{
-    text: string;
-    language?: string;
-    duration?: number;
-    segments?: (TranscriptSegment & { speaker?: number })[];
-    words?: (TranscriptWord & { speaker?: number })[];
-  }>("v1/audio/transcriptions", form, options.signal);
+  let reply: TranscriptReply | undefined;
+  let failed: string | undefined;
+  let duration = 0;
+  await postEvents(
+    "v1/audio/transcriptions/stream",
+    form,
+    (event, data) => {
+      const d = data as Record<string, unknown>;
+      if (event === "started") {
+        duration = Number(d.duration) || 0;
+        const total = Array.isArray(d.windows) ? d.windows.length : 0;
+        options.onProgress?.({ done: 0, total, secondsDone: 0, duration });
+      } else if (event === "progress") {
+        options.onProgress?.({
+          done: Number(d.done) || 0,
+          total: Number(d.total) || 0,
+          secondsDone: Number(d.seconds_done) || 0,
+          duration,
+        });
+      } else if (event === "done") {
+        reply = d as unknown as TranscriptReply;
+      } else if (event === "error") {
+        const error = (d as { error?: { message?: string } }).error;
+        failed = error?.message ?? "the transcription failed";
+      } else if (event === "canceled") {
+        failed = "Canceled";
+      }
+    },
+    options.signal,
+  );
+  if (failed) throw new Error(failed);
+  if (!reply) throw new Error("the transcription ended without a transcript");
+  return reply;
 }
 
 /** Speech for `input`, as a WAV blob. */

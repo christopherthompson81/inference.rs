@@ -18,6 +18,14 @@ pub enum Diarizer {
 }
 
 impl Diarizer {
+    /// The rate the model takes its audio at.
+    pub fn sample_rate(&self) -> u32 {
+        match self {
+            Self::Nemotron3(d) => d.sample_rate(),
+            Self::Sortformer(d) => d.sample_rate(),
+        }
+    }
+
     pub fn device(&self) -> &inference_tensor::Device {
         match self {
             Self::Nemotron3(d) => d.device(),

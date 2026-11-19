@@ -214,6 +214,12 @@ JSON body whose `images` are `{"image_url": ...}` entries (`http(s)` or `data:` 
 
 Served by transcription models such as Parakeet and Whisper, and by audio-in decoders that transcribe (Qwen3-ASR), which give whole-clip segments and no words. See [speech models guide](/guides/models/use-speech-models/).
 
+`/v1/audio/transcriptions/stream` (an inference.rs route) takes the same form and answers with server-sent events, for
+long recordings: `started` (the recording's `duration` and the `windows` planned), a `window` (its `text` and
+`words`) and a `progress` (`done`, `total`, `seconds_done`) as each window finishes, and last `done` (the
+`verbose_json` transcript, with the diarizer's `speaker_turns` when `diarization_model` is named), `canceled` or
+`error`. Closing the connection stops it before its next window. The web UI's speech-to-text view shows these.
+
 ### `/v1/audio/translations`
 
 - The transcription form, answered with an English translation by a model that translates (Whisper multilingual

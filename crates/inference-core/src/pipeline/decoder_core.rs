@@ -164,6 +164,7 @@ impl DecoderCore {
 
         Ok(Self {
             metadata: Arc::new(GeneralMetadata {
+                speech_sample_rate: None,
                 max_seq_len: args.model.max_seq_len,
                 llg_factory: Some(build_llg_factory(args.tokenizer.clone())?),
                 no_kv_cache: args.no_kv_cache,

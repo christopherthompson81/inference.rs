@@ -5,7 +5,7 @@
   import SlotBar from "../components/SlotBar.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
   import { managerStore, SLOTS } from "../stores/manager.svelte";
-  import { transcribe } from "../services/manager";
+  import { transcribeStream, type TranscriptionProgress } from "../services/manager";
   import { compactAudio } from "../services/audioUpload";
   import { jobFile, jobFileUrl, keptExtension, type Job } from "../services/jobs";
   import {
@@ -176,21 +176,28 @@
       if (!file) return;
       const options = { language: language.trim() || undefined, signal };
 
-      // one upload: the server diarizes the same audio while it transcribes, and labels the sentences
-      progress = { stage: diarizer ? "Transcribing and finding the speakers" : "Transcribing", done: 0, total: 0 };
+      // one upload: the server diarizes the same audio while it transcribes, and labels the sentences; the windows
+      // count up as they finish, and once all are in the speakers are what is left
+      const counting = (speakers: boolean) => (p: TranscriptionProgress) => {
+        const stage = speakers && p.total && p.done === p.total ? "Finding the speakers" : speakers ? "Transcribing and finding the speakers" : "Transcribing";
+        progress = { stage, done: p.done, total: p.total };
+      };
       let speakersFailed = "";
       // what the model hears, at the size it needs, which the history keeps too
       const upload = await compactAudio(file);
+      progress = { stage: "Decoding the audio", done: 0, total: 0 };
       let reply;
       try {
-        reply = await transcribe(SLOTS.transcription.id, upload, {
+        reply = await transcribeStream(SLOTS.transcription.id, upload, {
           ...options,
           diarizationModel: diarizer ? SLOTS.diarization.id : undefined,
+          onProgress: counting(Boolean(diarizer)),
         });
       } catch (e) {
         if (signal.aborted || !diarizer) throw e;
         speakersFailed = e instanceof Error ? e.message : String(e);
-        reply = await transcribe(SLOTS.transcription.id, upload, options);
+        progress = { stage: "Decoding the audio", done: 0, total: 0 };
+        reply = await transcribeStream(SLOTS.transcription.id, upload, { ...options, onProgress: counting(false) });
       }
       segments = segmentsOf(reply);
       progress = null;

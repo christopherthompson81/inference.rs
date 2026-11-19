@@ -14,6 +14,7 @@ use crate::{
 
 const BOUNDARY: &str = "inference-transcription-boundary";
 const ROUTE: &str = "/v1/audio/transcriptions";
+const STREAM_ROUTE: &str = "/v1/audio/transcriptions/stream";
 const TRANSLATION_ROUTE: &str = "/v1/audio/translations";
 const VAD_ROUTE: &str = "/v1/audio/vad";
 const DIARIZATION_ROUTE: &str = "/v1/audio/diarization";
@@ -105,6 +106,46 @@ async fn the_translation_form_translates_where_the_model_can() -> anyhow::Result
         .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_text(response).await?.contains("does not translate"));
+    Ok(())
+}
+
+// the stream route takes the same form and reports the windows as server-sent events, ending in the transcript
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stream_route_reports_windows_then_the_transcript() -> anyhow::Result<()> {
+    let dir = parakeet_support::tiny_parakeet_checkpoint(parakeet_support::HEADS[0])?;
+    let app = router(dir.path()).await?;
+    let response = app
+        .oneshot(form_to(
+            STREAM_ROUTE,
+            &[("model", "default"), ("response_format", "text")],
+            Some(&tone_wav()),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    let body = body_text(response).await?;
+    let names: Vec<&str> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("event: "))
+        .collect();
+    assert_eq!(names.first(), Some(&"started"), "{body}");
+    assert!(
+        names.contains(&"window") && names.contains(&"progress"),
+        "{body}"
+    );
+    assert_eq!(names.last(), Some(&"done"), "{body}");
+    // `done` is the verbose_json transcript whatever format the form asked for
+    let done = body
+        .rsplit("event: done\ndata: ")
+        .next()
+        .and_then(|rest| rest.lines().next())
+        .unwrap();
+    let done: Value = serde_json::from_str(done)?;
+    assert!(done["duration"].as_f64().is_some_and(|d| d > 0.9), "{done}");
+    assert!(done["text"].is_string(), "{done}");
     Ok(())
 }
 

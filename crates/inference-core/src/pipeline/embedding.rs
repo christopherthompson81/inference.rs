@@ -455,6 +455,7 @@ impl EmbeddingLoader {
                 tokenizer: tokenizer.into(),
                 model_id: self.model_id.clone(),
                 metadata: Arc::new(GeneralMetadata {
+                    speech_sample_rate: None,
                     prompt_chunk_tokens: None,
                     max_seq_len,
                     llg_factory: None,

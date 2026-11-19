@@ -344,6 +344,7 @@ impl InferenceRs {
         let modalities = metadata.modalities.clone();
         let label_decision = metadata.label_decision.clone();
         let audio_transcriber = metadata.audio_transcriber;
+        let speech_sample_rate = metadata.speech_sample_rate;
         // a sequence can't outgrow the paged KV cache, however long the model itself reads
         let max_seq_len = match &category {
             ModelCategory::Diffusion | ModelCategory::Speech => None,
@@ -385,6 +386,7 @@ impl InferenceRs {
             generation_defaults,
             label_decision,
             audio_transcriber,
+            speech_sample_rate,
         };
 
         // Shared between engine and EngineInstance so the SDK/HTTP API

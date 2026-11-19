@@ -366,6 +366,19 @@ enum AudioModel {
 }
 
 impl AudioModel {
+    fn sample_rate(&self) -> u32 {
+        match self {
+            Self::Parakeet { asr, .. } => asr.sample_rate(),
+            Self::Whisper(_) => inference_models_speech::whisper::SAMPLE_RATE,
+            Self::CohereAsr(asr) => asr.sample_rate(),
+            #[cfg(feature = "models-qwen")]
+            Self::VibeVoiceStreaming(asr) => asr.sample_rate(),
+            Self::Silero(vad) => vad.sample_rate(),
+            Self::Diarizer(diarizer) => diarizer.sample_rate(),
+            Self::LanguageId(_) => inference_models_speech::voxlingua::SAMPLE_RATE,
+        }
+    }
+
     fn device(&self) -> &Device {
         match self {
             Self::Parakeet { asr, .. } => asr.device(),
@@ -1195,10 +1208,12 @@ impl TranscriptionPipeline {
                 _ => {}
             }
         }
+        let speech_sample_rate = Some(model.sample_rate());
         Ok(Self {
             model_id,
             model,
             metadata: Arc::new(GeneralMetadata {
+                speech_sample_rate,
                 prompt_chunk_tokens: None,
                 max_seq_len: METADATA_MAX_SEQ_LEN,
                 llg_factory: None,

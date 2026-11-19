@@ -23,6 +23,9 @@ use symphonia::core::{
 const PCM16_SCALE: f32 = 32_768.0;
 // 30 minutes of 48 kHz stereo; compressed input can otherwise expand to tens of GB
 const MAX_DECODED_AUDIO_SAMPLES: usize = 48_000 * 2 * 30 * 60;
+// mono samples the decoding thread hands the resampling one at a time, and the blocks that may wait between them
+const DECODE_BLOCK_SAMPLES: usize = 1 << 16;
+const DECODE_QUEUE_BLOCKS: usize = 8;
 /// The rate a speech stream decodes a file to: most speech models' own (a model at another rate resamples from it).
 pub const SPEECH_SAMPLE_RATE: u32 = 16_000;
 /// The highest rate a speech model takes (VibeVoice-ASR's 24 kHz): uploaded speech above it is decoded down to it,
@@ -102,11 +105,26 @@ impl AudioInput {
 
     /// Encoded bytes decoded to mono as they read, at their own rate or `max_rate` where theirs is higher, and at most
     /// `max_seconds` long: speech the way the models take it, a long or wide recording never held whole as it came.
-    pub fn from_bytes_mono(bytes: &[u8], max_rate: u32, max_seconds: usize) -> Result<Self> {
-        let cursor = std::io::Cursor::new(bytes.to_vec());
-        let decoder = Decoder::open(Box::new(cursor), bytes.len() as u64)?;
+    pub fn from_bytes_mono(bytes: Vec<u8>, max_rate: u32, max_seconds: usize) -> Result<Self> {
+        let len = bytes.len() as u64;
+        let decoder = Decoder::open(Box::new(std::io::Cursor::new(bytes)), len)?;
         let rate = decoder.sample_rate.min(max_rate);
         Self::mono_from_decoder(decoder, rate, max_seconds.saturating_mul(rate as usize))
+    }
+
+    /// [`Self::from_bytes_mono`] at exactly `sample_rate`, a model's own.
+    pub fn from_bytes_mono_at(
+        bytes: Vec<u8>,
+        sample_rate: u32,
+        max_seconds: usize,
+    ) -> Result<Self> {
+        let len = bytes.len() as u64;
+        let decoder = Decoder::open(Box::new(std::io::Cursor::new(bytes)), len)?;
+        Self::mono_from_decoder(
+            decoder,
+            sample_rate,
+            max_seconds.saturating_mul(sample_rate as usize),
+        )
     }
 
     fn mono_from_source(
@@ -123,26 +141,55 @@ impl AudioInput {
         sample_rate: u32,
         max_samples: usize,
     ) -> Result<Self> {
-        let mut resampler = mel::StreamResampler::new(decoder.sample_rate, sample_rate)?;
-        let ratio = f64::from(sample_rate) / f64::from(decoder.sample_rate);
+        let from_rate = decoder.sample_rate;
+        let ratio = f64::from(sample_rate) / f64::from(from_rate);
         let stated = (decoder.stated_frames() as f64 * ratio) as usize;
-        let mut samples = Vec::with_capacity(stated.min(max_samples));
-        let (mut packet, mut mono) = (Vec::new(), Vec::new());
-        while decoder.next(&mut packet)? {
-            let channels = usize::from(decoder.channels.max(1));
-            mono.clear();
-            mono.extend(
-                packet
-                    .chunks_exact(channels)
-                    .map(|frame| frame.iter().sum::<f32>() / channels as f32),
-            );
-            let out = resampler.push(&mono)?;
-            if samples.len() + out.len() > max_samples {
-                anyhow::bail!("audio exceeds the {max_samples} decoded sample limit");
-            }
-            samples.extend_from_slice(&out);
-        }
-        samples.extend(resampler.finish()?);
+        // the codec on this thread and the resampler on another, so a long recording's two costs overlap; the
+        // resampler takes the same samples in the same order, so its output is as one thread's
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(DECODE_QUEUE_BLOCKS);
+        let samples = std::thread::scope(|scope| {
+            let resampling = scope.spawn(move || -> Result<Vec<f32>> {
+                let mut resampler = mel::StreamResampler::new(from_rate, sample_rate)?;
+                let mut samples = Vec::with_capacity(stated.min(max_samples));
+                for block in rx {
+                    let out = resampler.push(&block)?;
+                    if samples.len() + out.len() > max_samples {
+                        anyhow::bail!("audio exceeds the {max_samples} decoded sample limit");
+                    }
+                    samples.extend_from_slice(&out);
+                }
+                samples.extend(resampler.finish()?);
+                Ok(samples)
+            });
+            let decoding = (|| -> Result<()> {
+                let mut packet = Vec::new();
+                let mut block = Vec::with_capacity(DECODE_BLOCK_SAMPLES);
+                while decoder.next(&mut packet)? {
+                    let channels = usize::from(decoder.channels.max(1));
+                    block.extend(
+                        packet
+                            .chunks_exact(channels)
+                            .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+                    );
+                    if block.len() >= DECODE_BLOCK_SAMPLES {
+                        let full =
+                            std::mem::replace(&mut block, Vec::with_capacity(DECODE_BLOCK_SAMPLES));
+                        // a closed receiver has its own error to report
+                        if tx.send(full).is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                let _ = tx.send(block);
+                Ok(())
+            })();
+            drop(tx);
+            let samples = resampling
+                .join()
+                .map_err(|_| anyhow::anyhow!("the resampling thread panicked"))??;
+            decoding.map(|()| samples)
+        })?;
+        let mut samples = samples;
         samples.truncate(max_samples);
         samples.shrink_to_fit();
         Ok(Self {
@@ -642,12 +689,18 @@ mod tests {
         // bytes in memory decode as the file does, taken down to a lower rate but never up to a higher one
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
-            AudioInput::from_bytes_mono(&bytes, 16_000, usize::MAX / RATE as usize).unwrap(),
+            AudioInput::from_bytes_mono(bytes.clone(), 16_000, usize::MAX / RATE as usize).unwrap(),
             streamed
         );
-        let own = AudioInput::from_bytes_mono(&bytes, 96_000, usize::MAX / RATE as usize).unwrap();
+        assert_eq!(
+            AudioInput::from_bytes_mono_at(bytes.clone(), 16_000, usize::MAX / RATE as usize)
+                .unwrap(),
+            streamed
+        );
+        let own =
+            AudioInput::from_bytes_mono(bytes.clone(), 96_000, usize::MAX / RATE as usize).unwrap();
         assert_eq!((own.sample_rate, own.samples.len()), (RATE, FRAMES));
-        assert!(AudioInput::from_bytes_mono(&bytes, 16_000, 1).is_err());
+        assert!(AudioInput::from_bytes_mono(bytes, 16_000, 1).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

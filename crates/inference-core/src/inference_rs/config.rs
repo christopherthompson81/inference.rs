@@ -108,6 +108,8 @@ pub struct InferenceRsConfig {
     pub generation_defaults: Option<ModelGenerationDefaults>,
     pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
     pub audio_transcriber: Option<inference_nn::loaders::AudioTranscriber>,
+    /// The rate a speech model takes its audio at.
+    pub speech_sample_rate: Option<u32>,
 }
 
 /// What a model was loaded from, able to build its loader again; `inference_selection::ModelSelected` is the usual one.

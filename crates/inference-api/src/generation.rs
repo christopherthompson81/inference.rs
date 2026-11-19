@@ -485,7 +485,9 @@ async fn transcribe_inner(
     audio: &[u8],
 ) -> Result<TranscriptionOutput, ApiError> {
     check_beam(&request)?;
-    let audio = decode_audio(audio)?;
+    let mut models = vec![request.model.as_str()];
+    models.extend(request.diarization_model.as_deref());
+    let audio = decode_speech(state, &models, audio).await?;
     let mut request = request;
     let identified = identify_language_of(state, &mut request, &audio).await?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
@@ -1119,7 +1121,7 @@ async fn detect_voice_activity_inner(
     audio: &[u8],
 ) -> Result<VoiceActivityResponse, ApiError> {
     validate_segment_request(&request)?;
-    let audio = decode_audio(audio)?;
+    let audio = decode_speech(state, &[request.model.as_str()], audio).await?;
     let defaults = SegmentOptions::default();
     let options = SegmentOptions {
         threshold: request.threshold.unwrap_or(defaults.threshold),
@@ -1205,7 +1207,7 @@ async fn identify_language_inner(
     request: LanguageIdRequest,
     audio: &[u8],
 ) -> Result<LanguageIdResponse, ApiError> {
-    let audio = decode_audio(audio)?;
+    let audio = decode_speech(state, &[request.model.as_str()], audio).await?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let identified = spoken_language(state, &request.model, repr, audio).await?;
     let top_k = match request.top_k.unwrap_or(DEFAULT_LANGUAGE_TOP_K) {
@@ -1270,7 +1272,7 @@ async fn diarize_inner(
             Some("threshold"),
         ));
     }
-    let audio = decode_audio(audio)?;
+    let audio = decode_speech(state, &[request.model.as_str()], audio).await?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let messages = RequestMessage::Diarization {
         audio,
@@ -1357,9 +1359,38 @@ fn speech_reference(
     })))
 }
 
-// speech input decoded to mono as it reads, no higher than a speech model's rate, so a long or wide recording stays small
-pub(crate) fn decode_audio(audio: &[u8]) -> Result<AudioInput, ApiError> {
-    AudioInput::from_bytes_mono(audio, MAX_SPEECH_RATE, MAX_SPEECH_SECONDS).map_err(audio_error)
+/// Speech audio decoded off the runtime to mono as it reads, at the rate the named speech models take (the highest when
+/// they differ, so each resamples at most once and the common case not at all), or for any other model at its own rate
+/// up to [`MAX_SPEECH_RATE`].
+pub(crate) async fn decode_speech(
+    state: &SharedInferenceRsState,
+    models: &[&str],
+    audio: &[u8],
+) -> Result<AudioInput, ApiError> {
+    let rate = speech_rate(state, models);
+    let bytes = audio.to_vec();
+    tokio::task::spawn_blocking(move || decode_audio(bytes, rate))
+        .await
+        .map_err(|_| ApiError::internal())?
+}
+
+/// The rate the named speech models take their audio at, the highest when they differ; `None` when none is one.
+pub(crate) fn speech_rate(state: &SharedInferenceRsState, models: &[&str]) -> Option<u32> {
+    models
+        .iter()
+        .filter_map(|&m| {
+            let id = (m != DEFAULT_MODEL_ID).then_some(m);
+            state.speech_sample_rate(id).ok().flatten()
+        })
+        .max()
+}
+
+pub(crate) fn decode_audio(audio: Vec<u8>, rate: Option<u32>) -> Result<AudioInput, ApiError> {
+    match rate {
+        Some(rate) => AudioInput::from_bytes_mono_at(audio, rate, MAX_SPEECH_SECONDS),
+        None => AudioInput::from_bytes_mono(audio, MAX_SPEECH_RATE, MAX_SPEECH_SECONDS),
+    }
+    .map_err(audio_error)
 }
 
 pub(crate) fn audio_error(error: anyhow::Error) -> ApiError {
