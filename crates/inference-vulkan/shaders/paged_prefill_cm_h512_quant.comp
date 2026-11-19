@@ -1,7 +1,9 @@
 #version 450
-// head size 512: paged_prefill_cm_wide_main.glsl's teams of 4 subgroups over quantized caches, 16-position tiles.
+// head size 512: paged_prefill_cm_wide_main.glsl's four teams of 4 subgroups (64 query rows) over quantized caches,
+// 16-position tiles.
 #extension GL_GOOGLE_include_directive : require
 #define CACHE_QUANT
 #define WIDE_SPLIT 4
 #define WIDE_BC 16
+#define WIDE_SUBGROUPS 16
 #include "paged_prefill_cm_wide_main.glsl"

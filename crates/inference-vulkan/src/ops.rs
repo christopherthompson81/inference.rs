@@ -1609,9 +1609,10 @@ const PREFILL_CM_ROWS: usize = 64;
 const PREFILL_CM_HEAD_STEP: usize = 16;
 const PREFILL_CM_MAX_HEAD: usize = 128;
 // paged_prefill_cm_wide's heads past PREFILL_CM_MAX_HEAD, and its query rows a workgroup; then its 512-wide build's
+// (on a 780M, Gemma 4's 2048-token prompt ran 25 % faster at 128 and 64 rows than at 32 and 16)
 const PREFILL_CM_WIDE_MAX_HEAD: usize = 256;
-const PREFILL_CM_WIDE_ROWS: usize = 32;
-const PREFILL_CM_H512_ROWS: usize = 16;
+const PREFILL_CM_WIDE_ROWS: usize = 128;
+const PREFILL_CM_H512_ROWS: usize = 64;
 const PREFILL_MIN_SPAN: usize = 1024;
 const MAX_PREFILL_SPLITS: usize = 32;
 const PREFILL_PARTIALS_BYTES: usize = 32 << 20;

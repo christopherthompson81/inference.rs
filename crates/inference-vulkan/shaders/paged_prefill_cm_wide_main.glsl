@@ -1,5 +1,5 @@
-// paged_prefill_cm_main.glsl for heads past its 128 (to 128 WIDE_SPLIT): a team of WIDE_SPLIT of its 4 subgroups (of
-// 32) takes 16 query rows, each holding its part of the head's chunks of Q and of the output accumulators, so a
+// paged_prefill_cm_main.glsl for heads past its 128 (to 128 WIDE_SPLIT): a team of WIDE_SPLIT of its WIDE_SUBGROUPS
+// subgroups (of 32, 4 by default) takes 16 query rows, each holding its part of the head's chunks of Q and of the output accumulators, so a
 // subgroup's registers stay those of a 128-wide head. A team adds its parts' scores through shared memory and all take
 // the same softmax; the first writes P. Bindings, push constants and partials are paged_prefill_cm's.
 #extension GL_EXT_shader_16bit_storage : require
@@ -11,7 +11,10 @@
 #extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_KHR_shader_subgroup_vote : require
 
-layout(local_size_x = 128) in;
+#ifndef WIDE_SUBGROUPS
+#define WIDE_SUBGROUPS 4
+#endif
+layout(local_size_x = WIDE_SUBGROUPS * 32) in;
 
 layout(std430, binding = 0) readonly buffer Q { vec4 q[]; };
 #ifdef CACHE_QUANT
@@ -55,10 +58,10 @@ layout(push_constant) uniform PushConstants {
 #define WIDE_SPLIT 2
 #define WIDE_BC 32
 #endif
-const uint THREADS = 128;
-const uint SUBGROUPS = 4;
+const uint THREADS = WIDE_SUBGROUPS * 32;
+const uint SUBGROUPS = WIDE_SUBGROUPS;
 const uint M = 16;
-// query rows a workgroup (M a team of subgroups), and positions a tile (at least BR: Q stages through a tile)
+// query rows a workgroup (M a team of subgroups), and positions a tile (Q stages through a tile, BC rows at a time)
 const uint BR = SUBGROUPS / WIDE_SPLIT * M;
 const uint BC = WIDE_BC;
 const uint MAX_HEAD = 128 * WIDE_SPLIT;
@@ -184,30 +187,35 @@ void main() {
         start = max(start, (first_len - pc.window) / BC * BC);
     }
 
-    // Q's rows (BR, one tile's worth) as f16 A matrices, staged through `keys`
+    // Q's rows as f16 A matrices, staged through `keys` a tile's BC rows at a time
     coopmat<float16_t, gl_ScopeSubgroup, M, M, gl_MatrixUseA> qa[HALF_CHUNKS];
-    for (uint i = t; i < BR * hs4; i += THREADS) {
-        uint r = i / hs4;
-        uint d = (i % hs4) * 4;
-        uint p = pos0 + r / group;
-        vec4 v = vec4(0.0);
-        if (r < positions * group && p < pc.rows) {
-            v = q[pc.q_off + (p * pc.heads + kvh * group + r % group) * hs4 + d / 4];
+    for (uint r0 = 0; r0 < BR; r0 += BC) {
+        for (uint i = t; i < BC * hs4; i += THREADS) {
+            uint r = r0 + i / hs4;
+            uint d = (i % hs4) * 4;
+            uint p = pos0 + r / group;
+            vec4 v = vec4(0.0);
+            if (r < positions * group && p < pc.rows) {
+                v = q[pc.q_off + (p * pc.heads + kvh * group + r % group) * hs4 + d / 4];
+            }
+            uint at = (r - r0) * KV_STRIDE + d;
+            keys[at] = float16_t(v.x);
+            keys[at + 1] = float16_t(v.y);
+            keys[at + 2] = float16_t(v.z);
+            keys[at + 3] = float16_t(v.w);
         }
-        uint at = r * KV_STRIDE + d;
-        keys[at] = float16_t(v.x);
-        keys[at + 1] = float16_t(v.y);
-        keys[at + 2] = float16_t(v.z);
-        keys[at + 3] = float16_t(v.w);
-    }
-    barrier();
-    [[unroll]] for (uint k = 0; k < HALF_CHUNKS; k++) {
-        if (first + k < chunks) {
-            coopMatLoad(qa[k], keys, (pair * M) * KV_STRIDE + (first + k) * M, KV_STRIDE,
-                        gl_CooperativeMatrixLayoutRowMajor);
+        barrier();
+        // uniform across the subgroup: its 16 rows lie within this pass or outside it
+        if (pair * M >= r0 && pair * M < r0 + BC) {
+            [[unroll]] for (uint k = 0; k < HALF_CHUNKS; k++) {
+                if (first + k < chunks) {
+                    coopMatLoad(qa[k], keys, (pair * M - r0) * KV_STRIDE + (first + k) * M, KV_STRIDE,
+                                gl_CooperativeMatrixLayoutRowMajor);
+                }
+            }
         }
+        barrier();
     }
-    barrier();
 
     coopmat<float, gl_ScopeSubgroup, M, M, gl_MatrixUseAccumulator> acc[HALF_CHUNKS];
     [[unroll]] for (uint k = 0; k < HALF_CHUNKS; k++) {
