@@ -600,6 +600,7 @@ impl SpeechPipeline {
             model_id,
             model,
             metadata: Arc::new(GeneralMetadata {
+                speech_sample_rate: None,
                 prompt_chunk_tokens: None,
                 max_seq_len: 1024,
                 llg_factory: None,

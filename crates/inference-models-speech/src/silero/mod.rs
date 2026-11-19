@@ -199,6 +199,11 @@ impl SileroVad {
             .collect()
     }
 
+    /// The rate the model takes its audio at.
+    pub fn sample_rate(&self) -> u32 {
+        self.config.sample_rate
+    }
+
     /// Probabilities and speech segments of mono `pcm` at `sample_rate`, resampled to the model's rate first.
     pub fn detect(
         &self,

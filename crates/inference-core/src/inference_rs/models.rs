@@ -197,6 +197,22 @@ impl InferenceRs {
             .ok_or(InferenceRsError::EnginePoisoned)
     }
 
+    /// The rate a speech model takes its audio at; `None` for any other model.
+    pub fn speech_sample_rate(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Option<u32>, InferenceRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
+        engines
+            .get(&resolved_model_id)
+            .map(|engine_instance| engine_instance.config.speech_sample_rate)
+            .ok_or(InferenceRsError::EnginePoisoned)
+    }
+
     /// Add a new model engine to the InferenceRs instance
     pub fn add_model<'a>(
         &'a self,

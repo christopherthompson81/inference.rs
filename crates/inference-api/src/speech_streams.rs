@@ -19,7 +19,7 @@ use crate::{
     api_error::{ApiError, ApiErrorKind},
     generation::{
         audio_error, check_beam, decode_audio, render_diarization, render_transcript, run,
-        speaker_turns, unexpected,
+        speaker_turns, speech_rate, unexpected,
     },
     lora_routing::DEFAULT_MODEL_ID,
     model_inventory::{CancelOnDrop, event},
@@ -232,22 +232,23 @@ where
     }
 }
 
-// the stream's audio, decoded off the runtime; cut to `from_seconds` with `trim`, else only checked against it
+// the stream's audio, decoded off the runtime at the models' `rate`; cut to `from_seconds` with `trim`, else only
+// checked against it
 async fn load_audio(
     source: Source,
     bytes: Option<Vec<u8>>,
+    rate: Option<u32>,
     trim: bool,
     canceled: &RequestCancellation,
 ) -> Result<AudioInput, ApiError> {
     let path = source.path;
     let audio = tokio::task::spawn_blocking(move || match (path, bytes) {
-        (Some(path), _) => AudioInput::from_file_mono(
-            &path,
-            SPEECH_SAMPLE_RATE,
-            MAX_SPEECH_SECONDS * SPEECH_SAMPLE_RATE as usize,
-        )
-        .map_err(audio_error),
-        (None, Some(bytes)) => decode_audio(&bytes),
+        (Some(path), _) => {
+            let rate = rate.unwrap_or(SPEECH_SAMPLE_RATE);
+            AudioInput::from_file_mono(&path, rate, MAX_SPEECH_SECONDS * rate as usize)
+                .map_err(audio_error)
+        }
+        (None, Some(bytes)) => decode_audio(bytes, rate),
         (None, None) => unreachable!("checked when the stream opened"),
     })
     .await
@@ -271,7 +272,10 @@ async fn transcribe(
     let resume_at = (source.from_seconds > 0.0).then_some(source.from_seconds);
     let max_window_seconds = source.max_window_seconds;
     let spans = source.spans.take();
-    let audio = load_audio(source, bytes, false, canceled).await?;
+    let mut models = vec![request.model.as_str()];
+    models.extend(request.diarization_model.as_deref());
+    let rate = speech_rate(state, &models);
+    let audio = load_audio(source, bytes, rate, false, canceled).await?;
     let mut request = request;
     let identified = crate::generation::identify_language_of(state, &mut request, &audio).await?;
     let (progress, windowed) = noting_windows(Some(report(events.clone(), canceled.clone())));
@@ -333,7 +337,8 @@ async fn diarize(
     canceled: &RequestCancellation,
 ) -> Result<Value, ApiError> {
     let offset = source.from_seconds;
-    let audio = load_audio(source, bytes, true, canceled).await?;
+    let rate = speech_rate(state, &[request.model.as_str()]);
+    let audio = load_audio(source, bytes, rate, true, canceled).await?;
     let frames = audio.samples.len() / usize::from(audio.channels.max(1));
     let duration = offset + frames as f64 / f64::from(audio.sample_rate);
     let _ = events.send(event("started", json!({ "duration": duration })));

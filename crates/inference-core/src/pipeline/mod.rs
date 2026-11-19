@@ -807,6 +807,9 @@ fn uses_recurrent_transition_log(cache: &EitherCache) -> bool {
 
 pub struct GeneralMetadata {
     pub max_seq_len: usize,
+    /// The rate a speech model (recogniser, VAD, diarizer, language identifier) takes its audio at, so a request's
+    /// audio can be decoded straight to it.
+    pub speech_sample_rate: Option<u32>,
     /// The prompt chunk the load reserved activations for, the scheduler's unless one is configured.
     pub prompt_chunk_tokens: Option<usize>,
     /// Only None if it doesn't make sense for the model
