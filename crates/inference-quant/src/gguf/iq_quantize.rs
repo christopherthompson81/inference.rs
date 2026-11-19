@@ -536,6 +536,81 @@ fn sigma2(x: &[f32]) -> f32 {
     x.iter().fold(0f32, |s, v| v.mul_add(*v, s)) * (2.0 / x.len() as f32)
 }
 
+// one IQ4_KS block's scale search: the best scale over both codebooks and whether it took the shifted one; None for
+// a block of all but zeros
+fn iq4_ks_search(xb: &[f32], weight: &[f32]) -> Option<(f32, bool)> {
+    let (values, shifted) = IQ4K_VALUES.split_at(16);
+    let (mut amax, mut max) = (0f32, 0f32);
+    for &v in xb {
+        if v.abs() > amax {
+            amax = v.abs();
+            max = v;
+        }
+    }
+    if amax < IQ4_KS_EPS {
+        return None;
+    }
+    let mut d = -max / f32::from(values[0]);
+    let mut best = 0f32;
+    let mut is_shifted = false;
+    evaluate_iq4k_block(1.0 / d, values, xb, weight, &mut d, &mut best);
+    for itry in -SCALE_TRIES..=SCALE_TRIES {
+        let inverse = (itry as f32 + f32::from(values[0])) / max;
+        if evaluate_iq4k_block(inverse, values, xb, weight, &mut d, &mut best) {
+            is_shifted = false;
+        }
+        let inverse = (itry as f32 + f32::from(shifted[0])) / max;
+        if evaluate_iq4k_block(inverse, shifted, xb, weight, &mut d, &mut best) {
+            is_shifted = true;
+        }
+    }
+    Some((d, is_shifted))
+}
+
+// one IQ4_KS block against the row scale `d`: its scale byte (`scale_byte` holds the codebook bit already) and 16
+// index bytes, its fit added to `sums`, each value's level (index value times the block scale) into `levels`
+#[allow(clippy::too_many_arguments)]
+fn iq4_ks_encode(
+    xb: &[f32],
+    weight: &[f32],
+    scale: f32,
+    d: f32,
+    scale_byte: &mut u8,
+    qs: &mut [u8],
+    sums: &mut (f32, f32),
+    levels: &mut [f32],
+) {
+    let (values, shifted) = IQ4K_VALUES.split_at(16);
+    let codebook = if *scale_byte & 0x01 != 0 {
+        shifted
+    } else {
+        values
+    };
+    let id = 1.0 / d;
+    let l =
+        nearest_int(0.5 * (id * scale + IQ4_KS_SCALE_MAX as f32)).clamp(0, IQ4_KS_SCALE_MAX) << 1;
+    *scale_byte |= l as u8;
+    let l = l - IQ4_KS_SCALE_MAX;
+    let dl = d * l as f32;
+    let idl = if dl != 0.0 { 1.0 / dl } else { 0.0 };
+    let half = QK4_NL / 2;
+    for j in 0..half {
+        let i1 = best_index_iq4k(codebook, idl * xb[j]);
+        let i2 = best_index_iq4k(codebook, idl * xb[j + half]);
+        qs[j] = i1 as u8 | ((i2 as u8) << 4);
+        let (q1, q2) = (
+            f32::from(codebook[i1]) * l as f32,
+            f32::from(codebook[i2]) * l as f32,
+        );
+        levels[j] = q1;
+        levels[j + half] = q2;
+        // as g++ contracts it: the first product fused over the second
+        let (w1, w2) = (weight[j] * q1, weight[j + half] * q2);
+        sums.0 += w1.mul_add(xb[j], w2 * xb[j + half]);
+        sums.1 += w1.mul_add(q1, w2 * q2);
+    }
+}
+
 /// One IQ4_KS row (`quantize_row_iq4_k_impl_bs32`): per 32-value block the best scale over both codebooks; the
 /// scales as 7-bit multiples of the row's largest over 127; then the row scale refit to the indices.
 fn quantize_iq4_ks_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
@@ -545,7 +620,11 @@ fn quantize_iq4_ks_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
     let mut all_scales = vec![0f32; x.len() / QK4_NL];
     let mut weight = [0f32; QK4_NL];
     let mut amax_scale = 0f32;
-    let (values, shifted) = IQ4K_VALUES.split_at(16);
+    let block_qw = |ibl: usize, ib: usize| {
+        weights
+            .as_deref()
+            .map(|w| &w[ibl * QK_K + ib * QK4_NL..ibl * QK_K + (ib + 1) * QK4_NL])
+    };
     for (ibl, (xbl, block)) in x
         .as_chunks::<QK_K>()
         .0
@@ -556,40 +635,15 @@ fn quantize_iq4_ks_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
         let s2 = sigma2(xbl);
         for ib in 0..QK_K / QK4_NL {
             let xb = &xbl[ib * QK4_NL..(ib + 1) * QK4_NL];
-            let qw = weights
-                .as_deref()
-                .map(|w| &w[ibl * QK_K + ib * QK4_NL..ibl * QK_K + (ib + 1) * QK4_NL]);
-            block_weights(xb, qw, s2, &mut weight);
-            let (mut amax, mut max) = (0f32, 0f32);
-            for &v in xb {
-                if v.abs() > amax {
-                    amax = v.abs();
-                    max = v;
-                }
-            }
-            let scale = &mut all_scales[ibl * (QK_K / QK4_NL) + ib];
-            if amax < IQ4_KS_EPS {
-                *scale = 0.0;
+            block_weights(xb, block_qw(ibl, ib), s2, &mut weight);
+            let Some((d, is_shifted)) = iq4_ks_search(xb, &weight) else {
+                all_scales[ibl * (QK_K / QK4_NL) + ib] = 0.0;
                 continue;
-            }
-            let mut d = -max / f32::from(values[0]);
-            let mut best = 0f32;
-            let mut is_shifted = false;
-            evaluate_iq4k_block(1.0 / d, values, xb, &weight, &mut d, &mut best);
-            for itry in -SCALE_TRIES..=SCALE_TRIES {
-                let inverse = (itry as f32 + f32::from(values[0])) / max;
-                if evaluate_iq4k_block(inverse, values, xb, &weight, &mut d, &mut best) {
-                    is_shifted = false;
-                }
-                let inverse = (itry as f32 + f32::from(shifted[0])) / max;
-                if evaluate_iq4k_block(inverse, shifted, xb, &weight, &mut d, &mut best) {
-                    is_shifted = true;
-                }
-            }
+            };
             if is_shifted {
                 block[ib] = 0x01;
             }
-            *scale = d;
+            all_scales[ibl * (QK_K / QK4_NL) + ib] = d;
             amax_scale = amax_scale.max(d.abs());
         }
     }
@@ -598,8 +652,8 @@ fn quantize_iq4_ks_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
     if d == 0.0 {
         return;
     }
-    let id = 1.0 / d;
-    let (mut sumqx, mut sumq2) = (0f32, 0f32);
+    let mut sums = (0f32, 0f32);
+    let mut levels = [0f32; QK4_NL];
     for (ibl, (xbl, block)) in x
         .as_chunks::<QK_K>()
         .0
@@ -610,43 +664,23 @@ fn quantize_iq4_ks_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
         let s2 = sigma2(xbl);
         let (scales, qs) = block.split_at_mut(QK_K / QK4_NL);
         for ib in 0..QK_K / QK4_NL {
-            let codebook = if scales[ib] & 0x01 != 0 {
-                shifted
-            } else {
-                values
-            };
-            let scale = all_scales[ibl * (QK_K / QK4_NL) + ib];
-            let l = nearest_int(0.5 * (id * scale + IQ4_KS_SCALE_MAX as f32))
-                .clamp(0, IQ4_KS_SCALE_MAX)
-                << 1;
-            scales[ib] |= l as u8;
-            let l = l - IQ4_KS_SCALE_MAX;
-            let dl = d * l as f32;
-            let idl = if dl != 0.0 { 1.0 / dl } else { 0.0 };
             let xb = &xbl[ib * QK4_NL..(ib + 1) * QK4_NL];
-            let qw = weights
-                .as_deref()
-                .map(|w| &w[ibl * QK_K + ib * QK4_NL..ibl * QK_K + (ib + 1) * QK4_NL]);
-            block_weights(xb, qw, s2, &mut weight);
+            block_weights(xb, block_qw(ibl, ib), s2, &mut weight);
             let half = QK4_NL / 2;
-            let qs = &mut qs[ib * half..(ib + 1) * half];
-            for j in 0..half {
-                let i1 = best_index_iq4k(codebook, idl * xb[j]);
-                let i2 = best_index_iq4k(codebook, idl * xb[j + half]);
-                qs[j] = i1 as u8 | ((i2 as u8) << 4);
-                let (q1, q2) = (
-                    f32::from(codebook[i1]) * l as f32,
-                    f32::from(codebook[i2]) * l as f32,
-                );
-                // as g++ contracts it: the first product fused over the second
-                let (w1, w2) = (weight[j] * q1, weight[j + half] * q2);
-                sumqx += w1.mul_add(xb[j], w2 * xb[j + half]);
-                sumq2 += w1.mul_add(q1, w2 * q2);
-            }
+            iq4_ks_encode(
+                xb,
+                &weight,
+                all_scales[ibl * (QK_K / QK4_NL) + ib],
+                d,
+                &mut scales[ib],
+                &mut qs[ib * half..(ib + 1) * half],
+                &mut sums,
+                &mut levels,
+            );
         }
     }
-    if sumq2 > 0.0 {
-        header.copy_from_slice(&(IQ4_KS_FUDGE * sumqx / sumq2).to_le_bytes());
+    if sums.1 > 0.0 {
+        header.copy_from_slice(&(IQ4_KS_FUDGE * sums.0 / sums.1).to_le_bytes());
     }
 }
 
@@ -745,17 +779,120 @@ fn iq4_kss_fit(
     (words, sumqx, sumq2)
 }
 
+// one IQ4_KSS block's scale search over both codebooks and signs, every try's indices pruned; None for a block of
+// all but zeros
+fn iq4_kss_search(xb: &[f32], weight: &[f32]) -> Option<f32> {
+    let (values, shifted) = IQ4K_VALUES.split_at(16);
+    let (mut amax, mut max) = (0f32, 0f32);
+    for &v in xb {
+        if v.abs() > amax {
+            amax = v.abs();
+            max = v;
+        }
+    }
+    if amax < IQ4_KS_EPS {
+        return None;
+    }
+    let (mut best, mut d) = (0f32, -max / f32::from(values[0]));
+    for itry in -IQ4_KSS_TRIES..=IQ4_KSS_TRIES {
+        for codebook in [values, shifted] {
+            let inverse = (itry as f32 + f32::from(codebook[0])) / max;
+            for negated in [false, true] {
+                let (_, sumqx, sumq2) = iq4_kss_fit(inverse, negated, codebook, xb, weight);
+                if sumq2 > 0.0 && sumqx * sumqx > best * sumq2 {
+                    d = sumqx / sumq2;
+                    best = d * sumqx;
+                }
+            }
+        }
+    }
+    Some(d)
+}
+
+// one IQ4_KSS block against the row scale `d`: its eight words (16 bytes), its fit chained onto `sums`, each value's
+// level into `levels` (0 where the block scale rounds to 0)
+fn iq4_kss_encode(
+    xb: &[f32],
+    weight: &[f32],
+    scale: f32,
+    d: f32,
+    words: &mut [u8],
+    sums: &mut (f32, f32),
+    levels: &mut [f32],
+) {
+    let (values, shifted) = IQ4K_VALUES.split_at(16);
+    let table = iq4_kss_scramble();
+    let id = 1.0 / d;
+    let mut l =
+        (nearest_int(0.5 * (id * scale + IQ4_KS_SCALE_MAX as f32)).clamp(0, IQ4_KS_SCALE_MAX) << 1)
+            - IQ4_KS_SCALE_MAX;
+    if l == 0 {
+        l += IQ4_KS_SCALE_MAX;
+        for k in 0..IQ4_KSS_WORDS {
+            words[2 * k..2 * k + 2].copy_from_slice(&(((l >> k) & 1) as u16).to_le_bytes());
+        }
+        levels.fill(0.0);
+        return;
+    }
+    let dl = d * l as f32;
+    let idl = 1.0 / dl;
+    let (mut vp, mut vm) = ([0u16; IQ4_KSS_WORDS], [0u16; IQ4_KSS_WORDS]);
+    let (mut mse_p, mut mse_m) = (0f32, 0f32);
+    for k in 0..IQ4_KSS_WORDS {
+        let (xv, wv) = (iq4_kss_group(xb, k), iq4_kss_group(weight, k));
+        let (mut p, mut m) = (0u16, 0u16);
+        for (j, &x) in xv.iter().enumerate() {
+            let al = idl * x;
+            p |= (best_index_iq4k(values, al) as u16) << (4 * j);
+            m |= (best_index_iq4k(shifted, al) as u16) << (4 * j);
+        }
+        vp[k] = iq4_kss_prune(p, values, &xv, &wv, dl);
+        vm[k] = iq4_kss_prune(m, shifted, &xv, &wv, dl);
+        for j in 0..4 {
+            let q = f32::from(values[((vp[k] >> (4 * j)) & 0xf) as usize]);
+            let e = (-dl).mul_add(q, xv[j]);
+            mse_p = (wv[j] * e).mul_add(e, mse_p);
+            let q = f32::from(shifted[((vm[k] >> (4 * j)) & 0xf) as usize]);
+            let e = (-dl).mul_add(q, xv[j]);
+            mse_m = (wv[j] * e).mul_add(e, mse_m);
+        }
+    }
+    let use_shifted = mse_m < mse_p;
+    let (v, codebook) = if use_shifted {
+        (&vm, shifted)
+    } else {
+        (&vp, values)
+    };
+    let half = QK4_NL / 2;
+    for k in 0..IQ4_KSS_WORDS {
+        let (xv, wv) = (iq4_kss_group(xb, k), iq4_kss_group(weight, k));
+        for j in 0..4 {
+            let q = (i32::from(codebook[((v[k] >> (4 * j)) & 0xf) as usize]) * l) as f32;
+            levels[(j & 1) * half + 2 * k + (j >> 1)] = q;
+            let wq = wv[j] * q;
+            sums.0 = wq.mul_add(xv[j], sums.0);
+            sums.1 = wq.mul_add(q, sums.1);
+        }
+    }
+    l += IQ4_KS_SCALE_MAX;
+    if use_shifted {
+        l |= 1;
+    }
+    for k in 0..IQ4_KSS_WORDS {
+        let word = (table[(v[k] & 0x7fff) as usize] << 1) | ((l >> k) & 1) as u16;
+        words[2 * k..2 * k + 2].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
 /// One IQ4_KSS row (ik's `quantize_row_iq4_kss_impl`): IQ4_KS's search with every four indices pruned to even
 /// parity, so each word stores them in 15 bits beside one bit of the block's 8-bit scale.
 fn quantize_iq4_kss_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
     let weights = imatrix.map(|w| iq4_ks_row_weights(x, w));
     let (header, blocks) = out.split_at_mut(IQ4_KS_ROW_HEADER);
     blocks.fill(0);
-    let table = iq4_kss_scramble();
     let mut all_scales = vec![0f32; x.len() / QK4_NL];
     let mut weight = [0f32; QK4_NL];
     let mut amax_scale = 0f32;
-    let (values, shifted) = IQ4K_VALUES.split_at(16);
     let block_qw = |ibl: usize, ib: usize| {
         weights
             .as_deref()
@@ -766,33 +903,8 @@ fn quantize_iq4_kss_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
         for ib in 0..QK_K / QK4_NL {
             let xb = &xbl[ib * QK4_NL..(ib + 1) * QK4_NL];
             block_weights(xb, block_qw(ibl, ib), s2, &mut weight);
-            let (mut amax, mut max) = (0f32, 0f32);
-            for &v in xb {
-                if v.abs() > amax {
-                    amax = v.abs();
-                    max = v;
-                }
-            }
-            let scale = &mut all_scales[ibl * (QK_K / QK4_NL) + ib];
-            if amax < IQ4_KS_EPS {
-                *scale = 0.0;
-                continue;
-            }
-            let (mut best, mut d) = (0f32, -max / f32::from(values[0]));
-            for itry in -IQ4_KSS_TRIES..=IQ4_KSS_TRIES {
-                for codebook in [values, shifted] {
-                    let inverse = (itry as f32 + f32::from(codebook[0])) / max;
-                    for negated in [false, true] {
-                        let (_, sumqx, sumq2) =
-                            iq4_kss_fit(inverse, negated, codebook, xb, &weight);
-                        if sumq2 > 0.0 && sumqx * sumqx > best * sumq2 {
-                            d = sumqx / sumq2;
-                            best = d * sumqx;
-                        }
-                    }
-                }
-            }
-            *scale = d;
+            let d = iq4_kss_search(xb, &weight).unwrap_or(0.0);
+            all_scales[ibl * (QK_K / QK4_NL) + ib] = d;
             amax_scale = amax_scale.max(d.abs());
         }
     }
@@ -801,8 +913,8 @@ fn quantize_iq4_kss_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
     if d == 0.0 {
         return;
     }
-    let id = 1.0 / d;
-    let (mut sumqx, mut sumq2) = (0f32, 0f32);
+    let mut sums = (0f32, 0f32);
+    let mut levels = [0f32; QK4_NL];
     for (ibl, (xbl, block)) in x
         .as_chunks::<QK_K>()
         .0
@@ -814,69 +926,143 @@ fn quantize_iq4_kss_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
         for ib in 0..QK_K / QK4_NL {
             let xb = &xbl[ib * QK4_NL..(ib + 1) * QK4_NL];
             block_weights(xb, block_qw(ibl, ib), s2, &mut weight);
-            let scale = all_scales[ibl * (QK_K / QK4_NL) + ib];
-            let mut l = (nearest_int(0.5 * (id * scale + IQ4_KS_SCALE_MAX as f32))
-                .clamp(0, IQ4_KS_SCALE_MAX)
-                << 1)
-                - IQ4_KS_SCALE_MAX;
-            let words = &mut block[ib * 2 * IQ4_KSS_WORDS..(ib + 1) * 2 * IQ4_KSS_WORDS];
-            if l == 0 {
-                l += IQ4_KS_SCALE_MAX;
-                for k in 0..IQ4_KSS_WORDS {
-                    words[2 * k..2 * k + 2].copy_from_slice(&(((l >> k) & 1) as u16).to_le_bytes());
-                }
-                continue;
-            }
-            let dl = d * l as f32;
-            let idl = 1.0 / dl;
-            let (mut vp, mut vm) = ([0u16; IQ4_KSS_WORDS], [0u16; IQ4_KSS_WORDS]);
-            let (mut mse_p, mut mse_m) = (0f32, 0f32);
-            for k in 0..IQ4_KSS_WORDS {
-                let (xv, wv) = (iq4_kss_group(xb, k), iq4_kss_group(&weight, k));
-                let (mut p, mut m) = (0u16, 0u16);
-                for (j, &x) in xv.iter().enumerate() {
-                    let al = idl * x;
-                    p |= (best_index_iq4k(values, al) as u16) << (4 * j);
-                    m |= (best_index_iq4k(shifted, al) as u16) << (4 * j);
-                }
-                vp[k] = iq4_kss_prune(p, values, &xv, &wv, dl);
-                vm[k] = iq4_kss_prune(m, shifted, &xv, &wv, dl);
-                for j in 0..4 {
-                    let q = f32::from(values[((vp[k] >> (4 * j)) & 0xf) as usize]);
-                    let e = (-dl).mul_add(q, xv[j]);
-                    mse_p = (wv[j] * e).mul_add(e, mse_p);
-                    let q = f32::from(shifted[((vm[k] >> (4 * j)) & 0xf) as usize]);
-                    let e = (-dl).mul_add(q, xv[j]);
-                    mse_m = (wv[j] * e).mul_add(e, mse_m);
-                }
-            }
-            let use_shifted = mse_m < mse_p;
-            let (v, codebook) = if use_shifted {
-                (&vm, shifted)
-            } else {
-                (&vp, values)
-            };
-            for k in 0..IQ4_KSS_WORDS {
-                let (xv, wv) = (iq4_kss_group(xb, k), iq4_kss_group(&weight, k));
-                for j in 0..4 {
-                    let q = (i32::from(codebook[((v[k] >> (4 * j)) & 0xf) as usize]) * l) as f32;
-                    let wq = wv[j] * q;
-                    sumqx = wq.mul_add(xv[j], sumqx);
-                    sumq2 = wq.mul_add(q, sumq2);
-                }
-            }
-            l += IQ4_KS_SCALE_MAX;
-            if use_shifted {
-                l |= 1;
-            }
-            for k in 0..IQ4_KSS_WORDS {
-                let word = (table[(v[k] & 0x7fff) as usize] << 1) | ((l >> k) & 1) as u16;
-                words[2 * k..2 * k + 2].copy_from_slice(&word.to_le_bytes());
-            }
+            iq4_kss_encode(
+                xb,
+                &weight,
+                all_scales[ibl * (QK_K / QK4_NL) + ib],
+                d,
+                &mut block[ib * 2 * IQ4_KSS_WORDS..(ib + 1) * 2 * IQ4_KSS_WORDS],
+                &mut sums,
+                &mut levels,
+            );
         }
     }
-    if sumq2 > 0.0 {
-        header.copy_from_slice(&(IQ4_KSS_FUDGE * sumqx / sumq2).to_le_bytes());
+    if sums.1 > 0.0 {
+        header.copy_from_slice(&(IQ4_KSS_FUDGE * sums.0 / sums.1).to_le_bytes());
+    }
+}
+
+#[cfg(feature = "cuda")]
+/// The row-scaled types GPTQ encodes a super-block at a time against a row scale fixed first: IQ4_KS, IQ4_KSS (an f32
+/// row scale) and IQ3_KS (f16).
+pub(super) fn row_scaled(ty: GgufType) -> Option<(usize, usize)> {
+    match ty {
+        GgufType::Iq4Ks => Some((IQ4_KS_ROW_HEADER, BLOCK_IQ4_KS)),
+        GgufType::Iq4Kss => Some((IQ4_KS_ROW_HEADER, BLOCK_IQ4_KSS)),
+        GgufType::Iq3Ks => Some((iqk::F16_ROW_SCALE, iqk::BLOCK_IQ3_KS)),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "cuda")]
+/// A row-scaled type's row scale from a row's ordinary first pass.
+pub(super) fn row_scale(ty: GgufType, row: &[f32], imatrix: Option<&[f32]>) -> f32 {
+    if ty == GgufType::Iq3Ks {
+        return iqk::iq3_ks_row_scale(row, imatrix);
+    }
+    let weights = imatrix.map(|w| iq4_ks_row_weights(row, w));
+    let mut weight = [0f32; QK4_NL];
+    let mut amax_scale = 0f32;
+    for (ibl, xbl) in row.as_chunks::<QK_K>().0.iter().enumerate() {
+        let s2 = if ty == GgufType::Iq4Kss {
+            sigma2_unfused(xbl)
+        } else {
+            sigma2(xbl)
+        };
+        for ib in 0..QK_K / QK4_NL {
+            let xb = &xbl[ib * QK4_NL..(ib + 1) * QK4_NL];
+            let qw = weights
+                .as_deref()
+                .map(|w| &w[ibl * QK_K + ib * QK4_NL..][..QK4_NL]);
+            block_weights(xb, qw, s2, &mut weight);
+            let d = if ty == GgufType::Iq4Kss {
+                iq4_kss_search(xb, &weight).unwrap_or(0.0)
+            } else {
+                iq4_ks_search(xb, &weight).map_or(0.0, |(d, _)| d)
+            };
+            amax_scale = amax_scale.max(d.abs());
+        }
+    }
+    amax_scale / IQ4_KS_SCALE_MAX as f32
+}
+
+#[cfg(feature = "cuda")]
+/// One super-block of a row-scaled type (its blocks' own searches on `xbl`) against the row scale `d`, into `out`; its
+/// fit added to `sums`, each value's level into `levels` (the value decodes to `d * level`).
+pub(super) fn row_scaled_super_block(
+    ty: GgufType,
+    xbl: &[f32],
+    imatrix: Option<&[f32]>,
+    d: f32,
+    out: &mut [u8],
+    sums: &mut (f32, f32),
+    levels: &mut [f32],
+) {
+    if ty == GgufType::Iq3Ks {
+        return iqk::iq3_ks_super_block(xbl, imatrix, d, out, sums, levels);
+    }
+    out.fill(0);
+    levels.fill(0.0);
+    let weights = imatrix.map(|w| iq4_ks_row_weights(xbl, w));
+    let kss = ty == GgufType::Iq4Kss;
+    let s2 = if kss {
+        sigma2_unfused(xbl)
+    } else {
+        sigma2(xbl)
+    };
+    let mut weight = [0f32; QK4_NL];
+    for ib in 0..QK_K / QK4_NL {
+        let xb = &xbl[ib * QK4_NL..(ib + 1) * QK4_NL];
+        block_weights(
+            xb,
+            weights.as_deref().map(|w| &w[ib * QK4_NL..][..QK4_NL]),
+            s2,
+            &mut weight,
+        );
+        let lv = &mut levels[ib * QK4_NL..(ib + 1) * QK4_NL];
+        if d == 0.0 {
+            continue;
+        }
+        if kss {
+            let scale = iq4_kss_search(xb, &weight).unwrap_or(0.0);
+            let words = &mut out[ib * 2 * IQ4_KSS_WORDS..(ib + 1) * 2 * IQ4_KSS_WORDS];
+            iq4_kss_encode(xb, &weight, scale, d, words, sums, lv);
+        } else {
+            let (scale, is_shifted) = iq4_ks_search(xb, &weight).unwrap_or((0.0, false));
+            let (scales, qs) = out.split_at_mut(QK_K / QK4_NL);
+            scales[ib] = u8::from(is_shifted);
+            let half = QK4_NL / 2;
+            iq4_ks_encode(
+                xb,
+                &weight,
+                scale,
+                d,
+                &mut scales[ib],
+                &mut qs[ib * half..(ib + 1) * half],
+                sums,
+                lv,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+/// A row-scaled type's header: the row scale refit to the row's fit, or `d` without one.
+pub(super) fn row_scaled_header(ty: GgufType, d: f32, sums: (f32, f32), header: &mut [u8]) {
+    let fudge = match ty {
+        GgufType::Iq3Ks => 1.0,
+        GgufType::Iq4Kss => IQ4_KSS_FUDGE,
+        _ => IQ4_KS_FUDGE,
+    };
+    let scale = if sums.1 > 0.0 {
+        fudge * sums.0 / sums.1
+    } else {
+        fudge * d
+    };
+    if ty == GgufType::Iq3Ks {
+        header.copy_from_slice(&half::f16::from_f32(scale).to_le_bytes());
+    } else {
+        header.copy_from_slice(&scale.to_le_bytes());
     }
 }
 

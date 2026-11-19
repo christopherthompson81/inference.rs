@@ -879,49 +879,118 @@ fn quantize_iq3_k(xbl: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
     out[..2].copy_from_slice(&half::f16::from_f32(IQ3_K_FUDGE * scale).to_le_bytes());
 }
 
+const IQ3_KS_BLOCK: usize = 32;
+
+// a super-block's sigma2 (its squares summed fused, in order) and one block's weights
+fn iq3_ks_sigma2(xbl: &[f32]) -> f32 {
+    sum_squares(xbl) * (2.0 / QK_K as f32)
+}
+
+fn iq3_ks_weights(xb: &[f32], qw: Option<&[f32]>, sigma2: f32, weight: &mut [f32; IQ3_KS_BLOCK]) {
+    for j in 0..IQ3_KS_BLOCK {
+        weight[j] = match qw {
+            Some(qw) => qw[j] * fma(xb[j], xb[j], sigma2).sqrt(),
+            None => xb[j] * xb[j],
+        };
+    }
+}
+
+// a super-block's eight block scales and codebook bits (`extra` bits 8..16); its blocks of all but zeros keep 0
+fn iq3_ks_search(xbl: &[f32], qw: Option<&[f32]>, scales: &mut [f32], extra: &mut u16) {
+    let sigma2 = iq3_ks_sigma2(xbl);
+    let mut weight = [0f32; IQ3_KS_BLOCK];
+    for ib in 0..QK_K / IQ3_KS_BLOCK {
+        let xb = &xbl[IQ3_KS_BLOCK * ib..][..IQ3_KS_BLOCK];
+        iq3_ks_weights(
+            xb,
+            qw.map(|w| &w[IQ3_KS_BLOCK * ib..][..IQ3_KS_BLOCK]),
+            sigma2,
+            &mut weight,
+        );
+        let (mut amax, mut max) = (0f32, 0f32);
+        for &v in xb {
+            if v.abs() > amax {
+                (amax, max) = (v.abs(), v);
+            }
+        }
+        if amax < IQ2_K_EPS {
+            continue;
+        }
+        let (d, is_shifted) = find_best_scale(xb, &weight, max, IQ3_KS_TRIES, 1.0);
+        if is_shifted {
+            *extra |= 1 << (8 + ib);
+        }
+        scales[ib] = d;
+    }
+}
+
+// a super-block against the row scale `d`: its 5-bit scales and 3-bit indices into `block` (its codebook bits in
+// place already), its fit chained onto `sums`, each value's level into `levels`
+fn iq3_ks_encode(
+    xbl: &[f32],
+    qw: Option<&[f32]>,
+    scales: &[f32],
+    d: f32,
+    block: &mut [u8],
+    sums: &mut (f32, f32),
+    levels: &mut [f32],
+) {
+    let (values, shifted) = IQ3NL_VALUES.split_at(8);
+    let sigma2 = iq3_ks_sigma2(xbl);
+    let mut weight = [0f32; IQ3_KS_BLOCK];
+    let id = 1.0 / d;
+    for ib in 0..QK_K / IQ3_KS_BLOCK {
+        let mut extra = u16::from_le_bytes([block[0], block[1]]);
+        let codebook = if (extra >> (8 + ib)) & 1 != 0 {
+            shifted
+        } else {
+            values
+        };
+        let l = nearest_int(id * scales[ib]).clamp(-16, 15);
+        let ul = (l + 16) as u8;
+        block[2 + ib % 4] |= (ul & 0xf) << (4 * (ib / 4));
+        extra |= u16::from(ul >> 4) << ib;
+        block[..2].copy_from_slice(&extra.to_le_bytes());
+        let dl = d * l as f32;
+        let idl = if dl != 0.0 { 1.0 / dl } else { 0.0 };
+        let xb = &xbl[IQ3_KS_BLOCK * ib..][..IQ3_KS_BLOCK];
+        iq3_ks_weights(
+            xb,
+            qw.map(|w| &w[IQ3_KS_BLOCK * ib..][..IQ3_KS_BLOCK]),
+            sigma2,
+            &mut weight,
+        );
+        for j in 0..IQ3_KS_BLOCK {
+            let i = best_index_iq3nl(codebook, idl * xb[j]);
+            block[6 + (ib / 4) * IQ3_KS_BLOCK + j] |= ((i & 3) as u8) << (2 * (ib % 4));
+            block[70 + j] |= ((i >> 2) as u8) << (ib % 8);
+            let q = (i32::from(codebook[i]) * l) as f32;
+            levels[IQ3_KS_BLOCK * ib + j] = q;
+            sums.0 = fma(weight[j] * q, xb[j], sums.0);
+            sums.1 = fma(weight[j] * q, q, sums.1);
+        }
+    }
+}
+
 /// One IQ3_KS row (`quantize_row_iq3_ks_impl`, AVX2 search): per 32 values a scale and codebook pick, the scales as
 /// 5-bit multiples of the row's largest over 16, the row scale refit to the indices.
 fn quantize_iq3_ks_row(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
-    const BLOCK: usize = 32;
     let (header, blocks) = out.split_at_mut(F16_ROW_SCALE);
     header.fill(0);
     blocks.fill(0);
-    let (values, shifted) = IQ3NL_VALUES.split_at(8);
     let nblock = x.len() / QK_K;
-    let mut all_scales = vec![0f32; nblock * QK_K / BLOCK];
-    let mut weight = [0f32; BLOCK];
-    let sigma2_of = |xbl: &[f32]| sum_squares(xbl) * (2.0 / QK_K as f32);
-    let weights_of = |ibl: usize, ib: usize, sigma2: f32, weight: &mut [f32; BLOCK]| {
-        let xb = &x[ibl * QK_K + BLOCK * ib..][..BLOCK];
-        for j in 0..BLOCK {
-            weight[j] = match qw {
-                Some(qw) => qw[ibl * QK_K + BLOCK * ib + j] * fma(xb[j], xb[j], sigma2).sqrt(),
-                None => xb[j] * xb[j],
-            };
-        }
-    };
+    let mut all_scales = vec![0f32; nblock * QK_K / IQ3_KS_BLOCK];
     let (mut amax_scale, mut max_scale) = (0f32, 0f32);
     for ibl in 0..nblock {
-        let xbl = &x[ibl * QK_K..][..QK_K];
-        let sigma2 = sigma2_of(xbl);
+        let scales = &mut all_scales[ibl * 8..][..8];
         let mut extra = 0u16;
-        for ib in 0..QK_K / BLOCK {
-            let xb = &xbl[BLOCK * ib..][..BLOCK];
-            weights_of(ibl, ib, sigma2, &mut weight);
-            let (mut amax, mut max) = (0f32, 0f32);
-            for &v in xb {
-                if v.abs() > amax {
-                    (amax, max) = (v.abs(), v);
-                }
-            }
-            if amax < IQ2_K_EPS {
-                continue;
-            }
-            let (d, is_shifted) = find_best_scale(xb, &weight, max, IQ3_KS_TRIES, 1.0);
-            if is_shifted {
-                extra |= 1 << (8 + ib);
-            }
-            all_scales[ibl * 8 + ib] = d;
+        iq3_ks_search(
+            &x[ibl * QK_K..][..QK_K],
+            qw.map(|w| &w[ibl * QK_K..][..QK_K]),
+            scales,
+            &mut extra,
+        );
+        for &d in scales.iter() {
             if d.abs() > amax_scale {
                 (amax_scale, max_scale) = (d.abs(), d);
             }
@@ -933,41 +1002,69 @@ fn quantize_iq3_ks_row(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
     if d == 0.0 {
         return;
     }
-    let id = 1.0 / d;
-    let (mut sumqx, mut sumq2) = (0f32, 0f32);
+    let mut sums = (0f32, 0f32);
+    let mut levels = [0f32; QK_K];
     for ibl in 0..nblock {
-        let xbl = &x[ibl * QK_K..][..QK_K];
-        let sigma2 = sigma2_of(xbl);
-        let block = &mut blocks[ibl * BLOCK_IQ3_KS..][..BLOCK_IQ3_KS];
-        for ib in 0..QK_K / BLOCK {
-            let mut extra = u16::from_le_bytes([block[0], block[1]]);
-            let codebook = if (extra >> (8 + ib)) & 1 != 0 {
-                shifted
-            } else {
-                values
-            };
-            let l = nearest_int(id * all_scales[ibl * 8 + ib]).clamp(-16, 15);
-            let ul = (l + 16) as u8;
-            block[2 + ib % 4] |= (ul & 0xf) << (4 * (ib / 4));
-            extra |= u16::from(ul >> 4) << ib;
-            block[..2].copy_from_slice(&extra.to_le_bytes());
-            let dl = d * l as f32;
-            let idl = if dl != 0.0 { 1.0 / dl } else { 0.0 };
-            let xb = &xbl[BLOCK * ib..][..BLOCK];
-            weights_of(ibl, ib, sigma2, &mut weight);
-            for j in 0..BLOCK {
-                let i = best_index_iq3nl(codebook, idl * xb[j]);
-                block[6 + (ib / 4) * BLOCK + j] |= ((i & 3) as u8) << (2 * (ib % 4));
-                block[70 + j] |= ((i >> 2) as u8) << (ib % 8);
-                let q = (i32::from(codebook[i]) * l) as f32;
-                sumqx = fma(weight[j] * q, xb[j], sumqx);
-                sumq2 = fma(weight[j] * q, q, sumq2);
+        iq3_ks_encode(
+            &x[ibl * QK_K..][..QK_K],
+            qw.map(|w| &w[ibl * QK_K..][..QK_K]),
+            &all_scales[ibl * 8..][..8],
+            d,
+            &mut blocks[ibl * BLOCK_IQ3_KS..][..BLOCK_IQ3_KS],
+            &mut sums,
+            &mut levels,
+        );
+    }
+    if sums.1 > 0.0 {
+        header.copy_from_slice(&half::f16::from_f32(sums.0 / sums.1).to_le_bytes());
+    }
+}
+
+#[cfg(feature = "cuda")]
+/// IQ3_KS's row scale from a row's first pass (its block scale of largest magnitude over -16), `imatrix` reweighed.
+pub(super) fn iq3_ks_row_scale(row: &[f32], imatrix: Option<&[f32]>) -> f32 {
+    let weights = imatrix.map(|w| row_weights(row, w, IQ3_KS_BLOCK));
+    let (mut amax_scale, mut max_scale) = (0f32, 0f32);
+    for (ibl, xbl) in row.as_chunks::<QK_K>().0.iter().enumerate() {
+        let mut scales = [0f32; QK_K / IQ3_KS_BLOCK];
+        let mut extra = 0u16;
+        iq3_ks_search(
+            xbl,
+            weights.as_deref().map(|w| &w[ibl * QK_K..][..QK_K]),
+            &mut scales,
+            &mut extra,
+        );
+        for d in scales {
+            if d.abs() > amax_scale {
+                (amax_scale, max_scale) = (d.abs(), d);
             }
         }
     }
-    if sumq2 > 0.0 {
-        header.copy_from_slice(&half::f16::from_f32(sumqx / sumq2).to_le_bytes());
+    -max_scale / 16.0
+}
+
+#[cfg(feature = "cuda")]
+/// One IQ3_KS super-block of `xbl` (its own search) against the row scale `d`, into `out` (102 bytes); its fit chained
+/// onto `sums`, each value's level into `levels`.
+pub(super) fn iq3_ks_super_block(
+    xbl: &[f32],
+    imatrix: Option<&[f32]>,
+    d: f32,
+    out: &mut [u8],
+    sums: &mut (f32, f32),
+    levels: &mut [f32],
+) {
+    out.fill(0);
+    let weights = imatrix.map(|w| row_weights(xbl, w, IQ3_KS_BLOCK));
+    let mut scales = [0f32; QK_K / IQ3_KS_BLOCK];
+    let mut extra = 0u16;
+    iq3_ks_search(xbl, weights.as_deref(), &mut scales, &mut extra);
+    out[..2].copy_from_slice(&extra.to_le_bytes());
+    if d == 0.0 {
+        levels.fill(0.0);
+        return;
     }
+    iq3_ks_encode(xbl, weights.as_deref(), &scales, d, out, sums, levels);
 }
 
 /// One row of `ty`, the imatrix reweighed as `QHelper` does for the type's block size.

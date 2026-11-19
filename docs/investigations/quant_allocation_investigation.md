@@ -275,3 +275,32 @@ Next: Hessian collection in the engine (the EXL3 writer's per-linear Hessians) r
 types (IQ4_KS, IQ4_KSS, IQ3_KS: the row scale has to be fixed before the first block); MoE experts, whose per-expert
 gate/up Hessians would not fit on disk for the 35B (16 MB each, 10,240 of them), so the feedback would run as the
 engine collects, layer by layer, as the EXL3 writer does.
+
+## Run 10 - 2026-11-19 15:20
+
+Question: GPTQ feedback for the row-scaled types (IQ4_KS, IQ4_KSS, IQ3_KS), whose row scale the CPU quantizers fix
+from all of a row's block scales before encoding any block.
+
+Change: each split into a block search and a block encoder, the row functions rebuilt from them (ik parity script 0
+bytes for all three; IQ3_KS now pinned in `the_ik_quantizer_writes_ik_llamas_bytes` too). GPTQ takes a row's scale
+from an ordinary first pass, then per 256 columns searches each block's scale on the columns as fed forward, encodes
+against the fixed row scale (decoding to `d * level`), carries the error on, and refits the row scale at the end.
+
+Qwen3.5-2B, every matrix at the type, mixed calibration (Run 9's), KLD:
+
+```
+type, method                 wiki     docs B   rust
+IQ4_KS none                  0.06277  0.05663  0.04521
+IQ4_KS Hessian weights       0.04354  0.03499  0.02997
+IQ4_KS GPTQ                  0.03170  0.02208  0.01987
+IQ3_KS none                  0.32068  0.27427  0.26983
+IQ3_KS Hessian weights       0.20556  0.15577  0.14163
+IQ3_KS GPTQ                  0.15954  0.09677  0.09432
+```
+
+-27 to -37% (IQ4_KS) and -22 to -38% (IQ3_KS) against the same Hessians as weights only. The row-scaled path runs on
+the CPU a super-block at a time (~90 s for the 2B).
+
+Next: Hessians from the engine instead of transformers (the safetensors loader's linears already collect them, the
+EXL3 writer's path), keyed by GGUF name through `gguf_tensor_names`; for MoE, one pooled Hessian per layer for the
+gate/up experts (they share the layer input; ~16 MB a layer instead of 4 GB) and per-expert ones for down (1 MB each).
