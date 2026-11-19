@@ -874,20 +874,32 @@ impl Gemma4Model {
             input_embeds = layout.splice_embeddings(&input_embeds, &encoder_outputs)?;
         }
 
-        let ple_vocab_limit = self
+        // a model without per-layer inputs (the 26B and 31B) never reads their ids: masking them is device work, and
+        // comparisons a backend runs on the host
+        let ple_input_ids = if self
             .cfg
             .text_config
-            .vocab_size_per_layer_input
-            .unwrap_or(self.cfg.text_config.vocab_size);
-        let ple_zeros = input_ids.zeros_like()?;
-        let ple_inputs_mask = input_ids.lt(ple_vocab_limit as f64)?;
-        let ple_input_ids = ple_inputs_mask.where_cond(input_ids, &ple_zeros)?;
-        let non_image_mask = input_ids.ne(self.cfg.image_token_id as f64)?;
-        let ple_input_ids = non_image_mask.where_cond(&ple_input_ids, &ple_zeros)?;
-        let non_audio_mask = input_ids.ne(self.cfg.audio_token_id as f64)?;
-        let ple_input_ids = non_audio_mask.where_cond(&ple_input_ids, &ple_zeros)?;
-        let non_video_mask = input_ids.ne(self.cfg.video_token_id as f64)?;
-        let ple_input_ids = non_video_mask.where_cond(&ple_input_ids, &ple_zeros)?;
+            .hidden_size_per_layer_input
+            .unwrap_or(0)
+            == 0
+        {
+            input_ids.clone()
+        } else {
+            let ple_vocab_limit = self
+                .cfg
+                .text_config
+                .vocab_size_per_layer_input
+                .unwrap_or(self.cfg.text_config.vocab_size);
+            let ple_zeros = input_ids.zeros_like()?;
+            let ple_inputs_mask = input_ids.lt(ple_vocab_limit as f64)?;
+            let ple_input_ids = ple_inputs_mask.where_cond(input_ids, &ple_zeros)?;
+            let non_image_mask = input_ids.ne(self.cfg.image_token_id as f64)?;
+            let ple_input_ids = non_image_mask.where_cond(&ple_input_ids, &ple_zeros)?;
+            let non_audio_mask = input_ids.ne(self.cfg.audio_token_id as f64)?;
+            let ple_input_ids = non_audio_mask.where_cond(&ple_input_ids, &ple_zeros)?;
+            let non_video_mask = input_ids.ne(self.cfg.video_token_id as f64)?;
+            non_video_mask.where_cond(&ple_input_ids, &ple_zeros)?
+        };
 
         self.language_model.forward_embeds(
             input_ids,

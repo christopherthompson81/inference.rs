@@ -104,13 +104,21 @@ impl MappedCpuExperts {
 /// GGUF experts in a Vulkan device's memory, their blocks copied once: gate and up through the expert matvec, the
 /// activation, then down.
 struct VulkanExperts {
-    // gate, up, down; each `(experts, rows, cols)`
-    stacks: [inference_tensor::vulkan::BlockWeight; 3],
+    gate_up: VulkanGateUp,
+    // `(experts, rows, cols)`
+    down: inference_tensor::vulkan::BlockWeight,
+    act: inference_tensor::vulkan::GluAct,
+}
+
+enum VulkanGateUp {
+    Separate([inference_tensor::vulkan::BlockWeight; 2]),
+    // one stack of each expert's gate rows then its up rows (a GGUF's `ffn_gate_up_exps`), one matvec for both
+    Fused(inference_tensor::vulkan::BlockWeight),
 }
 
 impl VulkanExperts {
     fn forward(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
-        let [gate, up, down] = &self.stacks;
+        let down = &self.down;
         let (tokens, k) = (forward.shape.num_tokens, config.num_experts_per_tok);
         let xs = forward
             .xs_flat
@@ -121,15 +129,28 @@ impl VulkanExperts {
             .to_dtype(inference_tensor::DType::U32)?
             .reshape((tokens, k))?
             .contiguous()?;
-        let (g, u) = (
-            gate.expert_mat_vec(&xs, &ids, k)?,
-            up.expert_mat_vec(&xs, &ids, k)?,
-        );
-        let hidden =
-            match inference_tensor::vulkan::glu(&g, &u, inference_tensor::vulkan::GluAct::Silu)? {
-                Some(hidden) => hidden,
-                None => (inference_tensor::nn::ops::silu(&g)? * u)?,
-            };
+        let (g, u) = match &self.gate_up {
+            VulkanGateUp::Separate([gate, up]) => (
+                gate.expert_mat_vec(&xs, &ids, k)?,
+                up.expert_mat_vec(&xs, &ids, k)?,
+            ),
+            VulkanGateUp::Fused(gate_up) => {
+                let both = gate_up.expert_mat_vec(&xs, &ids, k)?;
+                let rows = both.dim(1)? / 2;
+                (both.narrow(1, 0, rows)?, both.narrow(1, rows, rows)?)
+            }
+        };
+        let hidden = match inference_tensor::vulkan::glu(&g, &u, self.act)? {
+            Some(hidden) => hidden,
+            None => {
+                let g = g.contiguous()?;
+                let act = match self.act {
+                    inference_tensor::vulkan::GluAct::Gelu => g.gelu()?,
+                    _ => inference_tensor::nn::ops::silu(&g)?,
+                };
+                (act * u.contiguous()?)?
+            }
+        };
         let ys = down.expert_mat_vec(&hidden, &ids, 1)?;
         let weights = forward
             .topk_weights
@@ -353,6 +374,17 @@ impl MoEExperts {
         if !cfg.gated {
             return Self::new_ungated(cfg, experts_vb, comm, act);
         }
+        if experts_vb.device().is_vulkan()
+            && let Some(vulkan) = Self::load_vulkan(&experts_vb, comm, act, experts_vb.device())?
+        {
+            return Ok(Self::from_backend(
+                MoEExpertsBackendImpl::Vulkan(Box::new(vulkan)),
+                None,
+                cfg,
+                comm,
+                act,
+            ));
+        }
         if let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &experts_vb, comm)? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, fast.sharded)?;
             return Ok(Self::from_backend(
@@ -438,10 +470,16 @@ impl MoEExperts {
         act: Activation,
         device: &Device,
     ) -> Result<Option<VulkanExperts>> {
-        if !matches!(
-            backends::glu_activation(act),
-            Some(inference_quant::GluActivationType::Silu)
-        ) || comm.world_size() > 1
+        let act = match backends::glu_activation(act) {
+            Some(inference_quant::GluActivationType::Silu) => {
+                inference_tensor::vulkan::GluAct::Silu
+            }
+            Some(inference_quant::GluActivationType::Gelu) => {
+                inference_tensor::vulkan::GluAct::Gelu
+            }
+            _ => return Ok(None),
+        };
+        if comm.world_size() > 1
             || inference_quant::get_immediate_isq().is_some()
             || experts_vb.lora_registry().is_some()
         {
@@ -451,12 +489,13 @@ impl MoEExperts {
             return Ok(None);
         };
         let keys = inference_quant::QuantizedExpertKeys::new(&experts_vb.prefix());
-        let [Some(gate), Some(up), Some(down)] = [&keys.gate, &keys.up, &keys.down].map(|key| {
-            source
-                .mapped_blocks(key)
-                .filter(|blocks| blocks.dims.len() == 3)
-                .and_then(|blocks| Some((blocks.ty.vulkan_block_kind()?, blocks)))
-        }) else {
+        let kinded = |blocks: inference_quant::MappedBlocks| {
+            (blocks.dims.len() == 3)
+                .then_some(())
+                .and_then(|()| Some((blocks.ty.vulkan_block_kind()?, blocks)))
+        };
+        let mapped = |key: &String| source.mapped_blocks(key).and_then(kinded);
+        let Some(down) = mapped(&keys.down) else {
             return Ok(None);
         };
         let upload = |(kind, blocks): (
@@ -470,8 +509,17 @@ impl MoEExperts {
                 blocks.bytes(),
             )
         };
+        let gate_up = match (mapped(&keys.gate), mapped(&keys.up)) {
+            (Some(gate), Some(up)) => VulkanGateUp::Separate([upload(gate)?, upload(up)?]),
+            _ => match source.mapped_gate_up(&keys.gate, &keys.up).and_then(kinded) {
+                Some(gate_up) => VulkanGateUp::Fused(upload(gate_up)?),
+                None => return Ok(None),
+            },
+        };
         Ok(Some(VulkanExperts {
-            stacks: [upload(gate)?, upload(up)?, upload(down)?],
+            gate_up,
+            down: upload(down)?,
+            act,
         }))
     }
 

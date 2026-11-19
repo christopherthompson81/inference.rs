@@ -14,6 +14,14 @@ const VULKAN_PREFILL_TOLERANCE: f32 = 1e-4;
 const VULKAN_MATRIX_CORE_PREFILL_TOLERANCE: f32 = 1e-3;
 // the wide (head 256) build stages keys and values as f16
 const VULKAN_WIDE_PREFILL_TOLERANCE: f32 = 2e-3;
+// a sliding window shorter than the prompt test's context, its start mid-split for every row
+const PREFILL_TEST_WINDOW: usize = 700;
+// the widest heads the prompt attention's f32 kernel and its matrix-core builds take
+const SCALAR_PREFILL_MAX_HEAD: usize = 256;
+const MATRIX_CORE_PREFILL_MAX_HEAD: usize = 512;
+// the decode kernels' f32 sums against the CPU's, and against a plain f32 loop summing in another order
+const VULKAN_DECODE_TOLERANCE: f32 = 1e-4;
+const WINDOW_REFERENCE_TOLERANCE: f32 = 1e-3;
 // a quantized cache's rows against their dequantized values, absolute: decode in f32, and the prompt on matrix cores,
 // which round the dequantized rows to f16 (1.4e-3 seen)
 const QUANT_DECODE_TOLERANCE: f32 = 1e-3;
@@ -221,6 +229,7 @@ fn paged_decode_matches_softmax_attention() -> Result<()> {
                 scale,
                 softcap,
                 sink_t.as_ref(),
+                None,
             )?;
             assert_eq!(got.dtype(), dtype);
             let want = reference_decode(
@@ -269,13 +278,24 @@ fn vulkan_paged_attention_matches_the_cpu() -> Result<()> {
     let Ok(vk) = Device::new_vulkan(0) else {
         return Ok(());
     };
-    for (heads, head) in [(4usize, 64usize), (8, 256), (16, 256)] {
-        vulkan_paged_attention_case(&vk, heads, head)?;
+    // the 512-wide build stages its tiles as f16, so an f32 cache's case takes an f16 rounding
+    for (heads, head, tolerance) in [
+        (4usize, 64usize, VULKAN_DECODE_TOLERANCE),
+        (8, 256, VULKAN_DECODE_TOLERANCE),
+        (16, 256, VULKAN_DECODE_TOLERANCE),
+        (16, 512, VULKAN_WIDE_PREFILL_TOLERANCE),
+    ] {
+        vulkan_paged_attention_case(&vk, heads, head, tolerance)?;
     }
     Ok(())
 }
 
-fn vulkan_paged_attention_case(vk: &Device, heads: usize, head: usize) -> Result<()> {
+fn vulkan_paged_attention_case(
+    vk: &Device,
+    heads: usize,
+    head: usize,
+    tolerance: f32,
+) -> Result<()> {
     const BLOCKS: usize = 6;
     const BLOCK: usize = 4;
     const KV_HEADS: usize = 2;
@@ -323,7 +343,7 @@ fn vulkan_paged_attention_case(vk: &Device, heads: usize, head: usize) -> Result
     let lens = Tensor::new(&[7u32, 5], &Device::Cpu)?;
     let scale = 1.0 / (head as f32).sqrt();
     let want = paged_attention(
-        &q, None, None, &kc, &vc, &tables, &lens, None, 7, scale, NO_SOFTCAP, None,
+        &q, None, None, &kc, &vc, &tables, &lens, None, 7, scale, NO_SOFTCAP, None, None,
     )?;
     let got = paged_attention(
         &q.to_device(vk)?,
@@ -338,6 +358,7 @@ fn vulkan_paged_attention_case(vk: &Device, heads: usize, head: usize) -> Result
         scale,
         NO_SOFTCAP,
         None,
+        None,
     )?;
     for (g, w) in got
         .flatten_all()?
@@ -345,7 +366,10 @@ fn vulkan_paged_attention_case(vk: &Device, heads: usize, head: usize) -> Result
         .iter()
         .zip(want.flatten_all()?.to_vec1::<f32>()?)
     {
-        assert!((g - w).abs() <= 1e-4 * w.abs().max(1.0), "{g} vs {w}");
+        assert!(
+            (g - w).abs() <= tolerance * w.abs().max(1.0),
+            "head {head}: {g} vs {w}"
+        );
     }
     Ok(())
 }
@@ -394,6 +418,7 @@ fn vulkan_paged_attention_splits_long_contexts() -> Result<()> {
         scale,
         NO_SOFTCAP,
         None,
+        None,
     )?;
     let on = |t: &Tensor| t.to_device(&vk);
     let got = paged_attention(
@@ -409,6 +434,7 @@ fn vulkan_paged_attention_splits_long_contexts() -> Result<()> {
         scale,
         NO_SOFTCAP,
         None,
+        None,
     )?;
     for (g, w) in got
         .flatten_all()?
@@ -421,6 +447,101 @@ fn vulkan_paged_attention_splits_long_contexts() -> Result<()> {
     Ok(())
 }
 
+// a sliding window over contexts spanning several of the decode kernel's chunks, its start mid-chunk and mid-block,
+// and one context shorter than the window, through a shuffled block table, against each row scored from the cache
+#[test]
+fn vulkan_paged_decode_keeps_to_its_window() -> Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const BLOCK: usize = 16;
+    const KV_HEADS: usize = 2;
+    const HEADS: usize = 32;
+    const HEAD: usize = 128;
+    const X: usize = 4;
+    const LENS: [usize; 3] = [700, 257, 60];
+    const WINDOW: usize = 100;
+    const MAX_BLOCKS: usize = 44;
+    let blocks = LENS.len() * MAX_BLOCKS;
+    let kc = Tensor::randn(
+        0f32,
+        1.,
+        (blocks, KV_HEADS, HEAD / X, BLOCK, X),
+        &Device::Cpu,
+    )?;
+    let vc = Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD, BLOCK), &Device::Cpu)?;
+    // sequence s takes blocks s, s + 3, ..., in reverse
+    let table: Vec<u32> = (0..LENS.len() as u32)
+        .flat_map(|s| (0..MAX_BLOCKS as u32).rev().map(move |b| 3 * b + s))
+        .collect();
+    let q = Tensor::randn(0f32, 1., (LENS.len(), HEADS, HEAD), &Device::Cpu)?;
+    let scale = 1.0 / (HEAD as f32).sqrt();
+    let on = |t: &Tensor| t.to_device(&vk);
+    let tables = Tensor::from_vec(table.clone(), (LENS.len(), MAX_BLOCKS), &Device::Cpu)?;
+    let lens = Tensor::new(&LENS.map(|l| l as u32), &Device::Cpu)?;
+    let got = paged_attention(
+        &on(&q)?,
+        None,
+        None,
+        &on(&kc)?,
+        &on(&vc)?,
+        &on(&tables)?,
+        &on(&lens)?,
+        None,
+        LENS[0],
+        scale,
+        NO_SOFTCAP,
+        None,
+        Some(WINDOW),
+    )?
+    .to_vec3::<f32>()?;
+    let (k, v, q) = (
+        kc.flatten_all()?.to_vec1::<f32>()?,
+        vc.flatten_all()?.to_vec1::<f32>()?,
+        q.to_vec3::<f32>()?,
+    );
+    for (seq, &len) in LENS.iter().enumerate() {
+        let positions = len.saturating_sub(WINDOW)..len;
+        for head in 0..HEADS {
+            let kvh = head / (HEADS / KV_HEADS);
+            let at = |p: usize| {
+                (
+                    table[seq * MAX_BLOCKS + p / BLOCK] as usize * KV_HEADS + kvh,
+                    p % BLOCK,
+                )
+            };
+            let key = |p: usize, d: usize| {
+                let (bh, off) = at(p);
+                k[((bh * (HEAD / X) + d / X) * BLOCK + off) * X + d % X]
+            };
+            let value = |p: usize, d: usize| {
+                let (bh, off) = at(p);
+                v[(bh * HEAD + d) * BLOCK + off]
+            };
+            let scores: Vec<f32> = positions
+                .clone()
+                .map(|p| (0..HEAD).map(|d| q[seq][head][d] * key(p, d)).sum::<f32>() * scale)
+                .collect();
+            let max = scores.iter().copied().fold(f32::MIN, f32::max);
+            let e: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+            let sum: f32 = e.iter().sum();
+            for (d, &g) in got[seq][head].iter().enumerate() {
+                let want: f32 = positions
+                    .clone()
+                    .zip(&e)
+                    .map(|(p, w)| w * value(p, d))
+                    .sum::<f32>()
+                    / sum;
+                assert!(
+                    (g - want).abs() <= WINDOW_REFERENCE_TOLERANCE * want.abs().max(1.0),
+                    "seq {seq} head {head} dim {d}: {g} vs {want}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 // a prompt chunk's rows against a long cached prefix on Vulkan (f32 and f16 caches), each row causal over its own
 // length, against the CPU kernel scoring each row as its own query: Nemotron-H's shape, a context over several of the kernel's splits ending
 // partway through a block, rows off its workgroup's 8, a shuffled block table
@@ -429,7 +550,7 @@ fn vulkan_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
     // the f32 kernel; its matrix-core twin is the next test
     // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
     unsafe { std::env::set_var(inference_tensor::vulkan::NO_MATRIX_CORES_ENV, "1") };
-    paged_prefill_rows_score_alone(VULKAN_PREFILL_TOLERANCE)
+    paged_prefill_rows_score_alone(VULKAN_PREFILL_TOLERANCE, SCALAR_PREFILL_MAX_HEAD)
 }
 
 // on matrix cores where the device has them, an iGPU's too: Q, K, V and P in f16, as CUDA's flash kernels take them
@@ -437,10 +558,14 @@ fn vulkan_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
 fn vulkan_matrix_core_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
     // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
     unsafe { std::env::set_var(inference_tensor::vulkan::IGPU_MATRIX_CORES_ENV, "1") };
-    paged_prefill_rows_score_alone(VULKAN_MATRIX_CORE_PREFILL_TOLERANCE)
+    paged_prefill_rows_score_alone(
+        VULKAN_MATRIX_CORE_PREFILL_TOLERANCE,
+        MATRIX_CORE_PREFILL_MAX_HEAD,
+    )
 }
 
-fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
+// the widest heads each prompt build takes: the f32 kernel's, and the matrix cores' 512
+fn paged_prefill_rows_score_alone(tolerance: f32, max_head: usize) -> Result<()> {
     let Ok(vk) = Device::new_vulkan(0) else {
         return Ok(());
     };
@@ -449,16 +574,25 @@ fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
         (32usize, 128usize, tolerance),
         (12, 256, VULKAN_WIDE_PREFILL_TOLERANCE.max(tolerance)),
         (16, 256, VULKAN_WIDE_PREFILL_TOLERANCE.max(tolerance)),
+        (16, 512, VULKAN_WIDE_PREFILL_TOLERANCE.max(tolerance)),
     ] {
-        paged_prefill_rows_score_alone_case(&vk, heads, head, tolerance)?;
+        if head > max_head {
+            continue;
+        }
+        for window in [None, Some(PREFILL_TEST_WINDOW)] {
+            paged_prefill_rows_score_alone_case(&vk, heads, head, window, tolerance)?;
+        }
     }
     Ok(())
 }
 
+// a windowed row's reference is Vulkan's decode of it alone (vulkan_paged_decode_keeps_to_its_window checks that
+// against the cache), the CPU kernel taking no window
 fn paged_prefill_rows_score_alone_case(
     vk: &Device,
     heads: usize,
     head: usize,
+    window: Option<usize>,
     tolerance: f32,
 ) -> Result<()> {
     const BLOCK: usize = 16;
@@ -490,23 +624,33 @@ fn paged_prefill_rows_score_alone_case(
         let scale = 1.0 / (head as f32).sqrt();
         let tables = Tensor::from_vec(table.repeat(ROWS), (ROWS, max_blocks), &Device::Cpu)?;
         let lens: Vec<u32> = (0..ROWS).map(|r| (CONTEXT - ROWS + r + 1) as u32).collect();
-        let want = paged_attention(
-            &q,
-            None,
-            None,
-            &kc,
-            &vc,
-            &tables,
-            &Tensor::new(lens.as_slice(), &Device::Cpu)?,
-            None,
-            CONTEXT,
-            scale,
-            NO_SOFTCAP,
-            None,
-        )?;
         let on = |t: &Tensor| t.to_device(vk);
+        let lens = Tensor::new(lens.as_slice(), &Device::Cpu)?;
+        let want = match window {
+            None => paged_attention(
+                &q, None, None, &kc, &vc, &tables, &lens, None, CONTEXT, scale, NO_SOFTCAP, None,
+                None,
+            )?,
+            Some(_) => paged_attention(
+                &on(&q)?,
+                None,
+                None,
+                &on(&kc)?,
+                &on(&vc)?,
+                &on(&tables)?,
+                &on(&lens)?,
+                None,
+                CONTEXT,
+                scale,
+                NO_SOFTCAP,
+                None,
+                window,
+            )?
+            .to_device(&Device::Cpu)?,
+        };
         let got =
             inference_tensor::vulkan::paged_prefill(&inference_tensor::vulkan::PagedPrefill {
+                window,
                 q: &on(&q)?,
                 key_cache: &on(&kc)?,
                 value_cache: &on(&vc)?,
@@ -522,7 +666,7 @@ fn paged_prefill_rows_score_alone_case(
         {
             assert!(
                 (g - w).abs() <= tolerance * w.abs().max(1.0),
-                "{dtype:?} head {head}: {g} vs {w}"
+                "{dtype:?} head {head} window {window:?}: {g} vs {w}"
             );
         }
     }
@@ -616,7 +760,7 @@ fn vulkan_quantized_cache_scores_as_its_dequantized_rows() -> Result<()> {
             &cpu_slots,
         )?;
         let want = paged_attention(
-            &q, None, None, &kc, &vc, &tables, &lens, None, CONTEXT, scale, NO_SOFTCAP, None,
+            &q, None, None, &kc, &vc, &tables, &lens, None, CONTEXT, scale, NO_SOFTCAP, None, None,
         )?;
 
         let rows = |bits| {
@@ -636,6 +780,7 @@ fn vulkan_quantized_cache_scores_as_its_dequantized_rows() -> Result<()> {
         reshape_and_cache(&on(&k)?, &on(&v)?, None, None, &qk, &qv, &on(&cpu_slots)?)?;
         let prefill =
             inference_tensor::vulkan::paged_prefill(&inference_tensor::vulkan::PagedPrefill {
+                window: None,
                 q: &on(&q)?,
                 key_cache: &qk,
                 value_cache: &qv,
@@ -655,6 +800,7 @@ fn vulkan_quantized_cache_scores_as_its_dequantized_rows() -> Result<()> {
             CONTEXT,
             scale,
             NO_SOFTCAP,
+            None,
             None,
         )?;
         for (name, got, tolerance) in [

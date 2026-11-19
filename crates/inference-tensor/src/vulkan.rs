@@ -66,6 +66,24 @@ pub fn ssm_scan_step(step: &ScanStep<'_>) -> Result<Tensor> {
     }
 }
 
+thread_local! {
+    static EXACT_F32_PRODUCTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `f` with this thread's f32 matmuls in f32 throughout: on matrix cores a product's inputs round to f16, which
+/// for an MoE router's logits is enough to move its choice of experts.
+pub fn exact_f32_products<T>(f: impl FnOnce() -> T) -> T {
+    EXACT_F32_PRODUCTS.with(|depth| depth.set(depth.get() + 1));
+    let out = f();
+    EXACT_F32_PRODUCTS.with(|depth| depth.set(depth.get() - 1));
+    out
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) fn exact_f32_products_active() -> bool {
+    EXACT_F32_PRODUCTS.with(|depth| depth.get() > 0)
+}
+
 /// The block types a [`BlockWeight`] takes, as ggml stores them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockKind {
@@ -596,6 +614,8 @@ pub const RANKED_TOP_K: usize = 128;
 /// output is laid out as `q`.
 pub struct PagedPrefill<'a> {
     pub q: &'a Tensor,
+    /// A sliding window: each row attends to its last `window` positions.
+    pub window: Option<usize>,
     pub key_cache: &'a Tensor,
     pub value_cache: &'a Tensor,
     pub block_table: &'a Tensor,
@@ -615,6 +635,8 @@ pub fn paged_prefill(op: &PagedPrefill<'_>) -> Result<Tensor> {
 
 pub struct PagedDecode<'a> {
     pub q: &'a Tensor,
+    /// A sliding window: each sequence attends to its last `window` positions.
+    pub window: Option<usize>,
     pub key_cache: &'a Tensor,
     pub value_cache: &'a Tensor,
     pub block_tables: &'a Tensor,

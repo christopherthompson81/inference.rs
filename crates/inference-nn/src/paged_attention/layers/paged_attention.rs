@@ -616,8 +616,9 @@ struct VulkanPrefill<'a> {
     query_lens: &'a [usize],
     kv_lens: &'a [usize],
     causal: bool,
-    // no window, softcap, sinks, ALiBi or multimodal prefix, and every sequence's rows dense
+    // no softcap, sinks, ALiBi or multimodal prefix, and every sequence's rows dense
     plain: bool,
+    window: Option<usize>,
     scale: f32,
 }
 
@@ -644,6 +645,7 @@ fn vulkan_paged_prefill(call: VulkanPrefill<'_>) -> Result<Option<Tensor>> {
                 block_table: &call.block_tables.get(seq)?,
                 context: kv_len,
                 scale: call.scale,
+                window: call.window,
             })?;
         rows.push(out.transpose(0, 1)?);
     }
@@ -1381,11 +1383,11 @@ impl PagedAttention {
             kv_lens: &kv_lens,
             causal: prefix_causal || single_queries,
             plain: mm_prefix_ranges.is_none()
-                && ctx.sdpa_params.sliding_window.is_none()
                 && ctx.sdpa_params.softcap.is_none()
                 && ctx.sdpa_params.sinks.is_none()
                 && ctx.alibi_slopes.is_none()
                 && query_layout_is_dense,
+            window: ctx.sdpa_params.sliding_window,
             scale: ctx.sdpa_params.softmax_scale,
         })? {
             return prefix_attention_output_layout(output, tensors.attention_mask).map(Some);
@@ -1776,6 +1778,68 @@ impl PagedAttention {
             .transpose(1, 2)
     }
 
+    // a first prompt chunk on Vulkan, written to the cache and attended there by the paged prompt kernel (flash-style,
+    // a window and all) rather than by SDPA's f32 products, whose matrix cores round their inputs to f16 (Gemma 4's
+    // 1024-window layers over a 4K prompt had parted from llama.cpp's text within 21 tokens, matching it without)
+    fn try_vulkan_first_prompt(
+        &self,
+        ctx: &PagedForwardCtx<'_>,
+        tensors: PagedForwardTensors<'_>,
+        key_cache: &mut Option<Tensor>,
+        value_cache: &mut Option<Tensor>,
+        write_cache: bool,
+    ) -> Result<Option<Tensor>> {
+        let dev = tensors.query.device().location();
+        let (Some(kc), Some(vc), Some(block_tables)) = (
+            key_cache.as_mut(),
+            value_cache.as_mut(),
+            ctx.block_tables(&dev),
+        ) else {
+            return Ok(None);
+        };
+        let causal = ctx.flash_params.is_some_and(|params| params.causal);
+        let query_lens = ctx
+            .input_metadata
+            .query_lens
+            .clone()
+            .unwrap_or_else(|| vec![ctx.dims.seq_len; ctx.dims.batch_size]);
+        let plain = ctx.sdpa_params.softcap.is_none()
+            && ctx.sdpa_params.sinks.is_none()
+            && ctx.alibi_slopes.is_none();
+        if !tensors.query.device().is_vulkan()
+            || !write_cache
+            || !causal
+            || !plain
+            || !matches!(kc.dtype(), DType::F32 | DType::F16 | DType::U8)
+            || ctx.has_noncausal_mm_context()
+            || ctx.flash_params.is_some_and(|params| params.packed)
+            || !query_layout_is_dense(&query_lens, ctx.dims.batch_size, ctx.dims.seq_len)
+        {
+            return Ok(None);
+        }
+        let scales = self.cache_scales(kc);
+        write_kv_cache(
+            &tensors.key.transpose(1, 2)?,
+            &tensors.value.transpose(1, 2)?,
+            scales,
+            kc,
+            vc,
+            &ctx.slot_mapping,
+        )?;
+        vulkan_paged_prefill(VulkanPrefill {
+            query: tensors.query,
+            key_cache: kc,
+            value_cache: vc,
+            block_tables,
+            query_lens: &query_lens,
+            kv_lens: &query_lens,
+            causal,
+            plain,
+            window: ctx.sdpa_params.sliding_window,
+            scale: ctx.sdpa_params.softmax_scale,
+        })
+    }
+
     fn try_regular_prompt(
         &self,
         ctx: &PagedForwardCtx<'_>,
@@ -1793,6 +1857,11 @@ impl PagedAttention {
             || matches!(tensors.attention_mask, AttentionMask::None) && !single_token_first_prompt
         {
             return Ok(None);
+        }
+        if let Some(att) =
+            self.try_vulkan_first_prompt(ctx, tensors, key_cache, value_cache, write_cache)?
+        {
+            return Ok(Some(att));
         }
 
         // fattn takes packed sinks as it takes any packed query; Metal's sinks kernel wants it padded per sequence
@@ -1899,8 +1968,8 @@ impl PagedAttention {
                 tensors.attention_mask,
             );
         }
-        // a CUDA build plans for CUDA's kernels; a Vulkan device takes its own paged decode, which has no window
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        // a Vulkan device takes its own paged decode, a sliding window included (the plan is for CUDA's and Metal's
+        // kernels)
         if key_cache_ref.device().is_vulkan() && !ctx.keeps_prompt {
             return self.run_standard_paged_decode(
                 ctx,
@@ -2406,6 +2475,7 @@ impl PagedAttention {
             ctx.sdpa_params.softmax_scale,
             ctx.sdpa_params.softcap.unwrap_or(1.0f32),
             ctx.sdpa_params.sinks.as_ref(),
+            ctx.sdpa_params.sliding_window,
         )
     }
 

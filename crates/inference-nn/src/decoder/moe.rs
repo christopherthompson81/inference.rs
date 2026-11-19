@@ -243,19 +243,22 @@ impl SparseMoe {
     pub(super) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (b_size, seq_len, hidden) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden))?;
-        let logits = match &self.router {
-            Router::Quantized(gate) => gate.forward(&xs_flat)?,
-            Router::Plain { gate, lora } => {
-                let logits = gate.forward(&xs_flat)?;
-                match lora {
-                    Some(site) => {
-                        inference_quant::apply_dynamic_lora_delta(site, &xs_flat, logits)?
+        let logits = inference_tensor::vulkan::exact_f32_products(|| {
+            let logits = match &self.router {
+                Router::Quantized(gate) => gate.forward(&xs_flat)?,
+                Router::Plain { gate, lora } => {
+                    let logits = gate.forward(&xs_flat)?;
+                    match lora {
+                        Some(site) => {
+                            inference_quant::apply_dynamic_lora_delta(site, &xs_flat, logits)?
+                        }
+                        None => logits,
                     }
-                    None => logits,
                 }
-            }
-            Router::F32 { gate, .. } => gate.forward(&xs_flat.to_dtype(DType::F32)?)?,
-        };
+                Router::F32 { gate, .. } => gate.forward(&xs_flat.to_dtype(DType::F32)?)?,
+            };
+            inference_tensor::Result::Ok(logits)
+        })?;
         let (weights, experts) = match self.routing {
             MoeRouting::TopK { k, renormalize } => {
                 let topk = crate::ops::moe_router_topk(

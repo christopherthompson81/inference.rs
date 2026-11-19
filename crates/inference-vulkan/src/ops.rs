@@ -29,6 +29,10 @@ const TILED_MIN: usize = 16;
 const SMALL_TILE: usize = 32;
 // matmul_f32_cm's tile
 const CM_TILE: usize = 128;
+// the shortest inner dimension an f32 product takes to the matrix cores: one 16-wide step. A rank-1 product (a RoPE
+// table's positions times its frequencies) gains nothing there, and f16 holds integers only to 2048, so its positions
+// past that would round (Gemma 4's 262144-row tables, its text parting from llama.cpp's past ~2K tokens)
+const CM_MIN_K: usize = 16;
 const CM_SMALL_TILE: usize = 64;
 // a discrete GPU's matrix-core product with fewer 128 x 128 tiles than this takes 64 x 64 ones (the 3090's 82 SMs ran
 // Sortformer's 684 x 512 x 2048 in 24 workgroups, 10 TFLOPS)
@@ -633,6 +637,16 @@ impl Recorder<'_> {
     }
 
     pub fn matmul_f32(&self, op: &MatMul<'_>) -> Result<()> {
+        self.matmul_f32_on(op, true)
+    }
+
+    /// [`Self::matmul_f32`] off the matrix cores, whose f16 inputs would round an MoE router's logits enough to move
+    /// its choice of experts.
+    pub fn matmul_f32_exact(&self, op: &MatMul<'_>) -> Result<()> {
+        self.matmul_f32_on(op, false)
+    }
+
+    fn matmul_f32_on(&self, op: &MatMul<'_>, matrix_cores: bool) -> Result<()> {
         let count = op.batch * op.m * op.n;
         if count == 0 {
             return Ok(());
@@ -662,7 +676,11 @@ impl Recorder<'_> {
         let tiled = op.m >= TILED_MIN && op.n >= TILED_MIN && op.batch <= MAX_GROUPS_Z;
         // on an iGPU too, unlike the quantized matmuls: f32 has no int8 dot product to lose to (a 780M's Parakeet
         // encoder products ran ~1 TFLOPS tiled, 1.5-2.4 here)
-        if tiled && let Some(coop) = self.context.coop.as_ref() {
+        if tiled
+            && matrix_cores
+            && op.k >= CM_MIN_K
+            && let Some(coop) = self.context.coop.as_ref()
+        {
             let (pipeline, tile) = self.cm_build(op, [&coop.matmul_f32, &coop.matmul_cm64[0]]);
             pipeline.dispatch(
                 self,
@@ -1550,11 +1568,11 @@ pub(crate) const PAGED_WRITE_BINDINGS: usize = 5;
 pub(crate) const PAGED_WRITE_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const PAGED_WRITE_QUANT_PUSH_BYTES: u32 = 9 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
-pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 12 * 4;
+pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 13 * 4;
 pub(crate) const GATED_RMSNORM_BINDINGS: usize = 4;
 pub(crate) const GATED_RMSNORM_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const PAGED_PREFILL_BINDINGS: usize = 5;
-pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 13 * 4;
+pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 14 * 4;
 pub(crate) const HADAMARD_BINDINGS: usize = 2;
 pub(crate) const HADAMARD_PUSH_BYTES: u32 = 3 * 4;
 // the quantizing write's and the Hadamard op's threads a workgroup; the values a rotation (and a scale) covers
@@ -1575,9 +1593,10 @@ const PREFILL_WIDE_LANES: usize = 4;
 const PREFILL_CM_ROWS: usize = 64;
 const PREFILL_CM_HEAD_STEP: usize = 16;
 const PREFILL_CM_MAX_HEAD: usize = 128;
-// paged_prefill_cm_wide's heads past PREFILL_CM_MAX_HEAD, and its query rows a workgroup
+// paged_prefill_cm_wide's heads past PREFILL_CM_MAX_HEAD, and its query rows a workgroup; then its 512-wide build's
 const PREFILL_CM_WIDE_MAX_HEAD: usize = 256;
 const PREFILL_CM_WIDE_ROWS: usize = 32;
+const PREFILL_CM_H512_ROWS: usize = 16;
 const PREFILL_MIN_SPAN: usize = 1024;
 const MAX_PREFILL_SPLITS: usize = 32;
 const PREFILL_PARTIALS_BYTES: usize = 32 << 20;
@@ -1588,7 +1607,10 @@ pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 const PAGED_CHUNK: usize = 64;
 // the shared tiles' head size, sized for occupancy; decode and prefill have wide builds to 256 (Qwen3.5's)
 pub(crate) const MAX_PAGED_NARROW_HEAD: usize = 128;
-const MAX_PAGED_WIDE_HEAD: usize = 256;
+pub(crate) const MAX_PAGED_WIDE_HEAD: usize = 256;
+// paged_decode_h512's head (two dimensions a value thread) and its query heads a kv head
+const PAGED_HEAD_512: usize = 512;
+const PAGED_HEAD_512_GROUP: usize = 8;
 // the partials one piece of a call holds; many queries (an MTP head reading a whole prompt) run in pieces
 const PAGED_PARTIALS_BYTES: usize = 256 << 20;
 const PAGED_TILE: usize = 32;
@@ -1656,6 +1678,8 @@ pub struct PagedWrite<'a> {
 /// `out` is laid out as the queries, and `partials` holds [`PagedPrefill::partials_bytes`].
 pub struct PagedPrefill<'a> {
     pub shape: CacheShape,
+    /// A sliding window: each row attends to its last `window` positions.
+    pub window: Option<usize>,
     pub rows: usize,
     pub heads: usize,
     pub context: usize,
@@ -1691,6 +1715,8 @@ impl PagedPrefill<'_> {
 /// [`PagedDecode::partials_bytes`] of each context chunk's sums.
 pub struct PagedDecode<'a> {
     pub shape: CacheShape,
+    /// A sliding window: each sequence attends to its last `window` positions.
+    pub window: Option<usize>,
     pub seqs: usize,
     pub heads: usize,
     pub max_blocks: usize,
@@ -1839,8 +1865,11 @@ impl Recorder<'_> {
         } else {
             (PREFILL_LANES, PREFILL_ROWS)
         };
+        // past the scalar kernels' widest heads only the matrix cores' 512-wide build takes a prompt
+        let past_scalar = s.head_size > MAX_PAGED_WIDE_HEAD;
         if s.head_size == 0
-            || s.head_size > MAX_PAGED_WIDE_HEAD
+            || (past_scalar
+                && (s.head_size != PAGED_HEAD_512 || self.prefill_cm(s, group).is_none()))
             || !s.head_size.is_multiple_of(lanes * PAGED_X)
             || !s.readable()
             || s.kv_heads == 0
@@ -1873,6 +1902,7 @@ impl Recorder<'_> {
             span,
         ])?);
         bytes.extend(words(&s.bits())?);
+        bytes.extend(words(&[op.window.unwrap_or(0)])?);
         let buffers = [
             op.q.0,
             op.key_cache,
@@ -1920,40 +1950,40 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    // the matrix-core prompt attention and its query rows a workgroup, for heads it tiles (multiples of 16 to 128, or
-    // to 256 at half the rows) and groups within those rows
+    // the matrix-core prompt attention and its query rows a workgroup, for heads it tiles (multiples of 16 to 128, to
+    // 256 at half the rows, or 512 at a quarter) and groups within those rows
     fn prefill_cm(
         &self,
         s: CacheShape,
         group: usize,
     ) -> Option<(&crate::pipeline::Pipeline, usize)> {
-        let wide = s.head_size > PREFILL_CM_MAX_HEAD;
-        let rows = if wide {
-            PREFILL_CM_WIDE_ROWS
-        } else {
-            PREFILL_CM_ROWS
+        use crate::kernels::PrefillWidth as W;
+        let (width, rows) = match s.head_size {
+            h if h <= PREFILL_CM_MAX_HEAD => (W::Narrow, PREFILL_CM_ROWS),
+            h if h <= PREFILL_CM_WIDE_MAX_HEAD => (W::Wide, PREFILL_CM_WIDE_ROWS),
+            PAGED_HEAD_512 => (W::H512, PREFILL_CM_H512_ROWS),
+            _ => return None,
         };
-        if !s.head_size.is_multiple_of(PREFILL_CM_HEAD_STEP)
-            || s.head_size > PREFILL_CM_WIDE_MAX_HEAD
-            || group > rows
-        {
+        if !s.head_size.is_multiple_of(PREFILL_CM_HEAD_STEP) || group > rows {
             return None;
         }
-        Some((self.context.coop.as_ref()?.paged_prefill(s, wide), rows))
+        Some((self.context.coop.as_ref()?.paged_prefill(s, width), rows))
     }
 
     pub fn paged_decode(&self, op: &PagedDecode<'_>) -> Result<()> {
         let s = op.shape;
         let group = op.heads / s.kv_heads.max(1);
         let chunks = op.max_context.div_ceil(PAGED_CHUNK).max(1);
+        let head_512 = s.head_size == PAGED_HEAD_512;
         if s.head_size == 0
-            || s.head_size > MAX_PAGED_WIDE_HEAD
-            || !PAGED_THREADS.is_multiple_of(s.head_size)
+            || (s.head_size > MAX_PAGED_WIDE_HEAD && !head_512)
+            || !(PAGED_THREADS.is_multiple_of(s.head_size) || head_512)
             || !s.readable()
             || s.kv_heads == 0
             || !op.heads.is_multiple_of(s.kv_heads)
             || group > MAX_PAGED_GROUP
-            || group > PAGED_VALUE_HEADS * (PAGED_THREADS / s.head_size)
+            || (head_512 && group > PAGED_HEAD_512_GROUP)
+            || (!head_512 && group > PAGED_VALUE_HEADS * (PAGED_THREADS / s.head_size))
             || !PAGED_TILE.is_multiple_of(s.block_size)
             || !s.block_size.is_multiple_of(PAGED_X)
             || !op.q.1.is_multiple_of(PAGED_X)
@@ -1994,6 +2024,7 @@ impl Recorder<'_> {
                 chunks,
             ])?);
             bytes.extend(words(&s.bits())?);
+            bytes.extend(words(&[op.window.unwrap_or(0)])?);
             self.context.kernels.paged_decode(s).dispatch(
                 self,
                 &buffers.map(|b| b.buffer),

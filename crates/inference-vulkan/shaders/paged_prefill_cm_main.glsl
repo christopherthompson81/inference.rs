@@ -49,6 +49,8 @@ layout(push_constant) uniform PushConstants {
     // a quantized cache's K and V bits
     uint k_bits;
     uint v_bits;
+    // a sliding window: a row attends to its last `window` positions (0 for all of them)
+    uint window;
 } pc;
 
 const uint THREADS = 128;
@@ -170,6 +172,11 @@ void main() {
     uint tile_len = pc.context - pc.rows + last;
     uint start = split * pc.span;
     uint end = min(start + pc.span, tile_len);
+    // the tiles before the workgroup's first row's window hold nothing any of its rows sees
+    uint first_len = pc.context - pc.rows + pos0 + 1;
+    if (pc.window != 0 && first_len > pc.window) {
+        start = max(start, (first_len - pc.window) / BC * BC);
+    }
 
     // Q's rows as f16 A matrices, staged through `keys` half a workgroup at a time
     coopmat<float16_t, gl_ScopeSubgroup, M, M, gl_MatrixUseA> qa[MAX_CHUNKS];
@@ -257,7 +264,7 @@ void main() {
         float tile_max = MASKED;
         [[unroll]] for (uint j = 0; j < BC / 2; j++) {
             uint col = side * (BC / 2) + j;
-            bool valid = p0 + col < limit;
+            bool valid = p0 + col < limit && (pc.window == 0 || p0 + col + pc.window >= len);
             sv[j] = valid ? scores[srow * S_STRIDE + col] * pc.scale : MASKED;
             tile_max = max(tile_max, sv[j]);
         }

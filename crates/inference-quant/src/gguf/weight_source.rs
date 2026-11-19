@@ -1011,6 +1011,36 @@ impl QuantizedWeightSource for GgufWeightSource {
         ))
     }
 
+    fn mapped_gate_up(&self, gate: &str, up: &str) -> Option<crate::MappedBlocks> {
+        let [gate, up] = [gate, up].map(|key| self.weight_name(key));
+        let half = |native: &str| match self.bindings.get(native)? {
+            GgufTensorBinding::Slice {
+                input,
+                dim: 1,
+                start,
+                len,
+            } => Some((input.direct_tensor()?, *start, *len)),
+            _ => None,
+        };
+        let ((source, 0, rows), (up_source, up_start, up_rows)) = (half(&gate)?, half(&up)?) else {
+            return None;
+        };
+        if up_source != source || up_start != rows || up_rows != rows {
+            return None;
+        }
+        let (shard, range) = self.archive.mapped_range(source)?;
+        let ty = self.archive.tensor_info(source).ok()?.dtype().gguf_type()?;
+        let mut dims = self.shapes.get(&gate)?.clone();
+        *dims.get_mut(1)? = 2 * rows;
+        Some(crate::MappedBlocks::new(
+            ty,
+            dims,
+            self.archive.clone(),
+            shard,
+            range,
+        ))
+    }
+
     fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, Vec<usize>)>> {
         let mut layers = Vec::<usize>::new();
         let mut experts = Vec::<usize>::new();

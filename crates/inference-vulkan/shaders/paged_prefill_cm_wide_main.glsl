@@ -1,7 +1,7 @@
-// paged_prefill_cm_main.glsl for heads past its 128 (to 256): a workgroup takes BR = 32 query rows, a pair of its 4
-// subgroups (of 32) 16 of them, each holding half the head's chunks of Q and of the output accumulators, so a
-// subgroup's registers stay those of a 128-wide head. A pair adds its two halves' scores through shared memory and
-// both take the same softmax; the first writes P. Bindings, push constants and partials are paged_prefill_cm's.
+// paged_prefill_cm_main.glsl for heads past its 128 (to 128 WIDE_SPLIT): a team of WIDE_SPLIT of its 4 subgroups (of
+// 32) takes 16 query rows, each holding its part of the head's chunks of Q and of the output accumulators, so a
+// subgroup's registers stay those of a 128-wide head. A team adds its parts' scores through shared memory and all take
+// the same softmax; the first writes P. Bindings, push constants and partials are paged_prefill_cm's.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_control_flow_attributes : require
@@ -47,17 +47,23 @@ layout(push_constant) uniform PushConstants {
     // a quantized cache's K and V bits
     uint k_bits;
     uint v_bits;
+    // a sliding window: a row attends to its last `window` positions (0 for all of them)
+    uint window;
 } pc;
 
+#ifndef WIDE_SPLIT
+#define WIDE_SPLIT 2
+#define WIDE_BC 32
+#endif
 const uint THREADS = 128;
 const uint SUBGROUPS = 4;
 const uint M = 16;
-// query rows a workgroup (M a pair of subgroups), and positions a tile
-const uint BR = SUBGROUPS / 2 * M;
-const uint BC = 32;
-const uint MAX_HEAD = 256;
-// the head's 16-wide chunks a subgroup takes: half of them
-const uint HALF_CHUNKS = MAX_HEAD / M / 2;
+// query rows a workgroup (M a team of subgroups), and positions a tile (at least BR: Q stages through a tile)
+const uint BR = SUBGROUPS / WIDE_SPLIT * M;
+const uint BC = WIDE_BC;
+const uint MAX_HEAD = 128 * WIDE_SPLIT;
+// the head's 16-wide chunks a subgroup takes
+const uint HALF_CHUNKS = MAX_HEAD / M / WIDE_SPLIT;
 // tile row strides, padded against bank conflicts
 const uint KV_STRIDE = MAX_HEAD + 8;
 const uint S_STRIDE = BC + 4;
@@ -150,9 +156,9 @@ void main() {
     uint t = gl_LocalInvocationID.x;
     uint sg = gl_SubgroupID;
     uint lane = gl_SubgroupInvocationID;
-    // a pair of subgroups shares 16 rows, each taking half the head: its chunks from `first`
-    uint pair = sg / 2;
-    uint first = (sg % 2) * HALF_CHUNKS;
+    // a team of subgroups shares 16 rows, each taking a part of the head: its chunks from `first`
+    uint pair = sg / WIDE_SPLIT;
+    uint first = (sg % WIDE_SPLIT) * HALF_CHUNKS;
     uint group = pc.heads / pc.kv_heads;
     uint positions = BR / group;
     uint pos0 = gl_WorkGroupID.z * positions;
@@ -172,6 +178,11 @@ void main() {
     uint tile_len = pc.context - pc.rows + last;
     uint start = split * pc.span;
     uint end = min(start + pc.span, tile_len);
+    // the tiles before the workgroup's first row's window hold nothing any of its rows sees
+    uint first_len = pc.context - pc.rows + pos0 + 1;
+    if (pc.window != 0 && first_len > pc.window) {
+        start = max(start, (first_len - pc.window) / BC * BC);
+    }
 
     // Q's rows (BR, one tile's worth) as f16 A matrices, staged through `keys`
     coopmat<float16_t, gl_ScopeSubgroup, M, M, gl_MatrixUseA> qa[HALF_CHUNKS];
@@ -249,15 +260,18 @@ void main() {
         }
         barrier();
 
-        // both halves' sums: the pair's two subgroups take the same softmax, the first writing P
+        // the parts' sums: the team's subgroups take the same softmax, the first writing P
         uint limit = min(len, end);
         float sv[BC / 2];
         float tile_max = MASKED;
         [[unroll]] for (uint j = 0; j < BC / 2; j++) {
             uint col = side * (BC / 2) + j;
-            bool valid = p0 + col < limit;
+            bool valid = p0 + col < limit && (pc.window == 0 || p0 + col + pc.window >= len);
             uint r = lane / 2;
-            float sum = scores[(pair * 2 * M + r) * S_STRIDE + col] + scores[((pair * 2 + 1) * M + r) * S_STRIDE + col];
+            float sum = 0.0;
+            [[unroll]] for (uint i = 0; i < WIDE_SPLIT; i++) {
+                sum += scores[((pair * WIDE_SPLIT + i) * M + r) * S_STRIDE + col];
+            }
             sv[j] = valid ? sum * pc.scale : MASKED;
             tile_max = max(tile_max, sv[j]);
         }
@@ -272,7 +286,7 @@ void main() {
         [[unroll]] for (uint j = 0; j < BC / 2; j++) {
             float e = sv[j] > MASKED ? exp(sv[j] - m) : 0.0;
             l += e;
-            if (sg % 2 == 0) {
+            if (sg % WIDE_SPLIT == 0) {
                 probs[srow * P_STRIDE + side * (BC / 2) + j] = float16_t(e);
             }
         }
@@ -320,7 +334,7 @@ void main() {
     uint head = kvh * group + srow % group;
     uint stride = hs + 2;
     uint at = ((spos * pc.heads + head) * pc.splits + split) * stride;
-    if (live && side == 0 && sg % 2 == 0) {
+    if (live && side == 0 && sg % WIDE_SPLIT == 0) {
         part[at] = m;
         part[at + 1] = l;
     }
