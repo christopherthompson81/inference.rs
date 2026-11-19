@@ -10,6 +10,10 @@ const QK_K: usize = 256;
 const BLOCK: usize = 32;
 const IQ4_KS_ROW_HEADER: usize = 4;
 const BLOCK_IQ4_KS: usize = QK_K / BLOCK + QK_K / 2;
+const BLOCK_IQ4_KSS: usize = QK_K / 2;
+const BLOCK_IQ4_XS: usize = 2 + 2 + QK_K / 64 + QK_K / 2;
+const F16_ROW_HEADER: usize = 2;
+const BLOCK_IQ3_KS: usize = 102;
 const GGML_F32: u32 = 0;
 const GGML_F16: u32 = 1;
 const GGML_BF16: u32 = 30;
@@ -39,12 +43,103 @@ inference_tensor::kernel_library! {
             out: *mut u8,
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
+
+        /// As `launch_iq4_ks_quantize`, for IQ4_KSS (`terms` its per-value levels; `shifted` unused).
+        fn launch_iq4_kss_quantize(
+            source: *const u8,
+            dtype: i32,
+            x: *mut f32,
+            imatrix: *const f32,
+            rows_per_imatrix: i64,
+            rows: i64,
+            cols: i32,
+            weights: *mut f32,
+            terms: *mut f32,
+            scales: *mut f32,
+            shifted: *mut u8,
+            row_d: *mut f32,
+            out: *mut u8,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// As `launch_iq4_ks_quantize`, for IQ4_XS (no row scale; only `x`, `scales` and `out` are used).
+        fn launch_iq4_xs_quantize(
+            source: *const u8,
+            dtype: i32,
+            x: *mut f32,
+            imatrix: *const f32,
+            rows_per_imatrix: i64,
+            rows: i64,
+            cols: i32,
+            weights: *mut f32,
+            terms: *mut f32,
+            scales: *mut f32,
+            shifted: *mut u8,
+            row_d: *mut f32,
+            out: *mut u8,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        /// As `launch_iq4_ks_quantize`, for IQ3_KS (an f16 row scale; `terms` its per-value levels).
+        fn launch_iq3_ks_quantize(
+            source: *const u8,
+            dtype: i32,
+            x: *mut f32,
+            imatrix: *const f32,
+            rows_per_imatrix: i64,
+            rows: i64,
+            cols: i32,
+            weights: *mut f32,
+            terms: *mut f32,
+            scales: *mut f32,
+            shifted: *mut u8,
+            row_d: *mut f32,
+            out: *mut u8,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+    }
+}
+
+type Launch = unsafe extern "C" fn(
+    *const u8,
+    i32,
+    *mut f32,
+    *const f32,
+    i64,
+    i64,
+    i32,
+    *mut f32,
+    *mut f32,
+    *mut f32,
+    *mut u8,
+    *mut f32,
+    *mut u8,
+    inference_tensor::cuda::cudarc::driver::sys::CUstream,
+) -> i32;
+
+// a type's launcher and the bytes a row of `cols` takes
+fn kernels(ty: GgufType, cols: usize) -> Option<(Launch, usize)> {
+    match ty {
+        GgufType::Iq4Ks => Some((
+            launch_iq4_ks_quantize,
+            IQ4_KS_ROW_HEADER + cols / QK_K * BLOCK_IQ4_KS,
+        )),
+        GgufType::Iq4Kss => Some((
+            launch_iq4_kss_quantize,
+            IQ4_KS_ROW_HEADER + cols / QK_K * BLOCK_IQ4_KSS,
+        )),
+        GgufType::Iq4Xs => Some((launch_iq4_xs_quantize, cols / QK_K * BLOCK_IQ4_XS)),
+        GgufType::Iq3Ks => Some((
+            launch_iq3_ks_quantize,
+            F16_ROW_HEADER + cols / QK_K * BLOCK_IQ3_KS,
+        )),
+        _ => None,
     }
 }
 
 /// Whether [`quantize_rows`] writes `ty` on the GPU.
 pub fn can_quantize(ty: GgufType) -> bool {
-    ty == GgufType::Iq4Ks
+    kernels(ty, QK_K).is_some()
 }
 
 /// Rows of `cols` values (`source`, little-endian of ggml type `dtype`: f32, f16 or bf16) as `ty` on `dev`, the bytes
@@ -67,9 +162,9 @@ pub fn quantize_rows(
         ),
     };
     let values = source.len() / width;
-    if !can_quantize(ty) {
+    let Some((launch, row_bytes)) = kernels(ty, cols) else {
         inference_tensor::bail!("{ty:?} has no GPU quantizer");
-    }
+    };
     if !cols.is_multiple_of(QK_K)
         || !values.is_multiple_of(cols)
         || !source.len().is_multiple_of(width)
@@ -100,7 +195,6 @@ pub fn quantize_rows(
     let scales = unsafe { dev.alloc::<f32>(values / BLOCK)? };
     // SAFETY: as above
     let shifted = unsafe { dev.alloc::<u8>(values / BLOCK)? };
-    let row_bytes = IQ4_KS_ROW_HEADER + cols / QK_K * BLOCK_IQ4_KS;
     // SAFETY: the row kernel writes each row's every byte
     let out = unsafe { dev.alloc::<u8>(rows * row_bytes)? };
     let (srcp, _src) = slice_ptr(&src, 0);
@@ -114,7 +208,7 @@ pub fn quantize_rows(
     let (op, _o) = slice_ptr(&out, 0);
     // SAFETY: the pointers are the live device buffers above, sized as the kernels index them, on this stream
     let status = unsafe {
-        launch_iq4_ks_quantize(
+        launch(
             srcp as *const u8,
             dtype as i32,
             xp as *mut f32,
@@ -135,7 +229,7 @@ pub fn quantize_rows(
     };
     if status != 0 {
         inference_tensor::bail!(
-            "the IQ4_KS quantize kernels failed to launch (CUDA error {status})"
+            "the {ty:?} quantize kernels failed to launch (CUDA error {status})"
         );
     }
     drop((_src, _x, w_ptr, _w, _t, _d, _s, _f, _o));
@@ -149,6 +243,13 @@ mod tests {
 
     use super::*;
     use crate::gguf::iq_quantize;
+
+    const GPU_TYPES: [GgufType; 4] = [
+        GgufType::Iq4Ks,
+        GgufType::Iq4Kss,
+        GgufType::Iq4Xs,
+        GgufType::Iq3Ks,
+    ];
 
     // small values with sparse outliers, a zeroed block and a zeroed row, and a skewed imatrix
     fn layer(rows: usize, cols: usize, seed: u32) -> (Vec<f32>, Vec<f32>) {
@@ -175,110 +276,89 @@ mod tests {
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
 
-    fn iq4_ks_matches_the_cpu_port() -> Result<()> {
+    fn matches_the_cpu_port() -> Result<()> {
         let Device::Cuda(dev) = Device::new_cuda(0)? else {
             unreachable!("a CUDA device")
         };
-        for (rows, cols, seed) in [(64, 4096, 1), (3, 256, 2), (17, 2048, 3)] {
-            let (values, imatrix) = layer(rows, cols, seed);
-            for w in [None, Some(imatrix.as_slice())] {
-                let cpu = iq_quantize::quantize_rows(
-                    GgufType::Iq4Ks,
-                    cols,
-                    &values,
-                    w,
-                    Quantizer::IkLlama,
-                )?;
-                let gpu = quantize_rows(
-                    &dev,
-                    GgufType::Iq4Ks,
-                    cols,
-                    GGML_F32,
-                    &bytes(&values),
-                    w,
-                    rows,
-                )?;
-                let differing = cpu.iter().zip(&gpu).filter(|(a, b)| a != b).count();
-                assert_eq!(
-                    (gpu.len(), differing),
-                    (cpu.len(), 0),
-                    "{rows}x{cols}, imatrix {}",
-                    w.is_some()
-                );
+        for ty in GPU_TYPES {
+            for (rows, cols, seed) in [(64, 4096, 1), (3, 256, 2), (17, 2048, 3)] {
+                let (values, imatrix) = layer(rows, cols, seed);
+                for w in [None, Some(imatrix.as_slice())] {
+                    let cpu = iq_quantize::quantize_rows(ty, cols, &values, w, Quantizer::IkLlama)?;
+                    let gpu = quantize_rows(&dev, ty, cols, GGML_F32, &bytes(&values), w, rows)?;
+                    let differing = cpu.iter().zip(&gpu).filter(|(a, b)| a != b).count();
+                    assert_eq!(
+                        (gpu.len(), differing),
+                        (cpu.len(), 0),
+                        "{ty:?} {rows}x{cols}, imatrix {}",
+                        w.is_some()
+                    );
+                }
             }
         }
         Ok(())
     }
 
     // three experts of 8 rows in one call, each weighed by its own imatrix slice, as the CPU writes them one by one
-    fn iq4_ks_weighs_each_expert_by_its_slice() -> Result<()> {
+    fn weighs_each_expert_by_its_slice() -> Result<()> {
         let Device::Cuda(dev) = Device::new_cuda(0)? else {
             unreachable!("a CUDA device")
         };
-        let (rows, cols, experts) = (8, 512, 3);
-        let (values, _) = layer(rows * experts, cols, 4);
-        let imatrix: Vec<f32> = (0..experts)
-            .flat_map(|e| layer(1, cols, 10 + e as u32).1)
-            .collect();
-        let mut cpu = Vec::new();
-        for e in 0..experts {
-            cpu.extend(iq_quantize::quantize_rows(
-                GgufType::Iq4Ks,
+        for ty in GPU_TYPES {
+            let (rows, cols, experts) = (8, 512, 3);
+            let (values, _) = layer(rows * experts, cols, 4);
+            let imatrix: Vec<f32> = (0..experts)
+                .flat_map(|e| layer(1, cols, 10 + e as u32).1)
+                .collect();
+            let mut cpu = Vec::new();
+            for e in 0..experts {
+                cpu.extend(iq_quantize::quantize_rows(
+                    ty,
+                    cols,
+                    &values[e * rows * cols..(e + 1) * rows * cols],
+                    Some(&imatrix[e * cols..(e + 1) * cols]),
+                    Quantizer::IkLlama,
+                )?);
+            }
+            let gpu = quantize_rows(
+                &dev,
+                ty,
                 cols,
-                &values[e * rows * cols..(e + 1) * rows * cols],
-                Some(&imatrix[e * cols..(e + 1) * cols]),
-                Quantizer::IkLlama,
-            )?);
+                GGML_F32,
+                &bytes(&values),
+                Some(&imatrix),
+                rows,
+            )?;
+            assert!(cpu == gpu, "{ty:?}");
         }
-        let gpu = quantize_rows(
-            &dev,
-            GgufType::Iq4Ks,
-            cols,
-            GGML_F32,
-            &bytes(&values),
-            Some(&imatrix),
-            rows,
-        )?;
-        assert!(cpu == gpu);
         Ok(())
     }
 
     // bf16 rows widen on the GPU to the f32 the CPU quantizes
-    fn iq4_ks_reads_bf16_rows() -> Result<()> {
+    fn reads_bf16_rows() -> Result<()> {
         let Device::Cuda(dev) = Device::new_cuda(0)? else {
             unreachable!("a CUDA device")
         };
-        let (rows, cols) = (5, 512);
-        let (values, imatrix) = layer(rows, cols, 5);
-        let halves: Vec<half::bf16> = values.iter().map(|&v| half::bf16::from_f32(v)).collect();
-        let widened: Vec<f32> = halves.iter().map(|h| h.to_f32()).collect();
-        let source: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
-        let cpu = iq_quantize::quantize_rows(
-            GgufType::Iq4Ks,
-            cols,
-            &widened,
-            Some(&imatrix),
-            Quantizer::IkLlama,
-        )?;
-        let gpu = quantize_rows(
-            &dev,
-            GgufType::Iq4Ks,
-            cols,
-            GGML_BF16,
-            &source,
-            Some(&imatrix),
-            rows,
-        )?;
-        assert!(cpu == gpu);
+        for ty in GPU_TYPES {
+            let (rows, cols) = (5, 512);
+            let (values, imatrix) = layer(rows, cols, 5);
+            let halves: Vec<half::bf16> = values.iter().map(|&v| half::bf16::from_f32(v)).collect();
+            let widened: Vec<f32> = halves.iter().map(|h| h.to_f32()).collect();
+            let source: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
+            let cpu =
+                iq_quantize::quantize_rows(ty, cols, &widened, Some(&imatrix), Quantizer::IkLlama)?;
+            let gpu = quantize_rows(&dev, ty, cols, GGML_BF16, &source, Some(&imatrix), rows)?;
+            assert!(cpu == gpu, "{ty:?}");
+        }
         Ok(())
     }
 
     inference_tensor::gpu_cases!(
         cuda_cases,
         [
-            iq4_ks_matches_the_cpu_port,
-            iq4_ks_weighs_each_expert_by_its_slice,
-            iq4_ks_reads_bf16_rows
+            matches_the_cpu_port,
+            weighs_each_expert_by_its_slice,
+            reads_bf16_rows
         ]
     );
 }

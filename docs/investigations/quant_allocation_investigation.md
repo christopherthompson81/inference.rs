@@ -170,3 +170,61 @@ Every version wrote the CPU's bytes: GPU tests compare f32, multi-expert and bf1
 four-layer outputs `cmp` equal. A whole expert group drops from ~13 min to ~45 s; `--cpu` keeps the CPU path.
 
 Next: the same for IQ4_XS, IQ4_KSS, IQ3_KS and the K-quants the sweeps use, then rerun Run 5's measurements.
+
+## Run 7 - 2026-11-19 13:10
+
+Question: the other types the sweeps quantize on expert tensors (IQ4_KSS, IQ4_XS, IQ3_KS) on the GPU, byte-exact.
+
+Shared parts moved to `gguf_quantize/iq4k_common.cuh` (tables, rounding, f16 bits, weights, row scale). Per type:
+
+- IQ4_KSS: a thread per block for the search (one serial fit chain per try, the parity pruning inside it); the row
+  refit is a fused chain across the row, so the block pass stores each value's level and a row pass chains them in the
+  CPU's order. Matched the CPU on the first run.
+- IQ4_XS: no row scale; a thread per block for weights (raw imatrix, sigma2 summed per lane), the search from both
+  codebook ends and the step-by-step refinement; a thread per super-block for the f16 scale and indices. First run:
+  1,001 bytes differing, all in the f16 scales' low byte (CPU 0x02af, GPU 0x0200): the library builds with
+  `--use_fast_math`, whose flush-to-zero makes `__float2half_rn` drop subnormal f16 results. A bit-level conversion
+  (the `half` crate's) fixed it; IQ3_KS's f16 row scale uses it too.
+- IQ3_KS: a warp per block as IQ4_KS (8-value codebooks), the row's f16 scale, a thread per super-block for the packed
+  bits (its eight blocks share bytes) and levels, the row refit chained per row. Matched on the first run.
+
+```
+four layers of gate/up experts, imatrix   CPU (16 threads)   GPU     identical
+IQ4_KS                                    58 s               4.6 s   yes
+IQ4_KSS                                   188 s              13.1 s  yes
+IQ4_XS                                    61 s               3.4 s   yes
+IQ3_KS                                    44 s               5.9 s   yes
+```
+
+GPU tests compare all four with the CPU ports on f32 rows (plain and imatrix, three shapes, a zeroed block and row),
+per-expert imatrix slices and bf16 rows. K-quants stay on the CPU: the sweeps use them only on the small non-expert
+groups.
+
+## Run 8 - 2026-11-19 13:45
+
+Question: Run 5's stopped measurements, now that the experts quantize on the GPU; does allocation beat R1?
+
+The two IQ4_KSS expert points and the allocated recipes as overlays over the base (six points in 13.4 min with GPU
+quantizing; two more in 5.6 min):
+
+```
+point                                   bytes            KLD predicted  KLD measured  p99     same top
+base (R0)                               20,273,121,216                  0.01825       0.1835  94.38%
+exps_gate_up IQ4_KSS                    19,628,246,976                  0.02023       0.2026  93.83%
+exps_down IQ4_KSS                       20,015,171,520                  0.01962       0.1942  94.27%
+allocated at the base's size            20,158,302,144   0.01656        0.01686       0.1816  94.61%
+R1 (hand-made, as an overlay)           19,968,231,360                  0.01995       0.2086  94.15%
+allocated at R1's size                  19,904,022,464   0.01704        0.01829       0.1968  94.42%
+allocated at 19.5 GB                    19,490,736,064   0.01945        0.02006       0.2160  93.71%
+allocated at 19.5 GB, IQ4_KSS down      19,436,922,816   0.01896        0.02019       0.2023  94.03%
+allocated at 18.5 GB (IQ3_KS down)      18,399,315,904   0.02799        0.02947       0.3178  92.78%
+```
+
+(R1's size differs from its 19.50 GB file of Run 17: this base keeps the MTP layer's experts at IQ4_XS.)
+
+Findings: at R1's size the allocation measures 8% lower KLD (0.0183 against 0.0200), with a lower p99 and a higher
+top-1 match. Predictions ran 2-5% under the measurement for the first four recipes and 6-7% for the two with Q4_K
+embeddings: Q4_K `token_embd` cost +0.0005 alone but +0.0014 on top of the 20.27 GB recipe (compounding, or partly
+noise at ~0.0003). IQ4_KSS gate/up was the cheapest single saving per byte (+0.0020 for 645 MB), but IQ4_KSS down
+inside the 19.5 GB recipe measured no better than without it. A pick should be measured before it is trusted; with
+GPU quantizing that is ~1-3 min a recipe.
