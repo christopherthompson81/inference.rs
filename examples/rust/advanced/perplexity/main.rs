@@ -29,6 +29,9 @@ const KLD_LOG_PROB_FLOOR: f32 = -16.0;
 // a base row keeps log-probs this far below its top as u16 steps between them (llama-perplexity's encoding)
 const KLD_BASE_RANGE: f32 = 16.0;
 const KLD_BASE_STEPS: f32 = 65535.0;
+// llama-perplexity's chunking for a base written here: `-c 512 --chunks 40`, as the recipe investigations use
+const DEFAULT_KLD_CTX: usize = 512;
+const DEFAULT_KLD_CHUNKS: usize = 40;
 // a row's logprob of its next token, from our logits against the engine's own, agrees to this
 const ROW_CHECK_TOLERANCE: f32 = 1e-3;
 
@@ -99,6 +102,19 @@ struct Args {
     /// can be scored against this one.
     #[arg(long, requires = "kld_base")]
     kld_base_out: Option<PathBuf>,
+
+    /// Write a new `llama-perplexity --kl-divergence-base` file from this model over `--file`: its first
+    /// `--kld-chunks` chunks of `--kld-ctx` tokens, tokenized as llama-perplexity does, each chunk's second half scored.
+    #[arg(long, conflicts_with = "kld_base")]
+    kld_base_write: Option<PathBuf>,
+
+    /// With `--kld-base-write`, the tokens per chunk.
+    #[arg(long, default_value_t = DEFAULT_KLD_CTX)]
+    kld_ctx: usize,
+
+    /// With `--kld-base-write`, the chunks scored (fewer when the text runs out).
+    #[arg(long, default_value_t = DEFAULT_KLD_CHUNKS)]
+    kld_chunks: usize,
 }
 
 fn tokenize(text: String, add_special_tokens: bool) -> TokenizeRequest {
@@ -187,6 +203,10 @@ async fn main() -> Result<()> {
 
     if let Some(base) = &args.kld_base {
         return kl_divergence(&model, base, args.kld_base_out.as_deref()).await;
+    }
+    if let Some(out) = &args.kld_base_write {
+        let text = read_to_string(&args.file)?;
+        return write_kld_base(&model, text, args.kld_ctx, args.kld_chunks, out).await;
     }
     let text = read_to_string(&args.file)?;
     if let Some(ctx) = args.llama_cpp_ctx {
@@ -317,6 +337,28 @@ fn chunk_prompt(chunk: &[u32], bos: Option<u32>) -> Vec<u32> {
     prompt
 }
 
+// `f` over `rows` on every core, the results in row order: a row walks the whole vocabulary, which one thread made
+// the bottleneck of a scoring run
+fn parallel_rows<T: Send>(rows: std::ops::Range<usize>, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let per = rows.len().div_ceil(threads).max(1);
+    let starts: Vec<usize> = rows.clone().step_by(per).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = starts
+            .into_iter()
+            .map(|start| {
+                let f = &f;
+                let end = (start + per).min(rows.end);
+                scope.spawn(move || (start..end).map(f).collect::<Vec<T>>())
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("a scoring thread panicked"))
+            .collect()
+    })
+}
+
 fn read_i32(reader: &mut impl Read) -> Result<i32> {
     let mut bytes = [0u8; 4];
     reader.read_exact(&mut bytes)?;
@@ -400,6 +442,66 @@ fn base_record(logits: &[f32], n_vocab: usize) -> Vec<u8> {
     record
 }
 
+// a new base over `text` as llama-perplexity writes one: the text tokenized with its special tokens, cut into
+// `n_ctx`-token chunks, each chunk's second half recorded
+async fn write_kld_base(
+    model: &Model,
+    text: String,
+    n_ctx: usize,
+    chunks: usize,
+    out: &Path,
+) -> Result<()> {
+    anyhow::ensure!(
+        n_ctx >= MIN_LLAMA_CPP_CTX,
+        "a chunk needs at least {MIN_LLAMA_CPP_CTX} tokens"
+    );
+    let tokens = model.tokenize(tokenize(text, true)).await?.tokens;
+    let n_chunk = chunks.min(tokens.len() / n_ctx);
+    anyhow::ensure!(
+        n_chunk > 0,
+        "the text holds {} tokens, less than one chunk",
+        tokens.len()
+    );
+    let tokens = &tokens[..n_chunk * n_ctx];
+    let first = n_ctx / 2;
+    let bos = added_bos(model).await?;
+    let mut writer = None;
+    for (c, chunk) in tokens.chunks(n_ctx).enumerate() {
+        let scored = model
+            .prompt_logits(PromptLogitsRequest {
+                model: None,
+                prompt: PromptInput::Tokens(chunk_prompt(chunk, bos)),
+                output: LogitsOutput::Logits,
+                audio: Vec::new(),
+            })
+            .await?;
+        let logits = scored.logits.context("the engine returned no logits")?;
+        let vocab = scored.vocab_size;
+        if writer.is_none() {
+            let mut w = BufWriter::new(File::create(out)?);
+            w.write_all(KLD_BASE_MAGIC)?;
+            for v in [n_ctx, vocab, n_chunk] {
+                w.write_all(&i32::try_from(v)?.to_le_bytes())?;
+            }
+            for &token in tokens {
+                w.write_all(&i32::try_from(token)?.to_le_bytes())?;
+            }
+            writer = Some(w);
+        }
+        let w = writer.as_mut().expect("opened on the first chunk");
+        let records = parallel_rows(first..n_ctx - 1, |row| {
+            base_record(&logits[row * vocab..][..vocab], vocab)
+        });
+        for record in records {
+            w.write_all(&record)?;
+        }
+        println!("chunk {}/{n_chunk} recorded", c + 1);
+    }
+    writer.expect("at least one chunk").flush()?;
+    println!("wrote {} chunks of {n_ctx} to {}", n_chunk, out.display());
+    Ok(())
+}
+
 async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result<()> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut magic = [0u8; 8];
@@ -433,7 +535,7 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
     let first = n_ctx / 2;
     let bos = added_bos(model).await?;
     let record = 2 * n_vocab.div_ceil(2) + 4;
-    let mut bytes = vec![0u8; record * 2];
+    let record_bytes = record * 2;
     let (mut klds, mut nll, mut nll_base, mut same_top) = (Vec::new(), 0.0, 0.0, 0usize);
     for (c, chunk) in tokens.chunks(n_ctx).enumerate() {
         let start = Instant::now();
@@ -451,13 +553,20 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
             vocab <= n_vocab,
             "our vocab ({vocab}) is wider than the base's ({n_vocab})"
         );
-        for row in first..n_ctx - 1 {
-            reader.read_exact(&mut bytes)?;
-            let next = chunk[row + 1] as usize;
+        // the chunk's base records read in order, then its rows scored across the cores (each row as before, the
+        // totals still summed in row order)
+        let rows = first..n_ctx - 1;
+        let mut records = vec![0u8; record_bytes * rows.len()];
+        reader.read_exact(&mut records)?;
+        let scores = parallel_rows(rows.clone(), |row| {
+            let record = &records[(row - first) * record_bytes..][..record_bytes];
             let row_logits = &logits[row * vocab..][..vocab];
-            let (kld, logprob, base_logprob, same) = score_row(row_logits, &bytes, next);
-            if let Some(writer) = writer.as_mut() {
-                writer.write_all(&base_record(row_logits, n_vocab))?;
+            let out = writer.is_some().then(|| base_record(row_logits, n_vocab));
+            (score_row(row_logits, record, chunk[row + 1] as usize), out)
+        });
+        for (row, ((kld, logprob, base_logprob, same), out)) in rows.zip(scores) {
+            if let (Some(writer), Some(out)) = (writer.as_mut(), out) {
+                writer.write_all(&out)?;
             }
             if c == 0 && row == first {
                 let engine =
