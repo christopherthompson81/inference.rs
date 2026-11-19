@@ -70,6 +70,21 @@ const uint RELU2 = 29;
 const uint GELU_ERF = 30;
 #include "glu_act.glsl"
 
+// Rust's powf: GLSL's pow leaves a negative base (and 0^0) undefined, where an integer exponent's parity sets the sign
+float powf(float x, float e) {
+    if (e == 0.0) {
+        return 1.0;
+    }
+    float r = pow(abs(x), e);
+    if (x >= 0.0) {
+        return r;
+    }
+    if (e != floor(e)) {
+        return uintBitsToFloat(0x7fc00000u);
+    }
+    return mod(e, 2.0) == 1.0 ? -r : r;
+}
+
 float apply(float x, float y) {
     switch (pc.op) {
         case COPY: return x;
@@ -91,7 +106,7 @@ float apply(float x, float y) {
         case TANH: return tanh(x);
         case ABS: return abs(x);
         case AFFINE: return x * pc.p0 + pc.p1;
-        case POWF: return pow(x, pc.p0);
+        case POWF: return powf(x, pc.p0);
         case SIN: return sin(x);
         case COS: return cos(x);
         case FILL: return pc.p0;

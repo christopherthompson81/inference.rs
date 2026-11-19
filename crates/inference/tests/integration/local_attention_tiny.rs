@@ -10,6 +10,7 @@ use inference_models_gemma::gemma4::{Gemma4Model, config::Gemma4Config};
 use inference_models_llama::llama4::{Llama4Config, Llama4Model};
 use inference_models_other::gpt_oss;
 use inference_nn::paged_attention::AttentionImplementation;
+use inference_tensor::{DType, Device, Tensor};
 
 #[path = "../support/recording.rs"]
 mod recording;
@@ -38,6 +39,8 @@ const EAGLE3_N_PREDICT: usize = 2;
 // sliding, sliding, sliding, global: the 31B's pattern cut to four layers
 const GEMMA4_LAYERS: usize = 4;
 const GEMMA4_HIDDEN: usize = 64;
+const ASSISTANT_HIDDEN: usize = 32;
+const ASSISTANT_WEIGHT_STD: f32 = 0.1;
 const GPT_OSS_HIDDEN: usize = 64;
 const GPT_OSS_EXPERT_INTER: usize = 64;
 const GPT_OSS_EXPERTS: usize = 2;
@@ -533,6 +536,124 @@ async fn a_gemma4_eagle3_drafter_keeps_paged_output() -> anyhow::Result<()> {
         .map(|m| m.drafts)
         .sum();
     anyhow::ensure!(drafts > 0, "the EAGLE-3 drafter never drafted");
+    ensure_close(&actual, &plain)
+}
+
+// A Gemma 4 assistant drafter (gemma4_assistant: its layers read the target's last sliding and global caches) in
+// miniature, its logits from the whole tied head (`use_ordered_embeddings` off, as the 26B-A4B's and 31B's are)
+fn tiny_gemma4_assistant() -> anyhow::Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir()?;
+    let config = serde_json::json!({
+        "architectures": ["Gemma4AssistantForCausalLM"],
+        "model_type": "gemma4_assistant",
+        "backbone_hidden_size": GEMMA4_HIDDEN,
+        "num_centroids": 2,
+        "centroid_intermediate_top_k": 1,
+        "use_ordered_embeddings": false,
+        "tie_word_embeddings": true,
+        "dtype": "bfloat16",
+        "text_config": {
+            "attention_bias": false,
+            "attention_k_eq_v": true,
+            "enable_moe_block": false,
+            "global_head_dim": HEAD_DIM,
+            "head_dim": HEAD_DIM,
+            "hidden_activation": "gelu_pytorch_tanh",
+            "hidden_size": ASSISTANT_HIDDEN,
+            "hidden_size_per_layer_input": 0,
+            "intermediate_size": 2 * ASSISTANT_HIDDEN,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "max_position_embeddings": 512,
+            "num_attention_heads": 2,
+            "num_global_key_value_heads": 1,
+            "num_hidden_layers": 2,
+            "num_key_value_heads": 1,
+            "num_kv_shared_layers": 2,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {
+                "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1000000.0, "rope_type": "proportional"},
+                "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+            },
+            "sliding_window": WINDOW,
+            "tie_word_embeddings": true,
+            "use_double_wide_mlp": false,
+            "vocab_size": VOCAB,
+            "vocab_size_per_layer_input": 0
+        }
+    });
+    std::fs::write(dir.path().join("config.json"), config.to_string())?;
+    let random = |dims: &[usize]| -> anyhow::Result<Tensor> {
+        Ok(Tensor::randn(0f32, ASSISTANT_WEIGHT_STD, dims, &Device::Cpu)?.to_dtype(DType::BF16)?)
+    };
+    let ones = |dims: &[usize]| Tensor::ones(dims, DType::BF16, &Device::Cpu);
+    let (hidden, inter, q) = (ASSISTANT_HIDDEN, 2 * ASSISTANT_HIDDEN, 2 * HEAD_DIM);
+    let mut tensors = HashMap::from([
+        (
+            "model.embed_tokens.weight".to_string(),
+            random(&[VOCAB, hidden])?,
+        ),
+        ("model.norm.weight".to_string(), ones(&[hidden])?),
+        (
+            "pre_projection.weight".to_string(),
+            random(&[hidden, 2 * GEMMA4_HIDDEN])?,
+        ),
+        (
+            "post_projection.weight".to_string(),
+            random(&[GEMMA4_HIDDEN, hidden])?,
+        ),
+    ]);
+    for layer in 0..2 {
+        let at = |name: &str| format!("model.layers.{layer}.{name}");
+        for (name, dims) in [
+            ("self_attn.q_proj.weight", vec![q, hidden]),
+            ("self_attn.o_proj.weight", vec![hidden, q]),
+            ("mlp.gate_proj.weight", vec![inter, hidden]),
+            ("mlp.up_proj.weight", vec![inter, hidden]),
+            ("mlp.down_proj.weight", vec![hidden, inter]),
+        ] {
+            tensors.insert(at(name), random(&dims)?);
+        }
+        for norm in [
+            "input_layernorm",
+            "post_attention_layernorm",
+            "pre_feedforward_layernorm",
+            "post_feedforward_layernorm",
+        ] {
+            tensors.insert(at(&format!("{norm}.weight")), ones(&[hidden])?);
+        }
+        tensors.insert(at("self_attn.q_norm.weight"), ones(&[HEAD_DIM])?);
+        tensors.insert(at("layer_scalar"), ones(&[1])?);
+    }
+    inference_tensor::safetensors::save(&tensors, dir.path().join("model.safetensors"))?;
+    Ok(dir)
+}
+
+// A Gemma 4 assistant drafts, and paged decode with it matches decode without it.
+#[tokio::test]
+async fn a_gemma4_assistant_drafter_keeps_paged_output() -> anyhow::Result<()> {
+    let checkpoint = tiny_gemma4()?;
+    let drafter = tiny_gemma4_assistant()?;
+    let build = |mtp: bool| {
+        let builder = MultimodalModelBuilder::new(checkpoint.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_paged_attn(paged_cache());
+        let builder = if mtp {
+            builder.with_mtp_model(drafter.path().to_string_lossy(), Some(EAGLE3_N_PREDICT))
+        } else {
+            builder
+        };
+        builder.build()
+    };
+    let plain = traces(&build(false).await?, Run::Paged).await?;
+    let drafting = build(true).await?;
+    let actual = traces(&drafting, Run::Paged).await?;
+    let drafts: usize = drafting
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    anyhow::ensure!(drafts > 0, "the Gemma 4 assistant never drafted");
     ensure_close(&actual, &plain)
 }
 

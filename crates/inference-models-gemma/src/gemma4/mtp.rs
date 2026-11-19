@@ -6,8 +6,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use inference_quant::ShardedVarBuilder;
-use inference_tensor::nn::Linear;
+use inference_quant::{
+    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, ShardedVarBuilder, UnquantLinear,
+};
 use inference_tensor::{D, DType, Device, Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
@@ -111,9 +112,6 @@ impl Gemma4MtpRuntime {
         if !assistant_cfg.tie_word_embeddings {
             inference_tensor::bail!("MTP currently expects tied assistant word embeddings.");
         }
-        if !assistant_cfg.use_ordered_embeddings {
-            inference_tensor::bail!("MTP currently requires ordered centroid embeddings.");
-        }
 
         let mut weight_paths = fs::read_dir(&path)
             .map_err(|e| {
@@ -149,7 +147,14 @@ impl Gemma4MtpRuntime {
             Some(n) => n,
             None => read_generation_n_predict(&path)?.unwrap_or(6),
         };
-        let model = Gemma4MtpModel::new(&assistant_cfg, target_cfg, vb, device, mapper)?;
+        let model = Gemma4MtpModel::new(
+            &assistant_cfg,
+            target_cfg,
+            config.drafter_isq,
+            vb,
+            device,
+            mapper,
+        )?;
         Ok(Self { model, n_predict })
     }
 
@@ -363,12 +368,17 @@ fn read_generation_n_predict(path: &Path) -> Result<Option<usize>> {
 }
 
 struct Gemma4MtpModel {
-    pre_projection: Linear,
-    post_projection: Linear,
+    pre_projection: Arc<dyn QuantMethod>,
+    post_projection: Arc<dyn QuantMethod>,
     layers: Vec<Gemma4MtpDecoderLayer>,
     norm: Gemma4MtpRmsNorm,
     lm_head_weight: Tensor,
-    masked_embedding: Gemma4MtpMaskedEmbedding,
+    // the whole tied head as a projection, where no centroid head narrows the logits
+    lm_head: Option<Arc<dyn QuantMethod>>,
+    // the activations' dtype: f32 over quantized projections, else the checkpoint's
+    act_dtype: DType,
+    // the centroid head over ordered embeddings; without it the logits are the whole tied head's (HF's fallback)
+    masked_embedding: Option<Gemma4MtpMaskedEmbedding>,
     device: Device,
 }
 
@@ -406,21 +416,25 @@ impl Gemma4MtpModel {
     fn new(
         cfg: &Gemma4AssistantConfig,
         target_cfg: &Gemma4TextConfig,
+        isq: Option<IsqType>,
         vb: ShardedVarBuilder,
         device: &Device,
         mapper: &dyn DeviceMapper,
     ) -> Result<Self> {
         let text_cfg = &cfg.text_config;
+        let vb_dtype = vb.dtype();
         let donor_indices = donor_indices(target_cfg, text_cfg)?;
 
         let pre_projection = linear_no_bias(
             2 * cfg.backbone_hidden_size,
             text_cfg.hidden_size,
+            isq,
             vb.pp("pre_projection"),
         )?;
         let post_projection = linear_no_bias(
             text_cfg.hidden_size,
             cfg.backbone_hidden_size,
+            isq,
             vb.pp("post_projection"),
         )?;
 
@@ -439,25 +453,36 @@ impl Gemma4MtpModel {
                 text_cfg,
                 layer_idx,
                 donor_idx,
+                isq,
                 vb_l.pp(layer_idx),
                 device,
                 mapper,
             )?);
         }
 
-        let masked_embedding = Gemma4MtpMaskedEmbedding::new(
-            text_cfg.hidden_size,
-            text_cfg.vocab_size,
-            cfg.num_centroids,
-            cfg.centroid_intermediate_top_k,
-            vb.pp("masked_embedding"),
-        )?;
+        let masked_embedding = cfg
+            .use_ordered_embeddings
+            .then(|| {
+                Gemma4MtpMaskedEmbedding::new(
+                    text_cfg.hidden_size,
+                    text_cfg.vocab_size,
+                    cfg.num_centroids,
+                    cfg.centroid_intermediate_top_k,
+                    vb.pp("masked_embedding"),
+                )
+            })
+            .transpose()?;
 
         Ok(Self {
             pre_projection,
             post_projection,
             layers,
             norm,
+            lm_head: masked_embedding
+                .is_none()
+                .then(|| at_isq(lm_head_weight.clone(), isq, device))
+                .transpose()?,
+            act_dtype: if isq.is_some() { DType::F32 } else { vb_dtype },
             lm_head_weight,
             masked_embedding,
             device: device.clone(),
@@ -475,8 +500,15 @@ impl Gemma4MtpModel {
         positions: &[usize],
         cache: &Gemma4MtpStepCache<'_>,
     ) -> Result<(Tensor, Tensor, Tensor)> {
-        let mut hidden_states = Tensor::cat(&[input_embed, target_hidden], D::Minus1)?;
-        hidden_states = hidden_states.apply(&self.pre_projection)?;
+        let target_dtype = target_hidden.dtype();
+        let mut hidden_states = Tensor::cat(
+            &[
+                input_embed.to_dtype(self.act_dtype)?,
+                target_hidden.to_dtype(self.act_dtype)?,
+            ],
+            D::Minus1,
+        )?;
+        hidden_states = self.pre_projection.forward(&hidden_states)?;
 
         // Each MTP step is a single query over the target donor KV cache, not
         // a causal prefill over newly produced draft tokens.
@@ -486,10 +518,27 @@ impl Gemma4MtpModel {
         }
 
         let draft_hidden_states = self.norm.forward(&hidden_states)?;
-        let backbone_hidden_states = draft_hidden_states.apply(&self.post_projection)?;
-        let (token, logits) = self
-            .masked_embedding
-            .get_logits_and_top_token(&draft_hidden_states, &self.lm_head_weight)?;
+        let backbone_hidden_states = self
+            .post_projection
+            .forward(&draft_hidden_states)?
+            .to_dtype(target_dtype)?;
+        let (token, logits) = match &self.masked_embedding {
+            Some(masked) => {
+                masked.get_logits_and_top_token(&draft_hidden_states, &self.lm_head_weight)?
+            }
+            None => {
+                let rows = draft_hidden_states.dims()[0];
+                let head = self
+                    .lm_head
+                    .as_ref()
+                    .expect("a whole head without a centroid head");
+                let logits = head
+                    .forward(&draft_hidden_states.reshape((rows, ()))?)?
+                    .to_dtype(DType::F32)?;
+                let token = logits.argmax_keepdim(D::Minus1)?.to_dtype(DType::U32)?;
+                (token, logits.unsqueeze(1)?)
+            }
+        };
         Ok((token, logits, backbone_hidden_states))
     }
 }
@@ -530,16 +579,24 @@ impl Gemma4MtpDecoderLayer {
         cfg: &Gemma4TextConfig,
         layer_idx: usize,
         donor_layer_idx: usize,
+        isq: Option<IsqType>,
         vb: ShardedVarBuilder,
         device: &Device,
         mapper: &dyn DeviceMapper,
     ) -> Result<Self> {
-        let self_attn =
-            Gemma4MtpAttention::new(cfg, layer_idx, donor_layer_idx, vb.pp("self_attn"), device)?;
+        let self_attn = Gemma4MtpAttention::new(
+            cfg,
+            layer_idx,
+            donor_layer_idx,
+            isq,
+            vb.pp("self_attn"),
+            device,
+        )?;
         let mlp = Gemma4MtpMlp::new(
             cfg.hidden_size,
             cfg.intermediate_size,
             cfg.hidden_activation,
+            isq,
             vb.pp("mlp"),
         )?;
         let input_layernorm = Gemma4MtpRmsNorm::new(
@@ -595,15 +652,15 @@ impl Gemma4MtpDecoderLayer {
         let mlp = self.post_feedforward_layernorm.forward(&mlp)?;
         let mut xs = (mlp + residual)?;
         if let Some(scalar) = &self.layer_scalar {
-            xs = xs.broadcast_mul(scalar)?;
+            xs = xs.broadcast_mul(&scalar.to_dtype(xs.dtype())?)?;
         }
         Ok(xs)
     }
 }
 
 struct Gemma4MtpAttention {
-    q_proj: Linear,
-    o_proj: Linear,
+    q_proj: Arc<dyn QuantMethod>,
+    o_proj: Arc<dyn QuantMethod>,
     q_norm: Gemma4MtpRmsNorm,
     rotary_emb_global: Option<ProportionalRotaryEmbedding>,
     rotary_emb_local: Option<RotaryEmbedding>,
@@ -619,6 +676,7 @@ impl Gemma4MtpAttention {
         cfg: &Gemma4TextConfig,
         layer_idx: usize,
         donor_layer_idx: usize,
+        isq: Option<IsqType>,
         vb: ShardedVarBuilder,
         device: &Device,
     ) -> Result<Self> {
@@ -635,8 +693,8 @@ impl Gemma4MtpAttention {
             cfg.num_global_key_value_heads
                 .unwrap_or(cfg.num_key_value_heads)
         };
-        let q_proj = linear_no_bias(cfg.hidden_size, num_heads * head_dim, vb.pp("q_proj"))?;
-        let o_proj = linear_no_bias(num_heads * head_dim, cfg.hidden_size, vb.pp("o_proj"))?;
+        let q_proj = linear_no_bias(cfg.hidden_size, num_heads * head_dim, isq, vb.pp("q_proj"))?;
+        let o_proj = linear_no_bias(num_heads * head_dim, cfg.hidden_size, isq, vb.pp("o_proj"))?;
         let q_norm = Gemma4MtpRmsNorm::new(head_dim, cfg.rms_norm_eps, vb.pp("q_norm"))?;
 
         let rotary_emb_local = if is_sliding {
@@ -646,7 +704,11 @@ impl Gemma4MtpAttention {
                 cfg.max_position_embeddings,
                 device,
                 true,
-                vb.dtype(),
+                if isq.is_some() {
+                    DType::F32
+                } else {
+                    vb.dtype()
+                },
             )?)
         } else {
             None
@@ -661,7 +723,11 @@ impl Gemma4MtpAttention {
                 cfg.max_position_embeddings,
                 device,
                 true,
-                vb.dtype(),
+                if isq.is_some() {
+                    DType::F32
+                } else {
+                    vb.dtype()
+                },
             )?)
         };
         let paged_attn = PagedAttention::new(head_dim, device, None)?;
@@ -699,7 +765,7 @@ impl Gemma4MtpAttention {
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
-        let mut q = xs.apply(&self.q_proj)?;
+        let mut q = self.q_proj.forward(xs)?;
         q = q.reshape((b_sz, self.num_heads, q_len, self.head_dim))?;
         q = self.q_norm.forward(&q)?;
         let positions = positions
@@ -741,14 +807,14 @@ impl Gemma4MtpAttention {
             }
         };
         let attn = attn.reshape((b_sz, q_len, ()))?;
-        attn.apply(&self.o_proj)
+        self.o_proj.forward(&attn)
     }
 }
 
 struct Gemma4MtpMlp {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    gate_proj: Arc<dyn QuantMethod>,
+    up_proj: Arc<dyn QuantMethod>,
+    down_proj: Arc<dyn QuantMethod>,
     activation: Activation,
 }
 
@@ -757,25 +823,27 @@ impl Gemma4MtpMlp {
         hidden_size: usize,
         intermediate_size: usize,
         activation: Activation,
+        isq: Option<IsqType>,
         vb: ShardedVarBuilder,
     ) -> Result<Self> {
         Ok(Self {
-            gate_proj: linear_no_bias(hidden_size, intermediate_size, vb.pp("gate_proj"))?,
-            up_proj: linear_no_bias(hidden_size, intermediate_size, vb.pp("up_proj"))?,
-            down_proj: linear_no_bias(intermediate_size, hidden_size, vb.pp("down_proj"))?,
+            gate_proj: linear_no_bias(hidden_size, intermediate_size, isq, vb.pp("gate_proj"))?,
+            up_proj: linear_no_bias(hidden_size, intermediate_size, isq, vb.pp("up_proj"))?,
+            down_proj: linear_no_bias(intermediate_size, hidden_size, isq, vb.pp("down_proj"))?,
             activation,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let lhs = xs.apply(&self.gate_proj)?;
-        let rhs = xs.apply(&self.up_proj)?;
-        crate::ops::mul_and_act(&lhs, &rhs, self.activation)?.apply(&self.down_proj)
+        let lhs = self.gate_proj.forward(xs)?;
+        let rhs = self.up_proj.forward(xs)?;
+        self.down_proj
+            .forward(&crate::ops::mul_and_act(&lhs, &rhs, self.activation)?)
     }
 }
 
 struct Gemma4MtpMaskedEmbedding {
-    centroids: Linear,
+    centroids: Arc<dyn QuantMethod>,
     token_ordering: Tensor,
     hidden_size: usize,
     num_centroids: usize,
@@ -792,7 +860,7 @@ impl Gemma4MtpMaskedEmbedding {
         centroid_top_k: usize,
         vb: ShardedVarBuilder,
     ) -> Result<Self> {
-        let centroids = linear_no_bias(hidden_size, num_centroids, vb.pp("centroids"))?;
+        let centroids = linear_no_bias(hidden_size, num_centroids, None, vb.pp("centroids"))?;
         let token_ordering = vb
             .get((vocab_size,), "token_ordering")?
             .to_dtype(DType::U32)?;
@@ -813,7 +881,7 @@ impl Gemma4MtpMaskedEmbedding {
         lm_head_weight: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let hidden_states = hidden_states.reshape(((), self.hidden_size))?;
-        let centroid_logits = hidden_states.apply(&self.centroids)?;
+        let centroid_logits = self.centroids.forward(&hidden_states)?;
         let top_k_indices = topk_indices_u32(&centroid_logits, self.centroid_top_k)?;
         let clusters = self
             .token_ordering
@@ -885,7 +953,30 @@ fn topk_pairs(values: &[f32], top_k: usize) -> Vec<(u32, f32)> {
     ranked
 }
 
-fn linear_no_bias(in_dim: usize, out_dim: usize, vb: ShardedVarBuilder) -> Result<Linear> {
+fn linear_no_bias(
+    in_dim: usize,
+    out_dim: usize,
+    isq: Option<IsqType>,
+    vb: ShardedVarBuilder,
+) -> Result<Arc<dyn QuantMethod>> {
     let ws = vb.get((out_dim, in_dim), "weight")?;
-    Ok(Linear::new(ws, None))
+    let device = ws.device().clone();
+    at_isq(ws, isq, &device)
+}
+
+// a projection of `weight` at `isq`, or as the checkpoint stores it
+fn at_isq(weight: Tensor, isq: Option<IsqType>, device: &Device) -> Result<Arc<dyn QuantMethod>> {
+    let layer: Arc<dyn QuantMethod> = Arc::new(UnquantLinear::new(
+        QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, None)),
+    )?);
+    match isq {
+        None => Ok(layer),
+        Some(ty) => layer.apply_isq(
+            Some(ty),
+            device.clone(),
+            &std::sync::atomic::AtomicUsize::new(0),
+            None,
+            QuantizeOntoGuard::new(),
+        ),
+    }
 }

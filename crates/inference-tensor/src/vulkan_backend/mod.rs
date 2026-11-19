@@ -2651,6 +2651,11 @@ mod tests {
         assert_same(&view(&va)?.silu()?, &view(&a)?.silu()?)?;
         assert_same(&view(&va)?.tanh()?, &view(&a)?.tanh()?)?;
         assert_same(&view(&va)?.relu()?, &view(&a)?.relu()?)?;
+        // negative bases under integer exponents, which GLSL's pow leaves undefined
+        for e in [2.0, 3.0, 0.0] {
+            assert_same(&view(&va)?.powf(e)?, &view(&a)?.powf(e)?)?;
+        }
+        assert_same(&va.abs()?.powf(0.5)?, &a.abs()?.powf(0.5)?)?;
         let wide = Tensor::arange(-GELU_ERF_STEPS, GELU_ERF_STEPS, &Device::Cpu)?
             .affine(GELU_ERF_STEP, 0.)?;
         assert_same(&wide.to_device(&vk)?.gelu_erf()?, &wide.gelu_erf()?)?;
