@@ -1,108 +1,16 @@
 // ik_llama.cpp's IQ4_KS quantizer (`quantize_row_iq4_k_impl_bs32`, as its AVX2 build writes the bytes) on the GPU,
 // byte for byte the CPU port in iq_quantize.rs: every product, sum and fused multiply-add is an explicit rounding
-// intrinsic, so nvcc contracts nothing the CPU build does not. One thread searches each 32-value block's scale; one
-// thread per row then picks the 7-bit scales and indices and refits the row scale, summing in the CPU's order.
+// intrinsic, so nvcc contracts nothing the CPU build does not.
 // Kernels: each block's weights; a warp per block searching its scale (lane j holds value j, and the CPU's eight
 // interleaved partial sums are chained lane j - 8 to lane j); a thread per row for the row scale; a thread per block
 // for its indices and refit terms; a thread per row adding the terms in the CPU's order.
-#include <cstdint>
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
+#include "iq4k_common.cuh"
 
-#define QK_K 256
-#define BLOCK 32
-#define LANES 8
-#define TRIES 7
-#define SCALE_MAX 127
 #define BLOCK_BYTES (QK_K / BLOCK + QK_K / 2)
-#define ROW_HEADER 4
-#define EPS 1e-16f
-#define IMATRIX_EPS 1e-9f
-#define ROUNDING_MAGIC 12582912.0f
-#define THREADS 128
-// ggml's type ids for the float sources
-#define GGML_F32 0
-#define GGML_F16 1
-#define GGML_BF16 30
-
-__constant__ int8_t kValues[32] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113, -123, -100, -79, -61, -45, -31, -18, -6, 5, 17, 29, 42, 57, 73, 93, 117};
-__constant__ int8_t kIndex[241] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 17, 17, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 18, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 19, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 20, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 21, 21, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 22, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 23, 23, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 24, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 25, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 26, 26, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 27, 27, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 28, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 29, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 30, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15};
-__constant__ uint8_t kSimple[256] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14};
-
-// ggml's nearest_int: the float added to 1.5 * 2^23, ties to even
-__device__ __forceinline__ int nearest_int(float x) {
-    return (__float_as_int(__fadd_rn(x, ROUNDING_MAGIC)) & 0x007fffff) - 0x00400000;
-}
-
-__device__ __forceinline__ int best_index(const int8_t* index, const int8_t* values, float x) {
-    int ix = (int)x - values[0];
-    if (ix < 0 || ix >= 241) return ix < 0 ? 0 : 15;
-    ix = index[ix];
-    if (ix < 16) return ix;
-    return __fsub_rn(x, (float)values[ix - 16]) < __fsub_rn((float)values[ix - 15], x) ? ix - 16 : ix - 15;
-}
-
-// the 256 values' sum of squares (fused, in order) times 2 / 256
-__device__ float sigma2(const float* xbl) {
-    float s = 0.0f;
-    for (int j = 0; j < QK_K; ++j) s = __fmaf_rn(xbl[j], xbl[j], s);
-    return __fmul_rn(s, 2.0f / QK_K);
-}
-
-// each block's weights: the imatrix (a block weighing all but zero replaced by IMATRIX_EPS) times sqrt(sigma2 + x^2),
-// or x^2 without one
-__global__ void iq4_ks_weights(const float* x, const float* imatrix, int64_t rows_per_imatrix, int64_t blocks, int cols,
-                               float* weights) {
-    const int64_t b = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (b >= blocks) return;
-    const int per_row = cols / BLOCK;
-    const int ib_row = (int)(b % per_row);
-    const float* xb = x + b * BLOCK;
-    float* w = weights + b * BLOCK;
-    if (!imatrix) {
-        for (int j = 0; j < BLOCK; ++j) w[j] = __fmul_rn(xb[j], xb[j]);
-        return;
-    }
-    const float s2 = sigma2(x + (b / per_row) * cols + (ib_row / (QK_K / BLOCK)) * QK_K);
-    const float* qw = imatrix + (b / per_row / rows_per_imatrix) * cols + ib_row * BLOCK;
-    const float floor = __fmul_rn(__fmul_rn((float)BLOCK, IMATRIX_EPS), IMATRIX_EPS);
-    float sumw2 = 0.0f, sumx2 = 0.0f, sumwx = 0.0f;
-    for (int j = 0; j < BLOCK; ++j) sumw2 = __fadd_rn(sumw2, __fmul_rn(qw[j], qw[j]));
-    for (int j = 0; j < BLOCK; ++j) sumx2 = __fadd_rn(sumx2, __fmul_rn(xb[j], xb[j]));
-    for (int j = 0; j < BLOCK; ++j) sumwx = __fadd_rn(sumwx, __fmul_rn(qw[j], fabsf(xb[j])));
-    const bool keep = sumw2 > floor && sumx2 > floor && sumwx > floor;
-    for (int j = 0; j < BLOCK; ++j)
-        w[j] = __fmul_rn(keep ? qw[j] : IMATRIX_EPS, __fsqrt_rn(__fmaf_rn(xb[j], xb[j], s2)));
-}
-
-// the tables as each kernel copies them to shared memory: constant memory serializes a warp's differing indices
-struct Tables {
-    int8_t values[32];
-    int8_t index[241];
-    uint8_t simple[256];
-};
-
-__device__ __forceinline__ void load_tables(Tables* t) {
-    for (int i = threadIdx.x; i < 256; i += blockDim.x) {
-        if (i < 32) t->values[i] = kValues[i];
-        if (i < 241) t->index[i] = kIndex[i];
-        t->simple[i] = kSimple[i];
-    }
-    __syncthreads();
-}
-
-__device__ __forceinline__ float candidate(const uint8_t* simple, const int8_t* values, float xi) {
-    int ix = (int)xi - values[0];
-    ix = ix < 0 ? 0 : (ix > 240 ? 240 : ix);
-    const int lo = simple[ix];
-    const float c0 = values[lo], c1 = values[lo + 1];
-    return __fsub_rn(xi, c0) < __fsub_rn(c1, xi) ? c0 : c1;
-}
 
 // lane j's `fma(a, b, acc)` chained through lanes j % 8, j % 8 + 8, ... as the CPU's eight partial sums run, then
 // those summed in `hsum_float_8`'s order; every lane gets the total
-__device__ __forceinline__ float chained_sum(float a, float b, int lane) {
+static __device__ __forceinline__ float chained_sum(float a, float b, int lane) {
     float acc = __fmaf_rn(a, b, 0.0f);
     for (int step = 1; step < BLOCK / LANES; ++step) {
         const float prev = __shfl_up_sync(0xffffffffu, acc, LANES);
@@ -115,7 +23,7 @@ __device__ __forceinline__ float chained_sum(float a, float b, int lane) {
 }
 
 // one scale try (`evaluate_block_iq4k`) by the warp; true when it improved (d, best), the same in every lane
-__device__ bool evaluate(const uint8_t* simple, float inverse, const int8_t* values, float x, float w, int lane, float* d,
+static __device__ bool evaluate(const uint8_t* simple, float inverse, const int8_t* values, float x, float w, int lane, float* d,
                          float* best) {
     const float xi = __fmul_rn(inverse, x);
     const float qp = candidate(simple, values, xi), qm = candidate(simple, values, -xi);
@@ -137,7 +45,7 @@ __device__ bool evaluate(const uint8_t* simple, float inverse, const int8_t* val
 }
 
 // a warp per block: its best scale and whether it takes the shifted codebook
-__global__ void iq4_ks_search(const float* x, const float* weights, int64_t blocks, float* scales, uint8_t* shifted) {
+static __global__ void iq4_ks_search(const float* x, const float* weights, int64_t blocks, float* scales, uint8_t* shifted) {
     __shared__ Tables t;
     load_tables(&t);
     const int64_t b = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) / BLOCK;
@@ -182,22 +90,8 @@ __global__ void iq4_ks_search(const float* x, const float* weights, int64_t bloc
     }
 }
 
-// per row: the row scale, the largest block scale over 127, also the header unless the refit replaces it
-__global__ void iq4_ks_row_scale(const float* scales, int64_t rows, int cols, float* row_d, uint8_t* out) {
-    const int64_t row = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= rows) return;
-    const int per_row = cols / BLOCK;
-    float amax_scale = 0.0f;
-    for (int ib = 0; ib < per_row; ++ib) amax_scale = fmaxf(amax_scale, fabsf(scales[row * per_row + ib]));
-    const float d = __fdiv_rn(amax_scale, (float)SCALE_MAX);
-    row_d[row] = d;
-    const uint32_t bits = __float_as_uint(d);
-    uint8_t* orow = out + row * (ROW_HEADER + (int64_t)(cols / QK_K) * BLOCK_BYTES);
-    for (int k = 0; k < 4; ++k) orow[k] = (uint8_t)(bits >> (8 * k));
-}
-
 // a thread per block: its 7-bit scale and indices, and its refit terms (the CPU adds them to the row's sums in order)
-__global__ void iq4_ks_blocks(const float* x, const float* weights, int64_t blocks, int cols, const float* scales,
+static __global__ void iq4_ks_blocks(const float* x, const float* weights, int64_t blocks, int cols, const float* scales,
                               const uint8_t* shifted, const float* row_d, uint8_t* out, float* terms_qx,
                               float* terms_q2) {
     __shared__ Tables t;
@@ -241,7 +135,7 @@ __global__ void iq4_ks_blocks(const float* x, const float* weights, int64_t bloc
 }
 
 // per row: the terms added in the CPU's order, and the row scale refit to them
-__global__ void iq4_ks_refit(int64_t rows, int cols, const float* row_d, const float* terms_qx, const float* terms_q2,
+static __global__ void iq4_ks_refit(int64_t rows, int cols, const float* row_d, const float* terms_qx, const float* terms_q2,
                              uint8_t* out) {
     const int64_t row = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows || row_d[row] == 0.0f) return;
@@ -257,17 +151,6 @@ __global__ void iq4_ks_refit(int64_t rows, int cols, const float* row_d, const f
     for (int k = 0; k < 4; ++k) orow[k] = (uint8_t)(bits >> (8 * k));
 }
 
-// the source rows as f32 (f16 and bf16 widen exactly)
-__global__ void to_f32(const void* src, int dtype, int64_t n, float* dst) {
-    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    if (dtype == GGML_BF16) dst[i] = __bfloat162float(((const __nv_bfloat16*)src)[i]);
-    else if (dtype == GGML_F16) dst[i] = __half2float(((const __half*)src)[i]);
-    else dst[i] = ((const float*)src)[i];
-}
-
-static unsigned grid(int64_t n) { return (unsigned)((n + THREADS - 1) / THREADS); }
-
 // `rows` rows of `cols` values of ggml type `dtype` (f32, f16 or bf16; `x` then holds them as f32) to IQ4_KS rows in
 // `out`, `imatrix` holding `cols` importances per `rows_per_imatrix` rows (an expert stack's experts one after
 // another) or null. Scratch: `weights` and
@@ -280,9 +163,10 @@ extern "C" int launch_iq4_ks_quantize(const void* source, int dtype, float* x, c
     const int64_t blocks = rows * (cols / BLOCK);
     const int64_t half = rows * cols / 2;
     to_f32<<<grid(rows * cols), THREADS, 0, stream>>>(source, dtype, rows * cols, x);
-    iq4_ks_weights<<<grid(blocks), THREADS, 0, stream>>>(x, imatrix, rows_per_imatrix, blocks, cols, weights);
+    iq4k_weights<true><<<grid(blocks), THREADS, 0, stream>>>(x, imatrix, rows_per_imatrix, blocks, cols, weights);
     iq4_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
-    iq4_ks_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, row_d, out);
+    iq4k_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, ROW_HEADER + (cols / QK_K) * BLOCK_BYTES,
+                                                       1.0f, row_d, out);
     iq4_ks_blocks<<<grid(blocks), THREADS, 0, stream>>>(x, weights, blocks, cols, scales, shifted, row_d, out, terms,
                                                         terms + half);
     iq4_ks_refit<<<grid(rows), THREADS, 0, stream>>>(rows, cols, row_d, terms, terms + half, out);

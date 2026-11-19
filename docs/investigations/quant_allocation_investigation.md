@@ -170,3 +170,32 @@ Every version wrote the CPU's bytes: GPU tests compare f32, multi-expert and bf1
 four-layer outputs `cmp` equal. A whole expert group drops from ~13 min to ~45 s; `--cpu` keeps the CPU path.
 
 Next: the same for IQ4_XS, IQ4_KSS, IQ3_KS and the K-quants the sweeps use, then rerun Run 5's measurements.
+
+## Run 7 - 2026-11-19 13:10
+
+Question: the other types the sweeps quantize on expert tensors (IQ4_KSS, IQ4_XS, IQ3_KS) on the GPU, byte-exact.
+
+Shared parts moved to `gguf_quantize/iq4k_common.cuh` (tables, rounding, f16 bits, weights, row scale). Per type:
+
+- IQ4_KSS: a thread per block for the search (one serial fit chain per try, the parity pruning inside it); the row
+  refit is a fused chain across the row, so the block pass stores each value's level and a row pass chains them in the
+  CPU's order. Matched the CPU on the first run.
+- IQ4_XS: no row scale; a thread per block for weights (raw imatrix, sigma2 summed per lane), the search from both
+  codebook ends and the step-by-step refinement; a thread per super-block for the f16 scale and indices. First run:
+  1,001 bytes differing, all in the f16 scales' low byte (CPU 0x02af, GPU 0x0200): the library builds with
+  `--use_fast_math`, whose flush-to-zero makes `__float2half_rn` drop subnormal f16 results. A bit-level conversion
+  (the `half` crate's) fixed it; IQ3_KS's f16 row scale uses it too.
+- IQ3_KS: a warp per block as IQ4_KS (8-value codebooks), the row's f16 scale, a thread per super-block for the packed
+  bits (its eight blocks share bytes) and levels, the row refit chained per row. Matched on the first run.
+
+```
+four layers of gate/up experts, imatrix   CPU (16 threads)   GPU     identical
+IQ4_KS                                    58 s               4.6 s   yes
+IQ4_KSS                                   188 s              13.1 s  yes
+IQ4_XS                                    61 s               3.4 s   yes
+IQ3_KS                                    44 s               5.9 s   yes
+```
+
+GPU tests compare all four with the CPU ports on f32 rows (plain and imatrix, three shapes, a zeroed block and row),
+per-expert imatrix slices and bf16 rows. K-quants stay on the CPU: the sweeps use them only on the small non-expert
+groups.
