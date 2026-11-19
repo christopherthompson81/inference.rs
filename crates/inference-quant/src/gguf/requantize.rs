@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use half::{bf16, f16};
 pub use inference_tensor::quantized::Quantizer;
@@ -124,12 +124,17 @@ pub struct RequantizePlan {
     /// llama.cpp's per-tensor importances (mean squared activations, an expert stack's experts one after another).
     pub imatrix: Option<HashMap<String, Vec<f32>>>,
     pub quantizer: Quantizer,
+    /// Earlier outputs from the same source, imatrix and quantizer: a tensor one of them holds at its planned type is
+    /// copied from it instead of quantized again.
+    pub reuse: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
 pub struct RequantizeSummary {
     pub tensors: usize,
     pub quantized: usize,
+    /// Of the quantized, the ones copied from a `reuse` file.
+    pub reused: usize,
     /// Quantized tensors the imatrix had no entry for.
     pub without_imatrix: Vec<String>,
     pub bytes_in: u64,
@@ -239,6 +244,15 @@ pub fn requantize_gguf(
         reader.read_exact(&mut count)?;
         u64::from_le_bytes(count) as usize
     };
+    let mut reuse = plan
+        .reuse
+        .iter()
+        .map(|path| -> Result<_> {
+            let mut reader = BufReader::new(File::open(path)?);
+            let header = Header::read_summary(&mut reader)?;
+            Ok((reader, header))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut writer = BufWriter::new(File::create(dst)?);
     let entries = tensors
         .iter()
@@ -279,6 +293,32 @@ pub fn requantize_gguf(
             && w.len() != cols * (rows / expert_rows.unwrap_or(rows))
         {
             inference_tensor::bail!("{}: an imatrix of {} for rows of {cols}", t.name, w.len());
+        }
+        let reused = t.target.and_then(|ty| {
+            reuse.iter_mut().find(|(_, h)| {
+                h.tensor_infos.get(t.name).is_some_and(|info| {
+                    info.ggml_dtype == ty.id() && info.shape.dims() == t.dims.as_slice()
+                })
+            })
+        });
+        if let Some((reader, h)) = reused {
+            reader.seek(SeekFrom::Start(
+                h.tensor_data_offset + h.tensor_infos[t.name].offset,
+            ))?;
+            let copied = std::io::copy(&mut reader.by_ref().take(t.size as u64), &mut writer)?;
+            if copied != t.size as u64 {
+                inference_tensor::bail!("{}: reused {copied} bytes, planned {}", t.name, t.size);
+            }
+            write_tensor_padding(&mut writer, t.size)?;
+            summary.reused += 1;
+            summary.bytes_in += t.source_bytes as u64;
+            summary.bytes_out += t.size as u64;
+            let entry = by_type
+                .entry(t.target.map_or(t.source_type, |ty| ty.id()))
+                .or_default();
+            entry.0 += 1;
+            entry.1 += t.size as u64;
+            continue;
         }
         let slice_rows =
             expert_rows.unwrap_or_else(|| (SLICE_BYTES / source_row.max(1)).clamp(1, rows.max(1)));
@@ -603,10 +643,20 @@ mod tests {
             ],
             imatrix: Some(imatrix.clone()),
             quantizer: Quantizer::LlamaCpp,
+            reuse: Vec::new(),
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
         assert_eq!(summary.without_imatrix, ["blk.0.attn_q.weight"]);
+        // a second run reusing the first copies both quantized tensors and writes the same file
+        let again = dst.with_extension("again.gguf");
+        let plan = RequantizePlan {
+            reuse: vec![dst.clone()],
+            ..plan
+        };
+        let summary_again = requantize_gguf(&src, &again, &plan, |_, _, _| {})?;
+        assert_eq!(summary_again.reused, 2);
+        assert_eq!(std::fs::read(&again)?, std::fs::read(&dst)?);
 
         let mut reader = BufReader::new(File::open(&dst)?);
         let header = Header::read(&mut reader)?;

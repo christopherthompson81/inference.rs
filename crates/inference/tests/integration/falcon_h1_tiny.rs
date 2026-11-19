@@ -220,6 +220,7 @@ async fn prompt_logits(dir: &tempfile::TempDir) -> anyhow::Result<Vec<f32>> {
     let scored = load(dir)
         .await?
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(PROMPT.to_vec()),
             output: LogitsOutput::Logits,

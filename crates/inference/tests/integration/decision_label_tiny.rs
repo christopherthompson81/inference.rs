@@ -84,6 +84,7 @@ async fn group_softmax(
     let ids = tokens(model, prompt).await?;
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(ids.clone()),
             output: LogitsOutput::Logits,

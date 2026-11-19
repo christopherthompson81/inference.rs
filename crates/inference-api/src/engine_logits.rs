@@ -17,6 +17,10 @@ use crate::{
 };
 
 const SCORING_FAILED: &str = "prompt scoring did not return logits";
+// reference log-probs at or below this add nothing to the divergence, as llama-perplexity sums it
+const REFERENCE_LOG_PROB_FLOOR: f64 = -16.0;
+// rows of the divergence computed at once, which bounds its temporaries (a few `[rows, vocab]` f32 tensors)
+const DIVERGENCE_ROWS: usize = 64;
 
 /// The prompt to score, as text (tokenized with the model's special tokens) or as token ids.
 #[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
@@ -50,6 +54,31 @@ pub struct PromptLogitsRequest {
     /// order; a multimodal model expands each placeholder as a chat's.
     #[serde(default)]
     pub audio: Vec<String>,
+    /// A reference distribution to score the logits against where they were computed; Rust callers only.
+    #[serde(skip)]
+    pub reference: Option<LogitsReference>,
+}
+
+/// Reference log-probabilities for consecutive logits rows from `first_row`, in llama-perplexity's KL-divergence base
+/// encoding: row `r`'s token `t` has `log p = scales[r] * codes[r * width + t] + floors[r]`.
+#[derive(Debug, Clone, Default)]
+pub struct LogitsReference {
+    pub first_row: usize,
+    /// Codes per row, at least the model's vocabulary (the ones past it are ignored).
+    pub width: usize,
+    pub scales: Vec<f32>,
+    pub floors: Vec<f32>,
+    /// `scales.len() * width` little-endian u16 codes.
+    pub codes: Vec<u8>,
+}
+
+/// Per reference row: `KL(reference || model)`, whether both put the same token on top, and the reference log-prob of
+/// the prompt's next token.
+#[derive(Debug, Clone, Default)]
+pub struct Divergence {
+    pub kld: Vec<f32>,
+    pub same_top: Vec<bool>,
+    pub reference_logprobs: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -62,6 +91,9 @@ pub struct PromptLogits {
     /// Row-major `[tokens.len(), vocab_size]`, present when the request asked for `logits`.
     #[serde(skip)]
     pub logits: Option<Vec<f32>>,
+    /// Present when the request carried a reference.
+    #[serde(skip)]
+    pub divergence: Option<Divergence>,
 }
 
 pub(crate) async fn prompt_logits(
@@ -136,6 +168,7 @@ pub(crate) async fn prompt_logits(
     let mut normal =
         NormalRequest::new_simple(message, sampling, tx, state.next_request_id(), None, None);
     normal.return_raw_logits = true;
+    normal.raw_logits_on_device = request.reference.is_some();
     send_request_with_model(state, Request::Normal(Box::new(normal)), model)
         .await
         .map_err(|error| ApiError::from_error(&error, ApiErrorKind::Internal))?;
@@ -167,7 +200,7 @@ pub(crate) async fn prompt_logits(
             ));
         }
     };
-    scored(chunks, tokens, request.output)
+    scored(chunks, tokens, request.output, request.reference.as_ref())
         .map_err(|error| ApiError::from_error(&error, ApiErrorKind::Internal))
 }
 
@@ -175,6 +208,7 @@ fn scored(
     chunks: Vec<Tensor>,
     tokens: Vec<u32>,
     output: LogitsOutput,
+    reference: Option<&LogitsReference>,
 ) -> inference_tensor::Result<PromptLogits> {
     let logits = Tensor::cat(&chunks, 0)?.to_dtype(DType::F32)?;
     let (rows, vocab_size) = logits.dims2()?;
@@ -209,6 +243,9 @@ fn scored(
     if scores.iter().flatten().any(|score| !score.is_finite()) {
         inference_tensor::bail!("the model's logits are not finite");
     }
+    let divergence = reference
+        .map(|reference| divergence(&logits, &tokens, reference))
+        .transpose()?;
     let logits = match output {
         LogitsOutput::Logits => Some(logits.flatten_all()?.to_vec1::<f32>()?),
         LogitsOutput::Logprobs => None,
@@ -218,7 +255,90 @@ fn scored(
         vocab_size,
         token_logprobs: std::iter::once(None).chain(scores).collect(),
         logits,
+        divergence,
     })
+}
+
+// each row's first index of its maximum, as llama-perplexity picks the top token (a device argmax may take any tie)
+fn first_max(rows: &Tensor, positions: &Tensor) -> inference_tensor::Result<Tensor> {
+    let at_max = rows.broadcast_eq(&rows.max_keepdim(1)?)?;
+    let past = positions.affine(0.0, positions.dim(1)? as f64)?;
+    at_max
+        .where_cond(
+            &positions.broadcast_as(rows.shape())?,
+            &past.broadcast_as(rows.shape())?,
+        )?
+        .min(1)
+}
+
+// the reference rows scored on the logits' device, `DIVERGENCE_ROWS` at a time; only the codes go up and three
+// numbers a row come back
+fn divergence(
+    logits: &Tensor,
+    tokens: &[u32],
+    reference: &LogitsReference,
+) -> inference_tensor::Result<Divergence> {
+    let (rows, vocab) = logits.dims2()?;
+    let n = reference.scales.len();
+    let width = reference.width;
+    if reference.floors.len() != n
+        || reference.codes.len() != 2 * n * width
+        || width < vocab
+        || reference.first_row + n >= rows
+    {
+        inference_tensor::bail!(
+            "a reference of {n} rows of {width} from row {} does not fit {rows} rows of {vocab}",
+            reference.first_row
+        );
+    }
+    let device = logits.device();
+    let mut out = Divergence::default();
+    let positions = Tensor::arange(0, vocab as u32, device)?
+        .to_dtype(DType::F32)?
+        .unsqueeze(0)?;
+    for start in (0..n).step_by(DIVERGENCE_ROWS) {
+        let len = DIVERGENCE_ROWS.min(n - start);
+        let ours = inference_tensor::nn::ops::log_softmax(
+            &logits.narrow(0, reference.first_row + start, len)?,
+            1,
+        )?;
+        let bytes = &reference.codes[2 * start * width..][..2 * len * width];
+        let pairs = Tensor::from_slice(bytes, (len, width, 2), device)?.narrow(1, 0, vocab)?;
+        let codes = pairs
+            .narrow(2, 0, 1)?
+            .to_dtype(DType::F32)?
+            .add(
+                &pairs
+                    .narrow(2, 1, 1)?
+                    .to_dtype(DType::F32)?
+                    .affine(256.0, 0.0)?,
+            )?
+            .squeeze(2)?;
+        let column = |values: &[f32]| Tensor::from_slice(&values[start..][..len], (len, 1), device);
+        let base = codes
+            .broadcast_mul(&column(&reference.scales)?)?
+            .broadcast_add(&column(&reference.floors)?)?;
+        let counted = base.gt(REFERENCE_LOG_PROB_FLOOR)?.to_dtype(DType::F32)?;
+        let kld = base
+            .exp()?
+            .mul(&base.sub(&ours)?)?
+            .mul(&counted)?
+            .sum(1)?
+            .to_vec1::<f32>()?;
+        let same = first_max(&ours, &positions)?
+            .eq(&first_max(&base, &positions)?)?
+            .to_vec1::<u8>()?;
+        let next = tokens[reference.first_row + start + 1..][..len]
+            .iter()
+            .map(|&token| (token as usize).min(vocab - 1) as u32)
+            .collect::<Vec<_>>();
+        let next = Tensor::from_slice(&next, (len, 1), device)?;
+        out.reference_logprobs
+            .extend(base.gather(&next, 1)?.flatten_all()?.to_vec1::<f32>()?);
+        out.kld.extend(kld);
+        out.same_top.extend(same.into_iter().map(|same| same != 0));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -231,7 +351,7 @@ mod tests {
             &[[0.0_f32, 2.0], [5.0, 0.0], [1.0, 0.0]],
             &inference_tensor::Device::Cpu,
         )?;
-        let scored = scored(vec![logits], vec![0, 7, 1], LogitsOutput::Logprobs)?;
+        let scored = scored(vec![logits], vec![0, 7, 1], LogitsOutput::Logprobs, None)?;
         assert_eq!(scored.token_logprobs[1], None);
         let expected = -(1.0_f32 + 5.0_f32.exp()).ln();
         assert!((scored.token_logprobs[2].unwrap() - expected).abs() < 1e-6);
@@ -245,11 +365,46 @@ mod tests {
             &[[0.0_f32, 2.0], [5.0, 0.0]],
             &inference_tensor::Device::Cpu,
         )?;
-        let scored = scored(vec![logits], vec![0, 1], LogitsOutput::Logits)?;
+        let scored = scored(vec![logits], vec![0, 1], LogitsOutput::Logits, None)?;
         assert_eq!(scored.token_logprobs[0], None);
         let expected = 2.0 - (1.0_f32 + 2.0_f32.exp()).ln();
         assert!((scored.token_logprobs[1].unwrap() - expected).abs() < 1e-6);
         assert_eq!(scored.logits.map(|logits| logits.len()), Some(4));
+        Ok(())
+    }
+
+    #[test]
+    fn a_reference_row_scores_its_divergence_and_top_token() -> inference_tensor::Result<()> {
+        let device = inference_tensor::Device::Cpu;
+        let logits = Tensor::new(
+            &[[0.0_f32, 2.0], [5.0, 0.0], [3.0, 3.0], [0.0, 0.0]],
+            &device,
+        )?;
+        // rows 1 and 2 against reference log-probs [-1, 0] (codes 0 and 1) and [-0.5, -0.5] (a tie, codes 1 and 1)
+        let reference = LogitsReference {
+            first_row: 1,
+            width: 2,
+            scales: vec![1.0, 0.0],
+            floors: vec![-1.0, -0.5],
+            codes: vec![0, 0, 1, 0, 1, 0, 1, 0],
+        };
+        let scored = scored(
+            vec![logits],
+            vec![0, 1, 0, 1],
+            LogitsOutput::Logprobs,
+            Some(&reference),
+        )?;
+        let divergence = scored.divergence.expect("a reference was given");
+        let ours = [
+            -(1.0_f32 + (-5.0_f32).exp()).ln(),
+            -5.0 - (1.0 + (-5.0_f32).exp()).ln(),
+        ];
+        let expected = (-1.0_f32).exp() * (-1.0 - ours[0]) + (0.0 - ours[1]);
+        assert!((divergence.kld[0] - expected).abs() < 1e-5);
+        let tie = 2.0 * (-0.5_f32).exp() * (-0.5 + 2.0_f32.ln());
+        assert!((divergence.kld[1] - tie).abs() < 1e-5);
+        assert_eq!(divergence.same_top, [false, true]);
+        assert_eq!(divergence.reference_logprobs, [-1.0, -0.5]);
         Ok(())
     }
 }

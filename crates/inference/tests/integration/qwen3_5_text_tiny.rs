@@ -136,6 +136,7 @@ const BIDIRECTIONAL_DIFF: f32 = 1e-4;
 async fn first_row_logits(model: &Model, prompt: &[u32]) -> anyhow::Result<Vec<f32>> {
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(prompt.to_vec()),
             output: LogitsOutput::Logits,
@@ -225,6 +226,7 @@ async fn a_paged_cache_smaller_than_the_model_caps_its_listed_length() -> anyhow
     let prompt = PromptInput::Tokens((0..len as u32 + 1).map(|t| 40 + t % 200).collect());
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt,
             output: LogitsOutput::Logits,
@@ -251,6 +253,7 @@ async fn a_decision_head_replaces_the_vocabulary_logits() -> anyhow::Result<()> 
         .await?;
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(PROMPT.to_vec()),
             output: LogitsOutput::Logits,
@@ -279,6 +282,7 @@ async fn a_joint_head_returns_the_hidden_states() -> anyhow::Result<()> {
         .await?;
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(PROMPT.to_vec()),
             output: LogitsOutput::Logits,

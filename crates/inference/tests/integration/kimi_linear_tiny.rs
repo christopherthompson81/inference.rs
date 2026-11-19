@@ -295,6 +295,7 @@ fn chat(prompt: &str) -> RequestBuilder {
 
 async fn scores(model: &inference::Model, tokens: Vec<u32>) -> anyhow::Result<Vec<Option<f32>>> {
     let request = PromptLogitsRequest {
+        reference: None,
         model: None,
         prompt: PromptInput::Tokens(tokens),
         output: Default::default(),

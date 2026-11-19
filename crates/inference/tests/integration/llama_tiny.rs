@@ -569,6 +569,7 @@ async fn paged_gpu_decode_without_cuda_graphs_matches() -> anyhow::Result<()> {
 async fn score(model: &Model, tokens: &[u32]) -> anyhow::Result<Vec<f32>> {
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(tokens.to_vec()),
             output: Default::default(),
