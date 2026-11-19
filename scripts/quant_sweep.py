@@ -23,7 +23,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,29 +56,23 @@ def score(gguf, kld_base):
 
 
 def run_points(args, points):
-    """Every `(name, rules)` point quantized on one worker and scored on `args.jobs` others, so the CPU's quantizing
-    overlaps the GPU's scoring and small models score side by side; at most `jobs + 1` quantized files exist at once."""
-    slots = threading.BoundedSemaphore(args.jobs + 1)
+    """Every `(name, rules)` point quantized and scored on one of `args.jobs` workers, its file deleted after; the
+    quantizer uses only part of the cores, so points overlap."""
     results = {}
 
-    def scored(name, out, size):
+    def point(name, rules):
+        out = os.path.join(args.work, f"{name}.gguf")
         try:
-            results[name] = {"bytes": size, **score(out, args.kld_base)}
+            size = quantize(args.source, rules, out, args.imatrix)
+            results[name] = r = {"bytes": size, **score(out, args.kld_base)}
         finally:
-            os.remove(out)
-            slots.release()
-        r = results[name]
+            if os.path.exists(out):
+                os.remove(out)
         print(f"{name:28s} {size:>14,} B  KLD {r['kld']:.5f}  p99 {r['p99']:.4f}  top {r['same_top']:.2f}%",
               flush=True)
 
-    with ThreadPoolExecutor(1) as quantizing, ThreadPoolExecutor(args.jobs) as scoring:
-        pending = []
-        for name, rules in points:
-            slots.acquire()
-            out = os.path.join(args.work, f"{name}.gguf")
-            size = quantizing.submit(quantize, args.source, rules, out, args.imatrix).result()
-            pending.append(scoring.submit(scored, name, out, size))
-        for future in pending:
+    with ThreadPoolExecutor(args.jobs) as pool:
+        for future in [pool.submit(point, name, rules) for name, rules in points]:
             future.result()
     return results
 
@@ -169,7 +162,7 @@ def main():
     s.add_argument("--out", required=True)
     s.add_argument("--imatrix")
     s.add_argument("--work", default=".")
-    s.add_argument("--jobs", type=int, default=1, help="models scored at once (as many as fit the GPU)")
+    s.add_argument("--jobs", type=int, default=1, help="points quantized and scored at once (as many models as fit the GPU)")
     m = sub.add_parser("measure")
     m.add_argument("--source", required=True)
     m.add_argument("--kld-base", required=True)

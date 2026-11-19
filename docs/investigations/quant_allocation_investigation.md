@@ -64,3 +64,30 @@ bound (~400 CPU-s a point: the logits come back to the host and every row walks 
 mostly share the cores; moving the KLD onto the GPU beside the logits would be the next speedup.
 
 Next: the 35B (an imatrix, its BF16 again, ~10 min a point), then Hessian error feedback (#1013 item 2).
+
+## Run 3 - 2026-11-19 08:10
+
+Question: does scoring on the GPU, beside the logits, take the scoring off the CPU?
+
+Change: `PromptLogitsRequest::reference` (llama-perplexity's base encoding: per-row scale and floor, u16 codes) makes
+the engine score `KL(reference || model)`, the top-token match and the reference log-prob of the next token where the
+logits were computed, 64 rows at a time; only the codes go up and three numbers a row come back. The perplexity
+example sends each chunk's base records that way.
+
+Findings along the way:
+
+- The first try ran at 3.2 s a chunk (CPU scoring: 0.8 s): raw logits move to the host per forward (step.rs
+  `scatter`), so the tensor ops ran on the CPU. A request flag (`raw_logits_on_device`) keeps them on the device.
+- With them kept, chunk 2 on read garbage (PPL 2512): the API thread read them on another stream before the step's
+  kernels finished. The step now synchronizes before handing device logits over.
+- Same top-1 85.49% against the CPU's 85.58%: a device argmax may take any tie, llama-perplexity the first index
+  (bf16 logits tie at the top often enough). `first_max` picks the first.
+
+Result (uniform Q4_K, 40 chunks): PPL 12.2411, KLD mean 0.06880, median 0.04845, p99 0.40003, same top 85.58%, equal
+to the CPU scorer; the divergence takes ~30 ms a chunk, a whole scoring run 7.4 s (33 s before, 4.9 CPU-s against
+57). The five Run 2 recipes re-measured equal to Run 2.
+
+But the five recipes still take 178-220 s: quantizing now dominates (~44 s a k-quant recipe at ~7 cores, the dev
+build's debug assertions on). Points run whole on each worker (quantize then score): jobs 1 220 s, 2 190 s, 3 178 s
+(2,275 CPU-s: the quantizers contend). Next: reuse tensors across points (the base and each group/type quantized
+once, a point's file assembled by copying), and a quantizer built without debug assertions.

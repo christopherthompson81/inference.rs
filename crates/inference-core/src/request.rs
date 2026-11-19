@@ -204,6 +204,10 @@ pub struct NormalRequest {
     #[serde(default)]
     pub sequential_tool_calls: bool,
     pub return_raw_logits: bool,
+    /// Raw logits stay on the device that computed them (for a caller reducing them there) instead of moving to
+    /// the host per forward.
+    #[serde(skip)]
+    pub raw_logits_on_device: bool,
     pub web_search_options: Option<WebSearchOptions>,
     /// When true, registered code-execution tools are injected and the agentic loop runs.
     #[serde(default)]
@@ -409,6 +413,7 @@ impl NormalRequest {
             host_tools: Vec::new(),
             sequential_tool_calls: false,
             return_raw_logits: false,
+            raw_logits_on_device: false,
             web_search_options: None,
             enable_code_execution: false,
             enable_shell: false,

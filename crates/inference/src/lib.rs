@@ -266,7 +266,9 @@ pub use inference_api::{
     },
     engine::{expand_isq_value, parse_isq_value},
     engine_chat::{AgenticToolCallData, AgenticToolCallPhase, ChatStreamEvent, Usage},
-    engine_logits::{LogitsOutput, PromptInput, PromptLogits, PromptLogitsRequest},
+    engine_logits::{
+        Divergence, LogitsOutput, LogitsReference, PromptInput, PromptLogits, PromptLogitsRequest,
+    },
     generation::SpeechAudio,
     initialize_logging,
     logits_processors::{CustomLogitsProcessor, in_place},

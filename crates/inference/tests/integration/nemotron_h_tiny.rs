@@ -891,6 +891,7 @@ async fn a_long_prompt_scores_on_vulkan_as_on_the_cpu() -> anyhow::Result<()> {
 
 async fn scores(model: &inference::Model, tokens: Vec<u32>) -> anyhow::Result<Vec<Option<f32>>> {
     let request = PromptLogitsRequest {
+        reference: None,
         model: None,
         prompt: PromptInput::Tokens(tokens),
         output: Default::default(),
@@ -939,6 +940,7 @@ async fn decode_scores_as_prefill(
     tokens.extend(decoded.iter().map(|(token, _)| *token));
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(tokens),
             output: Default::default(),

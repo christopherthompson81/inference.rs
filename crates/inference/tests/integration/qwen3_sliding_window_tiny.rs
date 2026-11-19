@@ -239,6 +239,7 @@ async fn a_qwen3_option_head_returns_the_hidden_states() -> anyhow::Result<()> {
         .await?;
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(OPTION_HEAD_PROMPT.to_vec()),
             output: LogitsOutput::Logits,

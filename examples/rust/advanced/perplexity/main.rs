@@ -13,8 +13,8 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use inference::{
-    GgufModelBuilder, LogitsOutput, MemoryGpuConfig, Model, ModelBuilder, ModelDType,
-    PagedAttentionMetaBuilder, PagedCacheType, PromptInput, PromptLogitsRequest,
+    GgufModelBuilder, LogitsOutput, LogitsReference, MemoryGpuConfig, Model, ModelBuilder,
+    ModelDType, PagedAttentionMetaBuilder, PagedCacheType, PromptInput, PromptLogitsRequest,
     api::operations::TokenizeRequest,
 };
 
@@ -23,17 +23,14 @@ const WINDOW_HEADROOM: usize = 256;
 const PROMPT_CHUNKSIZE: usize = 1024;
 // llama-perplexity scores a window's second half, so a window needs a few tokens on each side
 const MIN_LLAMA_CPP_CTX: usize = 4;
-// llama-perplexity's `--kl-divergence-base` file opens with this, and skips base log-probs at or below the floor
+// llama-perplexity's `--kl-divergence-base` file opens with this
 const KLD_BASE_MAGIC: &[u8; 8] = b"_logits_";
-const KLD_LOG_PROB_FLOOR: f32 = -16.0;
 // a base row keeps log-probs this far below its top as u16 steps between them (llama-perplexity's encoding)
 const KLD_BASE_RANGE: f32 = 16.0;
 const KLD_BASE_STEPS: f32 = 65535.0;
 // llama-perplexity's chunking for a base written here: `-c 512 --chunks 40`, as the recipe investigations use
 const DEFAULT_KLD_CTX: usize = 512;
 const DEFAULT_KLD_CHUNKS: usize = 40;
-// a row's logprob of its next token, from our logits against the engine's own, agrees to this
-const ROW_CHECK_TOLERANCE: f32 = 1e-3;
 
 /// Calculate perplexity of a model. By default, this uses the Llama 3.1 8B model.
 #[derive(Parser)]
@@ -227,6 +224,7 @@ async fn main() -> Result<()> {
     for (i, chunk) in tokens.chunks(PROMPT_CHUNKSIZE).enumerate() {
         let start = Instant::now();
         let request = PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens([vec![bos_token], chunk.to_vec()].concat()),
             output: LogitsOutput::Logprobs,
@@ -236,6 +234,7 @@ async fn main() -> Result<()> {
         let skip = match args.cached_prefix {
             Some(prefix) if prefix + 1 < prompt.len() => {
                 let warm = PromptLogitsRequest {
+                    reference: None,
                     model: None,
                     prompt: PromptInput::Tokens(prompt[..=prefix].to_vec()),
                     output: LogitsOutput::Logprobs,
@@ -296,6 +295,7 @@ async fn llama_cpp_window(model: &Model, text: String, ctx: usize) -> Result<f64
         "the text is shorter than two windows"
     );
     let request = PromptLogitsRequest {
+        reference: None,
         model: None,
         prompt: PromptInput::Tokens(tokens[..ctx].to_vec()),
         output: LogitsOutput::Logprobs,
@@ -365,55 +365,6 @@ fn read_i32(reader: &mut impl Read) -> Result<i32> {
     Ok(i32::from_le_bytes(bytes))
 }
 
-// KL(base || ours) over one position as llama-perplexity computes it, our and the base's logprob of the next token,
-// and whether the two top tokens agree; `record` is the base's: its scale and floor as two f32, then a u16 per token
-fn score_row(logits: &[f32], record: &[u8], next: usize) -> (f64, f64, f64, bool) {
-    let (imax, max_logit) =
-        logits
-            .iter()
-            .copied()
-            .enumerate()
-            .fold(
-                (0, f32::NEG_INFINITY),
-                |m, (i, v)| if v > m.1 { (i, v) } else { m },
-            );
-    let log_sum_exp = logits
-        .iter()
-        .map(|v| f64::from((v - max_logit).exp()))
-        .sum::<f64>()
-        .ln() as f32;
-    let float = |at: usize| {
-        f32::from_le_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]])
-    };
-    let (scale, floor) = (float(0), float(4));
-    let base = record[8..]
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|b| u16::from_le_bytes(*b))
-        .collect::<Vec<_>>();
-    let ours = |i: usize| logits[i] - max_logit - log_sum_exp;
-    let mut kld = 0.0;
-    let (mut imax_base, mut base_max) = (0, f32::NEG_INFINITY);
-    for (i, &q) in base.iter().take(logits.len()).enumerate() {
-        let p_log = scale * f32::from(q) + floor;
-        if p_log > base_max {
-            base_max = p_log;
-            imax_base = i;
-        }
-        if p_log > KLD_LOG_PROB_FLOOR {
-            kld += f64::from(p_log.exp() * (p_log - ours(i)));
-        }
-    }
-    let base_logprob = scale * f32::from(base[next]) + floor;
-    (
-        kld,
-        f64::from(ours(next)),
-        f64::from(base_logprob),
-        imax == imax_base,
-    )
-}
-
 // `logits` as a base record of `n_vocab` codes, as llama-perplexity writes one: scale and floor as two f32, then a u16
 // per token (the ones past our vocab and those over the range below the top at 0)
 fn base_record(logits: &[f32], n_vocab: usize) -> Vec<u8> {
@@ -469,6 +420,7 @@ async fn write_kld_base(
     for (c, chunk) in tokens.chunks(n_ctx).enumerate() {
         let scored = model
             .prompt_logits(PromptLogitsRequest {
+                reference: None,
                 model: None,
                 prompt: PromptInput::Tokens(chunk_prompt(chunk, bos)),
                 output: LogitsOutput::Logits,
@@ -537,50 +489,65 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
     let record = 2 * n_vocab.div_ceil(2) + 4;
     let record_bytes = record * 2;
     let (mut klds, mut nll, mut nll_base, mut same_top) = (Vec::new(), 0.0, 0.0, 0usize);
+    let rows = first..n_ctx - 1;
+    let mut records = vec![0u8; record_bytes * rows.len()];
     for (c, chunk) in tokens.chunks(n_ctx).enumerate() {
         let start = Instant::now();
+        // the chunk's base records split into the per-row scale and floor and the codes, which the engine scores
+        // against the logits on their device
+        reader.read_exact(&mut records)?;
+        let mut reference = LogitsReference {
+            first_row: first,
+            width: record - 4,
+            codes: Vec::with_capacity(rows.len() * (record_bytes - 8)),
+            ..Default::default()
+        };
+        for row in records.chunks(record_bytes) {
+            let float =
+                |at: usize| f32::from_le_bytes(row[at..at + 4].try_into().expect("4 bytes"));
+            reference.scales.push(float(0));
+            reference.floors.push(float(4));
+            reference.codes.extend_from_slice(&row[8..]);
+        }
         let scored = model
             .prompt_logits(PromptLogitsRequest {
                 model: None,
                 prompt: PromptInput::Tokens(chunk_prompt(chunk, bos)),
-                output: LogitsOutput::Logits,
+                output: if writer.is_some() {
+                    LogitsOutput::Logits
+                } else {
+                    LogitsOutput::Logprobs
+                },
                 audio: Vec::new(),
+                reference: Some(reference),
             })
             .await?;
-        let logits = scored.logits.context("the engine returned no logits")?;
         let vocab = scored.vocab_size;
         anyhow::ensure!(
             vocab <= n_vocab,
             "our vocab ({vocab}) is wider than the base's ({n_vocab})"
         );
-        // the chunk's base records read in order, then its rows scored across the cores (each row as before, the
-        // totals still summed in row order)
-        let rows = first..n_ctx - 1;
-        let mut records = vec![0u8; record_bytes * rows.len()];
-        reader.read_exact(&mut records)?;
-        let scores = parallel_rows(rows.clone(), |row| {
-            let record = &records[(row - first) * record_bytes..][..record_bytes];
-            let row_logits = &logits[row * vocab..][..vocab];
-            let out = writer.is_some().then(|| base_record(row_logits, n_vocab));
-            (score_row(row_logits, record, chunk[row + 1] as usize), out)
-        });
-        for (row, ((kld, logprob, base_logprob, same), out)) in rows.zip(scores) {
-            if let (Some(writer), Some(out)) = (writer.as_mut(), out) {
+        if let Some(writer) = writer.as_mut() {
+            let logits = scored
+                .logits
+                .as_ref()
+                .context("the engine returned no logits")?;
+            let out = parallel_rows(rows.clone(), |row| {
+                base_record(&logits[row * vocab..][..vocab], n_vocab)
+            });
+            for out in out {
                 writer.write_all(&out)?;
             }
-            if c == 0 && row == first {
-                let engine =
-                    scored.token_logprobs[row + 1].context("a scored token has no logprob")?;
-                anyhow::ensure!(
-                    (engine - logprob as f32).abs() < ROW_CHECK_TOLERANCE,
-                    "logits row {row} does not predict token {}: {logprob} against the engine's {engine}",
-                    row + 1
-                );
-            }
-            klds.push(kld);
-            nll -= logprob;
-            nll_base -= base_logprob;
-            same_top += usize::from(same);
+        }
+        let divergence = scored
+            .divergence
+            .context("the engine returned no divergence")?;
+        for (i, row) in rows.clone().enumerate() {
+            klds.push(f64::from(divergence.kld[i]));
+            nll -=
+                f64::from(scored.token_logprobs[row + 1].context("a scored token has no logprob")?);
+            nll_base -= f64::from(divergence.reference_logprobs[i]);
+            same_top += usize::from(divergence.same_top[i]);
         }
         let n = klds.len() as f64;
         println!(

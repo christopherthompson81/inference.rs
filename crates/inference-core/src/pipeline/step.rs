@@ -74,12 +74,20 @@ impl RowOutputs {
         forward_idx: usize,
         result: &ForwardInputsResult,
         seq_indices: Vec<usize>,
+        seqs: &[&mut Sequence],
     ) -> inference_tensor::Result<()> {
         for (logit_idx, seq_idx) in seq_indices.into_iter().enumerate() {
             match result {
                 ForwardInputsResult::RawLogits { logits } => {
+                    let logits = logits.i(logit_idx)?;
                     self.raw_logits[seq_idx][forward_idx] =
-                        Some(logits.i(logit_idx)?.to_device(&Device::Cpu)?);
+                        Some(if seqs[seq_idx].raw_logits_on_device {
+                            // the caller reads them on another stream, after this step's kernels
+                            logits.device().synchronize()?;
+                            logits
+                        } else {
+                            logits.to_device(&Device::Cpu)?
+                        });
                 }
                 ForwardInputsResult::Embeddings { embeddings } => {
                     self.embeddings[seq_idx] =
@@ -277,7 +285,7 @@ impl dyn Pipeline {
         let result = in_precision(bf16, || self.forward_inputs(inputs, ctx.return_raw_logits))?
             .into_cpu_for_batch(input_seqs.len(), preserve_causal_generation)?;
         let mut exec_duration = start.elapsed();
-        outputs.scatter(0, &result, seq_indices)?;
+        outputs.scatter(0, &result, seq_indices, input_seqs)?;
 
         match post_op {
             CacheInstruction::Out => self.clone_out_cache(input_seqs),
@@ -863,7 +871,7 @@ impl dyn Pipeline {
                 }
                 result => result,
             };
-            outputs.scatter(i, &result, seq_indices)?;
+            outputs.scatter(i, &result, seq_indices, input_seqs)?;
         }
         Ok(PagedForwards {
             outputs,

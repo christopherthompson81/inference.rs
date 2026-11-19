@@ -148,6 +148,7 @@ async fn a_scored_prompt_expands_its_clips_as_a_chat_does() -> anyhow::Result<()
     let rendered = serde_json::from_value::<Vec<u32>>(rendered["tokens"].clone())?;
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(rendered),
             output: Default::default(),

@@ -33,6 +33,7 @@ async fn a_bf16_gguf_model_returns_f32_logits() -> anyhow::Result<()> {
         .await?;
     let scored = model
         .prompt_logits(PromptLogitsRequest {
+            reference: None,
             model: None,
             prompt: PromptInput::Tokens(PROMPT.to_vec()),
             output: LogitsOutput::Logits,
