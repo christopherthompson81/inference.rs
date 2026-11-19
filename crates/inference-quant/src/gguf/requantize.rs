@@ -124,6 +124,41 @@ fn quantize_slice(
     Ok(chunks.concat())
 }
 
+/// Where `quantize gguf --hessians` finds a tensor's input Hessian (`X^T X / n`, `[cols, cols]` f32 row-major).
+pub trait HessianSource: Send + Sync {
+    /// The Hessian of tensor `name` (by GGUF name), or of expert `expert` of a stack (None where the stack has one
+    /// for all its experts or none).
+    fn hessian(&self, name: &str, expert: Option<usize>) -> Result<Option<Vec<f32>>>;
+}
+
+/// A safetensors file of Hessians keyed by GGUF tensor name.
+pub struct HessianFile(inference_tensor::safetensors::MmapedSafetensors);
+
+impl HessianFile {
+    pub fn open(path: &Path) -> Result<Self> {
+        // SAFETY: the file is only read while it is open here
+        Ok(Self(unsafe {
+            inference_tensor::safetensors::MmapedSafetensors::new(path)?
+        }))
+    }
+}
+
+impl HessianSource for HessianFile {
+    fn hessian(&self, name: &str, expert: Option<usize>) -> Result<Option<Vec<f32>>> {
+        if expert.is_some() {
+            return Ok(None);
+        }
+        let Ok(h) = self.0.load(name, &Device::Cpu) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            h.to_dtype(inference_tensor::DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+        ))
+    }
+}
+
 /// The rules for which tensors become which type, in order: the first pattern matching a name wins, and a tensor
 /// no pattern matches is copied as it is.
 pub struct RequantizePlan {
@@ -138,9 +173,9 @@ pub struct RequantizePlan {
     pub only: Option<Regex>,
     /// The device whose quantizers write the types they cover (the same bytes as the CPU's, sooner).
     pub gpu: Option<Device>,
-    /// Input Hessians (`X^T X / n`, `[cols, cols]` f32) by tensor name: a tensor with one, of a type whose blocks
-    /// stand alone, is quantized with GPTQ-style error feedback on `gpu` (CUDA).
-    pub hessians: Option<PathBuf>,
+    /// Input Hessians: a tensor with one (each expert of a stack with its own or the stack's), of a type GPTQ covers,
+    /// is quantized with GPTQ-style error feedback on `gpu` (CUDA).
+    pub hessians: Option<Box<dyn HessianSource>>,
     /// With `hessians`, only their diagonals weigh the quantizer (the baseline the feedback is measured against).
     pub hessian_weights_only: bool,
     /// The share of a Hessian's mean diagonal added to it before the feedback.
@@ -227,6 +262,64 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
         target,
         size,
     })
+}
+
+// `t` quantized with GPTQ feedback when `hessians` has its Hessian (a stack's experts each with its own, or the stack's
+// for all); None leaves it to the ordinary path, the reader where it was
+#[cfg(feature = "cuda")]
+fn gptq_tensor(
+    t: &Planned<'_>,
+    ty: GgufType,
+    hessians: &dyn HessianSource,
+    plan: &RequantizePlan,
+    device: &Device,
+    reader: &mut BufReader<File>,
+    offset: u64,
+) -> Result<Option<Vec<u8>>> {
+    let cols = *t.dims.last().unwrap_or(&1);
+    let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
+    let shared = hessians.hessian(t.name, None)?;
+    let per_expert = if t.dims.len() == 3 {
+        (0..experts)
+            .map(|e| hessians.hessian(t.name, Some(e)))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    if shared.is_none() && per_expert.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let mut bytes = vec![0u8; t.source_bytes];
+    reader.seek(SeekFrom::Start(offset))?;
+    reader.read_exact(&mut bytes)?;
+    let values = to_f32(t.source_type, &bytes)?;
+    let per = values.len() / experts;
+    let mut out = Vec::with_capacity(t.size);
+    for e in 0..experts {
+        let h = per_expert
+            .get(e)
+            .and_then(Option::as_ref)
+            .or(shared.as_ref())
+            .ok_or_else(|| {
+                inference_tensor::Error::Msg(format!("{}: no Hessian for expert {e}", t.name))
+            })?;
+        out.extend(
+            super::gptq::quantize(
+                ty,
+                cols,
+                &values[e * per..(e + 1) * per],
+                h,
+                plan.quantizer,
+                !plan.hessian_weights_only,
+                plan.gptq_damp,
+                device,
+                quantize_slice,
+                dequantize_any,
+            )
+            .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))?,
+        );
+    }
+    Ok(Some(out))
 }
 
 // rows of `cols` of `ty` back to f32: the raw types' dequantizers, or Candle's for the types it holds
@@ -369,13 +462,6 @@ pub fn requantize_gguf(
         ..Default::default()
     };
     let mut by_type = HashMap::<u32, (usize, u64)>::new();
-    // SAFETY: the Hessians file is only read while this rewrite runs
-    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
-    let hessians = plan
-        .hessians
-        .as_ref()
-        .map(|p| unsafe { inference_tensor::safetensors::MmapedSafetensors::new(p) })
-        .transpose()?;
     for (i, t) in tensors.iter().enumerate() {
         progress(i, tensors.len(), t.name);
         let info = &header.tensor_infos[t.name];
@@ -426,33 +512,21 @@ pub fn requantize_gguf(
             entry.1 += t.size as u64;
             continue;
         }
-        // GPTQ takes the whole matrix at once, its Hessian beside it
+        // GPTQ takes the whole matrix (each expert's) at once, its Hessian beside it
         #[cfg(feature = "cuda")]
         if let (Some(ty), Some(h), Some(device @ Device::Cuda(_))) =
-            (t.target, &hessians, &plan.gpu)
-            && t.dims.len() == 2
+            (t.target, &plan.hessians, &plan.gpu)
             && super::gptq::supports(ty)
-            && let Ok(hessian) = h.load(t.name, &Device::Cpu)
-        {
-            let mut bytes = vec![0u8; t.source_bytes];
-            reader.read_exact(&mut bytes)?;
-            let hessian = hessian
-                .to_dtype(inference_tensor::DType::F32)?
-                .flatten_all()?
-                .to_vec1::<f32>()?;
-            let out = super::gptq::quantize(
+            && let Some(out) = gptq_tensor(
+                t,
                 ty,
-                cols,
-                &to_f32(t.source_type, &bytes)?,
-                &hessian,
-                plan.quantizer,
-                !plan.hessian_weights_only,
-                plan.gptq_damp,
+                h.as_ref(),
+                plan,
                 device,
-                quantize_slice,
-                dequantize_any,
-            )
-            .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
+                &mut reader,
+                header.tensor_data_offset + info.offset,
+            )?
+        {
             if out.len() != t.size {
                 inference_tensor::bail!(
                     "{}: wrote {} bytes, planned {}",

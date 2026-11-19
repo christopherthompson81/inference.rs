@@ -1,12 +1,22 @@
 //! A `.cimatrix` (collected online, keyed by the layers' tracking keys) as an imatrix under a GGUF's tensor names.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 // llama.cpp's stand-in for an expert that saw no tokens
 const UNSEEN_EXPERT_IMPORTANCE: f32 = 1.0;
+// an engine Hessian dump's file extension, the tensor each holds, and the head's key
+const HESSIAN_EXTENSION: &str = "safetensors";
+const HESSIAN_TENSOR: &str = "hin";
+const HEAD_KEY: &str = "lm_head";
+const OUTPUT_TENSOR: &str = "output.weight";
+const TOKEN_EMBD_TENSOR: &str = "token_embd.weight";
+// the GGUF keys of a gated delta net's key heads (its groups) and value heads, and its output projection
+const SSM_GROUP_COUNT: &str = "ssm.group_count";
+const SSM_TIME_STEP_RANK: &str = "ssm.time_step_rank";
+const SSM_OUT_SUFFIX: &str = ".ssm_out.weight";
 
 /// What [`cimatrix_for_gguf`] matched.
 #[derive(Debug, Default)]
@@ -56,4 +66,155 @@ pub fn cimatrix_for_gguf(cimatrix: &Path, gguf: &Path) -> Result<ImatrixMapping>
         mapping.entries.insert(gguf_name.to_string(), values);
     }
     Ok(mapping)
+}
+
+/// An engine Hessian dump (`inference quantize hessians`) under a GGUF's tensor names.
+pub struct HessianDir {
+    dense: HashMap<String, PathBuf>,
+    experts: HashMap<String, BTreeMap<usize, PathBuf>>,
+    // the GDN output projections' column order: the converter tiles V heads by key head, the checkpoint groups them
+    ssm_out_order: Option<Vec<usize>>,
+    /// Files no GGUF tensor binds to.
+    pub unmatched: Vec<String>,
+}
+
+impl HessianDir {
+    /// The GGUF tensors given a Hessian.
+    pub fn len(&self) -> usize {
+        self.dense.len() + self.experts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+fn load_hessian(path: &Path, order: Option<&[usize]>) -> inference_tensor::Result<Vec<f32>> {
+    let h = inference_tensor::safetensors::load(path, &inference_tensor::Device::Cpu)?
+        .remove(HESSIAN_TENSOR)
+        .ok_or_else(|| {
+            inference_tensor::Error::Msg(format!("{} holds no `{HESSIAN_TENSOR}`", path.display()))
+        })?
+        .to_dtype(inference_tensor::DType::F32)?;
+    let n = h.dim(0)?;
+    let values = h.flatten_all()?.to_vec1::<f32>()?;
+    let Some(order) = order.filter(|o| o.len() == n) else {
+        return Ok(values);
+    };
+    Ok((0..n * n)
+        .map(|i| values[order[i / n] * n + order[i % n]])
+        .collect())
+}
+
+impl inference_quant::requantize::HessianSource for HessianDir {
+    fn hessian(
+        &self,
+        name: &str,
+        expert: Option<usize>,
+    ) -> inference_tensor::Result<Option<Vec<f32>>> {
+        let order = name
+            .ends_with(SSM_OUT_SUFFIX)
+            .then_some(())
+            .and(self.ssm_out_order.as_deref());
+        let path = match expert {
+            None => self.dense.get(name),
+            Some(e) => self.experts.get(name).and_then(|m| m.get(&e)),
+        };
+        path.map(|p| load_hessian(p, order)).transpose()
+    }
+}
+
+// the converter's `_reorder_v_heads` along one dimension: grouped by key head to tiled
+fn v_head_order(num_k_heads: usize, num_v_heads: usize, n: usize) -> Vec<usize> {
+    let per_k = num_v_heads / num_k_heads;
+    let head_dim = n / num_v_heads;
+    (0..n)
+        .map(|j| {
+            let (v, d) = (j / head_dim, j % head_dim);
+            let (r, k) = (v / num_k_heads, v % num_k_heads);
+            (k * per_k + r) * head_dim + d
+        })
+        .collect()
+}
+
+/// The engine Hessians in `dir` under the names of the tensors `gguf`'s layers load: a file `<linear>` binds to the
+/// tensor its weight does, `<stack>.<e>.<proj>` to expert `e` of the stack, `lm_head` to the output (or, tied, the
+/// token embedding). A GDN output projection's Hessian follows the converter's V-head order.
+pub fn hessians_for_gguf(dir: &Path, gguf: &Path) -> Result<HessianDir> {
+    let archive = inference_quant::GgufArchive::open([gguf])?;
+    let names = crate::pipeline::gguf_tensor_names(&archive)?;
+    let tensors = archive.tensors();
+    let mut out = HessianDir {
+        dense: HashMap::new(),
+        experts: HashMap::new(),
+        ssm_out_order: None,
+        unmatched: Vec::new(),
+    };
+    let arch = archive
+        .metadata()
+        .get("general.architecture")
+        .and_then(|v| v.to_string().ok())
+        .cloned()
+        .unwrap_or_default();
+    let meta = |key: &str| {
+        archive
+            .metadata()
+            .get(&format!("{arch}.{key}"))
+            .and_then(|v| v.to_u64().ok())
+            .and_then(|v| usize::try_from(v).ok())
+    };
+    if let (Some(k), Some(v)) = (meta(SSM_GROUP_COUNT), meta(SSM_TIME_STEP_RANK))
+        && k != v
+        && k > 0
+        && let Some(info) = tensors
+            .iter()
+            .find(|(n, _)| n.ends_with(SSM_OUT_SUFFIX))
+            .map(|(_, i)| i)
+    {
+        let cols = *info.shape().last().unwrap_or(&0);
+        out.ssm_out_order = Some(v_head_order(k, v, cols));
+    }
+    let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != HESSIAN_EXTENSION) {
+            continue;
+        }
+        let Some(key) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if key == HEAD_KEY {
+            let head = [OUTPUT_TENSOR, TOKEN_EMBD_TENSOR]
+                .into_iter()
+                .find(|n| tensors.contains_key(*n));
+            match head {
+                Some(n) => {
+                    out.dense.insert(n.to_string(), path);
+                }
+                None => out.unmatched.push(key),
+            }
+            continue;
+        }
+        if let Some(gguf_name) = names.get(&format!("{key}.weight")) {
+            out.dense.insert(gguf_name.clone(), path);
+            continue;
+        }
+        // `<stack>.<e>.<proj>`: expert e of the stacked `<stack>.<proj>`
+        let expert = key.rsplit_once('.').and_then(|(rest, proj)| {
+            let (stack, e) = rest.rsplit_once('.')?;
+            Some((format!("{stack}.{proj}.weight"), e.parse::<usize>().ok()?))
+        });
+        match expert.and_then(|(native, e)| Some((names.get(&native)?.clone(), e))) {
+            Some((gguf_name, e)) => {
+                out.experts.entry(gguf_name).or_default().insert(e, path);
+            }
+            None => out.unmatched.push(key),
+        }
+    }
+    Ok(out)
 }

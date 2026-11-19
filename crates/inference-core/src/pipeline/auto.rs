@@ -141,7 +141,8 @@ impl AutoLoaderBuilder {
             .clone()
             .or(multimodal_cfg.hf_config_overrides.clone());
         let max_model_len = normal_cfg.max_model_len.or(multimodal_cfg.max_model_len);
-        let writes_exl3 = normal_cfg.exl3_out.is_some();
+        // collecting Hessians takes the text model as an EXL3 write does
+        let writes_exl3 = normal_cfg.exl3_out.is_some() || normal_cfg.hessians_out.is_some();
         let mut normal_builder = NormalLoaderBuilder::new(
             normal_cfg,
             chat_template.clone(),
@@ -385,7 +386,8 @@ impl AutoLoader {
         }
     }
 
-    // an EXL3 write takes a multimodal checkpoint's text model alone (only text stacks write EXL3)
+    // an EXL3 write (or a Hessian collection) takes a multimodal checkpoint's text model alone (only text stacks write
+    // EXL3)
     fn detect_for_load(&self, config: &ConfigArtifacts) -> Result<Detected> {
         let detected = detect(&self.model_id, config)?;
         if !matches!(detected, Detected::Multimodal(_)) || !self.writes_exl3 {
@@ -397,7 +399,7 @@ impl AutoLoader {
             .and_then(text_loader_of_multimodal);
         Ok(match text {
             Some(tp) => {
-                info!("Writing EXL3 of the checkpoint's text model, loaded as `{tp}`.");
+                info!("Taking the checkpoint's text model, loaded as `{tp}`.");
                 Detected::Normal(tp)
             }
             None => detected,

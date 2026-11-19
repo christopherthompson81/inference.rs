@@ -102,7 +102,7 @@ mod chat_collector;
 mod engine;
 mod gguf_imatrix;
 mod gguf_write;
-pub use gguf_imatrix::{ImatrixMapping, cimatrix_for_gguf};
+pub use gguf_imatrix::{HessianDir, ImatrixMapping, cimatrix_for_gguf, hessians_for_gguf};
 pub use gguf_write::GgufWriteSummary;
 use inference_nn::media_inputs::video as video_input;
 pub use video_input::{VideoFrameSampling, VideoInput, sample_frame_indices};

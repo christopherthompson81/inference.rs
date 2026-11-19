@@ -304,3 +304,29 @@ the CPU a super-block at a time (~90 s for the 2B).
 Next: Hessians from the engine instead of transformers (the safetensors loader's linears already collect them, the
 EXL3 writer's path), keyed by GGUF name through `gguf_tensor_names`; for MoE, one pooled Hessian per layer for the
 gate/up experts (they share the layer input; ~16 MB a layer instead of 4 GB) and per-expert ones for down (1 MB each).
+
+## Run 11 - 2026-11-19 15:45
+
+Question: Hessians from the engine instead of the transformers prototype, in a form the 35B's experts fit.
+
+Change: `inference quantize hessians -m <checkpoint> --calibration-file <text> -o <dir>` loads the checkpoint's text
+model on the host (a multimodal one's alone, as an EXL3 write does) and streams it through the GPU a layer at a time
+(the EXL3 writer's loop): each layer's Hessians over the calibration states, written as `<linear>.safetensors`
+(`hin`, exllamav3's layout), q/k/v and gate/up sharing one; the head's over the final normed states. Stacked gate/up
+experts read the layer's shared input, so they take the shared expert's Hessian (their pooled second moment); other
+stacks write one per expert (a 35B down expert's is 1 MB). `quantize gguf --hessians <dir>` binds each file to the
+tensor its weight loads from (`<stack>.<e>.<proj>` to expert e, `lm_head` to the output or, tied, `token_embd`), the
+GDN output projection's Hessian reordered as the converter orders its V heads; GPTQ runs per expert for stacks.
+
+Qwen3.5-2B, the mixed calibration's first ~65K tokens: 151 Hessians in 30 s (5.4 GB). GPTQ, KLD:
+
+```
+type, Hessians                 wiki     docs B   rust
+Q4_K, prototype (Run 9)        0.03209  0.02319  0.02208
+Q4_K, engine                   0.02749  0.01941  0.01859
+IQ4_KS, prototype (Run 10)     0.03170  0.02208  0.01987
+IQ4_KS, engine                 0.02597  0.01755  0.01724
+```
+
+The engine's do better mainly because they include the head's: the tied `token_embd` now gets the feedback too.
+Against no calibration at all (Q4_K 0.0688 / 0.0546 / 0.0498) that is -60 / -64 / -63%.
