@@ -280,6 +280,25 @@ inference run -m google/gemma-4-E4B-it --quant 8 \
 
 Non-paged KV-cache MTP is intentionally disabled for now, which is why paged attention is required (see the note at the top).
 
+The larger assistants (`google/gemma-4-26B-A4B-it-assistant`, `google/gemma-4-31B-it-assistant`) draw their logits
+from the whole tied 262144-token head rather than a centroid head. That head is most of a draft step's reads, so
+`--mtp-draft-isq` (which quantizes the assistant's projections and the head) matters on bandwidth-bound devices. The
+26B-A4B's QAT q4_0 GGUF on a Radeon 780M (Vulkan), greedy 256-token chat replies:
+
+| Drafts | Assistant weights | tok/s |
+| --- | --- | --- |
+| none | | 26.1 / 25.9 |
+| 1 | q8_0 | 32.3 / 30.0 |
+| 2 | q4_0 | 35.3 / 30.8 |
+| 3 | q4_0 | 34.4 / 30.1 |
+
+```bash
+inference serve --vulkan --pa-context-len 32768 --format gguf -m google/gemma-4-26B-A4B-it-qat-q4_0-gguf \
+  -f gemma-4-26B_q4_0-it.gguf --mtp-model google/gemma-4-26B-A4B-it-assistant --mtp-n-predict 2 --mtp-draft-isq q4_0
+```
+
+The sparse target pays for each verified row in expert reads, so deeper drafts stop paying past two there.
+
 The target and assistant configs must match where the implementation requires it, including vocabulary size and target hidden size. Mismatches fail at load, before generation starts.
 
 ## Notes
