@@ -22,6 +22,7 @@ import itertools
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,10 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "target", "debug", "inference")
 EXAMPLE = os.path.join(ROOT, "target", "debug", "examples", "perplexity")
+# GGUF metadata value types with a fixed size (bytes), and the string and array type ids
+GGUF_FIXED = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+GGUF_STRING, GGUF_ARRAY = 8, 9
+GGUF_ALIGNMENT = 32
 # the example's summary lines
 SCORE = {
     "kld": re.compile(r"^KLD mean\s+(-?[0-9.]+)", re.M),
@@ -38,8 +43,47 @@ SCORE = {
 }
 
 
-def quantize(source, rules, out, imatrix, reuse=()):
+def tensor_bytes(path):
+    """Each tensor's stored bytes in a GGUF (padding included), by name, from its header."""
+    with open(path, "rb") as f:
+        def read(fmt):
+            return struct.unpack("<" + fmt, f.read(struct.calcsize("<" + fmt)))[0]
+
+        def string():
+            return f.read(read("Q")).decode()
+
+        def skip(ty):
+            if ty == GGUF_STRING:
+                f.seek(read("Q"), 1)
+            elif ty == GGUF_ARRAY:
+                inner, n = read("I"), read("Q")
+                if inner in GGUF_FIXED:
+                    f.seek(GGUF_FIXED[inner] * n, 1)
+                else:
+                    for _ in range(n):
+                        skip(inner)
+            else:
+                f.seek(GGUF_FIXED[ty], 1)
+
+        f.seek(8)
+        n_tensors, n_kv = read("Q"), read("Q")
+        for _ in range(n_kv):
+            string()
+            skip(read("I"))
+        offsets = []
+        for _ in range(n_tensors):
+            name = string()
+            f.seek(8 * read("I") + 4, 1)
+            offsets.append((read("Q"), name))
+        data = -(-f.tell() // GGUF_ALIGNMENT) * GGUF_ALIGNMENT
+    ends = [o for o, _ in offsets[1:]] + [os.path.getsize(path) - data]
+    return {name: end - start for (start, name), end in zip(offsets, ends)}
+
+
+def quantize(source, rules, out, imatrix, reuse=(), only=None):
     args = [CLI, "quantize", "gguf", "-m", source, "-o", out]
+    if only:
+        args += ["--only", only]
     if imatrix:
         args += ["--imatrix", imatrix]
     for path in reuse:
@@ -50,24 +94,35 @@ def quantize(source, rules, out, imatrix, reuse=()):
     return os.path.getsize(out)
 
 
-def score(gguf, kld_base):
+def score(ggufs, kld_base):
     text = subprocess.run(
-        [EXAMPLE, "--gguf", gguf, "--file", os.devnull, "--kld-base", kld_base],
+        [EXAMPLE, "--gguf", *ggufs, "--file", os.devnull, "--kld-base", kld_base],
         check=True, capture_output=True, text=True,
     ).stdout
     return {k: float(r.search(text).group(1)) for k, r in SCORE.items()}
 
 
-def run_points(args, points, reuse=()):
-    """Every `(name, rules)` point quantized and scored on one of `args.jobs` workers, its file deleted after; the
+def run_points(args, points, reuse=(), base=None):
+    """Every `(name, rules, only)` point quantized and scored on one of `args.jobs` workers, its file deleted after;
+    with `base`, a point with `only` set is written as an overlay of those tensors and scored over the base. The
     quantizer uses only part of the cores, so points overlap."""
     results = {}
+    base_sizes = tensor_bytes(base) if base else None
 
-    def point(name, rules):
+    def point(name, rules, only):
         out = os.path.join(args.work, f"{name}.gguf")
         try:
-            size = quantize(args.source, rules, out, args.imatrix, reuse)
-            results[name] = r = {"bytes": size, **score(out, args.kld_base)}
+            size = quantize(args.source, rules, out, args.imatrix, reuse, only if base else None)
+            if base and only:
+                sizes = tensor_bytes(out)
+                size = os.path.getsize(base) + sum(sizes.values()) - sum(base_sizes[n] for n in sizes)
+                ggufs = [base, out]
+            else:
+                ggufs = [out]
+            results[name] = r = {"bytes": size, **score(ggufs, args.kld_base)}
+        except subprocess.CalledProcessError as e:
+            print(f"{name:28s} failed: {e}", flush=True)
+            return
         finally:
             if os.path.exists(out):
                 os.remove(out)
@@ -75,7 +130,7 @@ def run_points(args, points, reuse=()):
               flush=True)
 
     with ThreadPoolExecutor(args.jobs) as pool:
-        for future in [pool.submit(point, name, rules) for name, rules in points]:
+        for future in [pool.submit(point, *p) for p in points]:
             future.result()
     return results
 
@@ -83,25 +138,29 @@ def run_points(args, points, reuse=()):
 def sweep(args):
     spec = json.load(open(args.groups))
     os.makedirs(args.work, exist_ok=True)
-    # the base kept while the points run: each point copies its tensors and quantizes only its group's
+    # the base kept while the points run: each point quantizes only its group, as an overlay scored over the base
     base = os.path.join(args.work, "base.gguf")
     try:
-        size = quantize(args.source, spec["base"], base, args.imatrix)
-        results = {"base": {"bytes": size, **score(base, args.kld_base)}}
+        if args.keep_base and os.path.exists(base):
+            size = os.path.getsize(base)
+        else:
+            size = quantize(args.source, spec["base"], base, args.imatrix)
+        results = {"base": {"bytes": size, **score([base], args.kld_base)}}
         print(f"{'base':28s} {size:>14,} B  KLD {results['base']['kld']:.5f}", flush=True)
         points = []
         for name, group in spec["groups"].items():
             for ty in group["types"]:
-                points.append((f"{name}-{ty}", [f"{group['pattern']}={ty}"] + spec["base"]))
-        results.update(run_points(args, points, [base]))
+                rules = [f"{group['pattern']}={ty}"] + spec["base"]
+                points.append((f"{name}-{ty}", rules, group["pattern"]))
+        results.update(run_points(args, points, base=base))
     finally:
-        if os.path.exists(base):
+        if os.path.exists(base) and not args.keep_base:
             os.remove(base)
     table = {"base_rules": spec["base"], "base": results["base"], "groups": {}}
     for name, group in spec["groups"].items():
         table["groups"][name] = {
             "pattern": group["pattern"],
-            "types": {ty: results[f"{name}-{ty}"] for ty in group["types"]},
+            "types": {ty: results[f"{name}-{ty}"] for ty in group["types"] if f"{name}-{ty}" in results},
         }
     json.dump(table, open(args.out, "w"), indent=1)
 
@@ -110,7 +169,8 @@ def measure(args):
     """Each named recipe in `--recipes` ({"name": ["regex=type", ...]}) quantized and scored, as `sweep` does."""
     recipes = json.load(open(args.recipes))
     os.makedirs(args.work, exist_ok=True)
-    json.dump(run_points(args, list(recipes.items()), args.reuse), open(args.out, "w"), indent=1)
+    points = [(name, rules, None) for name, rules in recipes.items()]
+    json.dump(run_points(args, points, args.reuse), open(args.out, "w"), indent=1)
 
 
 def recipe(table, pick):
@@ -175,6 +235,7 @@ def main():
     s.add_argument("--imatrix")
     s.add_argument("--work", default=".")
     s.add_argument("--jobs", type=int, default=1, help="points quantized and scored at once (as many models as fit the GPU)")
+    s.add_argument("--keep-base", action="store_true", help="use the work dir's base.gguf if there, and keep it")
     m = sub.add_parser("measure")
     m.add_argument("--source", required=True)
     m.add_argument("--kld-base", required=True)

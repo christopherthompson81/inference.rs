@@ -149,6 +149,7 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         imatrix,
         quantizer,
         reuse: options.reuse.clone(),
+        only: options.only.as_deref().map(regex::Regex::new).transpose()?,
     };
     let summary = gguf_requantize::requantize_gguf(
         &options.model,

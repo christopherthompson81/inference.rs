@@ -43,6 +43,8 @@ const GENERAL_TYPE: &str = "general.type";
 const GENERAL_PREFIX: &str = "general.";
 const SPLIT_PREFIX: &str = "split.";
 const MMPROJ_TYPE: &str = "mmproj";
+/// `general.type` of a GGUF holding replacements for some of a model's tensors, listed with the model it overlays.
+pub const OVERLAY_GGUF_TYPE: &str = "tensor-overlay";
 // Older converters wrote this type, or none at all with the clip architecture; llama.cpp loads either
 const CLIP_VISION_TYPE: &str = "clip-vision";
 const GENERAL_ARCHITECTURE: &str = "general.architecture";
@@ -505,6 +507,14 @@ fn is_mtp_head(shard: &ParsedShard) -> bool {
             .any(|key| key.ends_with(NEXTN_PREDICT_LAYERS_SUFFIX))
 }
 
+fn is_overlay(shard: &ParsedShard) -> bool {
+    shard
+        .metadata
+        .get(GENERAL_TYPE)
+        .and_then(|value| value.to_string().ok())
+        .is_some_and(|ty| ty == OVERLAY_GGUF_TYPE)
+}
+
 fn parse_shards<I, P>(paths: I) -> Result<Vec<ParsedShard>>
 where
     I: IntoIterator<Item = P>,
@@ -550,6 +560,11 @@ impl GgufArchive {
         P: AsRef<Path>,
     {
         let parsed = parse_shards(paths)?;
+        let (overlays, parsed): (Vec<_>, Vec<_>) = if parsed.len() > 1 {
+            parsed.into_iter().partition(is_overlay)
+        } else {
+            (Vec::new(), parsed)
+        };
         // a built-in MTP head shipped as its own file (llama.cpp's draft head) extends the model it is listed with
         let (heads, model): (Vec<_>, Vec<_>) = if parsed.len() > 1 {
             parsed.into_iter().partition(is_mtp_head)
@@ -560,7 +575,31 @@ impl GgufArchive {
         for head in heads {
             archive.merge_mtp_head(Self::from_parsed(vec![head])?)?;
         }
+        for overlay in overlays {
+            archive.apply_overlay(Self::from_parsed(vec![overlay])?)?;
+        }
         Ok(archive)
+    }
+
+    // An overlay's tensors take the place of the model's same-named, same-shaped ones; its metadata is not read.
+    fn apply_overlay(&mut self, overlay: Self) -> Result<()> {
+        let shard_offset = self.shards.len();
+        for (name, mut tensor) in overlay.tensors {
+            match self.tensors.get(&name) {
+                Some(model) if model.shape == tensor.shape => {}
+                Some(model) => inference_tensor::bail!(
+                    "overlay tensor `{name}` is {:?}, the model's {:?}",
+                    tensor.shape,
+                    model.shape
+                ),
+                None => inference_tensor::bail!("overlay tensor `{name}` is not in the model"),
+            }
+            tensor.shard_index += shard_offset;
+            self.tensors.insert(name, tensor);
+        }
+        self.mappings.extend(overlay.mappings);
+        self.shards.extend(overlay.shards);
+        Ok(())
     }
 
     // The head's block count (the model's blocks and its own) and `nextn` keys describe the model it extends; every

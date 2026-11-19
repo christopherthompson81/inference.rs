@@ -237,6 +237,7 @@ inference quantize gguf [OPTIONS] --model <MODEL> --output <OUTPUT_PATH> --tenso
 | `--imatrix <IMATRIX>` |  | llama.cpp's imatrix (`.dat` or `.gguf`), keyed by the source's tensor names |
 | `--quantizer <QUANTIZER>` | `ik-llama` | Whose quantizer the bytes match: ik_llama.cpp's (the default) searches scales further for most types, for lower error at the same size; llama.cpp's writes its bytes exactly. Possible values: `llama-cpp`, `ik-llama`. |
 | `--reuse <REUSE>` |  | An earlier output from the same source, imatrix and quantizer, repeatable: tensors it holds at their planned type are copied from it rather than quantized again |
+| `--only <ONLY>` |  | Writes only the tensors whose names match this regex, as an overlay: listed after a model quantized from the same source (`--gguf model.gguf overlay.gguf`), its tensors replace the model's |
 
 ## inference quantize imatrix
 
