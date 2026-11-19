@@ -1,4 +1,8 @@
 #version 450
-// paged_prefill_cm_wide_main.glsl over f32 caches.
+// paged_prefill_cm_wide_main.glsl over f32 caches: eight teams of 2 subgroups (128 query rows), 16-position
+// tiles.
 #extension GL_GOOGLE_include_directive : require
+#define WIDE_SPLIT 2
+#define WIDE_BC 16
+#define WIDE_SUBGROUPS 16
 #include "paged_prefill_cm_wide_main.glsl"
