@@ -136,3 +136,41 @@ prefill 2048 (tok/s)  166           337
 Per decode token (44.5 ms): Q6_K head 9.7 ms (61 GB/s), MoE gate/up 7.1 ms, MoE down 4.8 ms (k = 704), ~300 RMS norms
 1.2 ms, windowed attention 1.85 ms. Not done here: the default context plans a 262k-token cache (56 GB, OOM on this
 machine) with full-context sliding layers; `--pa-context-len` is needed.
+
+## Run 5 - 2026-11-19 16:00
+
+**Question:** Run 4 left the 26B-A4B's prompts at 75 % of llama.cpp's on the 780M. Where do they part?
+
+llama.cpp's `GGML_VK_PERF_LOGGER` beside our `INFERENCE_VULKAN_PROFILE` over the same 512-token prompt:
+
+```
+a 512-token prompt          llama.cpp Vulkan      ours (int8 dot product kernels)
+dense Q4_0 matmuls          ~253 ms, 6-7 TFLOPS   ~360 ms, 4.5-5 TFLOPS
+experts' gate/up a layer    7.65 ms               9.7 ms
+experts' down a layer       4.43 ms               5.1 ms
+sliding attention a layer   1.04 ms               2.6 ms
+global attention a layer    2.0 ms                6.7 ms
+```
+
+On RDNA3 llama.cpp runs its prompt matmuls on the int8 matrix cores (`mul_mmq_cm1.comp`: 16 x 16 x 16 int8 into
+int32, each block's product scaled into f32 sums through the accumulator's lane layout). Our f16 matrix-core kernels
+stay off on an iGPU (Vulkan Run 38: slower than the int8 dot products), and tile shapes for the int8 dot product
+kernel (4-8 rows and tokens a thread, 2-8 blocks a step) all ran within 5 % of each other or slower.
+
+`mul_mmq_cm_*` and `moe_mmq_cm_*` do the same over our block decoders: 128 weight rows by 128 tokens (64 routes for
+the experts), 8 subgroups of 32, a step's blocks read a step ahead. They run where an AMD device has int8 cooperative
+matrices and no `VK_EXT_shader_float8` (RDNA4, a different layout), for the types with one scale and offset a block
+(not Q3_K or Q6_K), from 128 tokens (at 64 the half-empty tile lost 8 % to the int8 dot products).
+
+```
+780M, 512-token prompt (TTFT)       int8 dot product   int8 matrix cores
+Gemma 4 26B-A4B q4_0                450-464 tok/s      506-509 tok/s
+Nemotron Lightning recipe A         489                542
+Qwen3.6-35B-A3B iGPU R0             492                500
+llama.cpp Gemma 4 pp512             605
+```
+
+Isolated, Gemma 4's dense Q4_0 projections run at 5.2-5.8 TOPS (were 4.5-5.2) and its experts' gate/up and down at
+8.28 and 4.65 ms (were 9.89 and 5.17). Removing the matrix products from the kernel leaves 0.6 of 2.1 ms: the
+products themselves, not the loads, hold it well short of llama.cpp's 7 TFLOPS. Attention (3x llama.cpp's on the
+512-wide layers) is the next gap.

@@ -30,6 +30,9 @@ const QUANTIZE_THREADS: usize = 64;
 pub const MATVEC_MAX_ROWS: usize = 8;
 const MATMUL_Q_TILE_N: usize = 64;
 const MATMUL_Q_TILE_M: usize = 64;
+// mul_mmq_cm's tile, weight rows by tokens, and the fewest tokens it takes (780M, Q8_0 131072 x 2688: 64 tokens 8 %
+// slower than mul_mm, 512 tokens 13 % faster)
+pub(crate) const MMQ_CM_TILE: usize = 128;
 const MATMUL_Q_PUSH_BYTES: u32 = 6 * 4;
 
 /// Every kernel's pipeline on one device: its field, its embedded SPIR-V, its storage buffers and push-constant bytes.
@@ -40,6 +43,23 @@ macro_rules! kernels {
         }
 
         impl Kernels {
+    fn mul_mm(&self, ty: BlockType) -> &Pipeline {
+        match ty {
+            BlockType::Q8_0 => &self.mul_mm_q8_0,
+            BlockType::Q5_0 => &self.mul_mm_q5_0,
+            BlockType::Q4_0 => &self.mul_mm_q4_0,
+            BlockType::Q4_1 => &self.mul_mm_q4_1,
+            BlockType::Q5_1 => &self.mul_mm_q5_1,
+            BlockType::Q4K => &self.mul_mm_q4_k,
+            BlockType::Q5K => &self.mul_mm_q5_k,
+            BlockType::Q6K => &self.mul_mm_q6_k,
+            BlockType::IQ4XS => &self.mul_mm_iq4_xs,
+            BlockType::IQ3S => &self.mul_mm_iq3_s,
+            BlockType::Q3K => &self.mul_mm_q3_k,
+            BlockType::MXFP4 => &self.mul_mm_mxfp4,
+        }
+    }
+
             pub(crate) fn new(device: &ash::Device, cache: ash::vk::PipelineCache) -> Result<Self> {
                 let specs = [$(PipelineSpec::new(shaders::$spirv, $bindings, $push, stringify!($name))$(.constant($constant))?,)*];
                 let mut built = Pipeline::build_all(device, cache, &specs)?.into_iter();
@@ -340,6 +360,10 @@ pub(crate) struct CoopKernels {
     moe_mm_cm2: Vec<Option<[Pipeline; 4]>>,
     // by BlockType, the same: the prompt matmul on NV_cooperative_matrix2
     mul_mm_cm2: Vec<Option<Pipeline>>,
+    // by BlockType, where the device has int8 matrix cores in RDNA3's layout: the prompt matmul on them, and the
+    // many-route expert matmul
+    mul_mmq_cm: Vec<Option<Pipeline>>,
+    moe_mmq_cm: Vec<Option<Pipeline>>,
 }
 /// The matrix-core prompt attention's builds: heads to 128, to 256, and 512.
 #[derive(Clone, Copy)]
@@ -376,6 +400,7 @@ impl CoopKernels {
         cache: ash::vk::PipelineCache,
         subgroup: Option<u32>,
         cm2: bool,
+        int8: bool,
     ) -> Result<Self> {
         let mul_mmc = [
             (shaders::MUL_MMC_Q8_0, "mul_mmc_q8_0"),
@@ -601,6 +626,65 @@ impl CoopKernels {
             MOE_GATHER_PUSH_BYTES,
             "moe_gather_f16",
         ));
+        // the types whose blocks take one scale and offset (mul_mmq_cm_main.glsl's)
+        let mul_mmq_cm_types = [
+            (BlockType::Q8_0, shaders::MUL_MMQ_CM_Q8_0, "mul_mmq_cm_q8_0"),
+            (BlockType::Q5_0, shaders::MUL_MMQ_CM_Q5_0, "mul_mmq_cm_q5_0"),
+            (BlockType::Q4_0, shaders::MUL_MMQ_CM_Q4_0, "mul_mmq_cm_q4_0"),
+            (BlockType::Q4_1, shaders::MUL_MMQ_CM_Q4_1, "mul_mmq_cm_q4_1"),
+            (BlockType::Q5_1, shaders::MUL_MMQ_CM_Q5_1, "mul_mmq_cm_q5_1"),
+            (BlockType::Q4K, shaders::MUL_MMQ_CM_Q4_K, "mul_mmq_cm_q4_k"),
+            (BlockType::Q5K, shaders::MUL_MMQ_CM_Q5_K, "mul_mmq_cm_q5_k"),
+            (
+                BlockType::IQ4XS,
+                shaders::MUL_MMQ_CM_IQ4_XS,
+                "mul_mmq_cm_iq4_xs",
+            ),
+            (
+                BlockType::IQ3S,
+                shaders::MUL_MMQ_CM_IQ3_S,
+                "mul_mmq_cm_iq3_s",
+            ),
+            (
+                BlockType::MXFP4,
+                shaders::MUL_MMQ_CM_MXFP4,
+                "mul_mmq_cm_mxfp4",
+            ),
+        ];
+        let moe_mmq_cm_types = [
+            (BlockType::Q8_0, shaders::MOE_MMQ_CM_Q8_0, "moe_mmq_cm_q8_0"),
+            (BlockType::Q5_0, shaders::MOE_MMQ_CM_Q5_0, "moe_mmq_cm_q5_0"),
+            (BlockType::Q4_0, shaders::MOE_MMQ_CM_Q4_0, "moe_mmq_cm_q4_0"),
+            (BlockType::Q4_1, shaders::MOE_MMQ_CM_Q4_1, "moe_mmq_cm_q4_1"),
+            (BlockType::Q5_1, shaders::MOE_MMQ_CM_Q5_1, "moe_mmq_cm_q5_1"),
+            (BlockType::Q4K, shaders::MOE_MMQ_CM_Q4_K, "moe_mmq_cm_q4_k"),
+            (BlockType::Q5K, shaders::MOE_MMQ_CM_Q5_K, "moe_mmq_cm_q5_k"),
+            (
+                BlockType::IQ4XS,
+                shaders::MOE_MMQ_CM_IQ4_XS,
+                "moe_mmq_cm_iq4_xs",
+            ),
+            (
+                BlockType::IQ3S,
+                shaders::MOE_MMQ_CM_IQ3_S,
+                "moe_mmq_cm_iq3_s",
+            ),
+            (
+                BlockType::MXFP4,
+                shaders::MOE_MMQ_CM_MXFP4,
+                "moe_mmq_cm_mxfp4",
+            ),
+        ];
+        if int8 {
+            specs.extend(mul_mmq_cm_types.map(|(_, spirv, name)| {
+                PipelineSpec::new(spirv, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES, name)
+                    .subgroup(subgroup)
+            }));
+            specs.extend(moe_mmq_cm_types.map(|(_, spirv, name)| {
+                PipelineSpec::new(spirv, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES, name)
+                    .subgroup(subgroup)
+            }));
+        }
         if cm2 {
             specs.extend(mul_mm_cm2_types.map(|(_, spirv, name)| cm2_spec((spirv, name))));
             specs.extend(
@@ -628,6 +712,24 @@ impl CoopKernels {
             .expect("one relative-position pipeline");
         let [convert_f16, moe_gather_f16]: [Pipeline; 2] =
             take(2).try_into().ok().expect("two pipelines");
+        let mut mul_mmq_cm: Vec<Option<Pipeline>> = (0..BLOCK_TYPES).map(|_| None).collect();
+        if int8 {
+            for ((ty, _, _), pipeline) in mul_mmq_cm_types
+                .into_iter()
+                .zip(take(mul_mmq_cm_types.len()))
+            {
+                mul_mmq_cm[ty as usize] = Some(pipeline);
+            }
+        }
+        let mut moe_mmq_cm: Vec<Option<Pipeline>> = (0..BLOCK_TYPES).map(|_| None).collect();
+        if int8 {
+            for ((ty, _, _), pipeline) in moe_mmq_cm_types
+                .into_iter()
+                .zip(take(moe_mmq_cm_types.len()))
+            {
+                moe_mmq_cm[ty as usize] = Some(pipeline);
+            }
+        }
         let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
         let mut mul_mm_cm2: Vec<Option<Pipeline>> = (0..BLOCK_TYPES).map(|_| None).collect();
         if cm2 {
@@ -657,7 +759,17 @@ impl CoopKernels {
             flash_attn_relpos,
             moe_mm_cm2,
             mul_mm_cm2,
+            mul_mmq_cm,
+            moe_mmq_cm,
         })
+    }
+
+    pub(crate) fn moe_mmq_cm(&self, ty: BlockType) -> Option<&Pipeline> {
+        self.moe_mmq_cm[ty as usize].as_ref()
+    }
+
+    pub(crate) fn mul_mmq_cm(&self, ty: BlockType) -> Option<&Pipeline> {
+        self.mul_mmq_cm[ty as usize].as_ref()
     }
 
     /// Prompt attention over `shape`'s cache on matrix cores, where this device runs it, for heads of `width`.
@@ -1040,7 +1152,14 @@ impl Recorder<'_> {
             )));
         }
         let kernels = &self.context.kernels;
+        let int8 = self
+            .context
+            .coop
+            .as_ref()
+            .filter(|_| op.x_rows >= MMQ_CM_TILE)
+            .and_then(|coop| coop.mul_mmq_cm(op.ty));
         if op.x_rows > MATVEC_MAX_ROWS
+            && int8.is_none()
             && let Some(coop) = self.context.matmul_coop()
         {
             // the tokens as f16 into the scratch, padded to whole tiles with zeros: a tile's last matrices read past
@@ -1143,19 +1262,9 @@ impl Recorder<'_> {
         };
         let scratch = &blocks;
         if op.x_rows > MATVEC_MAX_ROWS {
-            let pipeline = match op.ty {
-                BlockType::Q8_0 => &kernels.mul_mm_q8_0,
-                BlockType::Q5_0 => &kernels.mul_mm_q5_0,
-                BlockType::Q4_0 => &kernels.mul_mm_q4_0,
-                BlockType::Q4_1 => &kernels.mul_mm_q4_1,
-                BlockType::Q5_1 => &kernels.mul_mm_q5_1,
-                BlockType::Q4K => &kernels.mul_mm_q4_k,
-                BlockType::Q5K => &kernels.mul_mm_q5_k,
-                BlockType::Q6K => &kernels.mul_mm_q6_k,
-                BlockType::IQ4XS => &kernels.mul_mm_iq4_xs,
-                BlockType::IQ3S => &kernels.mul_mm_iq3_s,
-                BlockType::Q3K => &kernels.mul_mm_q3_k,
-                BlockType::MXFP4 => &kernels.mul_mm_mxfp4,
+            let (pipeline, tile_n, tile_m) = match int8 {
+                Some(pipeline) => (pipeline, MMQ_CM_TILE, MMQ_CM_TILE),
+                None => (kernels.mul_mm(op.ty), MATMUL_Q_TILE_N, MATMUL_Q_TILE_M),
             };
             let bytes = push_words(&[
                 op.rows,
@@ -1179,8 +1288,8 @@ impl Recorder<'_> {
                 ],
                 &bytes,
                 [
-                    op.rows.div_ceil(MATMUL_Q_TILE_N) as u32,
-                    op.x_rows.div_ceil(MATMUL_Q_TILE_M) as u32,
+                    op.rows.div_ceil(tile_n) as u32,
+                    op.x_rows.div_ceil(tile_m) as u32,
                     1,
                 ],
             );
@@ -2043,6 +2152,62 @@ mod tests {
         Ok(())
     }
 
+    // a 512-token prompt through Gemma 4 26B-A4B's dense Q4_0 projections, a record each as a prompt makes them
+    #[test]
+    #[ignore = "benchmark"]
+    fn prompt_matmul_throughput() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const TOKENS: usize = 512;
+        const REPEATS: usize = 40;
+        for (rows, cols) in [
+            (2112usize, 2816usize),
+            (4096, 2816),
+            (2816, 4096),
+            (8192, 2816),
+        ] {
+            let ty = BlockType::Q4_0;
+            let len = len(ty, rows, cols);
+            let mut pages = Pages::new(len);
+            weights(ty, pages.bytes(), rows, cols);
+            let weights: Arc<dyn Bound> =
+                Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+            let x: Vec<f32> = (0..TOKENS * cols).map(|i| (i % 13) as f32 - 6.0).collect();
+            let xs = Arc::new(Buffer::with_f32(&context, &x)?);
+            let ys = Arc::new(Buffer::new(&context, TOKENS * rows * 4)?);
+            let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(TOKENS, cols))?);
+            let op = MatVec {
+                ty,
+                weights: &weights,
+                rows,
+                cols,
+                x: &xs,
+                x_offset: 0,
+                y: &ys,
+                y_offset: 0,
+                x_rows: TOKENS,
+                scratch: &scratch,
+            };
+            let run = || -> Result<()> {
+                for _ in 0..REPEATS {
+                    context.record(|r| r.mat_vec(&op))?;
+                }
+                context.synchronize()
+            };
+            run()?;
+            let start = std::time::Instant::now();
+            run()?;
+            let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
+            println!(
+                "{ty:?} {rows} x {cols} x {TOKENS}: {:.0} us, {:.2} int8 TOPS",
+                secs * 1e6,
+                (2 * TOKENS * rows * cols) as f64 / secs / 1e12
+            );
+        }
+        Ok(())
+    }
+
     // one token's routes through a stack of 128 Q4_0 experts, as decode runs them: up (one activation row for the six
     // routes) and down (a row a route)
     #[test]
@@ -2131,7 +2296,7 @@ mod tests {
         };
         const EXPERTS: usize = 128;
         const TOKENS: usize = 512;
-        const K: usize = 6;
+        const PROMPT_K: usize = 6;
         const REPEATS: usize = 20;
         const BATCH: usize = 40;
         // one 512-token prompt layer's routes an expert, busiest first (18 experts unrouted)
@@ -2142,11 +2307,14 @@ mod tests {
             7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2,
             2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         ];
-        // a hybrid MoE's up (one activation row a token's routes) and down (a row a route) projections
-        for (ty, rows, cols, x_div) in [
-            (BlockType::Q5_0, 1856usize, 2688usize, K),
-            (BlockType::Q4_0, 1856, 2688, K),
-            (BlockType::Q4_0, 2688, 1856, 1),
+        // a hybrid MoE's up (one activation row a token's routes) and down (a row a route) projections, then Gemma 4
+        // 26B-A4B's fused gate/up and down over 8 routes (drawn uniformly: PROMPT_ROUTES is a 6-route layer's)
+        for (ty, rows, cols, k, x_div) in [
+            (BlockType::Q5_0, 1856usize, 2688usize, PROMPT_K, PROMPT_K),
+            (BlockType::Q4_0, 1856, 2688, PROMPT_K, PROMPT_K),
+            (BlockType::Q4_0, 2688, 1856, PROMPT_K, 1),
+            (BlockType::Q4_0, 1408, 2816, 8, 8),
+            (BlockType::Q4_0, 2816, 704, 8, 1),
         ]
         .into_iter()
         .enumerate()
@@ -2158,13 +2326,13 @@ mod tests {
             weights(ty, pages.bytes(), EXPERTS * rows, cols);
             let weights: Arc<dyn Bound> =
                 Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
-            let slots = TOKENS * K;
+            let slots = TOKENS * k;
             let mut id_bytes = vec![0u8; slots * 4];
-            if std::env::var_os(BENCH_EVEN_ENV).is_some() {
+            if std::env::var_os(BENCH_EVEN_ENV).is_some() || k != PROMPT_K {
                 let mut state = 0x9e37_79b9u32;
                 for t in 0..TOKENS {
                     let mut picked = Vec::new();
-                    while picked.len() < K {
+                    while picked.len() < k {
                         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                         let e = (state >> 8) as usize % EXPERTS;
                         if !picked.contains(&e) {
@@ -2172,7 +2340,7 @@ mod tests {
                         }
                     }
                     for (j, e) in picked.into_iter().enumerate() {
-                        let slot = t * K + j;
+                        let slot = t * k + j;
                         id_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&(e as u32).to_le_bytes());
                     }
                 }
@@ -2181,7 +2349,7 @@ mod tests {
                 let mut i = 0;
                 for (e, &count) in PROMPT_ROUTES.iter().enumerate() {
                     for _ in 0..count {
-                        let slot = (i % TOKENS) * K + i / TOKENS;
+                        let slot = (i % TOKENS) * k + i / TOKENS;
                         id_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&(e as u32).to_le_bytes());
                         i += 1;
                     }
