@@ -17,6 +17,11 @@ const UNFOLD_MIN_K: usize = 64;
 // conv2d_f32's outputs a workgroup
 const CONV2D_THREADS: usize = 256;
 const MAX_GROUPS_X: usize = 65_535;
+
+// a grid's first dimension for `groups` workgroups, balanced so the last grid row launches almost none past them
+pub(crate) fn grid_x(groups: usize) -> usize {
+    groups.div_ceil(groups.div_ceil(MAX_GROUPS_X).max(1))
+}
 const INDEX_THREADS: usize = 256;
 const MATMUL_THREADS: usize = 64;
 // the inner length from which an output element gets a workgroup of its own, its threads splitting the dot product
@@ -258,7 +263,7 @@ impl Recorder<'_> {
             op.out_offset,
             beta_offset,
         ])?);
-        let groups_x = op.rows.min(MAX_GROUPS_X);
+        let groups_x = grid_x(op.rows);
         let kernels = &self.context.kernels;
         let pipeline = match half {
             None => &kernels.rows_f32,
@@ -405,7 +410,7 @@ impl Recorder<'_> {
         }
         let bytes = conv2d_words(op)?;
         let groups = count.div_ceil(CONV2D_THREADS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = grid_x(groups);
         let buffers = [op.x.0, op.w.0, op.out];
         let work = count * op.c_in * op.k_h * op.k_w;
         self.profile_shape(
@@ -461,7 +466,7 @@ impl Recorder<'_> {
         let count = op.batch * k * n;
         let cols = Arc::new(Buffer::new(op.out.context(), count * 2)?);
         let groups = count.div_ceil(CONV2D_THREADS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = grid_x(groups);
         self.context.kernels.im2col_bf16.dispatch(
             self,
             &[op.x.0.buffer, cols.buffer],
@@ -553,7 +558,7 @@ impl Recorder<'_> {
             Half::F16 => (&kernels.matmul_f16_dot, &kernels.matmul_f16),
         };
         if op.k >= DOT_MIN_K {
-            let groups_x = count.min(MAX_GROUPS_X);
+            let groups_x = grid_x(count);
             dot.dispatch(
                 self,
                 &buffers,
@@ -715,7 +720,7 @@ impl Recorder<'_> {
                 ],
             );
         } else if op.k >= DOT_MIN_K {
-            let groups_x = count.min(MAX_GROUPS_X);
+            let groups_x = grid_x(count);
             self.context.kernels.matmul_f32_dot.dispatch(
                 self,
                 &buffers,
@@ -1162,7 +1167,7 @@ impl Recorder<'_> {
                 .ssd_chunk_state
                 .dispatch(self, &bound, &bytes, tiles);
             let items = (op.batch * op.heads * op.head_dim * op.state).div_ceil(SSD_THREADS);
-            let items_x = items.clamp(1, MAX_GROUPS_X);
+            let items_x = grid_x(items).max(1);
             kernels.ssd_state_pass.dispatch(
                 self,
                 &bound,
@@ -1177,7 +1182,7 @@ impl Recorder<'_> {
             return Ok(());
         }
         let groups = (op.batch * op.heads * op.head_dim).div_ceil(SCAN_ROWS_PER_GROUP);
-        let groups_x = groups.clamp(1, MAX_GROUPS_X);
+        let groups_x = grid_x(groups).max(1);
         self.context.kernels.ssm_scan_step.dispatch(
             self,
             &buffers.map(|b| b.buffer),
@@ -1314,7 +1319,7 @@ impl Recorder<'_> {
             return Err(Error::Invalid(format!("{} expert routes", op.slots)));
         }
         let groups = op.rows.div_ceil(MATVEC_ROWS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = grid_x(groups);
         let bytes = words(&[
             op.rows,
             op.cols,
@@ -1393,7 +1398,7 @@ impl Recorder<'_> {
         let pad = (MOE_GATHER_PAD * op.cols * 2) as u64;
         self.fill_range(op.scratch.buffer, pad_at, pad, 0);
         let pairs = (op.slots * op.cols / 2).div_ceil(crate::kernels::CONVERT_THREADS);
-        let pairs_x = pairs.min(MAX_GROUPS_X);
+        let pairs_x = grid_x(pairs);
         coop.moe_gather_f16.dispatch(
             self,
             &[op.x.0.buffer, op.routing.buffer, op.scratch.buffer],
@@ -2322,7 +2327,7 @@ impl Recorder<'_> {
         self.fill(table.buffer, bytes.next_multiple_of(4) as u64, 0);
         let pairs = count.div_ceil(CONVERT_VALUES);
         let groups = pairs.div_ceil(crate::kernels::CONVERT_THREADS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = grid_x(groups);
         coop.convert_f16.dispatch(
             self,
             &[x.0.buffer, table.buffer],

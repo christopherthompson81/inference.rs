@@ -25,7 +25,6 @@ pub(crate) const Q8_SCALE_BYTES: usize = 8;
 const QUANTIZE_BINDINGS: usize = 3;
 const QUANTIZE_PUSH_BYTES: u32 = 3 * 4;
 const QUANTIZE_THREADS: usize = 64;
-const MAX_GROUPS_X: usize = 65_535;
 // the most activation rows the matvec kernels take (their MAX_M); more take the tiled matmul, its tile's weight rows
 // and tokens
 pub const MATVEC_MAX_ROWS: usize = 8;
@@ -944,7 +943,7 @@ impl Recorder<'_> {
             return Ok(());
         }
         let groups = count.div_ceil(CONVERT_THREADS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = crate::ops::grid_x(groups);
         self.context.kernels.widen_f16.dispatch(
             self,
             &[src.0.buffer, dst.buffer],
@@ -975,7 +974,7 @@ impl Recorder<'_> {
             return Ok(());
         }
         let groups = count.div_ceil(CONVERT_THREADS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = crate::ops::grid_x(groups);
         let pipeline = match half {
             crate::Half::Bf16 => &self.context.kernels.convert_bf16,
             crate::Half::F16 => &self.context.kernels.convert_half_f16,
@@ -1003,7 +1002,7 @@ impl Recorder<'_> {
         }
         let pairs = count.div_ceil(2);
         let groups = pairs.div_ceil(CONVERT_THREADS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = crate::ops::grid_x(groups);
         coop.convert_f16.dispatch(
             self,
             &[src.0.buffer, dst.buffer],
@@ -1050,7 +1049,7 @@ impl Recorder<'_> {
             let padded = (op.x_rows.next_multiple_of(MMC_PAD_M) * op.cols * 2) as u64;
             self.fill(scratch.buffer, padded.next_multiple_of(4), 0);
             let pairs = count.div_ceil(2).div_ceil(CONVERT_THREADS);
-            let pairs_x = pairs.min(MAX_GROUPS_X);
+            let pairs_x = crate::ops::grid_x(pairs);
             coop.convert_f16.dispatch(
                 self,
                 &[op.x.buffer, scratch.buffer],
@@ -1196,7 +1195,7 @@ impl Recorder<'_> {
             return Ok(());
         }
         let groups = op.rows.div_ceil(MATVEC_ROWS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = crate::ops::grid_x(groups);
         let bytes = push_words(&[
             op.rows,
             op.cols,
@@ -1263,7 +1262,7 @@ impl Recorder<'_> {
         let (blocks, s_off) =
             self.quantized((op.x, op.x_offset), op.x_rows, op.cols, op.scratch)?;
         let groups = op.rows.div_ceil(MATVEC_ROWS);
-        let groups_x = groups.min(MAX_GROUPS_X);
+        let groups_x = crate::ops::grid_x(groups);
         let bytes = push_words(&[
             op.rows,
             op.cols,
@@ -1380,7 +1379,7 @@ mod tests {
     }
 
     fn len(ty: BlockType, rows: usize, cols: usize) -> usize {
-        rows * cols / BLOCK_VALUES * ty.block_bytes()
+        rows * cols / ty.block_values() * ty.block_bytes()
     }
 
     // random blocks of `ty` with small finite scales
@@ -1996,6 +1995,12 @@ mod tests {
             (BlockType::Q8_0, 256, 2688),
             (BlockType::Q5_0, 3712, 2688),
             (BlockType::Q5_0, 2688, 3712),
+            (BlockType::Q4_0, 4096, 2816),
+            (BlockType::Q4_0, 2816, 4096),
+            (BlockType::Q4_0, 8192, 2816),
+            (BlockType::Q4_0, 1024, 2816),
+            (BlockType::Q6K, 262_144, 2816),
+            (BlockType::Q8_0, 262_144, 2816),
         ];
         for (ty, rows, cols) in shapes {
             let len = len(ty, rows, cols);
@@ -2047,31 +2052,37 @@ mod tests {
             return Ok(());
         };
         const EXPERTS: usize = 128;
-        const K: usize = 6;
         const REPEATS: usize = 200;
         let ty = BlockType::Q4_0;
-        for (rows, cols, x_div) in [(1856usize, 2688usize, K), (2688, 1856, 1)] {
+        // Nemotron Lightning's up and down (6 routes), then Gemma 4 26B-A4B's fused gate/up and down (8 routes)
+        let shapes = [
+            (1856usize, 2688usize, 6usize, 6usize),
+            (2688, 1856, 6, 1),
+            (1408, 2816, 8, 8),
+            (2816, 704, 8, 1),
+        ];
+        for (rows, cols, k, x_div) in shapes {
             let len = EXPERTS * len(ty, rows, cols);
             let mut pages = Pages::new(len);
             weights(ty, pages.bytes(), EXPERTS * rows, cols);
             let weights: Arc<dyn Bound> =
                 Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
-            let id_bytes: Vec<u8> = (0..K as u32)
+            let id_bytes: Vec<u8> = (0..k as u32)
                 .flat_map(|j| (j * 21 + 5).to_le_bytes())
                 .collect();
             let ids = Arc::new(Buffer::with_bytes(&context, &id_bytes)?);
-            let x: Vec<f32> = (0..K.div_ceil(x_div) * cols)
+            let x: Vec<f32> = (0..k.div_ceil(x_div) * cols)
                 .map(|i| (i % 13) as f32 - 6.0)
                 .collect();
             let xs = Arc::new(Buffer::with_f32(&context, &x)?);
-            let ys = Arc::new(Buffer::new(&context, K * rows * 4)?);
+            let ys = Arc::new(Buffer::new(&context, k * rows * 4)?);
             let scratch = Arc::new(Buffer::new(
                 &context,
-                crate::MoeMatVec::scratch_bytes(&context, K, x_div, cols),
+                crate::MoeMatVec::scratch_bytes(&context, k, x_div, cols),
             )?);
             let routing = Arc::new(Buffer::new(
                 &context,
-                crate::MoeMatVec::routing_bytes(K, EXPERTS),
+                crate::MoeMatVec::routing_bytes(k, EXPERTS),
             )?);
             let op = crate::MoeMatVec {
                 ty,
@@ -2079,7 +2090,7 @@ mod tests {
                 experts: EXPERTS,
                 rows,
                 cols,
-                slots: K,
+                slots: k,
                 x_div,
                 x: (&xs, 0),
                 ids: (&ids, 0),
@@ -2097,9 +2108,9 @@ mod tests {
             let start = std::time::Instant::now();
             run()?;
             let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
-            let bytes = K * len / EXPERTS;
+            let bytes = k * len / EXPERTS;
             println!(
-                "Q4_0 experts {rows} x {cols}, {K} routes: {:.1} us, {:.0} GB/s",
+                "Q4_0 experts {rows} x {cols}, {k} routes: {:.1} us, {:.0} GB/s",
                 secs * 1e6,
                 bytes as f64 / secs / 1e9
             );
