@@ -1575,6 +1575,9 @@ const PREFILL_WIDE_LANES: usize = 4;
 const PREFILL_CM_ROWS: usize = 64;
 const PREFILL_CM_HEAD_STEP: usize = 16;
 const PREFILL_CM_MAX_HEAD: usize = 128;
+// paged_prefill_cm_wide's heads past PREFILL_CM_MAX_HEAD, and its query rows a workgroup
+const PREFILL_CM_WIDE_MAX_HEAD: usize = 256;
+const PREFILL_CM_WIDE_ROWS: usize = 32;
 const PREFILL_MIN_SPAN: usize = 1024;
 const MAX_PREFILL_SPLITS: usize = 32;
 const PREFILL_PARTIALS_BYTES: usize = 32 << 20;
@@ -1879,14 +1882,14 @@ impl Recorder<'_> {
         ];
         let bound = buffers.map(|b| b.buffer);
         match self.prefill_cm(s, group) {
-            Some(pipeline) => pipeline.dispatch(
+            Some((pipeline, rows)) => pipeline.dispatch(
                 self,
                 &bound,
                 &bytes,
                 [
                     splits as u32,
                     s.kv_heads as u32,
-                    op.rows.div_ceil(PREFILL_CM_ROWS / group) as u32,
+                    op.rows.div_ceil(rows / group) as u32,
                 ],
             ),
             None => self.context.kernels.paged_prefill(s).dispatch(
@@ -1917,15 +1920,26 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    // the matrix-core prompt attention, for heads it tiles (multiples of 16 to 128) and groups within its rows
-    fn prefill_cm(&self, s: CacheShape, group: usize) -> Option<&crate::pipeline::Pipeline> {
+    // the matrix-core prompt attention and its query rows a workgroup, for heads it tiles (multiples of 16 to 128, or
+    // to 256 at half the rows) and groups within those rows
+    fn prefill_cm(
+        &self,
+        s: CacheShape,
+        group: usize,
+    ) -> Option<(&crate::pipeline::Pipeline, usize)> {
+        let wide = s.head_size > PREFILL_CM_MAX_HEAD;
+        let rows = if wide {
+            PREFILL_CM_WIDE_ROWS
+        } else {
+            PREFILL_CM_ROWS
+        };
         if !s.head_size.is_multiple_of(PREFILL_CM_HEAD_STEP)
-            || s.head_size > PREFILL_CM_MAX_HEAD
-            || group > PREFILL_CM_ROWS
+            || s.head_size > PREFILL_CM_WIDE_MAX_HEAD
+            || group > rows
         {
             return None;
         }
-        Some(self.context.coop.as_ref()?.paged_prefill(s))
+        Some((self.context.coop.as_ref()?.paged_prefill(s, wide), rows))
     }
 
     pub fn paged_decode(&self, op: &PagedDecode<'_>) -> Result<()> {

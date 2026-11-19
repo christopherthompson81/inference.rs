@@ -312,7 +312,8 @@ pub(crate) struct CoopKernels {
     moe_mmc: Vec<Pipeline>,
     pub(crate) moe_gather_f16: Pipeline,
     // prompt attention over f32, f16 and quantized paged caches
-    paged_prefill: [Pipeline; 3],
+    // f32, f16 and quantized caches, then the same for heads past 128
+    paged_prefill: [Pipeline; 6],
     // prompt attention over contiguous f32 keys and values
     pub(crate) flash_attn: Pipeline,
     // matmul_f32_tiled's product, its tiles in f16
@@ -331,6 +332,8 @@ pub(crate) struct CoopKernels {
     // by BlockType, the same: the prompt matmul on NV_cooperative_matrix2
     mul_mm_cm2: Vec<Option<Pipeline>>,
 }
+// the matrix-core prompt attention's cache types (f32, f16, quantized), a set for each head width
+const PREFILL_CACHE_TYPES: usize = 3;
 // BlockType's variants
 const BLOCK_TYPES: usize = 12;
 // the cm2 kernels' tile (weight rows, and tokens of the prompt matmul), and their K step: a row a whole number of them
@@ -412,6 +415,15 @@ impl CoopKernels {
             (shaders::PAGED_PREFILL_CM, "paged_prefill_cm"),
             (shaders::PAGED_PREFILL_CM_F16, "paged_prefill_cm_f16"),
             (shaders::PAGED_PREFILL_CM_QUANT, "paged_prefill_cm_quant"),
+            (shaders::PAGED_PREFILL_CM_WIDE, "paged_prefill_cm_wide"),
+            (
+                shaders::PAGED_PREFILL_CM_WIDE_F16,
+                "paged_prefill_cm_wide_f16",
+            ),
+            (
+                shaders::PAGED_PREFILL_CM_WIDE_QUANT,
+                "paged_prefill_cm_wide_quant",
+            ),
         ]
         .map(|(spirv, name)| {
             PipelineSpec::new(
@@ -576,8 +588,7 @@ impl CoopKernels {
         let mul_mmc = take(BLOCK_TYPES);
         let mul_mmcl = take(BLOCK_TYPES);
         let moe_mmc = take(BLOCK_TYPES);
-        let paged_prefill: [Pipeline; 3] =
-            take(3).try_into().ok().expect("three prefill pipelines");
+        let paged_prefill: [Pipeline; 6] = take(6).try_into().ok().expect("six prefill pipelines");
         let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
         let [matmul_f32, matmul_f32_bh, matmul_bf16_cm, matmul_f16_cm]: [Pipeline; 4] =
             take(4).try_into().ok().expect("four matmul pipelines");
@@ -623,9 +634,10 @@ impl CoopKernels {
         })
     }
 
-    /// Prompt attention over `shape`'s cache on matrix cores, where this device runs it.
-    pub(crate) fn paged_prefill(&self, shape: ops::CacheShape) -> &Pipeline {
-        let [f32, f16, quant] = &self.paged_prefill;
+    /// Prompt attention over `shape`'s cache on matrix cores, where this device runs it; `wide` for heads past 128.
+    pub(crate) fn paged_prefill(&self, shape: ops::CacheShape, wide: bool) -> &Pipeline {
+        let at = if wide { PREFILL_CACHE_TYPES } else { 0 };
+        let [f32, f16, quant] = [0, 1, 2].map(|i| &self.paged_prefill[at + i]);
         if shape.quant.is_some() {
             quant
         } else if shape.f16 {
