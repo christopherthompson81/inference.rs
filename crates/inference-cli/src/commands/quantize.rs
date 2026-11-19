@@ -148,6 +148,7 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         rules,
         imatrix,
         quantizer,
+        reuse: options.reuse.clone(),
     };
     let summary = gguf_requantize::requantize_gguf(
         &options.model,
@@ -169,12 +170,13 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         .collect::<Vec<_>>()
         .join(", ");
     info!(
-        "Wrote {} ({:.2} GiB from {:.2} GiB, {} of {} tensors quantized): {types}",
+        "Wrote {} ({:.2} GiB from {:.2} GiB, {} of {} tensors quantized, {} reused): {types}",
         options.output_path.display(),
         summary.bytes_out as f64 / MIB / 1024.0,
         summary.bytes_in as f64 / MIB / 1024.0,
         summary.quantized,
         summary.tensors,
+        summary.reused,
     );
     Ok(())
 }

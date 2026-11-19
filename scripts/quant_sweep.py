@@ -12,6 +12,7 @@ Usage:
       [--imatrix imatrix.dat] [--work DIR] [--jobs N]
   scripts/quant_sweep.py allocate --sweep sweep.json (--max-bytes N | --max-kld X)
   scripts/quant_sweep.py measure --source BF16.gguf --kld-base base.kld --recipes recipes.json --out scores.json
+      [--reuse earlier.gguf ...]
 
 groups.json: {"base": ["regex=type", ...], "groups": {"name": {"pattern": "regex", "types": ["q6_k", ...]}}}; the base
 rules come last, so each group's rule overrides them for its tensors.
@@ -37,10 +38,12 @@ SCORE = {
 }
 
 
-def quantize(source, rules, out, imatrix):
+def quantize(source, rules, out, imatrix, reuse=()):
     args = [CLI, "quantize", "gguf", "-m", source, "-o", out]
     if imatrix:
         args += ["--imatrix", imatrix]
+    for path in reuse:
+        args += ["--reuse", path]
     for rule in rules:
         args += ["--tensor-type", rule]
     subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -55,7 +58,7 @@ def score(gguf, kld_base):
     return {k: float(r.search(text).group(1)) for k, r in SCORE.items()}
 
 
-def run_points(args, points):
+def run_points(args, points, reuse=()):
     """Every `(name, rules)` point quantized and scored on one of `args.jobs` workers, its file deleted after; the
     quantizer uses only part of the cores, so points overlap."""
     results = {}
@@ -63,7 +66,7 @@ def run_points(args, points):
     def point(name, rules):
         out = os.path.join(args.work, f"{name}.gguf")
         try:
-            size = quantize(args.source, rules, out, args.imatrix)
+            size = quantize(args.source, rules, out, args.imatrix, reuse)
             results[name] = r = {"bytes": size, **score(out, args.kld_base)}
         finally:
             if os.path.exists(out):
@@ -80,11 +83,20 @@ def run_points(args, points):
 def sweep(args):
     spec = json.load(open(args.groups))
     os.makedirs(args.work, exist_ok=True)
-    points = [("base", spec["base"])]
-    for name, group in spec["groups"].items():
-        for ty in group["types"]:
-            points.append((f"{name}-{ty}", [f"{group['pattern']}={ty}"] + spec["base"]))
-    results = run_points(args, points)
+    # the base kept while the points run: each point copies its tensors and quantizes only its group's
+    base = os.path.join(args.work, "base.gguf")
+    try:
+        size = quantize(args.source, spec["base"], base, args.imatrix)
+        results = {"base": {"bytes": size, **score(base, args.kld_base)}}
+        print(f"{'base':28s} {size:>14,} B  KLD {results['base']['kld']:.5f}", flush=True)
+        points = []
+        for name, group in spec["groups"].items():
+            for ty in group["types"]:
+                points.append((f"{name}-{ty}", [f"{group['pattern']}={ty}"] + spec["base"]))
+        results.update(run_points(args, points, [base]))
+    finally:
+        if os.path.exists(base):
+            os.remove(base)
     table = {"base_rules": spec["base"], "base": results["base"], "groups": {}}
     for name, group in spec["groups"].items():
         table["groups"][name] = {
@@ -98,7 +110,7 @@ def measure(args):
     """Each named recipe in `--recipes` ({"name": ["regex=type", ...]}) quantized and scored, as `sweep` does."""
     recipes = json.load(open(args.recipes))
     os.makedirs(args.work, exist_ok=True)
-    json.dump(run_points(args, list(recipes.items())), open(args.out, "w"), indent=1)
+    json.dump(run_points(args, list(recipes.items()), args.reuse), open(args.out, "w"), indent=1)
 
 
 def recipe(table, pick):
@@ -171,6 +183,7 @@ def main():
     m.add_argument("--imatrix")
     m.add_argument("--work", default=".")
     m.add_argument("--jobs", type=int, default=1)
+    m.add_argument("--reuse", action="append", default=[], help="earlier outputs to copy matching tensors from")
     a = sub.add_parser("allocate")
     a.add_argument("--sweep", required=True)
     target = a.add_mutually_exclusive_group(required=True)

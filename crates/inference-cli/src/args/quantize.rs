@@ -142,6 +142,11 @@ pub struct GgufQuantizeOptions {
     /// error at the same size; llama.cpp's writes its bytes exactly
     #[arg(long, value_enum, default_value_t = QuantizerChoice::IkLlama)]
     pub quantizer: QuantizerChoice,
+
+    /// An earlier output from the same source, imatrix and quantizer, repeatable: tensors it holds at their planned
+    /// type are copied from it rather than quantized again
+    #[arg(long)]
+    pub reuse: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

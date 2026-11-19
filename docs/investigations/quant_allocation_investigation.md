@@ -91,3 +91,18 @@ But the five recipes still take 178-220 s: quantizing now dominates (~44 s a k-q
 build's debug assertions on). Points run whole on each worker (quantize then score): jobs 1 220 s, 2 190 s, 3 178 s
 (2,275 CPU-s: the quantizers contend). Next: reuse tensors across points (the base and each group/type quantized
 once, a point's file assembled by copying), and a quantizer built without debug assertions.
+
+## Run 4 - 2026-11-19 08:50
+
+Question: with scoring off the CPU, can a sweep point stop re-quantizing the whole model?
+
+Change: `inference quantize gguf --reuse <earlier.gguf>` (repeatable) copies a tensor an earlier output from the same
+source, imatrix and quantizer holds at its planned type instead of quantizing it again (a requantize test pins that a
+reusing run writes the identical file). `quant_sweep.py sweep` quantizes and scores the base once, keeps it while the
+points run, and every point reuses it, so a point quantizes only its group; `measure` takes `--reuse` too.
+
+Command: `sweep` over two of the seven groups (`ffn_gate_up`, `ssm_out`, five types each) with `--jobs 2`.
+
+Result: base and 10 points in 103.5 s (594 CPU-s), ~9.4 s a point against ~48 s in Run 1; every KLD, p99 and top
+equal to Run 2's. The full seven-group sweep is now ~6 min instead of ~29. The remaining time is the group's own
+quantization (the FFN at ~5 bits is the largest) and the 7 s score.
