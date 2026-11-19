@@ -221,7 +221,11 @@ impl Solid {
                 }
             }
         }
-        let occupied: Vec<bool> = density.iter().map(|&d| d >= DENSITY_THRESHOLD).collect();
+        // only inside the cube: a Gaussian at its edge reaches through the padding, which must stay empty
+        let in_cube = |c: [usize; 3]| {
+            (0..3).all(|a| (0..=res as i64).contains(&(c[a] as i64 + solid.origin[a])))
+        };
+        let occupied: Vec<bool> = solid.map(|i, c| density[i] >= DENSITY_THRESHOLD && in_cube(c));
         solid.seal(occupied, SPLAT_CLOSING, Fill::Voted);
         solid
     }
@@ -1018,5 +1022,30 @@ mod tests {
         let zs: Vec<f32> = floats.chunks(3).map(|p| p[2]).collect();
         assert_eq!(zs.iter().cloned().fold(f32::INFINITY, f32::min), 0.0);
         assert!((zs.iter().cloned().fold(0.0, f32::max) - 40.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn gaussians_reaching_past_the_cube_leave_the_border_empty() {
+        // a slab of long Gaussians against the cube's +x face, each reaching well past the padding
+        let mut g = Gaussians {
+            xyz: Vec::new(),
+            dc: Vec::new(),
+            scaling: Vec::new(),
+            rotation: Vec::new(),
+            opacity: Vec::new(),
+        };
+        for y in -4..=4 {
+            for z in -4..=4 {
+                g.xyz.push([0.45, y as f32 * 0.05, z as f32 * 0.05]);
+                g.dc.push([0.0; 3]);
+                g.scaling.push([0.08, 0.03, 0.03]);
+                g.rotation.push([1.0, 0.0, 0.0, 0.0]);
+                g.opacity.push(0.9);
+            }
+        }
+        let solid = Solid::from_gaussians(&g, 64);
+        let on_border = |c: [usize; 3]| (0..3).any(|a| c[a] == 0 || c[a] + 1 == solid.dims[a]);
+        assert!(!solid.points().any(|(i, c)| solid.inside[i] && on_border(c)));
+        assert_closed(&solid.surface_mesh(PRINT_FACES).expect("a solid slab"));
     }
 }
