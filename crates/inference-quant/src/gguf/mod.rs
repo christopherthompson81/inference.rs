@@ -48,6 +48,8 @@ mod kt_quantize;
 pub mod mapped;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
+#[cfg(feature = "cuda")]
+pub mod quantize_cuda;
 pub mod raw;
 mod repack;
 pub mod requantize;

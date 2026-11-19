@@ -25,6 +25,8 @@ use super::kernel::GgufType;
 const ROWS_PER_TASK: usize = 64;
 // the source bytes read at once: one expert of an expert stack, else rows up to this
 const SLICE_BYTES: usize = 64 << 20;
+// f32 bytes of rows the GPU quantizes in one call (its scratch takes about three times this)
+const GPU_CHUNK_BYTES: usize = 1 << 30;
 const GGUF_ALIGNMENT: u64 = 32;
 const GENERAL_ARCHITECTURE: &str = "general.architecture";
 const GENERAL_TYPE: &str = "general.type";
@@ -131,6 +133,8 @@ pub struct RequantizePlan {
     pub reuse: Vec<PathBuf>,
     /// Writes only the tensors this matches, as an overlay the source's quantized model loads beside it.
     pub only: Option<Regex>,
+    /// The device whose quantizers write the types they cover (the same bytes as the CPU's, sooner).
+    pub gpu: Option<Device>,
 }
 
 #[derive(Debug, Default)]
@@ -211,6 +215,50 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
         target,
         size,
     })
+}
+
+#[cfg(feature = "cuda")]
+type GpuDevice = inference_tensor::CudaDevice;
+#[cfg(not(feature = "cuda"))]
+type GpuDevice = std::convert::Infallible;
+
+// the plan's GPU, when its quantizer writes `ty` with the plan's search
+fn gpu_for(plan: &RequantizePlan, ty: GgufType) -> Option<&GpuDevice> {
+    #[cfg(feature = "cuda")]
+    if let Some(Device::Cuda(dev)) = &plan.gpu
+        && plan.quantizer == Quantizer::IkLlama
+        && super::quantize_cuda::can_quantize(ty)
+    {
+        return Some(dev);
+    }
+    let _ = (plan, ty);
+    None
+}
+
+fn gpu_quantize(
+    dev: &GpuDevice,
+    ty: GgufType,
+    cols: usize,
+    dtype: u32,
+    source: &[u8],
+    imatrix: Option<&[f32]>,
+    rows_per_imatrix: usize,
+) -> Result<Vec<u8>> {
+    #[cfg(feature = "cuda")]
+    return super::quantize_cuda::quantize_rows(
+        dev,
+        ty,
+        cols,
+        dtype,
+        source,
+        imatrix,
+        rows_per_imatrix,
+    );
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (ty, cols, dtype, source, imatrix, rows_per_imatrix);
+        match *dev {}
+    }
 }
 
 /// `src` rewritten to `dst` under `plan`; its metadata copied as it is. `progress` hears each tensor's name as it
@@ -338,8 +386,14 @@ pub fn requantize_gguf(
             entry.1 += t.size as u64;
             continue;
         }
-        let slice_rows =
-            expert_rows.unwrap_or_else(|| (SLICE_BYTES / source_row.max(1)).clamp(1, rows.max(1)));
+        let gpu = t.target.and_then(|ty| gpu_for(plan, ty));
+        let slice_rows = match (gpu.is_some(), expert_rows) {
+            // the GPU takes whole experts by the chunk, each weighed by its own imatrix slice
+            (true, Some(e)) => e * (GPU_CHUNK_BYTES / (e * cols * 4).max(1)).max(1),
+            (true, None) => (GPU_CHUNK_BYTES / (cols * 4).max(1)).clamp(1, rows.max(1)),
+            (false, Some(e)) => e,
+            (false, None) => (SLICE_BYTES / source_row.max(1)).clamp(1, rows.max(1)),
+        };
         let mut written = 0usize;
         let mut bytes = Vec::new();
         for first in (0..rows).step_by(slice_rows) {
@@ -351,12 +405,26 @@ pub fn requantize_gguf(
                 written += bytes.len();
                 continue;
             };
-            let w = imatrix.map(|w| {
-                let expert = expert_rows.map_or(0, |e| first / e);
-                &w[expert * cols..(expert + 1) * cols]
-            });
-            let out = quantize_slice(ty, cols, &to_f32(t.source_type, &bytes)?, w, plan.quantizer)
-                .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
+            let out = match gpu {
+                Some(dev) => {
+                    let (w, per) = match expert_rows {
+                        Some(e) => (
+                            imatrix.map(|w| &w[first / e * cols..(first + n) / e * cols]),
+                            e,
+                        ),
+                        None => (imatrix.map(Vec::as_slice), n),
+                    };
+                    gpu_quantize(dev, ty, cols, t.source_type, &bytes, w, per)
+                }
+                None => {
+                    let w = imatrix.map(|w| {
+                        let expert = expert_rows.map_or(0, |e| first / e);
+                        &w[expert * cols..(expert + 1) * cols]
+                    });
+                    quantize_slice(ty, cols, &to_f32(t.source_type, &bytes)?, w, plan.quantizer)
+                }
+            }
+            .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
             writer.write_all(&out)?;
             written += out.len();
         }
@@ -665,6 +733,7 @@ mod tests {
             quantizer: Quantizer::LlamaCpp,
             reuse: Vec::new(),
             only: None,
+            gpu: None,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -686,6 +755,7 @@ mod tests {
             quantizer: Quantizer::LlamaCpp,
             reuse: Vec::new(),
             only: Some(Regex::new(r"attn_q\.weight$").unwrap()),
+            gpu: None,
         };
         let overlaid = requantize_gguf(&src, &overlay, &overlaying, |_, _, _| {})?;
         assert_eq!(overlaid.tensors, 1);

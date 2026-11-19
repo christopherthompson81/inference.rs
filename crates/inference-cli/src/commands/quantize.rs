@@ -150,13 +150,23 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         quantizer,
         reuse: options.reuse.clone(),
         only: options.only.as_deref().map(regex::Regex::new).transpose()?,
+        gpu: (!options.cpu)
+            .then(|| inference_tensor::Device::new_cuda(0).ok())
+            .flatten(),
     };
-    let summary = gguf_requantize::requantize_gguf(
-        &options.model,
-        &options.output_path,
-        &plan,
-        |i, n, name| info!("[{}/{n}] {name}", i + 1),
-    )?;
+    let requantize = || {
+        gguf_requantize::requantize_gguf(
+            &options.model,
+            &options.output_path,
+            &plan,
+            |i, n, name| info!("[{}/{n}] {name}", i + 1),
+        )
+    };
+    // every logical CPU: the scale searches gain ~1.26x from the hyperthreads, the gemm pool's reason too
+    let summary = match inference_tensor::utils::smt_gemm_pool() {
+        Some(pool) => pool.install(requantize)?,
+        None => requantize()?,
+    };
     if !summary.without_imatrix.is_empty() {
         warn!(
             "{} quantized tensors had no imatrix entry: {}",

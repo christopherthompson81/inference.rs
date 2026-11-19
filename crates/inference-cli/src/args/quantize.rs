@@ -152,6 +152,10 @@ pub struct GgufQuantizeOptions {
     /// same source (`--gguf model.gguf overlay.gguf`), its tensors replace the model's
     #[arg(long)]
     pub only: Option<String>,
+
+    /// Quantize on the CPU even where a GPU quantizer writes the type (both write the same bytes)
+    #[arg(long)]
+    pub cpu: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
