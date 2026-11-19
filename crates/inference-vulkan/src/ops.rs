@@ -1501,7 +1501,17 @@ impl Recorder<'_> {
             },
             op.rows * op.cols * op.slots,
         );
-        self.context.kernels.moe_mm(op.ty).dispatch(
+        // a tile of weight rows: mul_mmq_cm_main.glsl's BM on the int8 matrix cores, else a row a thread
+        let int8 = self
+            .context
+            .coop
+            .as_ref()
+            .and_then(|coop| coop.moe_mmq_cm(op.ty));
+        let (pipeline, tile_n) = match int8 {
+            Some(pipeline) => (pipeline, crate::kernels::MMQ_CM_TILE),
+            None => (self.context.kernels.moe_mm(op.ty), MOE_TILE_N),
+        };
+        pipeline.dispatch(
             self,
             &[
                 op.weights.vk_buffer(),
@@ -1512,7 +1522,7 @@ impl Recorder<'_> {
             ],
             &bytes,
             [
-                op.rows.div_ceil(MOE_TILE_N) as u32,
+                op.rows.div_ceil(tile_n) as u32,
                 MoeMatVec::max_tiles(op.slots, op.experts) as u32,
                 1,
             ],

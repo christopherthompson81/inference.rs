@@ -210,6 +210,10 @@ impl Context {
         } && pin.is_some()
             && coop_matrix_f16(&entry, &instance, physical);
         let pin_subgroup = has_coop && pin == Some(SubgroupPin::Required);
+        let has_int8_coop = has_coop
+            && properties.vendor_id == AMD_VENDOR_ID
+            && std::env::var_os(NO_INT8_CM_ENV).is_none()
+            && coop_matrix_int8_rdna3(&entry, &instance, physical);
         let has_cm2 = has_coop
             && properties.api_version >= vk::API_VERSION_1_3
             && !crate::shaders::MOE_MM_CM2_Q4_0_N128.is_empty()
@@ -233,6 +237,7 @@ impl Context {
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
             .timeline_semaphore(true)
             .shader_float16(has_coop)
+            .shader_int8(has_int8_coop)
             .vulkan_memory_model(has_coop)
             .buffer_device_address(has_cm2);
         let mut cm2_features = CoopMatrix2Features::all();
@@ -293,6 +298,7 @@ impl Context {
                 disk_cache.cache,
                 pin_subgroup.then_some(COOP_SUBGROUP),
                 has_cm2,
+                has_int8_coop,
             )?)
         } else {
             None
@@ -982,6 +988,49 @@ fn coop_matrix_f16(
             && p.b_type == vk::ComponentTypeKHR::FLOAT16
             && p.c_type == vk::ComponentTypeKHR::FLOAT32
             && p.result_type == vk::ComponentTypeKHR::FLOAT32
+            && p.scope == vk::ScopeKHR::SUBGROUP
+    })
+}
+
+const AMD_VENDOR_ID: u32 = 0x1002;
+// RDNA4 has it and a blocked accumulator layout; RDNA3, the int8 kernels' layout, does not
+const SHADER_FLOAT8_NAME: &CStr = c"VK_EXT_shader_float8";
+/// Set to keep the int8 matrix-core prompt matmuls off (for A/B runs against the int8 dot product ones).
+pub const NO_INT8_CM_ENV: &str = "INFERENCE_VULKAN_NO_INT8_CM";
+
+// whether an AMD device multiplies 16 x 16 x 16 int8 matrices into int32 on its matrix cores with RDNA3's accumulator
+// layout, with the int8 arithmetic the kernels use
+fn coop_matrix_int8_rdna3(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+) -> bool {
+    // SAFETY: `physical` came from this instance
+    let extensions =
+        unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
+    if extensions
+        .iter()
+        .any(|ext| ext.extension_name_as_c_str() == Ok(SHADER_FLOAT8_NAME))
+    {
+        return false;
+    }
+    let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut features12);
+    // SAFETY: as above, and the chained struct outlives the call
+    unsafe { instance.get_physical_device_features2(physical, &mut features) };
+    if features12.shader_int8 == vk::FALSE {
+        return false;
+    }
+    let coop = ash::khr::cooperative_matrix::Instance::new(entry, instance);
+    // SAFETY: as above
+    let shapes = unsafe { coop.get_physical_device_cooperative_matrix_properties(physical) }
+        .unwrap_or_default();
+    shapes.iter().any(|p| {
+        (p.m_size, p.n_size, p.k_size) == (16, 16, 16)
+            && p.a_type == vk::ComponentTypeKHR::SINT8
+            && p.b_type == vk::ComponentTypeKHR::SINT8
+            && p.c_type == vk::ComponentTypeKHR::SINT32
+            && p.result_type == vk::ComponentTypeKHR::SINT32
             && p.scope == vk::ScopeKHR::SUBGROUP
     })
 }

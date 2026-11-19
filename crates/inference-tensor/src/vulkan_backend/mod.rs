@@ -2774,8 +2774,8 @@ mod tests {
             let weight = QTensor::quantize(&w.to_device(&vk)?, dtype)?;
             let dense = weight.dequantize(&Device::Cpu)?;
             let matmul = QMatMul::from_qtensor(weight)?;
-            // past 8 rows, the prompt matmul
-            for rows in [1usize, 3, 8, 70] {
+            // past 8 rows, the prompt matmul, and from 128 the int8 matrix-core one where the device has it
+            for rows in [1usize, 3, 8, 70, 200] {
                 let x = Tensor::randn(0f32, 1., (1, rows, 2816), &Device::Cpu)?;
                 let want = x.broadcast_matmul(&dense.t()?)?;
                 assert_int8_close(&matmul.forward(&x.to_device(&vk)?)?, &want)?;
