@@ -51,22 +51,6 @@ fn writable_types() -> impl Iterator<Item = GgufType> {
     CANDLE_WRITABLE.into_iter().map(GgufType::from).chain(raw)
 }
 
-/// Whether `quantizer` has its own search for `ty`; ik_llama.cpp's 1-3 bit grid types (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS,
-/// IQ2_S, IQ3_XXS, IQ3_S) are written with llama.cpp's.
-pub fn follows_quantizer(ty: GgufType, quantizer: Quantizer) -> bool {
-    quantizer == Quantizer::LlamaCpp
-        || !matches!(
-            ty,
-            GgufType::Iq1S
-                | GgufType::Iq1M
-                | GgufType::Iq2Xxs
-                | GgufType::Iq2Xs
-                | GgufType::Iq2S
-                | GgufType::Iq3Xxs
-                | GgufType::Iq3S
-        )
-}
-
 /// A tensor type by its llama.cpp name (`q4_k`, `iq4_ks`), if this module writes it.
 pub fn writable_type(name: &str) -> Result<GgufType> {
     writable_types()
@@ -520,19 +504,35 @@ mod tests {
     #[test]
     fn the_ik_quantizer_writes_ik_llamas_bytes() -> Result<()> {
         let (values, imatrix) = pinned_layer();
-        let pins: [(&str, u64, u64); 12] = PINNED_IK;
+        let pins: Vec<(&str, u64, u64)> = PINNED_IK.into_iter().chain(PINNED_IK_GRID).collect();
         let mut got = Vec::new();
-        for (name, _, _) in pins {
+        for &(name, _, _) in &pins {
             let ty = writable_type(name)?;
             let hash = |w| {
                 quantize_matrix(ty, PIN_COLS, &values, w, PIN_ROWS, Quantizer::IkLlama)
                     .map(|b| fnv1a(&b))
             };
-            got.push((name, hash(None)?, hash(Some(&imatrix))?));
+            // the types that need an imatrix have no plain bytes to pin
+            let plain = if iq_quantize::requires_imatrix(ty) {
+                0
+            } else {
+                hash(None)?
+            };
+            got.push((name, plain, hash(Some(&imatrix))?));
         }
-        assert_eq!(got, pins.to_vec());
+        assert_eq!(got, pins);
         Ok(())
     }
+
+    const PINNED_IK_GRID: [(&str, u64, u64); 7] = [
+        ("iq2_xxs", 0, 3960069783596285320),
+        ("iq2_xs", 0, 3351784405228797559),
+        ("iq2_s", 1979530409175927814, 173424413650317151),
+        ("iq3_xxs", 6333467982077396785, 267139717862269199),
+        ("iq3_s", 5272524117869529413, 3851133074760413839),
+        ("iq1_s", 0, 15644970516814970719),
+        ("iq1_m", 4877935477014574425, 546727153653379684),
+    ];
 
     const PINNED_IK: [(&str, u64, u64); 12] = [
         ("q2_k", 13302739417286923110, 11601392929549359756),

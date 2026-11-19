@@ -138,8 +138,8 @@ pub struct GgufQuantizeOptions {
     #[arg(long)]
     pub imatrix: Option<PathBuf>,
 
-    /// Whose quantizer the bytes match: ik_llama.cpp's (the default) searches the scales of the k-quants, the legacy
-    /// types and IQ4_NL / IQ4_XS further, for lower error at the same size; llama.cpp's writes its bytes exactly
+    /// Whose quantizer the bytes match: ik_llama.cpp's (the default) searches scales further for most types, for lower
+    /// error at the same size; llama.cpp's writes its bytes exactly
     #[arg(long, value_enum, default_value_t = QuantizerChoice::IkLlama)]
     pub quantizer: QuantizerChoice,
 }

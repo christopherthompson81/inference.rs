@@ -67,3 +67,32 @@ Command: the recipe investigation's R1 rules (IQ4_XS experts, Q5_K `attn_qkv`, Q
 `ssm_out` / `attn_gate` / head, Q8_0 the rest, the Unsloth imatrix) through `inference quantize gguf` with its
 default `--quantizer ik-llama` (dev build, 22.7 min), compared tensor by tensor with ik's file (its blk.40 MTP graft
 left out): 733 identical, 0 differing.
+
+## Run 4 - 2026-11-18 21:30
+
+Question: the 1-3 bit grid types (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S).
+
+The scratch harness now runs each build's own grid init (`iq2xs_init_impl` / `iq3xs_init_impl`, the tables are
+static per object). Against ik's file built with `-ffp-contract=off`, our llama.cpp-search output already matched
+IQ2_XXS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S: their source changes (zeroed levels moved, IQ3_XXS's `is_on_grid` not reset
+between blocks, IQ2_XXS's `eff_max <= 0` exit gone) only show on degenerate blocks; they are carried over anyway.
+With every candidate `a * b + c` fused (the levels' `nearest_int(0.5 * (id * x - 1))` twice) all five matched ik's
+own build on 9 seeds.
+
+IQ2_XS: ik's rewrite ported (`quantize_iq2_xs_ik`): the best split of the sorted magnitudes into 1 / 3 / 5 as the
+start, 15 scales around it, up to three rounds of re-snapping to the grid at the fitted scale, a 1.05 fudge, and the
+block scale refit over every value as stored (grid bytes x 0.125). All fused: 0 bytes on 11 seeds, first try.
+
+IQ1_M: `iq1m_process_1block` ported (sigma2 per 32 values x 1.5, per-half running sums, best score from 0, all four
+shift pairs refit after a snap off the grid, a 1.085 fudge). Unfused it matched ik's unfused build exactly; fused,
+the imatrix path stayed 2-14 bytes off whatever single sites were toggled, and a greedy search over sites stalled.
+The disassembly of `iq1m_process_1block` (16 FMAs against 52 multiplies and 30 adds) gave the rule: gcc fuses only a
+product with one use. The split search's first term of each half is hoisted out of the inner loop (added), the
+second half's `x` terms are shared between two shift choices (added), the `w * x * x` terms keep a unique last
+multiply (fused); `weight[i] * xb[i]` in the running sums appears in both branches of the half test, so it is
+computed once before them (added). With those: 0 bytes on 8 seeds.
+
+Result: `the_ik_quantizer_writes_ik_llamas_bytes` pins the seven grid types too (11 hashes, from ik's
+`ggml_quantize_chunk`); the parity script shows 0 differing against ik's build and against llama.cpp's for every
+grid type. `--quantizer ik-llama` now covers every type `quantize gguf` writes, so the fallback warning is gone.
+

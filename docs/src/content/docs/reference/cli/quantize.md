@@ -235,7 +235,7 @@ inference quantize gguf [OPTIONS] --model <MODEL> --output <OUTPUT_PATH> --tenso
 | `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path |
 | `--tensor-type <TENSOR_TYPES>` | required | `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`, `iq4_ks`, ...); tensors none matches are copied as they are |
 | `--imatrix <IMATRIX>` |  | llama.cpp's imatrix (`.dat` or `.gguf`), keyed by the source's tensor names |
-| `--quantizer <QUANTIZER>` | `ik-llama` | Whose quantizer the bytes match: ik_llama.cpp's (the default) searches the scales of the k-quants, the legacy types and IQ4_NL / IQ4_XS further, for lower error at the same size; llama.cpp's writes its bytes exactly. Possible values: `llama-cpp`, `ik-llama`. |
+| `--quantizer <QUANTIZER>` | `ik-llama` | Whose quantizer the bytes match: ik_llama.cpp's (the default) searches scales further for most types, for lower error at the same size; llama.cpp's writes its bytes exactly. Possible values: `llama-cpp`, `ik-llama`. |
 
 ## inference quantize imatrix
 

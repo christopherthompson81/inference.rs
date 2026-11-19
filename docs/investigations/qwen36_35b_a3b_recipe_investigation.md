@@ -592,3 +592,25 @@ different. `scripts/iq_quantize_parity.py` on those types: 0 bytes differing aga
 `ggml_quantize_chunk` (plain and imatrix), 20-69% differing against ik_llama.cpp's. So ours is mainline's quantizer;
 ik changed its k-quant / IQ4_XS search. KLD of our R1: 0.01976, median 0.00745, 99% 0.220, same top 93.90%: ik's
 search is about 2% better on the mean and lighter in the tail. The published files use ik's.
+
+## Run 18 - 2026-11-18 19:30
+
+Question: what do R0-R2 (Runs 16-17) give on the 780M iGPU under Vulkan, plain and with MTP? Measured by the laptop
+session (master 0e69d7d62, performance profile).
+
+```
+file        KLD      prefill@512   bench decode   216-token chat turn   --mtp 2      --mtp 3
+MXFP4_MOE   -        382           22.3           -                     (no MTP block)
+R0          0.0169   405           23.5           22.7                  36.0-36.3    37.8
+R1          0.0194   366           26.0           25.3                  36.7-37.0    37.5
+R2          0.0244   372           27.9           27.0                  38.5-38.6    38.1
+```
+
+- Plain decode follows the bytes read: R2 is ~19% faster than R0.
+- With MTP the three land within ~7%: a verify step reads the per-token tensors once for several tokens, so lowering
+  them pays less (as in Lightning's Run 9). Acceptance 80-99%; MTP 3 no better than 2; greedy text with `--mtp` byte
+  identical to plain in all 9 runs.
+- Prefill: the K-quant recipes ~370 against R0's 405 (Q5_K / Q6_K prompt kernels slower than Q8_0's, or heat; not
+  A/B'd cool). A later repeat round at Tctl 83 C with zram full fell to 13-17 tok/s and was discarded.
+
+So for the iGPU: R0 with `--mtp --mtp-n-predict 2` (best KLD, ~36 tok/s); R2 only where MTP is off.
