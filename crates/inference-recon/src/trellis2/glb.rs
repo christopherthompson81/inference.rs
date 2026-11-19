@@ -41,7 +41,7 @@ pub struct Pbr {
 }
 
 impl Pbr {
-    fn from_channels(c: &[f32]) -> Self {
+    pub(crate) fn from_channels(c: &[f32]) -> Self {
         Self {
             base_color: [c[0], c[1], c[2]],
             metallic: c[3],
