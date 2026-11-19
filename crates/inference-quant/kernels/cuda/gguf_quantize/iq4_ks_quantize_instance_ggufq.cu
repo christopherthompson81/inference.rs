@@ -93,7 +93,7 @@ static __global__ void iq4_ks_search(const float* x, const float* weights, int64
 // a thread per block: its 7-bit scale and indices, and its refit terms (the CPU adds them to the row's sums in order)
 static __global__ void iq4_ks_blocks(const float* x, const float* weights, int64_t blocks, int cols, const float* scales,
                               const uint8_t* shifted, const float* row_d, uint8_t* out, float* terms_qx,
-                              float* terms_q2) {
+                              float* terms_q2, float* levels) {
     __shared__ Tables t;
     load_tables(&t);
     const int64_t b = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -107,9 +107,15 @@ static __global__ void iq4_ks_blocks(const float* x, const float* weights, int64
     float* tx = terms_qx + b * (BLOCK / 2);
     float* t2 = terms_q2 + b * (BLOCK / 2);
     const float d = row_d[row];
+    float* lv = levels ? levels + b * BLOCK : nullptr;
     if (d == 0.0f) {
         sb[ib] = 0;
-        for (int j = 0; j < BLOCK / 2; ++j) qs[j] = 0;
+        for (int j = 0; j < BLOCK / 2; ++j) {
+            qs[j] = 0;
+            tx[j] = t2[j] = 0.0f;
+        }
+        if (lv)
+            for (int j = 0; j < BLOCK; ++j) lv[j] = 0.0f;
         return;
     }
     const float id = __fdiv_rn(1.0f, d);
@@ -128,6 +134,10 @@ static __global__ void iq4_ks_blocks(const float* x, const float* weights, int64
         qs[j] = (uint8_t)(i1 | (i2 << 4));
         const float q1 = __fmul_rn((float)codebook[i1], (float)l);
         const float q2 = __fmul_rn((float)codebook[i2], (float)l);
+        if (lv) {
+            lv[j] = q1;
+            lv[j + BLOCK / 2] = q2;
+        }
         const float w1 = __fmul_rn(w[j], q1), w2 = __fmul_rn(w[j + BLOCK / 2], q2);
         tx[j] = __fmaf_rn(w1, xb[j], __fmul_rn(w2, xb[j + BLOCK / 2]));
         t2[j] = __fmaf_rn(w1, q1, __fmul_rn(w2, q2));
@@ -168,7 +178,46 @@ extern "C" int launch_iq4_ks_quantize(const void* source, int dtype, float* x, c
     iq4k_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, ROW_HEADER + (cols / QK_K) * BLOCK_BYTES,
                                                        1.0f, row_d, out);
     iq4_ks_blocks<<<grid(blocks), THREADS, 0, stream>>>(x, weights, blocks, cols, scales, shifted, row_d, out, terms,
-                                                        terms + half);
+                                                        terms + half, nullptr);
     iq4_ks_refit<<<grid(rows), THREADS, 0, stream>>>(rows, cols, row_d, terms, terms + half, out);
+    return (int)cudaGetLastError();
+}
+
+// GPTQ's pieces (a row scale fixed first, then a super-block at a time): each row's running fit sums continued with a
+// super-block's terms in the CPU's order
+static __global__ void iq4_ks_accumulate(int64_t rows, const float* terms_qx, const float* terms_q2, float* sums) {
+    const int64_t row = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    float sqx = sums[2 * row], sq2 = sums[2 * row + 1];
+    for (int k = 0; k < QK_K / 2; ++k) {
+        sqx = __fadd_rn(sqx, terms_qx[row * (QK_K / 2) + k]);
+        sq2 = __fadd_rn(sq2, terms_q2[row * (QK_K / 2) + k]);
+    }
+    sums[2 * row] = sqx;
+    sums[2 * row + 1] = sq2;
+}
+
+// each row's scale from an ordinary first pass (the largest block scale over 127), `importance` its `cols` weights
+extern "C" int launch_iq4_ks_row_scale(const float* x, const float* importance, int64_t rows, int cols, float* weights,
+                                       float* scales, uint8_t* shifted, float* row_d, cudaStream_t stream) {
+    const int64_t blocks = rows * (cols / BLOCK);
+    iq4k_weights<true><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, cols, weights);
+    iq4_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
+    iq4k_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, 0, 1.0f, row_d, nullptr);
+    return (int)cudaGetLastError();
+}
+
+// one super-block of each row (`x`: rows of 256) against its fixed row scale: `out` rows of the header's width then the
+// super-block's bytes, `levels` each value's level, `sums` (2 a row) continued
+extern "C" int launch_iq4_ks_super_fixed(const float* x, const float* importance, int64_t rows, const float* row_d,
+                                         float* weights, float* scales, uint8_t* shifted, uint8_t* out, float* terms,
+                                         float* levels, float* sums, cudaStream_t stream) {
+    const int64_t blocks = rows * (QK_K / BLOCK);
+    const int64_t half = rows * QK_K / 2;
+    iq4k_weights<true><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, QK_K, weights);
+    iq4_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
+    iq4_ks_blocks<<<grid(blocks), THREADS, 0, stream>>>(x, weights, blocks, QK_K, scales, shifted, row_d, out, terms,
+                                                        terms + half, levels);
+    iq4_ks_accumulate<<<grid(rows), THREADS, 0, stream>>>(rows, terms, terms + half, sums);
     return (int)cudaGetLastError();
 }

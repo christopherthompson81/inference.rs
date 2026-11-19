@@ -183,6 +183,7 @@ static __global__ void iq3_ks_row_scale(const float* scales, int64_t rows, int c
     }
     const float d = __fdiv_rn(-max_scale, 16.0f);
     row_d[row] = d;
+    if (!out) return;
     const uint16_t h = to_f16_bits(d);
     uint8_t* orow = out + row * (F16_HEADER + (int64_t)(cols / QK_K) * BLOCK_BYTES);
     orow[0] = (uint8_t)h;
@@ -267,5 +268,44 @@ extern "C" int launch_iq3_ks_quantize(const void* source, int dtype, float* x, c
     iq3_ks_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, row_d, out);
     iq3_ks_super<<<grid(supers), THREADS, 0, stream>>>(x, supers, cols, scales, shifted, row_d, out, levels);
     iq3_ks_refit<<<grid(rows), THREADS, 0, stream>>>(x, weights, rows, cols, row_d, levels, out);
+    return (int)cudaGetLastError();
+}
+
+// GPTQ's pieces: each row's running fit chained on with a super-block's levels in the CPU's order
+static __global__ void iq3_ks_accumulate(const float* x, const float* weights, int64_t rows, const float* levels,
+                                         float* sums) {
+    const int64_t row = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    float sqx = sums[2 * row], sq2 = sums[2 * row + 1];
+    for (int64_t i = row * QK_K; i < (row + 1) * QK_K; ++i) {
+        const float q = levels[i];
+        const float wq = __fmul_rn(weights[i], q);
+        sqx = __fmaf_rn(wq, x[i], sqx);
+        sq2 = __fmaf_rn(wq, q, sq2);
+    }
+    sums[2 * row] = sqx;
+    sums[2 * row + 1] = sq2;
+}
+
+// as launch_iq4_ks_row_scale, for IQ3_KS (the block scale of largest magnitude over -16)
+extern "C" int launch_iq3_ks_row_scale(const float* x, const float* importance, int64_t rows, int cols, float* weights,
+                                       float* scales, uint8_t* shifted, float* row_d, cudaStream_t stream) {
+    const int64_t blocks = rows * (cols / BLOCK);
+    iq3_ks_weights<<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, cols, weights);
+    iq3_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
+    iq3_ks_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, row_d, nullptr);
+    return (int)cudaGetLastError();
+}
+
+// as launch_iq4_ks_super_fixed, for IQ3_KS (`terms` unused; `out` rows of the f16 header's width then 102 bytes)
+extern "C" int launch_iq3_ks_super_fixed(const float* x, const float* importance, int64_t rows, const float* row_d,
+                                         float* weights, float* scales, uint8_t* shifted, uint8_t* out, float* terms,
+                                         float* levels, float* sums, cudaStream_t stream) {
+    (void)terms;
+    const int64_t blocks = rows * (QK_K / BLOCK);
+    iq3_ks_weights<<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, QK_K, weights);
+    iq3_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
+    iq3_ks_super<<<grid(rows), THREADS, 0, stream>>>(x, rows, QK_K, scales, shifted, row_d, out, levels);
+    iq3_ks_accumulate<<<grid(rows), THREADS, 0, stream>>>(x, weights, rows, levels, sums);
     return (int)cudaGetLastError();
 }

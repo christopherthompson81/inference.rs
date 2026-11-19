@@ -1,7 +1,8 @@
 //! GGUF quantizers on the GPU (`kernels/cuda/gguf_quantize/*_instance_ggufq.cu`), writing the bytes the CPU ports in
 //! `iq_quantize` write: every product, sum and fused multiply-add there is an explicit rounding intrinsic here.
 
-use inference_tensor::{CudaDevice, Result};
+use inference_tensor::cuda::cudarc::driver::CudaSlice;
+use inference_tensor::{CudaDevice, DType, Result, Tensor};
 
 use super::kernel::GgufType;
 use crate::utils::slice_ptr;
@@ -97,6 +98,30 @@ inference_tensor::kernel_library! {
             out: *mut u8,
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
         ) -> i32;
+
+        /// GPTQ's first pass: each row's scale (`row_d`) of a row-scaled type from `rows` rows of `cols` f32 on the
+        /// device, `importance` their `cols` weights; `weights`, `scales` and `shifted` scratch as above.
+        fn launch_iq4_ks_row_scale(x: *const f32, importance: *const f32, rows: i64, cols: i32, weights: *mut f32,
+            scales: *mut f32, shifted: *mut u8, row_d: *mut f32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
+        fn launch_iq4_kss_row_scale(x: *const f32, importance: *const f32, rows: i64, cols: i32, weights: *mut f32,
+            scales: *mut f32, shifted: *mut u8, row_d: *mut f32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
+        fn launch_iq3_ks_row_scale(x: *const f32, importance: *const f32, rows: i64, cols: i32, weights: *mut f32,
+            scales: *mut f32, shifted: *mut u8, row_d: *mut f32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
+
+        /// One super-block (`x`: rows of 256 f32) encoded against the fixed `row_d`: `out` a row of the header's width
+        /// then the super-block's bytes each, `levels` each value's level, `sums` (2 a row) continued in the CPU's order.
+        fn launch_iq4_ks_super_fixed(x: *const f32, importance: *const f32, rows: i64, row_d: *const f32,
+            weights: *mut f32, scales: *mut f32, shifted: *mut u8, out: *mut u8, terms: *mut f32, levels: *mut f32,
+            sums: *mut f32, stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
+        fn launch_iq4_kss_super_fixed(x: *const f32, importance: *const f32, rows: i64, row_d: *const f32,
+            weights: *mut f32, scales: *mut f32, shifted: *mut u8, out: *mut u8, terms: *mut f32, levels: *mut f32,
+            sums: *mut f32, stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
+        fn launch_iq3_ks_super_fixed(x: *const f32, importance: *const f32, rows: i64, row_d: *const f32,
+            weights: *mut f32, scales: *mut f32, shifted: *mut u8, out: *mut u8, terms: *mut f32, levels: *mut f32,
+            sums: *mut f32, stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
     }
 }
 
@@ -135,6 +160,213 @@ fn kernels(ty: GgufType, cols: usize) -> Option<(Launch, usize)> {
         )),
         _ => None,
     }
+}
+
+type RowScaleLaunch = unsafe extern "C" fn(
+    *const f32,
+    *const f32,
+    i64,
+    i32,
+    *mut f32,
+    *mut f32,
+    *mut u8,
+    *mut f32,
+    inference_tensor::cuda::cudarc::driver::sys::CUstream,
+) -> i32;
+type SuperFixedLaunch = unsafe extern "C" fn(
+    *const f32,
+    *const f32,
+    i64,
+    *const f32,
+    *mut f32,
+    *mut f32,
+    *mut u8,
+    *mut u8,
+    *mut f32,
+    *mut f32,
+    *mut f32,
+    inference_tensor::cuda::cudarc::driver::sys::CUstream,
+) -> i32;
+
+// a row-scaled type's GPTQ launchers and its header and super-block widths
+fn fixed_kernels(ty: GgufType) -> Option<(RowScaleLaunch, SuperFixedLaunch, usize, usize)> {
+    match ty {
+        GgufType::Iq4Ks => Some((
+            launch_iq4_ks_row_scale,
+            launch_iq4_ks_super_fixed,
+            IQ4_KS_ROW_HEADER,
+            BLOCK_IQ4_KS,
+        )),
+        GgufType::Iq4Kss => Some((
+            launch_iq4_kss_row_scale,
+            launch_iq4_kss_super_fixed,
+            IQ4_KS_ROW_HEADER,
+            BLOCK_IQ4_KSS,
+        )),
+        GgufType::Iq3Ks => Some((
+            launch_iq3_ks_row_scale,
+            launch_iq3_ks_super_fixed,
+            F16_ROW_HEADER,
+            BLOCK_IQ3_KS,
+        )),
+        _ => None,
+    }
+}
+
+/// Whether GPTQ's row-scaled steps ([`row_scales`], [`super_block_fixed`]) run on the GPU for `ty`.
+pub fn fixed_supported(ty: GgufType) -> bool {
+    fixed_kernels(ty).is_some()
+}
+
+// a device tensor's f32 pointer: the tensor outlives each launch here, on its own stream
+fn tensor_ptr(t: &Tensor) -> Result<u64> {
+    let (st, layout) = t.storage_and_layout();
+    let inference_tensor::Storage::Cuda(c) = &*st else {
+        inference_tensor::bail!("a GPU quantizer's input lives on CUDA");
+    };
+    Ok(slice_ptr(c.as_cuda_slice::<f32>()?, layout.start_offset()).0)
+}
+
+/// Each row's scale for `ty` from an ordinary first pass over `x` (rows of `cols` f32 on `dev`), weighed by
+/// `importance` (`cols`): the row scale GPTQ encodes every super-block against.
+pub fn row_scales(
+    dev: &CudaDevice,
+    ty: GgufType,
+    x: &Tensor,
+    importance: &[f32],
+) -> Result<Tensor> {
+    let Some((launch, ..)) = fixed_kernels(ty) else {
+        inference_tensor::bail!("{ty:?} has no GPU row scale");
+    };
+    ensure_loaded().map_err(inference_tensor::Error::msg)?;
+    let x = x.to_dtype(DType::F32)?.contiguous()?;
+    let (rows, cols) = x.dims2()?;
+    let w = dev.clone_htod(importance)?;
+    // SAFETY: each scratch buffer is written by one kernel before a later one reads it
+    let weights = unsafe { dev.alloc::<f32>(rows * cols)? };
+    // SAFETY: as above
+    let scales = unsafe { dev.alloc::<f32>(rows * cols / BLOCK)? };
+    // SAFETY: as above
+    let shifted = unsafe { dev.alloc::<u8>(rows * cols / BLOCK)? };
+    // SAFETY: the row-scale kernel writes every row's
+    let row_d = unsafe { dev.alloc::<f32>(rows)? };
+    {
+        let xp = tensor_ptr(&x)?;
+        let (wp, _w) = slice_ptr(&w, 0);
+        let (gp, _g) = slice_ptr(&weights, 0);
+        let (sp, _s) = slice_ptr(&scales, 0);
+        let (fp, _f) = slice_ptr(&shifted, 0);
+        let (dp, _d) = slice_ptr(&row_d, 0);
+        // SAFETY: live device buffers sized as the kernels index them, on this device's stream
+        let status = unsafe {
+            launch(
+                xp as *const f32,
+                wp as *const f32,
+                rows as i64,
+                cols as i32,
+                gp as *mut f32,
+                sp as *mut f32,
+                fp as *mut u8,
+                dp as *mut f32,
+                dev.cuda_stream().cu_stream(),
+            )
+        };
+        if status != 0 {
+            inference_tensor::bail!(
+                "the {ty:?} row-scale kernels failed to launch (CUDA error {status})"
+            );
+        }
+    }
+    Ok(Tensor::from((
+        inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+            row_d,
+            dev.clone(),
+        )),
+        inference_tensor::Shape::from(rows),
+    )))
+}
+
+/// One super-block of each row (`x`: rows of 256 f32 on `dev`) as `ty` against the fixed `row_d`: the super-block's
+/// bytes for each row, and each value's level (the value decodes to `row_d * level`); `sums` (f32, 2 a row) carries
+/// each row's fit on for the refit of its scale.
+pub fn super_block_fixed(
+    dev: &CudaDevice,
+    ty: GgufType,
+    x: &Tensor,
+    importance: &[f32],
+    row_d: &Tensor,
+    sums: &mut CudaSlice<f32>,
+) -> Result<(Vec<u8>, Tensor)> {
+    let Some((_, launch, header, super_bytes)) = fixed_kernels(ty) else {
+        inference_tensor::bail!("{ty:?} has no GPU super-block encoder");
+    };
+    ensure_loaded().map_err(inference_tensor::Error::msg)?;
+    let x = x.to_dtype(DType::F32)?.contiguous()?;
+    let (rows, cols) = x.dims2()?;
+    if cols != QK_K || importance.len() != QK_K {
+        inference_tensor::bail!("a super-block is {QK_K} values, not {cols}");
+    }
+    let row_d = row_d.contiguous()?;
+    let w = dev.clone_htod(importance)?;
+    // SAFETY: each scratch buffer is written by one kernel before a later one reads it
+    let weights = unsafe { dev.alloc::<f32>(rows * QK_K)? };
+    // SAFETY: as above
+    let terms = unsafe { dev.alloc::<f32>(rows * QK_K)? };
+    // SAFETY: as above
+    let scales = unsafe { dev.alloc::<f32>(rows * QK_K / BLOCK)? };
+    // SAFETY: as above
+    let shifted = unsafe { dev.alloc::<u8>(rows * QK_K / BLOCK)? };
+    // SAFETY: the encoders write each row's super-block (the header's width before it is left as is)
+    let out = dev.alloc_zeros::<u8>(rows * (header + super_bytes))?;
+    // SAFETY: the encoders write every level
+    let levels = unsafe { dev.alloc::<f32>(rows * QK_K)? };
+    {
+        let xp = tensor_ptr(&x)?;
+        let rp = tensor_ptr(&row_d)?;
+        let (wp, _w) = slice_ptr(&w, 0);
+        let (gp, _g) = slice_ptr(&weights, 0);
+        let (tp, _t) = slice_ptr(&terms, 0);
+        let (sp, _s) = slice_ptr(&scales, 0);
+        let (fp, _f) = slice_ptr(&shifted, 0);
+        let (op, _o) = slice_ptr(&out, 0);
+        let (lp, _l) = slice_ptr(&levels, 0);
+        let (mp, _m) = slice_ptr(&*sums, 0);
+        // SAFETY: live device buffers sized as the kernels index them, on this device's stream
+        let status = unsafe {
+            launch(
+                xp as *const f32,
+                wp as *const f32,
+                rows as i64,
+                rp as *const f32,
+                gp as *mut f32,
+                sp as *mut f32,
+                fp as *mut u8,
+                op as *mut u8,
+                tp as *mut f32,
+                lp as *mut f32,
+                mp as *mut f32,
+                dev.cuda_stream().cu_stream(),
+            )
+        };
+        if status != 0 {
+            inference_tensor::bail!(
+                "the {ty:?} super-block kernels failed to launch (CUDA error {status})"
+            );
+        }
+    }
+    let bytes = dev.clone_dtoh(&out)?;
+    let bytes = bytes
+        .chunks_exact(header + super_bytes)
+        .flat_map(|row| row[header..].iter().copied())
+        .collect();
+    let levels = Tensor::from((
+        inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+            levels,
+            dev.clone(),
+        )),
+        inference_tensor::Shape::from((rows, QK_K)),
+    ));
+    Ok((bytes, levels))
 }
 
 /// Whether [`quantize_rows`] writes `ty` on the GPU.

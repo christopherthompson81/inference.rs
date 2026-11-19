@@ -294,31 +294,41 @@ fn gptq_tensor(
     reader.read_exact(&mut bytes)?;
     let values = to_f32(t.source_type, &bytes)?;
     let per = values.len() / experts;
-    let mut out = Vec::with_capacity(t.size);
-    for e in 0..experts {
-        let h = per_expert
-            .get(e)
-            .and_then(Option::as_ref)
-            .or(shared.as_ref())
-            .ok_or_else(|| {
+    let prepare = |h: &[f32]| {
+        super::gptq::prepare(h, cols, !plan.hessian_weights_only, plan.gptq_damp, device)
+            .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))
+    };
+    let quantize = |values: &[f32], prepared: &super::gptq::Prepared| {
+        super::gptq::quantize(
+            ty,
+            cols,
+            values,
+            prepared,
+            plan.quantizer,
+            device,
+            quantize_slice,
+            dequantize_any,
+        )
+        .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))
+    };
+    // experts sharing one Hessian are rows of one matrix to it (GPTQ treats rows alone): one pass over them all
+    if per_expert.iter().all(Option::is_none) {
+        let shared = prepare(shared.as_deref().expect("a shared Hessian"))?;
+        return Ok(Some(quantize(&values, &shared)?));
+    }
+    let shared = shared.as_deref().map(prepare).transpose()?;
+    // experts with their own Hessians run side by side, each factoring its own
+    let parts = (0..experts)
+        .into_par_iter()
+        .map(|e| {
+            let own = per_expert[e].as_deref().map(prepare).transpose()?;
+            let prepared = own.as_ref().or(shared.as_ref()).ok_or_else(|| {
                 inference_tensor::Error::Msg(format!("{}: no Hessian for expert {e}", t.name))
             })?;
-        out.extend(
-            super::gptq::quantize(
-                ty,
-                cols,
-                &values[e * per..(e + 1) * per],
-                h,
-                plan.quantizer,
-                !plan.hessian_weights_only,
-                plan.gptq_damp,
-                device,
-                quantize_slice,
-                dequantize_any,
-            )
-            .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))?,
-        );
-    }
+            quantize(&values[e * per..(e + 1) * per], prepared)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let out = parts.concat();
     Ok(Some(out))
 }
 

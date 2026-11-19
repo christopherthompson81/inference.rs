@@ -109,6 +109,7 @@ static __global__ void iq4k_row_scale(const float* scales, int64_t rows, int col
     for (int ib = 0; ib < per_row; ++ib) amax_scale = fmaxf(amax_scale, fabsf(scales[row * per_row + ib]));
     const float d = __fdiv_rn(amax_scale, (float)SCALE_MAX);
     row_d[row] = d;
+    if (!out) return;
     const uint32_t bits = __float_as_uint(__fmul_rn(fudge, d));
     uint8_t* orow = out + row * (int64_t)row_bytes;
     for (int k = 0; k < 4; ++k) orow[k] = (uint8_t)(bits >> (8 * k));
