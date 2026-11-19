@@ -381,20 +381,19 @@ fn pack_indices(indices: &[u8], qs: &mut [u8]) {
 
 type SuperBlock = fn(&[f32], Option<&[f32]>, &mut [u8], &mut u16, &mut [u8]) -> f32;
 
-fn quantize_iq4_nl_block(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
-    iq4_nl_block(quantize_super_block, x, qw, out)
+fn search(quantizer: Quantizer) -> SuperBlock {
+    match quantizer {
+        Quantizer::LlamaCpp => quantize_super_block,
+        Quantizer::IkLlama => quantize_super_block_ik,
+    }
 }
 
-fn quantize_iq4_nl_block_ik(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
-    iq4_nl_block(quantize_super_block_ik, x, qw, out)
+fn quantize_iq4_nl_block(x: &[f32], qw: Option<&[f32]>, out: &mut [u8], q: Quantizer) {
+    iq4_nl_block(search(q), x, qw, out)
 }
 
-fn quantize_iq4_xs_block(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
-    iq4_xs_block(quantize_super_block, x, qw, out)
-}
-
-fn quantize_iq4_xs_block_ik(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
-    iq4_xs_block(quantize_super_block_ik, x, qw, out)
+fn quantize_iq4_xs_block(x: &[f32], qw: Option<&[f32]>, out: &mut [u8], q: Quantizer) {
+    iq4_xs_block(search(q), x, qw, out)
 }
 
 fn iq4_nl_block(search: SuperBlock, x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
@@ -638,7 +637,7 @@ fn quantize_iq4_ks_row(x: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
     }
 }
 
-type BlockEncoder = fn(&[f32], Option<&[f32]>, &mut [u8]);
+type BlockEncoder = fn(&[f32], Option<&[f32]>, &mut [u8], Quantizer);
 
 /// Whether [`quantize_rows`] writes `ty`.
 pub fn can_quantize(ty: GgufType) -> bool {
@@ -678,38 +677,32 @@ pub fn quantize_rows(
     imatrix: Option<&[f32]>,
     quantizer: Quantizer,
 ) -> Result<Vec<u8>> {
-    let ik = quantizer == Quantizer::IkLlama;
     // IQ4_KS's scales span the row, and ik's types reweigh the imatrix per row, so those encode whole rows; the
     // others encode block by block
     let (block, row_bytes, encode): (usize, usize, Option<BlockEncoder>) = match ty {
         GgufType::Iq4Nl => (
             QK4_NL,
             cols / QK4_NL * BLOCK_IQ4_NL,
-            Some(if ik {
-                quantize_iq4_nl_block_ik
-            } else {
-                quantize_iq4_nl_block
-            }),
+            Some(quantize_iq4_nl_block),
         ),
         GgufType::Iq4Xs => (
             QK_K,
             cols / QK_K * BLOCK_IQ4_XS,
-            Some(if ik {
-                quantize_iq4_xs_block_ik
-            } else {
-                quantize_iq4_xs_block
-            }),
+            Some(quantize_iq4_xs_block),
         ),
         GgufType::Iq4Ks => (QK_K, IQ4_KS_ROW_HEADER + cols / QK_K * BLOCK_IQ4_KS, None),
         GgufType::Iq2Xxs => (
             QK_K,
             cols / QK_K * grid::BLOCK_IQ2_XXS,
-            Some(|x, w, o| grid::quantize_iq2_xxs(x, w.expect("an imatrix"), o)),
+            Some(|x, w, o, q| grid::quantize_iq2_xxs(x, w.expect("an imatrix"), o, q)),
         ),
         GgufType::Iq2Xs => (
             QK_K,
             cols / QK_K * grid::BLOCK_IQ2_XS,
-            Some(|x, w, o| grid::quantize_iq2_xs(x, w.expect("an imatrix"), o)),
+            Some(|x, w, o, q| match q {
+                Quantizer::LlamaCpp => grid::quantize_iq2_xs(x, w.expect("an imatrix"), o, q),
+                Quantizer::IkLlama => grid::quantize_iq2_xs_ik(x, w.expect("an imatrix"), o),
+            }),
         ),
         GgufType::Iq2S => (
             QK_K,
@@ -729,12 +722,15 @@ pub fn quantize_rows(
         GgufType::Iq1S => (
             QK_K,
             cols / QK_K * grid::BLOCK_IQ1_S,
-            Some(|x, w, o| grid::quantize_iq1_s(x, w.expect("an imatrix"), o)),
+            Some(|x, w, o, q| grid::quantize_iq1_s(x, w.expect("an imatrix"), o, q)),
         ),
         GgufType::Iq1M => (
             QK_K,
             cols / QK_K * grid::BLOCK_IQ1_M,
-            Some(grid::quantize_iq1_m),
+            Some(|x, w, o, q| match q {
+                Quantizer::LlamaCpp => grid::quantize_iq1_m(x, w, o, q),
+                Quantizer::IkLlama => grid::quantize_iq1_m_ik(x, w, o),
+            }),
         ),
         GgufType::Iq2K => (QK_K, cols / QK_K * iqk::BLOCK_IQ2_K, None),
         GgufType::Iq2Ks => (
@@ -793,7 +789,12 @@ pub fn quantize_rows(
                     .zip(row_out.chunks_exact_mut(size))
                     .enumerate()
                 {
-                    encode(x, imatrix.map(|w| &w[i * block..(i + 1) * block]), o);
+                    encode(
+                        x,
+                        imatrix.map(|w| &w[i * block..(i + 1) * block]),
+                        o,
+                        quantizer,
+                    );
                 }
             }
         });
