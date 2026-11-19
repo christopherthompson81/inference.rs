@@ -106,3 +106,67 @@ Command: `sweep` over two of the seven groups (`ffn_gate_up`, `ssm_out`, five ty
 Result: base and 10 points in 103.5 s (594 CPU-s), ~9.4 s a point against ~48 s in Run 1; every KLD, p99 and top
 equal to Run 2's. The full seven-group sweep is now ~6 min instead of ~29. The remaining time is the group's own
 quantization (the FFN at ~5 bits is the largest) and the 7 s score.
+
+## Run 5 - 2026-11-19 10:30
+
+Question: the Qwen3.6-35B-A3B sweep on our tooling, and does allocation beat the hand recipe R1 there?
+
+Setup: BF16 GGUF reconverted from the safetensors (71.1 GB), Unsloth imatrix, base = R0 (IQ4_XS experts, F32 router /
+GDN small tensors, Q8_0 the rest; 20,273,121,216 B, KLD 0.01825). Nine groups, each point an overlay (#1017) of its
+group scored over the base (27 s a point). The two IQ4_KSS expert points failed: `quantize gguf` could not write the
+type (fixed since, ik parity investigation Run 5). The experts-down IQ4_KS point failed to score once (a test build
+replaced the example binary mid-run) and was rerun.
+
+Bytes saved (negative: added) and KLD added against the base:
+
+```
+group         Q6_K              Q5_K              Q4_K              IQ4_XS            other
+exps_gate_up                                                                          IQ4_KS -43 MB -0.00108, IQ3_KS +2902 MB +0.01604
+exps_down                                                                             IQ4_KS -86 MB -0.00028, IQ3_KS +1419 MB +0.01067
+shexp          +31 MB +0.00023   +48 MB +0.00075   +64 MB +0.00176   +69 MB +0.00219
+attn_qkv      +122 MB +0.00003  +189 MB +0.00070  +252 MB +0.00203  +267 MB +0.00359
+attn_gate      +61 MB -0.00022   +94 MB +0.00046  +126 MB +0.00176  +134 MB +0.00108
+ssm_out        +61 MB -0.00014   +94 MB +0.00073  +126 MB +0.00288  +134 MB +0.00285
+attention      +73 MB +0.00028  +112 MB +0.00116  +150 MB +0.00416  +159 MB +0.00349
+token_embd    +123 MB +0.00029                    +254 MB +0.00048
+output        +123 MB +0.00027  +191 MB +0.00145  +254 MB +0.00568
+```
+
+Readings: IQ4_KS experts beat IQ4_XS for 43 / 86 MB more (gate/up -0.0011 KLD, the largest single gain); token
+embeddings at Q4_K are nearly free (+0.0005 for 254 MB); the untied output head is not (+0.0057 at Q4_K, top-1 -1.7
+points); Q6_K on `attn_gate` / `ssm_out` scoring below the Q8_0 base is within noise (~0.0003 here).
+
+Allocated picks (`allocate`): at the base's size IQ4_KS experts + Q6_K `attn_qkv`/`attn_gate`/`ssm_out` (predicted
+20.16 GB, KLD 0.0166); at 19.5 GB IQ4_KS gate/up, Q5_K `attn_qkv`/`attn_gate`, Q6_K the rest, Q4_K embeddings
+(predicted 0.0195; R1, hand-made at the same size, measured 0.0194 with ik's tool); at 18.5 GB IQ3_KS experts-down
+(predicted 0.0280). Their measurement was stopped: each needed ~14 min of CPU expert quantizing, which Run 6 removes.
+
+## Run 6 - 2026-11-19 12:00
+
+Question: where does a sweep point's time go now, and can the quantizing leave the CPU?
+
+CPU: the quantizer ran on rayon's global pool (8 physical cores). Four layers of gate/up experts at IQ4_KS with the
+imatrix: 8 threads 79.7 s, 16 (SMT) 63.5 s, identical bytes. `quantize gguf` now runs in the logical-CPU pool. Batching
+experts per CPU call gained nothing (852 s against ~780 s for a whole group): the search was already compute-bound.
+
+GPU (`kernels/cuda/gguf_quantize`, IQ4_KS first): the CPU port's every product, sum and fused multiply-add as an
+explicit rounding intrinsic, so nvcc contracts nothing. First version (a thread per block, a thread per row): 9.6 s for
+the four layers, kernels 6.2 s of it (the row pass serial over 2,048 values per row, 512 threads a launch). Then: a
+warp per block for the search (the CPU's eight interleaved partial sums chained lane j - 8 to lane j by shuffles), a
+weights pass, the row pass split (row scale, per-block indices and refit terms, a serial add of the terms per row);
+experts batched ~1 GiB a call with a per-expert imatrix; the codebook tables in shared memory (constant memory
+serialized the lanes' differing indices); bf16 uploaded and widened on the GPU.
+
+```
+four layers of gate/up experts, IQ4_KS, imatrix   wall
+CPU, 16 threads                                   58-62 s
+GPU, per expert, first kernels                    9.6 s
+GPU, chunked + split kernels                      8.2 s (kernels 3.5 s, search 2.8 s)
+GPU, tables in shared memory                      7.8 s
+GPU, bf16 widened on the GPU                      4.6 s   (a Q8_0 run of the same tensors, mostly I/O: 3.2 s)
+```
+
+Every version wrote the CPU's bytes: GPU tests compare f32, multi-expert and bf16 inputs against `iq_quantize`, and the
+four-layer outputs `cmp` equal. A whole expert group drops from ~13 min to ~45 s; `--cpu` keeps the CPU path.
+
+Next: the same for IQ4_XS, IQ4_KSS, IQ3_KS and the K-quants the sweeps use, then rerun Run 5's measurements.
