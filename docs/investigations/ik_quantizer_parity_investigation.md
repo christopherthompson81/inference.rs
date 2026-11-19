@@ -57,4 +57,13 @@ Not ported: the 1-3 bit grid types. ik rewrote IQ2_XS (an exhaustive split searc
 refinement rounds), IQ1_S and IQ1_M; IQ2_XXS, IQ2_S, IQ3_XXS and IQ3_S differ by a few bytes (zeroed levels moved,
 `is_on_grid` no longer reset, fusion). `--quantizer ik-llama` writes them with llama.cpp's search and warns.
 
-Next: the grid types; KLD of the R0-R2 recipes rebuilt with `inference quantize gguf` to confirm the files match.
+Next: the grid types; the R1 recipe rebuilt with `inference quantize gguf` to confirm whole files match.
+
+## Run 3 - 2026-11-18 18:20
+
+Question: does a whole recipe come out as ik's `llama-quantize` writes it?
+
+Command: the recipe investigation's R1 rules (IQ4_XS experts, Q5_K `attn_qkv`, Q6_K attention / shared experts /
+`ssm_out` / `attn_gate` / head, Q8_0 the rest, the Unsloth imatrix) through `inference quantize gguf` with its
+default `--quantizer ik-llama` (dev build, 22.7 min), compared tensor by tensor with ik's file (its blk.40 MTP graft
+left out): 733 identical, 0 differing.
