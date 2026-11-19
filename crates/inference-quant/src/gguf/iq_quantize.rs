@@ -4,6 +4,7 @@
 //! them.
 
 use inference_tensor::Result;
+use inference_tensor::quantized::Quantizer;
 use rayon::prelude::*;
 
 use super::iq_grid_quantize as grid;
@@ -68,6 +69,12 @@ const SIMPLE_INDEX_IQ4NL: [u8; 256] = [
 // ggml's: the float added to 1.5 * 2^23 rounds to the nearest integer, ties to even
 pub(super) fn nearest_int(x: f32) -> i32 {
     let v = x + ROUNDING_MAGIC;
+    (v.to_bits() & 0x007f_ffff) as i32 - 0x0040_0000
+}
+
+// `nearest_int(a * b)` with the product fused into the rounding add, as gcc builds it for an FMA target
+fn nearest_int_fused(a: f32, b: f32) -> i32 {
+    let v = a.mul_add(b, ROUNDING_MAGIC);
     (v.to_bits() & 0x007f_ffff) as i32 - 0x0040_0000
 }
 
@@ -198,6 +205,166 @@ fn quantize_super_block(
     d
 }
 
+// the codebook index nearest `x` as ik_llama.cpp's AVX2 search finds it: the lower of the two entries around
+// `trunc(x)` unless the upper is strictly closer
+fn simple_index(values: &[i8; 16], x: f32) -> usize {
+    let ix = ((x as i32) - i32::from(values[0])).clamp(0, 240) as usize;
+    let lo = SIMPLE_INDEX_IQ4NL[ix] as usize;
+    let (c0, c1) = (f32::from(values[lo]), f32::from(values[lo + 1]));
+    if c1 - x < x - c0 { lo + 1 } else { lo }
+}
+
+// one scale try over a block as `evaluate_quant_block_avx2` runs it: weighted fit sums kept per lane, then added
+fn evaluate_iq4nl_block(
+    values: &[i8; 16],
+    inverse: f32,
+    xb: &[f32],
+    weight: &[f32],
+    lb: Option<&mut [u8]>,
+) -> (f32, f32) {
+    let mut lb = lb;
+    let (mut sqx, mut sq2) = ([0f32; SIMD_LANES], [0f32; SIMD_LANES]);
+    for (j, (&x, &w)) in xb.iter().zip(weight).enumerate() {
+        let l = simple_index(values, inverse * x);
+        if let Some(lb) = lb.as_deref_mut() {
+            lb[j] = l as u8;
+        }
+        let q = f32::from(values[l]);
+        let wq = w * q;
+        let lane = j % SIMD_LANES;
+        sqx[lane] = wq.mul_add(x, sqx[lane]);
+        sq2[lane] = wq.mul_add(q, sq2[lane]);
+    }
+    (lanes_sum(&sqx), lanes_sum(&sq2))
+}
+
+/// [`quantize_super_block`] as ik_llama.cpp's AVX2 build runs it (`quantize_row_iq4_nl_impl_avx2`): its sums kept per
+/// lane, each block's search started from both ends of the codebook and the best levels then moved a step at a time
+/// while the fit improves.
+fn quantize_super_block_ik(
+    x: &[f32],
+    quant_weights: Option<&[f32]>,
+    indices: &mut [u8],
+    scales_h: &mut u16,
+    scales_l: &mut [u8],
+) -> f32 {
+    let values = &KVALUES_IQ4NL;
+    let v = |l: usize| f32::from(values[l]);
+    let mut lanes = [0f32; SIMD_LANES];
+    for (j, &xj) in x.iter().enumerate() {
+        lanes[j % SIMD_LANES] = xj.mul_add(xj, lanes[j % SIMD_LANES]);
+    }
+    let sigma2 = lanes_sum(&lanes) * (2.0 / x.len() as f32);
+    let blocks = x.len() / QK4_NL;
+    let mut scales = vec![0f32; blocks];
+    let mut weight = [0f32; QK4_NL];
+    let (mut max_scale, mut amax_scale) = (0f32, 0f32);
+    for ib in 0..blocks {
+        let xb = &x[ib * QK4_NL..(ib + 1) * QK4_NL];
+        let lb = &mut indices[ib * QK4_NL..(ib + 1) * QK4_NL];
+        block_weights(
+            xb,
+            quant_weights.map(|qw| &qw[ib * QK4_NL..(ib + 1) * QK4_NL]),
+            sigma2,
+            &mut weight,
+        );
+        let (mut amax, mut max) = (0f32, 0f32);
+        for &xv in xb {
+            if xv.abs() > amax {
+                amax = xv.abs();
+                max = xv;
+            }
+        }
+        if amax < GROUP_MAX_EPS {
+            scales[ib] = 0.0;
+            continue;
+        }
+        let id = 1.0 / (-max / v(0));
+        let (sumqx, sumq2) = evaluate_iq4nl_block(values, id, xb, &weight, Some(&mut *lb));
+        let mut d = sumqx / sumq2;
+        let mut best = d * sumqx;
+        let (mut best_sumqx, mut best_sumq2, mut best_id) = (sumqx, sumq2, id);
+        let imax = 1.0 / max;
+        for itry in -SCALE_TRIES..=SCALE_TRIES {
+            for end in [values[0], values[15]] {
+                let id = (itry + i32::from(end)) as f32 * imax;
+                let (sumqx, sumq2) = evaluate_iq4nl_block(values, id, xb, &weight, None);
+                if sumq2 > 0.0 && sumqx * sumqx > best * sumq2 {
+                    d = sumqx / sumq2;
+                    best = d * sumqx;
+                    (best_sumqx, best_sumq2, best_id) = (sumqx, sumq2, id);
+                }
+            }
+        }
+        evaluate_iq4nl_block(values, best_id, xb, &weight, Some(&mut *lb));
+        let (mut sumqx, mut sumq2) = (best_sumqx, best_sumq2);
+        // a level a step up or down, the one whose step the weighted residual reaches first, while the fit improves
+        for _ in 0..32 * QK4_NL {
+            let mut min_step = f32::INFINITY;
+            let (mut best_j, mut dir) = (None, 0i32);
+            for j in 0..QK4_NL {
+                let l = lb[j] as usize;
+                let g = d * weight[j] * (-d).mul_add(v(l), xb[j]);
+                if g > 0.0 && l < 15 {
+                    let step = (v(l + 1) - v(l)) / g;
+                    if step < min_step {
+                        (min_step, best_j, dir) = (step, Some(j), 1);
+                    }
+                } else if g < 0.0 && l > 0 {
+                    let step = (v(l - 1) - v(l)) / g;
+                    if step < min_step {
+                        (min_step, best_j, dir) = (step, Some(j), -1);
+                    }
+                }
+            }
+            let Some(j) = best_j else { break };
+            let (l, w) = (lb[j] as usize, weight[j]);
+            let next = (l as i32 + dir) as usize;
+            let (a, b) = (i32::from(values[next]), i32::from(values[l]));
+            let new_sumqx = (w * xb[j]).mul_add((a - b) as f32, sumqx);
+            let new_sumq2 = w.mul_add((a * a - b * b) as f32, sumq2);
+            if new_sumq2 > 0.0 && new_sumqx * new_sumqx > best * new_sumq2 {
+                (sumqx, sumq2) = (new_sumqx, new_sumq2);
+                d = sumqx / sumq2;
+                best = d * sumqx;
+                lb[j] = next as u8;
+            } else {
+                break;
+            }
+        }
+        scales[ib] = d;
+        if d.abs() > amax_scale {
+            amax_scale = d.abs();
+            max_scale = d;
+        }
+    }
+    if blocks == 1 {
+        let d = scales[0];
+        let inverse = if d != 0.0 { 1.0 / d } else { 0.0 };
+        for (l, &xv) in indices.iter_mut().zip(x) {
+            *l = simple_index(values, inverse * xv) as u8;
+        }
+        return d;
+    }
+    let d = -max_scale / SCALE_OFFSET as f32;
+    let inverse = if d != 0.0 { 1.0 / d } else { 0.0 };
+    *scales_h = 0;
+    scales_l.fill(0);
+    for ib in 0..blocks {
+        let l = nearest_int_fused(inverse, scales[ib]).clamp(-SCALE_OFFSET, SCALE_OFFSET - 1);
+        let dl = d * l as f32;
+        let idl = if dl != 0.0 { 1.0 / dl } else { 0.0 };
+        let xb = &x[ib * QK4_NL..(ib + 1) * QK4_NL];
+        for (j, &xv) in xb.iter().enumerate() {
+            indices[ib * QK4_NL + j] = simple_index(values, idl * xv) as u8;
+        }
+        let code = (l + SCALE_OFFSET) as u8;
+        scales_l[ib / 2] |= (code & 0x0F) << (4 * (ib % 2));
+        *scales_h |= u16::from(code >> 4) << (2 * ib);
+    }
+    d
+}
+
 // 32 indices to 16 bytes: the first 16 in the low nibbles, the next 16 in the high ones
 fn pack_indices(indices: &[u8], qs: &mut [u8]) {
     for (group, out) in indices
@@ -212,17 +379,35 @@ fn pack_indices(indices: &[u8], qs: &mut [u8]) {
     }
 }
 
+type SuperBlock = fn(&[f32], Option<&[f32]>, &mut [u8], &mut u16, &mut [u8]) -> f32;
+
 fn quantize_iq4_nl_block(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
+    iq4_nl_block(quantize_super_block, x, qw, out)
+}
+
+fn quantize_iq4_nl_block_ik(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
+    iq4_nl_block(quantize_super_block_ik, x, qw, out)
+}
+
+fn quantize_iq4_xs_block(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
+    iq4_xs_block(quantize_super_block, x, qw, out)
+}
+
+fn quantize_iq4_xs_block_ik(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
+    iq4_xs_block(quantize_super_block_ik, x, qw, out)
+}
+
+fn iq4_nl_block(search: SuperBlock, x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
     let mut indices = [0u8; QK4_NL];
-    let d = quantize_super_block(x, qw, &mut indices, &mut 0, &mut []);
+    let d = search(x, qw, &mut indices, &mut 0, &mut []);
     out[..2].copy_from_slice(&half::f16::from_f32(d).to_le_bytes());
     pack_indices(&indices, &mut out[2..]);
 }
 
-fn quantize_iq4_xs_block(x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
+fn iq4_xs_block(search: SuperBlock, x: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
     let mut indices = [0u8; QK_K];
     let (mut scales_h, mut scales_l) = (0u16, [0u8; QK_K / 64]);
-    let d = quantize_super_block(x, qw, &mut indices, &mut scales_h, &mut scales_l);
+    let d = search(x, qw, &mut indices, &mut scales_h, &mut scales_l);
     out[..2].copy_from_slice(&half::f16::from_f32(d).to_le_bytes());
     out[2..4].copy_from_slice(&scales_h.to_le_bytes());
     out[4..8].copy_from_slice(&scales_l);
@@ -491,19 +676,29 @@ pub fn quantize_rows(
     cols: usize,
     values: &[f32],
     imatrix: Option<&[f32]>,
+    quantizer: Quantizer,
 ) -> Result<Vec<u8>> {
+    let ik = quantizer == Quantizer::IkLlama;
     // IQ4_KS's scales span the row, and ik's types reweigh the imatrix per row, so those encode whole rows; the
     // others encode block by block
     let (block, row_bytes, encode): (usize, usize, Option<BlockEncoder>) = match ty {
         GgufType::Iq4Nl => (
             QK4_NL,
             cols / QK4_NL * BLOCK_IQ4_NL,
-            Some(quantize_iq4_nl_block),
+            Some(if ik {
+                quantize_iq4_nl_block_ik
+            } else {
+                quantize_iq4_nl_block
+            }),
         ),
         GgufType::Iq4Xs => (
             QK_K,
             cols / QK_K * BLOCK_IQ4_XS,
-            Some(quantize_iq4_xs_block),
+            Some(if ik {
+                quantize_iq4_xs_block_ik
+            } else {
+                quantize_iq4_xs_block
+            }),
         ),
         GgufType::Iq4Ks => (QK_K, IQ4_KS_ROW_HEADER + cols / QK_K * BLOCK_IQ4_KS, None),
         GgufType::Iq2Xxs => (
@@ -620,7 +815,7 @@ mod tests {
     }
 
     fn rms_error(ty: GgufType, cols: usize, x: &[f32], imatrix: Option<&[f32]>) -> (f32, Vec<f32>) {
-        let bytes = quantize_rows(ty, cols, x, imatrix).unwrap();
+        let bytes = quantize_rows(ty, cols, x, imatrix, Quantizer::LlamaCpp).unwrap();
         let back = super::super::raw::dequantize_rows(ty, cols, &bytes).unwrap();
         let err = x
             .iter()
@@ -739,7 +934,7 @@ mod tests {
         let x = values(256, 5);
         for ty in LOW_BIT {
             assert_eq!(
-                quantize_rows(ty, 256, &x, None).is_err(),
+                quantize_rows(ty, 256, &x, None, Quantizer::LlamaCpp).is_err(),
                 requires_imatrix(ty),
                 "{ty:?}"
             );

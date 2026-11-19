@@ -278,6 +278,14 @@ row's length must be a whole number of the type's blocks (256 values for the K a
 `iq4_ks` formats, 32 for the others); a rule that breaks this is refused before anything is
 written.
 
+`--quantizer` picks whose search writes the bytes. The default, `ik-llama`, is ik_llama.cpp's: it
+tries more scales per block and then moves single values a step while the fit improves, for the
+K types, the legacy `q4_0`-`q5_1` and `iq4_nl` / `iq4_xs`, and matches ik_llama.cpp's
+`llama-quantize` byte for byte. On Qwen3.6-35B-A3B it lowered the KLD of a mixed Q5_K / Q6_K /
+IQ4_XS recipe from 0.0198 to 0.0194 at the same size. `llama-cpp` writes llama.cpp's bytes
+exactly. The 1-3 bit grid types (`iq1_s` to `iq3_s`) are written with llama.cpp's search either
+way, with a warning under `ik-llama`.
+
 To use statistics collected by [online calibration](/guides/quantization/online-calibration/),
 convert the saved `.cimatrix` to llama.cpp's format under the GGUF's tensor names:
 

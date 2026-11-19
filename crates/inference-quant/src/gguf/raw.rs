@@ -1687,7 +1687,11 @@ mod tests {
             }
             Ok(())
         };
-        for ty in GgufType::RAW_BLOCKS {
+        // MXFP4 has only Vulkan's expert matvec; CUDA takes another path for its experts
+        for ty in GgufType::RAW_BLOCKS
+            .into_iter()
+            .filter(|&ty| ty != GgufType::Mxfp4)
+        {
             let intermediate = if ty.row_bytes(TAIL_INTERMEDIATE).is_some() && ty.is_trellis() {
                 TAIL_INTERMEDIATE
             } else {

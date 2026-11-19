@@ -23,7 +23,8 @@ use crate::args::{
     ImatrixConvertOptions, MatformerSelection, MmprojOptions, ModelSourceOptions, ModelType,
     MultimodalAdapterOptions, MultimodalOptions, NemotronTranscribeAudioOptions,
     QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
-    QuantizeMultimodalOptions, QuantizeQuantizationOptions, WorldgenQuantizeOptions,
+    QuantizeMultimodalOptions, QuantizeQuantizationOptions, QuantizerChoice,
+    WorldgenQuantizeOptions,
 };
 
 const MIB: f64 = (1u64 << 20) as f64;
@@ -139,7 +140,20 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
     if let Some(imatrix) = &imatrix {
         info!("Loaded an imatrix of {} tensors", imatrix.len());
     }
-    let plan = gguf_requantize::RequantizePlan { rules, imatrix };
+    let quantizer = match options.quantizer {
+        QuantizerChoice::LlamaCpp => gguf_requantize::Quantizer::LlamaCpp,
+        QuantizerChoice::IkLlama => gguf_requantize::Quantizer::IkLlama,
+    };
+    for (_, ty) in &rules {
+        if !gguf_requantize::follows_quantizer(*ty, quantizer) {
+            warn!("{ty:?} has no ik_llama.cpp search here yet; it is written with llama.cpp's");
+        }
+    }
+    let plan = gguf_requantize::RequantizePlan {
+        rules,
+        imatrix,
+        quantizer,
+    };
     let summary = gguf_requantize::requantize_gguf(
         &options.model,
         &options.output_path,

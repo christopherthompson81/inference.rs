@@ -344,7 +344,14 @@ fn encode(tensor: &Tensor, role: Role, matrix_type: Option<GgufType>) -> Result<
     let rows = values.len() / cols;
     Ok((
         ty.id(),
-        inference_quant::requantize::quantize_matrix(ty, cols, &values, None, rows)?,
+        inference_quant::requantize::quantize_matrix(
+            ty,
+            cols,
+            &values,
+            None,
+            rows,
+            inference_quant::requantize::Quantizer::LlamaCpp,
+        )?,
     ))
 }
 

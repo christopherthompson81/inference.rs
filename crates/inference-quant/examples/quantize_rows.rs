@@ -1,7 +1,8 @@
 //! Rows of little-endian f32 values to raw GGUF blocks with our quantizers, for `scripts/iq_quantize_parity.py`.
-//! Usage: quantize_rows <ggml type id> <cols> <values.f32> <imatrix.f32 | -> <out.bin>
+//! Usage: quantize_rows <ggml type id> <cols> <values.f32> <imatrix.f32 | -> <out.bin> [ik]
 
 use inference_quant::GgufType;
+use inference_quant::requantize::Quantizer;
 
 fn read_f32(path: &str) -> inference_tensor::Result<Vec<f32>> {
     Ok(std::fs::read(path)?
@@ -14,9 +15,13 @@ fn read_f32(path: &str) -> inference_tensor::Result<Vec<f32>> {
 
 fn main() -> inference_tensor::Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
-    let [_, id, cols, values, imatrix, out] = args.as_slice() else {
+    let (args, quantizer) = match args.split_last() {
+        Some((last, rest)) if last == "ik" => (rest, Quantizer::IkLlama),
+        _ => (args.as_slice(), Quantizer::LlamaCpp),
+    };
+    let [_, id, cols, values, imatrix, out] = args else {
         inference_tensor::bail!(
-            "usage: quantize_rows <ggml type id> <cols> <values.f32> <imatrix.f32 | -> <out.bin>"
+            "usage: quantize_rows <ggml type id> <cols> <values.f32> <imatrix.f32 | -> <out.bin> [ik]"
         );
     };
     let id: u32 = id.parse().map_err(inference_tensor::Error::msg)?;
@@ -47,6 +52,7 @@ fn main() -> inference_tensor::Result<()> {
         &values,
         imatrix.as_deref(),
         values.len() / cols,
+        quantizer,
     )?;
     std::fs::write(out, bytes)?;
     Ok(())

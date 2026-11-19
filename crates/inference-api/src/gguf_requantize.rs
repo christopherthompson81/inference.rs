@@ -5,6 +5,6 @@ pub use inference_core::{
     write_nemotron_transcribe_audio_gguf,
 };
 pub use inference_quant::requantize::{
-    RequantizePlan, RequantizeSummary, load_imatrix, requantize_gguf, save_legacy_imatrix,
-    writable_type,
+    Quantizer, RequantizePlan, RequantizeSummary, follows_quantizer, load_imatrix, requantize_gguf,
+    save_legacy_imatrix, writable_type,
 };

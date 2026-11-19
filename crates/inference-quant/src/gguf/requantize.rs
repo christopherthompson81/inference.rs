@@ -8,10 +8,11 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use half::{bf16, f16};
+pub use inference_tensor::quantized::Quantizer;
 use inference_tensor::quantized::gguf_file::{
     self, Header, TensorEntry, write_header, write_tensor_padding,
 };
-use inference_tensor::quantized::{GgmlDType, QTensor};
+use inference_tensor::quantized::{GgmlDType, QTensor, quantize_blocks};
 use inference_tensor::{Device, Result, Tensor};
 use rayon::prelude::*;
 use regex::Regex;
@@ -50,6 +51,22 @@ fn writable_types() -> impl Iterator<Item = GgufType> {
     CANDLE_WRITABLE.into_iter().map(GgufType::from).chain(raw)
 }
 
+/// Whether `quantizer` has its own search for `ty`; ik_llama.cpp's 1-3 bit grid types (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS,
+/// IQ2_S, IQ3_XXS, IQ3_S) are written with llama.cpp's.
+pub fn follows_quantizer(ty: GgufType, quantizer: Quantizer) -> bool {
+    quantizer == Quantizer::LlamaCpp
+        || !matches!(
+            ty,
+            GgufType::Iq1S
+                | GgufType::Iq1M
+                | GgufType::Iq2Xxs
+                | GgufType::Iq2Xs
+                | GgufType::Iq2S
+                | GgufType::Iq3Xxs
+                | GgufType::Iq3S
+        )
+}
+
 /// A tensor type by its llama.cpp name (`q4_k`, `iq4_ks`), if this module writes it.
 pub fn writable_type(name: &str) -> Result<GgufType> {
     writable_types()
@@ -70,6 +87,7 @@ pub fn quantize_matrix(
     values: &[f32],
     imatrix: Option<&[f32]>,
     rows_per_slice: usize,
+    quantizer: Quantizer,
 ) -> Result<Vec<u8>> {
     let slice_values = rows_per_slice * cols;
     if let Some(w) = imatrix
@@ -84,7 +102,7 @@ pub fn quantize_matrix(
     let mut out = Vec::new();
     for (i, slice) in values.chunks(slice_values).enumerate() {
         let w = imatrix.map(|w| &w[i * cols..(i + 1) * cols]);
-        out.extend(quantize_slice(ty, cols, slice, w)?);
+        out.extend(quantize_slice(ty, cols, slice, w, quantizer)?);
     }
     Ok(out)
 }
@@ -94,32 +112,22 @@ fn quantize_slice(
     cols: usize,
     values: &[f32],
     imatrix: Option<&[f32]>,
+    quantizer: Quantizer,
 ) -> Result<Vec<u8>> {
     if iq_quantize::can_quantize(ty) {
-        return iq_quantize::quantize_rows(ty, cols, values, imatrix);
+        return iq_quantize::quantize_rows(ty, cols, values, imatrix, quantizer);
     }
     let Some(dtype) = ty.candle() else {
         inference_tensor::bail!("{ty:?} has no quantizer");
     };
-    // ggml's Q8_0 and float types ignore an imatrix
-    let weighted = !matches!(
-        dtype,
-        GgmlDType::Q8_0
-            | GgmlDType::Q8_1
-            | GgmlDType::Q8K
-            | GgmlDType::F32
-            | GgmlDType::F16
-            | GgmlDType::BF16
-    );
+    if !matches!(dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16) {
+        return quantize_blocks(dtype, values, imatrix, cols, quantizer);
+    }
     let chunks = values
         .par_chunks(ROWS_PER_TASK * cols)
         .map(|chunk| {
             let t = Tensor::from_slice(chunk, (chunk.len() / cols, cols), &Device::Cpu)?;
-            let q = match imatrix.filter(|_| weighted) {
-                Some(w) => QTensor::quantize_imatrix(&t, w, dtype)?,
-                None => QTensor::quantize(&t, dtype)?,
-            };
-            Ok(q.data()?.into_owned())
+            Ok(QTensor::quantize(&t, dtype)?.data()?.into_owned())
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(chunks.concat())
@@ -131,6 +139,7 @@ pub struct RequantizePlan {
     pub rules: Vec<(Regex, GgufType)>,
     /// llama.cpp's per-tensor importances (mean squared activations, an expert stack's experts one after another).
     pub imatrix: Option<HashMap<String, Vec<f32>>>,
+    pub quantizer: Quantizer,
 }
 
 #[derive(Debug, Default)]
@@ -304,7 +313,7 @@ pub fn requantize_gguf(
                 let expert = expert_rows.map_or(0, |e| first / e);
                 &w[expert * cols..(expert + 1) * cols]
             });
-            let out = quantize_slice(ty, cols, &to_f32(t.source_type, &bytes)?, w)
+            let out = quantize_slice(ty, cols, &to_f32(t.source_type, &bytes)?, w, plan.quantizer)
                 .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
             writer.write_all(&out)?;
             written += out.len();
@@ -476,6 +485,70 @@ mod tests {
     use super::*;
     use inference_tensor::quantized::gguf_file::Value;
 
+    const PIN_ROWS: usize = 8;
+    const PIN_COLS: usize = 512;
+
+    // a reproducible layer: small values with sparse outliers, and a skewed imatrix (the same LCG regenerates them
+    // outside Rust to check the pins against ik_llama.cpp's own quantizer)
+    fn pinned_layer() -> (Vec<f32>, Vec<f32>) {
+        let mut state = 12_345u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / (1u32 << 24) as f32, state)
+        };
+        let values = (0..PIN_ROWS * PIN_COLS)
+            .map(|_| {
+                let (u, s) = next();
+                let scale = if (s >> 4) & 31 == 0 { 0.4 } else { 0.04 };
+                (u - 0.5) * scale
+            })
+            .collect();
+        let imatrix = (0..PIN_COLS)
+            .map(|_| 0.05 + 4.0 * next().0.powi(3))
+            .collect();
+        (values, imatrix)
+    }
+
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    // ik_llama.cpp's quantizer, as its AVX2 build (gcc, -march=native) writes these bytes: the pins are its own
+    // `ggml_quantize_chunk`'s on the same layer (scripts/iq_quantize_parity.py compares more against a build of it)
+    #[test]
+    fn the_ik_quantizer_writes_ik_llamas_bytes() -> Result<()> {
+        let (values, imatrix) = pinned_layer();
+        let pins: [(&str, u64, u64); 12] = PINNED_IK;
+        let mut got = Vec::new();
+        for (name, _, _) in pins {
+            let ty = writable_type(name)?;
+            let hash = |w| {
+                quantize_matrix(ty, PIN_COLS, &values, w, PIN_ROWS, Quantizer::IkLlama)
+                    .map(|b| fnv1a(&b))
+            };
+            got.push((name, hash(None)?, hash(Some(&imatrix))?));
+        }
+        assert_eq!(got, pins.to_vec());
+        Ok(())
+    }
+
+    const PINNED_IK: [(&str, u64, u64); 12] = [
+        ("q2_k", 13302739417286923110, 11601392929549359756),
+        ("q3_k", 16392672201002081248, 17943740573164000344),
+        ("q4_k", 14679928973253263191, 14544912929349767743),
+        ("q5_k", 15584132874035254720, 5277963835315783023),
+        ("q6_k", 15677125580282521591, 18396251129581993316),
+        ("q4_0", 10936624288346114449, 11794455730010133618),
+        ("q4_1", 10411377467337899343, 2434393147449071549),
+        ("q5_0", 337873762312862314, 16479908197838349031),
+        ("q5_1", 1211858028360391952, 13589153157721327241),
+        ("q8_0", 11372417339874904451, 11372417339874904451),
+        ("iq4_nl", 9596728955645266052, 12830532639945862795),
+        ("iq4_xs", 1175151790720974940, 8216451137976519682),
+    ];
+
     #[test]
     fn a_rewritten_gguf_keeps_metadata_and_quantizes_by_rule() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -529,6 +602,7 @@ mod tests {
                 (Regex::new(r".*").unwrap(), writable_type("q8_0")?),
             ],
             imatrix: Some(imatrix.clone()),
+            quantizer: Quantizer::LlamaCpp,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -553,11 +627,23 @@ mod tests {
         let row = GgufType::Iq4Ks.row_bytes(cols).unwrap();
         reader.read_exact(&mut bytes[..4 * row])?;
         let w = &imatrix["blk.0.ffn_up_exps.weight"];
-        let expected = quantize_matrix(GgufType::Iq4Ks, cols, &values, Some(w), 2)?;
+        let expected = quantize_matrix(
+            GgufType::Iq4Ks,
+            cols,
+            &values,
+            Some(w),
+            2,
+            Quantizer::LlamaCpp,
+        )?;
         assert_eq!(&bytes[..4 * row], expected.as_slice());
         // the second expert's rows weighed by the second slice, not the first
-        let first_only =
-            iq_quantize::quantize_rows(GgufType::Iq4Ks, cols, &values, Some(&w[..cols]))?;
+        let first_only = iq_quantize::quantize_rows(
+            GgufType::Iq4Ks,
+            cols,
+            &values,
+            Some(&w[..cols]),
+            Quantizer::LlamaCpp,
+        )?;
         assert_ne!(&bytes[2 * row..4 * row], &first_only[2 * row..]);
 
         let dat = dir.path().join("imatrix.dat");
