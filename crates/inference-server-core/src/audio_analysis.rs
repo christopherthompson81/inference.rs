@@ -1,18 +1,24 @@
 //! The audio analysis routes: multipart uploads over the engine's speech recognition and voice activity detection.
 
+use std::convert::Infallible;
+
 use axum::{
     extract::{Multipart, multipart::MultipartRejection},
     http::{HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
+use futures::StreamExt;
 use inference_api::api_error::ApiError;
 
 use crate::{
     form::{Field, invalid, multipart_payload, read_form},
     handler_core::openai_error_response,
     openai::{
-        DiarizationRequest, LanguageIdRequest, TranscriptionRequest, TranscriptionTask,
-        VoiceActivityRequest,
+        DiarizationRequest, LanguageIdRequest, TranscriptionRequest, TranscriptionResponseFormat,
+        TranscriptionTask, VoiceActivityRequest,
     },
     types::OwnedEngine,
 };
@@ -126,6 +132,59 @@ pub async fn transcription(
             Err(error) => return openai_error_response(error),
         };
     audio_response(engine.transcription(request, &audio).await)
+}
+
+/// Transcription as server-sent events, for long recordings: `started` (the recording's `duration` and the `windows`
+/// planned), then a `window` (its `text` and `words`) and a `progress` (`done`, `total`, `seconds_done`) as each window
+/// finishes, and last `done` (the `verbose_json` transcript, with the diarizer's `speaker_turns` when one is named),
+/// `canceled` or `error`. Closing the connection stops it before its next window.
+#[cfg_attr(test, utoipa::path(
+    post,
+    tag = "inference.rs",
+    path = "/v1/audio/transcriptions/stream",
+    request_body(content = inline(TranscriptionForm), content_type = "multipart/form-data"),
+    responses((
+        status = 200,
+        description = "`started`, `window`, `progress` and last `done`, `canceled` or `error` events",
+        content_type = "text/event-stream"
+    ))
+))]
+pub async fn transcription_stream(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<Multipart, MultipartRejection>,
+) -> Response {
+    let multipart = match multipart_payload(payload, INVALID_CODE) {
+        Ok(multipart) => multipart,
+        Err(error) => return openai_error_response(error),
+    };
+    let (mut request, audio) =
+        match read_audio_form::<TranscriptionRequest>(multipart, TRANSCRIPTION_FIELDS).await {
+            Ok(form) => form,
+            Err(error) => return openai_error_response(error),
+        };
+    // `done` carries the transcript as JSON; the form's fields never name a server-side `path`
+    request.response_format = TranscriptionResponseFormat::VerboseJson;
+    let Ok(body) = serde_json::to_vec(&request) else {
+        return openai_error_response(ApiError::internal());
+    };
+    match engine.transcription_stream_json(&body, Some(audio)).await {
+        Ok(stream) => Sse::new(
+            stream
+                .events
+                .map(|raw| Ok::<_, Infallible>(stream_event(&raw))),
+        )
+        .keep_alive(KeepAlive::default())
+        .into_response(),
+        Err(error) => openai_error_response(error),
+    }
+}
+
+// an engine stream's `{"event": name, "data": ...}` as the SSE event `name` carrying `data`
+fn stream_event(raw: &str) -> Event {
+    let value: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    Event::default()
+        .event(value["event"].as_str().unwrap_or("message"))
+        .data(value["data"].to_string())
 }
 
 /// Translation endpoint handler: the speech as English text, from a model that translates (Whisper).

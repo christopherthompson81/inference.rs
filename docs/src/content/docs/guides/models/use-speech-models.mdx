@@ -166,7 +166,9 @@ spec = t.EngineSpec(
 ### Streaming a whole recording
 
 Through the C ABI and its bindings, `inference_transcription_stream_open` (Python `transcription_stream`, C#
-`TranscriptionStream`) transcribes a recording as a stream of events instead of one blocking call: `started` with
+`TranscriptionStream`), or over HTTP `/v1/audio/transcriptions/stream` (the transcription form, answered with
+server-sent events; audio bytes only, no `path`), transcribes a recording as a stream of events instead of one
+blocking call: `started` with
 the windows the model cut, then a `window` (its text and words) and a `progress` as each finishes, and last `done`
 (the `verbose_json` transcript), `canceled` or `error`. The request takes `"path"`, a local file decoded to 16 kHz
 mono as it reads (up to 24 hours, never held whole at its own rate), in place of audio bytes, and `"from_seconds"`

@@ -575,6 +575,146 @@
         }
       }
     },
+    "/v1/audio/transcriptions/stream": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "Transcription as server-sent events, for long recordings: `started` (the recording's `duration` and the `windows`\nplanned), then a `window` (its `text` and `words`) and a `progress` (`done`, `total`, `seconds_done`) as each window\nfinishes, and last `done` (the `verbose_json` transcript, with the diarizer's `speaker_turns` when one is named),\n`canceled` or `error`. Closing the connection stops it before its next window.",
+        "operationId": "transcription_stream",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "description": "The multipart form `/v1/audio/transcriptions` takes.",
+                "required": [
+                  "file",
+                  "request"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The audio to transcribe: WAV, MP3, FLAC, Ogg, Matroska/WebM, MP4/M4A (AAC), Opus, and AC-3 or E-AC-3 in Matroska."
+                  },
+                  "request": {
+                    "type": "object",
+                    "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
+                    "properties": {
+                      "alignment_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A forced aligner (Qwen3-ForcedAligner) that times the transcript's words, for a model that writes none itself\n(Qwen3-ASR): words, segments, subtitles and `diarization_model` then work as with a model that times its own.\nAn inference.rs extension.",
+                        "example": "aligner"
+                      },
+                      "beam_size": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "description": "Beam search over this many hypotheses (1 to 16) for Whisper or an RNN-T or TDT model; unset decodes greedily.",
+                        "minimum": 0
+                      },
+                      "condition_on_previous_text": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ],
+                        "description": "Whisper takes each window's predecessor's text as context (on unless `false`); off keeps a window's\nfailure from carrying into the next. An inference.rs extension."
+                      },
+                      "diarization_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker. Naming the transcription model itself has a model that tags speakers (Nemotron\n3.5 Transcribe) attribute them.",
+                        "example": "diarization"
+                      },
+                      "language": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it."
+                      },
+                      "language_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A language identification model (VoxLingua107) that names the language when `language` is unset; the\nrecognizer is told it, and the response's `language` gives it. A language the recognizer does not take\ntranscribes as if unset. An inference.rs extension.",
+                        "example": "language-id"
+                      },
+                      "model": {
+                        "type": "string",
+                        "description": "The speech recognition model to use.",
+                        "example": "nvidia/parakeet-tdt-0.6b-v3"
+                      },
+                      "overlap_pass": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ],
+                        "description": "With `diarization_model`, a second pass over the long turns another speaker cuts into, where the first pass\ndrops words; on unless `false`. An inference.rs extension."
+                      },
+                      "patience": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "Whisper's beam patience (above 0, 1 when unset): the search ends once `beam_size * patience` hypotheses\nhave finished. An inference.rs extension."
+                      },
+                      "prompt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Text to steer the transcript: what came before the audio (Whisper), or context such as hotwords (VibeVoice-ASR);\nother models ignore it."
+                      },
+                      "response_format": {
+                        "$ref": "#/components/schemas/TranscriptionResponseFormat"
+                      },
+                      "task": {
+                        "$ref": "#/components/schemas/TranscriptionTask",
+                        "description": "`translate` writes an English translation (Whisper); `/v1/audio/translations` sets it. An inference.rs\nextension."
+                      },
+                      "temperature": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "0 to 1. Whisper: unset or 0 decodes at 0 and raises the temperature on a window whose text repeats itself or\nis improbable; above 0, every window at it. Parakeet decodes greedily and ignores it."
+                      },
+                      "timestamp_granularities": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/TimestampGranularity"
+                        },
+                        "description": "Timestamps `verbose_json` carries; segments are always given, words only when asked for."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`started`, `window`, `progress` and last `done`, `canceled` or `error` events",
+            "content": {
+              "text/event-stream": {}
+            }
+          }
+        }
+      }
+    },
     "/v1/audio/translations": {
       "post": {
         "tags": [
