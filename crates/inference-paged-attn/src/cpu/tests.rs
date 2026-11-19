@@ -444,10 +444,11 @@ fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
     let Ok(vk) = Device::new_vulkan(0) else {
         return Ok(());
     };
-    // Nemotron-H's heads, and Qwen3.5's 256-wide ones on the wide build
+    // Nemotron-H's heads, and 256-wide ones on the wide build (Qwen3.6-35B-A3B's 16 over 2 kv heads among them)
     for (heads, head, tolerance) in [
         (32usize, 128usize, tolerance),
         (12, 256, VULKAN_WIDE_PREFILL_TOLERANCE.max(tolerance)),
+        (16, 256, VULKAN_WIDE_PREFILL_TOLERANCE.max(tolerance)),
     ] {
         paged_prefill_rows_score_alone_case(&vk, heads, head, tolerance)?;
     }
