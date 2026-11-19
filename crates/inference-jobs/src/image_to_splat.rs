@@ -137,11 +137,10 @@ fn write_textured(
     let Some(mesh) = solid.surface_mesh(TEXTURED_FACES) else {
         return Ok(None);
     };
-    let (cells, values) = idol::color_cells(gaussians, COLOR_GRID);
     let prepared = bake::prepare_given(&mesh, None, COLOR_GRID, texture_size, &|| {
         progress.cancelled()
     })?;
-    let baked = bake::finish(prepared, &cells, &values)?;
+    let baked = idol::bake_splat_colors(gaussians, prepared, COLOR_GRID)?;
     std::fs::write(out_dir.join(GLB_FILE), to_textured_glb(&baked))?;
     Ok(Some(TexturedReport {
         vertices: baked.unwrapped.mesh.vertices.len(),

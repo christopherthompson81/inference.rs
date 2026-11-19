@@ -503,6 +503,11 @@ pub fn prepare(
 
 /// [`bake`]'s texture half: the volume (`coords` / `values`) sampled at the prepared texels and inpainted.
 pub fn finish(prepared: Prepared, coords: &[[i32; 3]], values: &[[f32; 6]]) -> Result<Baked> {
+    finish_with(prepared, |points| sample_attributes(coords, values, points))
+}
+
+/// [`finish`] with each covered texel's attributes from `sample`, given the texels' points in the grid's units.
+pub fn finish_with(prepared: Prepared, sample: impl FnOnce(&[V3]) -> Vec<Pbr>) -> Result<Baked> {
     let Prepared {
         unwrapped,
         size,
@@ -512,7 +517,7 @@ pub fn finish(prepared: Prepared, coords: &[[i32; 3]], values: &[[f32; 6]]) -> R
         points,
         double_sided,
     } = prepared;
-    let attrs = sample_attributes(coords, values, &points);
+    let attrs = sample(&points);
     // planes of the covered texels' values, zero elsewhere
     let plane = |channels: usize, get: &(dyn Fn(&Pbr) -> [f32; 3] + Sync)| {
         let mut plane = vec![0u8; size * size * channels];

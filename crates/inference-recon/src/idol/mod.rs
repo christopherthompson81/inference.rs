@@ -12,7 +12,7 @@ mod parity;
 mod pipeline;
 mod preprocess;
 
-pub use colors::color_cells;
+pub use colors::{bake_splat_colors, color_cells};
 pub use decoder::Gaussians;
 pub use pipeline::{
     Camera, IDOL_IMAGE_SIZE, IdolOutput, IdolPaths, IdolSettings, MAX_GAUSSIANS, MAX_STEPS,
