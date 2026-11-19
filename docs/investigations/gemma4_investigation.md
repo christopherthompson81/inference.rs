@@ -174,3 +174,30 @@ Isolated, Gemma 4's dense Q4_0 projections run at 5.2-5.8 TOPS (were 4.5-5.2) an
 8.28 and 4.65 ms (were 9.89 and 5.17). Removing the matrix products from the kernel leaves 0.6 of 2.1 ms: the
 products themselves, not the loads, hold it well short of llama.cpp's 7 TFLOPS. Attention (3x llama.cpp's on the
 512-wide layers) is the next gap.
+
+## Run 6 - 2026-11-19 21:30
+
+**Question:** with the 26B-A4B's MTP assistant drafting on the 780M (2 q4_0 drafts: 35.3 / 30.8 tok/s against 26.1 /
+25.9 plain), where does a speculative step's ~70 ms go?
+
+A step's GPU time (greedy chat, `INFERENCE_VULKAN_PROFILE`): the 3-row verify's experts ~20 ms (their reads run at
+the single token's ~75 GB/s, the rows sharing experts), dense projections ~13.5 ms, the Q6_K head 8 ms, the drafts
+~6 ms (each draft's whole 262144-row head 2.07 ms at q4_0), and decode attention ~9 ms at a few hundred positions.
+
+1. **Draft syncs:** each draft sampled on the host (all 262144 logits read back). Greedy requests now chain the
+   drafter's device argmax and read the drafts back once.
+2. **Decode attention:** plain decode fell with context, 27.1 tok/s at 4 positions, 20.9 at 1024, 19.1 at 4096
+   (llama.cpp 28.4 / 25.2 / 24.6); the 256-wide decode ran 422 us a layer at 1024 positions, 20 GB/s. Its key tiles
+   staged as f32 (33 KB: one workgroup a compute unit) and scored with 64 of 256 threads at Gemma's 2 query heads a
+   kv head. f16 tiles and split scores took it to 237 us. `paged_decode_stream_f16` then reads each position's key
+   straight into registers (a thread a position, 128 a workgroup, the query in shared memory) for an f16 cache's up
+   to 8 query heads a kv head.
+3. **The drafter's head:** a head over the vocabulary's first 32768 or 65536 ids (Gemma's ids are only loosely
+   frequency-ordered) dropped acceptance from 62-81 % to 42-46 %; a q3k drafter to 51-79 %. Both ran slower.
+
+```
+780M, Gemma 4 26B-A4B q4_0       before        after
+decode @ 4 / 1024 / 4096         27.0 / 20.9 / 19.1   26.9 / 24.8 / 24.0 tok/s   (llama.cpp 28.4 / 25.2 / 24.6)
+chat, 2 q4_0 drafts              35.3 / 30.8          37.2 / 32.4 tok/s
+Qwen3.6-35B-A3B decode @ 2048    23.7                 24.1 tok/s
+```

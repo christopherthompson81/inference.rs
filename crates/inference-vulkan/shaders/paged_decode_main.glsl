@@ -96,16 +96,22 @@ const uint LANES = THREADS / MAX_GROUP;
 #define DECODE_DIM_STEPS 1
 #endif
 const uint DIM_STEPS = DECODE_DIM_STEPS;
-// a 512-wide build reads the query in place and stages its tiles as f16, so its shared memory stays under 48 KB
-#ifdef DECODE_HEAD512
+// a 512-wide build reads the query in place and stages its tiles as f16, so its shared memory stays under 48 KB; an
+// f16 cache stages its tiles as f16 too (losing nothing), which halves a 256-wide build's tile so two workgroups fit
+#if defined(DECODE_HEAD512) || defined(CACHE_F16)
 #define STAGE4 f16vec4
-#define QS(i) q[pc.q_off + (seq * pc.heads + kvh * group) * hs4 + (i)]
 #else
 #define STAGE4 vec4
-#define QS(i) qs[i]
-// a kv head's query heads times the head size, at most 2048 floats (the op checks it)
+#endif
+// a kv head's query heads times the head size, at most 2048 floats (the op checks it), or 4096 as f16 at head 512
+#ifdef DECODE_HEAD512
+const uint MAX_Q4 = 1024;
+shared f16vec4 qs[MAX_Q4];
+#define QS(i) vec4(qs[i])
+#else
 const uint MAX_Q4 = 512;
 shared vec4 qs[MAX_Q4];
+#define QS(i) qs[i]
 #endif
 // a tile's keys (a position a padded row of vec4s), then its values (a dimension a padded row of 4-position vec4s)
 const uint VALUE_ROW = TILE / 4 + 1;
@@ -113,6 +119,9 @@ const uint KV_VEC4S = max(TILE * (MAX_HEAD4 + 1), 4 * MAX_HEAD4 * VALUE_ROW);
 shared STAGE4 keys[KV_VEC4S];
 shared vec4 scores[MAX_GROUP * CHUNK / 4];
 shared float stat_m[MAX_GROUP];
+// a position's score parts for a head when fewer heads than score slots split its dimensions
+const uint SCORE_SLOTS = THREADS / TILE;
+shared float score_parts[SCORE_SLOTS * TILE];
 shared float stat_l[MAX_GROUP];
 
 void main() {
@@ -140,11 +149,13 @@ void main() {
     uint v_words = quant_row_words(pc.head_size, pc.v_bits);
 #endif
 
-#ifndef DECODE_HEAD512
     for (uint i = t; i < group * hs4; i += THREADS) {
+#ifdef DECODE_HEAD512
+        qs[i] = f16vec4(q[pc.q_off + (seq * pc.heads + kvh * group) * hs4 + i]);
+#else
         qs[i] = q[pc.q_off + (seq * pc.heads + kvh * group) * hs4 + i];
-    }
 #endif
+    }
     for (uint i = t; i < MAX_GROUP * CHUNK / 4; i += THREADS) {
         scores[i] = vec4(0.0);
     }
@@ -179,23 +190,38 @@ void main() {
 #endif
         barrier();
         uint p = t % TILE;
-        uint g0 = t / TILE;
+        // a kv head's few query heads leave score slots idle: they split the head's dimensions instead
+        uint split = group < SCORE_SLOTS ? SCORE_SLOTS / group : 1;
+        uint part = (t / TILE) % split;
+        uint g0 = t / TILE / split;
+        float s[SCORE_HEADS];
+        [[unroll]] for (uint k = 0; k < SCORE_HEADS; k++) {
+            s[k] = 0.0;
+        }
         if (tile0 + p < n) {
-            float s[SCORE_HEADS];
-            [[unroll]] for (uint k = 0; k < SCORE_HEADS; k++) {
-                s[k] = 0.0;
-            }
-            for (uint d4 = 0; d4 < hs4; d4++) {
+            for (uint d4 = part; d4 < hs4; d4 += split) {
                 vec4 kv = vec4(keys[p * hp4 + d4]);
                 [[unroll]] for (uint k = 0; k < SCORE_HEADS; k++) {
-                    uint g = g0 + k * (THREADS / TILE);
+                    uint g = g0 + k * (SCORE_SLOTS / split);
                     if (g < group) {
                         s[k] += dot(QS(g * hs4 + d4), kv);
                     }
                 }
             }
+        }
+        if (split > 1) {
+            // one head a slot here (split * group <= SCORE_SLOTS), its parts summed by part 0
+            score_parts[(t / TILE) * TILE + p] = s[0];
+            barrier();
+            if (part == 0) {
+                for (uint i = 1; i < split; i++) {
+                    s[0] += score_parts[(t / TILE + i) * TILE + p];
+                }
+            }
+        }
+        if (tile0 + p < n && part == 0) {
             [[unroll]] for (uint k = 0; k < SCORE_HEADS; k++) {
-                uint g = g0 + k * (THREADS / TILE);
+                uint g = g0 + k * (SCORE_SLOTS / split);
                 if (g < group) {
                     uint at = g * CHUNK + tile0 + p;
                     scores[at / 4][at % 4] = start + tile0 + p >= lo ? s[k] * pc.scale : WINDOW_MASKED;

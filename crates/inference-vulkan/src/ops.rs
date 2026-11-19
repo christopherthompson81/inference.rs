@@ -1621,6 +1621,10 @@ pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 // the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
 // a kv head serves and those a value thread sums, and the cache's vec4 rows (x)
 const PAGED_CHUNK: usize = 64;
+// paged_decode_stream_f16's positions a workgroup (its threads), and the query heads a kv head and head it takes
+const PAGED_STREAM_CHUNK: usize = 128;
+const PAGED_STREAM_GROUP: usize = 8;
+const PAGED_STREAM_MAX_HEAD: usize = 512;
 // the shared tiles' head size, sized for occupancy; decode and prefill have wide builds to 256 (Qwen3.5's)
 pub(crate) const MAX_PAGED_NARROW_HEAD: usize = 128;
 pub(crate) const MAX_PAGED_WIDE_HEAD: usize = 256;
@@ -1989,7 +1993,18 @@ impl Recorder<'_> {
     pub fn paged_decode(&self, op: &PagedDecode<'_>) -> Result<()> {
         let s = op.shape;
         let group = op.heads / s.kv_heads.max(1);
-        let chunks = op.max_context.div_ceil(PAGED_CHUNK).max(1);
+        // an f16 cache's few query heads a kv head read their keys in place (paged_decode_stream_f16)
+        let stream = s.f16
+            && s.quant.is_none()
+            && group <= PAGED_STREAM_GROUP
+            && s.head_size <= PAGED_STREAM_MAX_HEAD
+            && s.head_size.is_multiple_of(PAGED_X_F16);
+        let chunk = if stream {
+            PAGED_STREAM_CHUNK
+        } else {
+            PAGED_CHUNK
+        };
+        let chunks = op.max_context.div_ceil(chunk).max(1);
         let head_512 = s.head_size == PAGED_HEAD_512;
         if s.head_size == 0
             || (s.head_size > MAX_PAGED_WIDE_HEAD && !head_512)
@@ -2041,7 +2056,13 @@ impl Recorder<'_> {
             ])?);
             bytes.extend(words(&s.bits())?);
             bytes.extend(words(&[op.window.unwrap_or(0)])?);
-            self.context.kernels.paged_decode(s).dispatch(
+            let kernels = &self.context.kernels;
+            let pipeline = if stream {
+                &kernels.paged_decode_stream_f16
+            } else {
+                kernels.paged_decode(s)
+            };
+            pipeline.dispatch(
                 self,
                 &buffers.map(|b| b.buffer),
                 &bytes,

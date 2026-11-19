@@ -247,11 +247,17 @@ impl Gemma4MtpRuntime {
         let mut hidden = target_hiddens;
         let mut tokens = Vec::with_capacity(self.n_predict);
         let mut logits = Vec::with_capacity(self.n_predict);
+        // greedy requests chain the device's argmax, so the drafts reach the host once rather than a sync a draft
+        let greedy = sequences.iter().all(|seq| seq.sampler().is_plain_argmax());
         for _ in 0..self.n_predict {
             let input_embed = target_embedder(&last_token)?;
-            let (_argmax_token, draft_logits, next_hidden) =
+            let (argmax_token, draft_logits, next_hidden) =
                 self.model.step(input_embed, hidden, base_lens, cache)?;
-            let draft_token = sample_draft_tokens(&draft_logits, sequences, &mut contexts, &rng)?;
+            let draft_token = if greedy {
+                argmax_token.reshape((batch, 1))?
+            } else {
+                sample_draft_tokens(&draft_logits, sequences, &mut contexts, &rng)?
+            };
             tokens.push(draft_token.clone());
             logits.push(draft_logits);
             last_token = draft_token;
