@@ -101,3 +101,20 @@ Residual-only rotation is a net loss on this MoE at these widths (the rotated v2
 0.0140 / 0.0145 in Run 1, with ~0.001 of it possibly the re-rounding of Run 2). It may still pay where the dense
 groups carry the bits (a dense model), or at 2-3-bit experts, where rotation is reported to help weight-only
 quantization most.
+
+## Run 4 - 2026-11-20 16:20
+
+Question: does the experts' penalty shrink at 3 bits, where rotation is reported to help weight-only quantization
+most? Run 3's reports again with the routed experts at IQ3_KS (`rules-iq3.txt`: the v2 rules, iq4_ks -> iq3_ks),
+original and rotated.
+
+```
+group (type)              original    rotated    rot/orig   (IQ4_KS ratio, Run 3)
+ffn_gate_exps (IQ3_KS)    9.40e-03    1.21e-02   1.283      1.285
+ffn_up_exps (IQ3_KS)      1.53e-02    1.93e-02   1.263      1.262
+ffn_down_exps (IQ3_KS)    1.72e-02    1.71e-02   0.995      0.994
+```
+
+(dense groups unchanged from Run 3, same types). The penalty is the same 26-28% at 3 bits as at 4: it is the loss
+of the importance weights' and GPTQ's steering around the residual's large channels, which does not depend on the
+width. No KLD run: the reports already rule the 35B out at both widths.
