@@ -454,29 +454,54 @@ fn vulkan_paged_decode_keeps_to_its_window() -> Result<()> {
     let Ok(vk) = Device::new_vulkan(0) else {
         return Ok(());
     };
+    windowed_decode_case(&vk, DType::F32, 2, 32, 128, Some(100))
+}
+
+// an f16 cache's in-place decode at each of its chunk sizes (128 positions over the whole context, 64 at a 400 window,
+// 32 at a 100 one) and both of Gemma 4's head sizes, at its 2 query heads a kv head
+#[test]
+fn vulkan_f16_paged_decode_matches_the_cache_at_every_chunk_size() -> Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    for head in [256, 512] {
+        for window in [None, Some(400), Some(100)] {
+            windowed_decode_case(&vk, DType::F16, 8, 16, head, window)?;
+        }
+    }
+    Ok(())
+}
+
+fn windowed_decode_case(
+    vk: &Device,
+    dtype: DType,
+    kv_heads: usize,
+    heads: usize,
+    head: usize,
+    window: Option<usize>,
+) -> Result<()> {
     const BLOCK: usize = 16;
-    const KV_HEADS: usize = 2;
-    const HEADS: usize = 32;
-    const HEAD: usize = 128;
-    const X: usize = 4;
     const LENS: [usize; 3] = [700, 257, 60];
-    const WINDOW: usize = 100;
     const MAX_BLOCKS: usize = 44;
+    // 16 bytes a key row: 4 f32 dimensions or 8 f16 ones
+    let x = 16 / dtype.size_in_bytes();
     let blocks = LENS.len() * MAX_BLOCKS;
     let kc = Tensor::randn(
         0f32,
         1.,
-        (blocks, KV_HEADS, HEAD / X, BLOCK, X),
+        (blocks, kv_heads, head / x, BLOCK, x),
         &Device::Cpu,
-    )?;
-    let vc = Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD, BLOCK), &Device::Cpu)?;
+    )?
+    .to_dtype(dtype)?;
+    let vc =
+        Tensor::randn(0f32, 1., (blocks, kv_heads, head, BLOCK), &Device::Cpu)?.to_dtype(dtype)?;
     // sequence s takes blocks s, s + 3, ..., in reverse
     let table: Vec<u32> = (0..LENS.len() as u32)
         .flat_map(|s| (0..MAX_BLOCKS as u32).rev().map(move |b| 3 * b + s))
         .collect();
-    let q = Tensor::randn(0f32, 1., (LENS.len(), HEADS, HEAD), &Device::Cpu)?;
-    let scale = 1.0 / (HEAD as f32).sqrt();
-    let on = |t: &Tensor| t.to_device(&vk);
+    let q = Tensor::randn(0f32, 1., (LENS.len(), heads, head), &Device::Cpu)?;
+    let scale = 1.0 / (head as f32).sqrt();
+    let on = |t: &Tensor| t.to_device(vk);
     let tables = Tensor::from_vec(table.clone(), (LENS.len(), MAX_BLOCKS), &Device::Cpu)?;
     let lens = Tensor::new(&LENS.map(|l| l as u32), &Device::Cpu)?;
     let got = paged_attention(
@@ -492,40 +517,40 @@ fn vulkan_paged_decode_keeps_to_its_window() -> Result<()> {
         scale,
         NO_SOFTCAP,
         None,
-        Some(WINDOW),
+        window,
     )?
     .to_vec3::<f32>()?;
     let (k, v, q) = (
-        kc.flatten_all()?.to_vec1::<f32>()?,
-        vc.flatten_all()?.to_vec1::<f32>()?,
+        kc.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+        vc.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
         q.to_vec3::<f32>()?,
     );
     for (seq, &len) in LENS.iter().enumerate() {
-        let positions = len.saturating_sub(WINDOW)..len;
-        for head in 0..HEADS {
-            let kvh = head / (HEADS / KV_HEADS);
+        let positions = window.map_or(0, |w| len.saturating_sub(w))..len;
+        for h in 0..heads {
+            let kvh = h / (heads / kv_heads);
             let at = |p: usize| {
                 (
-                    table[seq * MAX_BLOCKS + p / BLOCK] as usize * KV_HEADS + kvh,
+                    table[seq * MAX_BLOCKS + p / BLOCK] as usize * kv_heads + kvh,
                     p % BLOCK,
                 )
             };
             let key = |p: usize, d: usize| {
                 let (bh, off) = at(p);
-                k[((bh * (HEAD / X) + d / X) * BLOCK + off) * X + d % X]
+                k[((bh * (head / x) + d / x) * BLOCK + off) * x + d % x]
             };
             let value = |p: usize, d: usize| {
                 let (bh, off) = at(p);
-                v[(bh * HEAD + d) * BLOCK + off]
+                v[(bh * head + d) * BLOCK + off]
             };
             let scores: Vec<f32> = positions
                 .clone()
-                .map(|p| (0..HEAD).map(|d| q[seq][head][d] * key(p, d)).sum::<f32>() * scale)
+                .map(|p| (0..head).map(|d| q[seq][h][d] * key(p, d)).sum::<f32>() * scale)
                 .collect();
             let max = scores.iter().copied().fold(f32::MIN, f32::max);
             let e: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
             let sum: f32 = e.iter().sum();
-            for (d, &g) in got[seq][head].iter().enumerate() {
+            for (d, &g) in got[seq][h].iter().enumerate() {
                 let want: f32 = positions
                     .clone()
                     .zip(&e)
@@ -534,7 +559,7 @@ fn vulkan_paged_decode_keeps_to_its_window() -> Result<()> {
                     / sum;
                 assert!(
                     (g - want).abs() <= WINDOW_REFERENCE_TOLERANCE * want.abs().max(1.0),
-                    "seq {seq} head {head} dim {d}: {g} vs {want}"
+                    "{dtype:?} head {head} window {window:?} seq {seq} head {h} dim {d}: {g} vs {want}"
                 );
             }
         }

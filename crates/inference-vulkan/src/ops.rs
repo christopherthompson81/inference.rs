@@ -1621,8 +1621,12 @@ pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 // the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
 // a kv head serves and those a value thread sums, and the cache's vec4 rows (x)
 const PAGED_CHUNK: usize = 64;
-// paged_decode_stream_f16's positions a workgroup (its threads), and the query heads a kv head and head it takes
+// paged_decode_stream's positions a workgroup (its threads, halved down to the narrowest build while fewer workgroups
+// than PAGED_STREAM_FILL would cover the context), and the query heads a kv head and head it takes; on a 780M a
+// workgroup's chain of loads bounds a short context, and narrower chunks cost more past 16 workgroups
 const PAGED_STREAM_CHUNK: usize = 128;
+const PAGED_STREAM_MIN_CHUNK: usize = 32;
+const PAGED_STREAM_FILL: usize = 16;
 const PAGED_STREAM_GROUP: usize = 8;
 const PAGED_STREAM_MAX_HEAD: usize = 512;
 // the shared tiles' head size, sized for occupancy; decode and prefill have wide builds to 256 (Qwen3.5's)
@@ -1764,7 +1768,12 @@ impl PagedDecode<'_> {
 
     // a sequence's partials, and the sequences one piece of the call takes within PAGED_PARTIALS_BYTES
     fn row_bytes(heads: usize, head_size: usize, max_context: usize) -> usize {
-        heads * max_context.div_ceil(PAGED_CHUNK).max(1) * (head_size + 2) * 4
+        heads
+            * max_context
+                .div_ceil(PAGED_STREAM_MIN_CHUNK.min(PAGED_CHUNK))
+                .max(1)
+            * (head_size + 2)
+            * 4
     }
 
     fn piece_seqs(heads: usize, head_size: usize, max_context: usize) -> usize {
@@ -1991,6 +2000,15 @@ impl Recorder<'_> {
     }
 
     pub fn paged_decode(&self, op: &PagedDecode<'_>) -> Result<()> {
+        self.paged_decode_at(op, None)
+    }
+
+    // `stream_chunk` overrides paged_decode_stream's positions a workgroup (a bench's sweep)
+    pub(crate) fn paged_decode_at(
+        &self,
+        op: &PagedDecode<'_>,
+        stream_chunk: Option<usize>,
+    ) -> Result<()> {
         let s = op.shape;
         let group = op.heads / s.kv_heads.max(1);
         // an f16 cache's few query heads a kv head read their keys in place (paged_decode_stream_f16)
@@ -1998,13 +2016,27 @@ impl Recorder<'_> {
             && s.quant.is_none()
             && group <= PAGED_STREAM_GROUP
             && s.head_size <= PAGED_STREAM_MAX_HEAD
-            && s.head_size.is_multiple_of(PAGED_X_F16);
+            && s.head_size
+                .is_multiple_of(PAGED_X_F16 * PAGED_STREAM_CHUNK / PAGED_STREAM_MIN_CHUNK);
         let chunk = if stream {
-            PAGED_STREAM_CHUNK
+            stream_chunk.unwrap_or_else(|| {
+                let span = op.window.map_or(op.max_context, |w| w.min(op.max_context));
+                let mut chunk = PAGED_STREAM_CHUNK;
+                while chunk > PAGED_STREAM_MIN_CHUNK
+                    && span.div_ceil(chunk) * s.kv_heads * op.seqs < PAGED_STREAM_FILL
+                {
+                    chunk /= 2;
+                }
+                chunk
+            })
         } else {
             PAGED_CHUNK
         };
-        let chunks = op.max_context.div_ceil(chunk).max(1);
+        let mut chunks = op.max_context.div_ceil(chunk).max(1);
+        if let (true, Some(window)) = (stream, op.window) {
+            // a window's positions straddle one more chunk than they fill
+            chunks = chunks.min(window.div_ceil(chunk) + 1);
+        }
         let head_512 = s.head_size == PAGED_HEAD_512;
         if s.head_size == 0
             || (s.head_size > MAX_PAGED_WIDE_HEAD && !head_512)
@@ -2058,7 +2090,7 @@ impl Recorder<'_> {
             bytes.extend(words(&[op.window.unwrap_or(0)])?);
             let kernels = &self.context.kernels;
             let pipeline = if stream {
-                &kernels.paged_decode_stream_f16
+                kernels.paged_decode_stream(chunk)
             } else {
                 kernels.paged_decode(s)
             };

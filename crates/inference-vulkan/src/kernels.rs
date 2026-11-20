@@ -215,6 +215,8 @@ kernels! {
     paged_decode_h512: PAGED_DECODE_H512, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_h512_f16: PAGED_DECODE_H512_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_stream_f16: PAGED_DECODE_STREAM_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_stream_c64_f16: PAGED_DECODE_STREAM_C64_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_stream_c32_f16: PAGED_DECODE_STREAM_C32_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_h512_quant: PAGED_DECODE_H512_QUANT, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_cache_write_quant: PAGED_CACHE_WRITE_QUANT, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_QUANT_PUSH_BYTES;
     hadamard_32: HADAMARD_32, ops::HADAMARD_BINDINGS, ops::HADAMARD_PUSH_BYTES;
@@ -246,6 +248,15 @@ impl Kernels {
             (false, true, true) => &self.paged_decode_h256_f16,
             (false, false, false) => &self.paged_decode,
             (false, false, true) => &self.paged_decode_h256,
+        }
+    }
+
+    /// paged_decode_stream's build for `chunk` positions a workgroup (128, 64 or 32).
+    pub(crate) fn paged_decode_stream(&self, chunk: usize) -> &Pipeline {
+        match chunk {
+            32 => &self.paged_decode_stream_c32_f16,
+            64 => &self.paged_decode_stream_c64_f16,
+            _ => &self.paged_decode_stream_f16,
         }
     }
 
@@ -2149,6 +2160,79 @@ mod tests {
                 secs * 1e6,
                 len as f64 / secs / 1e9
             );
+        }
+        Ok(())
+    }
+
+    // one decode step's attention over Gemma 4 26B-A4B's f16 caches (sliding: 8 kv heads at 256, a 1024 window;
+    // global: 2 kv heads at 512), 16 query heads, at each of paged_decode_stream's chunk sizes and the one it picks
+    #[test]
+    #[ignore = "benchmark"]
+    fn decode_attention_at_each_chunk() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const REPEATS: usize = 200;
+        const BLOCK: usize = 16;
+        const HEADS: usize = 16;
+        const MAX_CONTEXT: usize = 8192;
+        for (kv_heads, head, window) in [(8usize, 256usize, Some(1024usize)), (2, 512, None)] {
+            let blocks = MAX_CONTEXT / BLOCK;
+            let cache_bytes = blocks * kv_heads * head * BLOCK * 2;
+            let kc = Arc::new(Buffer::with_bytes(&context, &vec![0x3c; cache_bytes])?);
+            let vc = Arc::new(Buffer::with_bytes(&context, &vec![0x3c; cache_bytes])?);
+            let table: Vec<u8> = (0..blocks as u32).flat_map(u32::to_le_bytes).collect();
+            let tables = Arc::new(Buffer::with_bytes(&context, &table)?);
+            let q = Arc::new(Buffer::with_f32(&context, &vec![0.01; HEADS * head])?);
+            let out = Arc::new(Buffer::new(&context, HEADS * head * 4)?);
+            for len in [128usize, 260, 384, 512, 768, 1024, 4096] {
+                let lens = Arc::new(Buffer::with_bytes(&context, &(len as u32).to_le_bytes())?);
+                let partials = Arc::new(Buffer::new(
+                    &context,
+                    crate::PagedDecode::partials_bytes(1, HEADS, head, len),
+                )?);
+                let op = crate::PagedDecode {
+                    shape: ops::CacheShape {
+                        kv_heads,
+                        head_size: head,
+                        block_size: BLOCK,
+                        x: 8,
+                        f16: true,
+                        quant: None,
+                    },
+                    window,
+                    seqs: 1,
+                    heads: HEADS,
+                    max_blocks: blocks,
+                    max_context: len,
+                    scale: 1.0,
+                    q: (&q, 0),
+                    key_cache: &kc,
+                    value_cache: &vc,
+                    block_tables: (&tables, 0),
+                    context_lens: (&lens, 0),
+                    partials: &partials,
+                    out: &out,
+                };
+                for chunk in [Some(128), Some(64), Some(32), None] {
+                    let run = || -> Result<()> {
+                        for _ in 0..REPEATS {
+                            context.record(|r| r.paged_decode_at(&op, chunk))?;
+                        }
+                        context.synchronize()
+                    };
+                    // twice, the clocks ramping on the first
+                    run()?;
+                    run()?;
+                    let start = std::time::Instant::now();
+                    run()?;
+                    let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
+                    println!(
+                        "head {head}, {kv_heads} kv heads, {len} positions, chunk {chunk:?}: {:.1} us",
+                        secs * 1e6
+                    );
+                }
+            }
         }
         Ok(())
     }
