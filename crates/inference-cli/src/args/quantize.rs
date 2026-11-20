@@ -39,6 +39,25 @@ pub enum QuantizeCommand {
     /// A text model to EXL3 (exllamav3's layout) from a calibration file, a layer at a time: each layer encoded
     /// against the inputs the layers before it, already encoded, give it
     Exl3(Exl3QuantizeOptions),
+
+    /// Each linear's input Hessian (`X^T X / n`) of a text model over a calibration file, for `quantize gguf --hessians`
+    /// (and exllamav3's converter): a layer at a time through the GPU, the model on the host
+    Hessians(HessiansOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct HessiansOptions {
+    /// Hugging Face model ID or local model directory (full precision)
+    #[arg(short = 'm', long)]
+    pub model_id: String,
+
+    /// Calibration text, varied (several domains): GPTQ fit to one domain loses on others
+    #[arg(long)]
+    pub calibration_file: PathBuf,
+
+    /// Output directory (one `<linear>.safetensors` each, holding `hin`)
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
 }
 
 #[derive(Args, Clone)]
@@ -156,6 +175,19 @@ pub struct GgufQuantizeOptions {
     /// Quantize on the CPU even where a GPU quantizer writes the type (both write the same bytes)
     #[arg(long)]
     pub cpu: bool,
+
+    /// Input Hessians: a directory from `quantize hessians`, or a safetensors file of `[cols, cols]` f32 (`X^T X / n`) by
+    /// GGUF tensor name. Tensors with one, of the types GPTQ covers, are quantized with its error feedback on the GPU
+    #[arg(long)]
+    pub hessians: Option<PathBuf>,
+
+    /// With `--hessians`, weigh the quantizer by their diagonals only, without the error feedback
+    #[arg(long, requires = "hessians")]
+    pub hessian_weights_only: bool,
+
+    /// With `--hessians`, the share of each Hessian's mean diagonal added to it before the feedback (GPTQ's damping)
+    #[arg(long, default_value_t = inference_api::gguf_requantize::DEFAULT_GPTQ_DAMP, requires = "hessians")]
+    pub gptq_damp: f64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -665,7 +697,8 @@ pub fn resolve_quantize_command(
             | QuantizeCommand::Imatrix(_)
             | QuantizeCommand::NemotronTranscribeAudio(_)
             | QuantizeCommand::Mmproj(_)
-            | QuantizeCommand::Exl3(_)),
+            | QuantizeCommand::Exl3(_)
+            | QuantizeCommand::Hessians(_)),
         ) => {
             return Ok(other);
         }
@@ -733,7 +766,8 @@ mod tests {
             | QuantizeCommand::Imatrix(_)
             | QuantizeCommand::NemotronTranscribeAudio(_)
             | QuantizeCommand::Mmproj(_)
-            | QuantizeCommand::Exl3(_) => {
+            | QuantizeCommand::Exl3(_)
+            | QuantizeCommand::Hessians(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

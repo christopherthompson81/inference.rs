@@ -39,6 +39,10 @@ const MUL1_MULT: u32 = 0x83DCD12D;
 // read-ahead of the next layer's weights: the read size, and the gap below which neighbouring tensors read as one
 const PREFETCH_CHUNK: usize = 8 << 20;
 const PREFETCH_MERGE_GAP: u64 = 1 << 20;
+// stacked experts whose per-expert Hessians would take more than this are written as one, their mean
+const SPLIT_EXPERT_HESSIANS_BYTES: usize = 1 << 30;
+const GATE_UP_PROJS: &[&str] = &["gate_proj", "up_proj", "gate_up_proj"];
+const SHARED_EXPERT: &str = "shared_expert";
 
 /// The checkpoint a write copies its unquantized tensors and files from.
 pub(crate) struct Exl3Source<'a> {
@@ -617,6 +621,159 @@ fn write_shard(
         weight_map.insert(name.clone(), file.to_string());
     }
     inference_tensor::safetensors::save(&tensors, out.join(file))?;
+    Ok(())
+}
+
+// a module's weight rank (3 for stacked experts `[E, out, in]`)
+fn weight_rank(module: &TrackedModule) -> Result<usize> {
+    let layer = module.ct.resolve()?;
+    let (weight, _) = layer
+        .unquant_weight_bias()
+        .with_context(|| format!("`{}` holds no full-precision weight", module.key))?;
+    Ok(weight.rank())
+}
+
+// a Hessian written as `<key>.safetensors` holding `hin`, exllamav3's `--hessians` layout
+fn save_hessian(dir: &Path, key: &str, h: Tensor) -> Result<()> {
+    inference_tensor::safetensors::save(
+        &HashMap::from([("hin".to_string(), h)]),
+        dir.join(format!("{key}.safetensors")),
+    )?;
+    Ok(())
+}
+
+// a stacked projection's per-expert Hessians `[E, in, in]`: each as `<experts>.<e>.<proj>`, or, past
+// SPLIT_EXPERT_HESSIANS_BYTES, their mean under the stack's own key
+fn save_expert_hessians(dir: &Path, key: &str, h: Tensor) -> Result<()> {
+    if h.elem_count() * 4 > SPLIT_EXPERT_HESSIANS_BYTES {
+        return save_hessian(dir, key, h.mean(0)?);
+    }
+    let (experts, proj) = key
+        .rsplit_once('.')
+        .with_context(|| format!("`{key}` names no projection"))?;
+    for e in 0..h.dim(0)? {
+        save_hessian(dir, &format!("{experts}.{e}.{proj}"), h.get(e)?)?;
+    }
+    Ok(())
+}
+
+/// Every linear's input Hessian over the calibration tokens, with the model on the host streaming through the GPU a
+/// layer at a time (its states run on through the layer as loaded): `<key>.safetensors` holding `hin` under `dir`, the
+/// head's as `lm_head`. Stacked gate/up experts read the layer's shared input, so they take the shared expert's
+/// Hessian where the layer has one (their rows' pooled second moment); other stacks write one per expert.
+#[cfg(feature = "cuda")]
+pub(crate) fn write_hessians_streamed(
+    stream: &dyn inference_nn::model::LayerStream,
+    tokens: &[u32],
+    ctx: &CalibrationCtx<'_>,
+    dir: &Path,
+    weights: &[PathBuf],
+) -> Result<()> {
+    let gpu = Device::new_cuda(0)?;
+    std::fs::create_dir_all(dir)?;
+    let mut ranges = layer_ranges(weights)?;
+    let mut states = Vec::new();
+    for chunk in tokens.chunks(CALIBRATION_CHUNK_SIZE) {
+        let ids = ctx
+            .bos_tok_id
+            .into_iter()
+            .chain(chunk.iter().copied())
+            .collect::<Vec<_>>();
+        states.push(stream.embed(&Tensor::new(ids, &Device::Cpu)?.unsqueeze(0)?)?);
+    }
+    let layers = stream.num_layers();
+    info!(
+        "Collecting Hessians: {layers} layers streamed through {gpu:?}, {} chunks of states on the host.",
+        states.len()
+    );
+    let mut ahead: Option<std::thread::JoinHandle<()>> = None;
+    for layer_idx in 0..layers {
+        let start = std::time::Instant::now();
+        if let Some(reading) = ahead.take() {
+            let _ = reading.join();
+        }
+        ahead = ranges.remove(&(layer_idx + 1)).map(prefetch);
+        let layer = stream.build_layer(layer_idx, &gpu)?;
+        let group = layer
+            .modules()
+            .iter()
+            .filter(|m| encoded(m))
+            .collect::<Vec<_>>();
+        let ranks = group
+            .iter()
+            .map(|m| weight_rank(m))
+            .collect::<Result<Vec<_>>>()?;
+        let proj = |m: &TrackedModule| m.key.rsplit_once('.').map_or("", |(_, p)| p).to_string();
+        let shared = group.iter().zip(&ranks).position(|(m, &r)| {
+            r == 2 && m.key.contains(SHARED_EXPERT) && GATE_UP_PROJS.contains(&proj(m).as_str())
+        });
+        // each module's Hessian source: itself, the first reading the same input, or (stacked gate/up) the shared expert
+        let mut first = HashMap::new();
+        let sources = group
+            .iter()
+            .zip(&ranks)
+            .enumerate()
+            .map(|(i, (m, &rank))| match (rank, shared) {
+                (3, Some(s)) if GATE_UP_PROJS.contains(&proj(m).as_str()) => s,
+                _ => match shared_input(&m.key) {
+                    Some(input) => *first.entry(input).or_insert(i),
+                    None => i,
+                },
+            })
+            .collect::<Vec<_>>();
+        for (i, module) in group.iter().enumerate() {
+            if sources[i] == i {
+                module.ct.begin_track_hessian()?;
+            }
+        }
+        for state in &states {
+            layer.forward(&state.to_device(&gpu)?)?;
+        }
+        let mut hessians = vec![None; group.len()];
+        for (i, module) in group.iter().enumerate() {
+            if sources[i] == i {
+                hessians[i] = take_hessian(module)?
+                    .map(|h| h.to_device(&Device::Cpu))
+                    .transpose()?;
+            }
+        }
+        for (i, module) in group.iter().enumerate() {
+            let Some(h) = &hessians[sources[i]] else {
+                continue;
+            };
+            match h.rank() {
+                3 => save_expert_hessians(dir, &module.key, h.clone())?,
+                _ => save_hessian(dir, &module.key, h.clone())?,
+            }
+        }
+        for state in &mut states {
+            *state = layer
+                .forward(&state.to_device(&gpu)?)?
+                .to_device(&Device::Cpu)?;
+        }
+        drop(group);
+        drop(layer);
+        info!(
+            "Layer {}/{layers} in {:.1}s.",
+            layer_idx + 1,
+            start.elapsed().as_secs_f32()
+        );
+    }
+    let in_dim = states[0].dim(states[0].rank() - 1)?;
+    let mut hessian = Tensor::zeros((in_dim, in_dim), inference_tensor::DType::F32, &gpu)?;
+    let mut rows = 0;
+    for state in &states {
+        let xs = stream
+            .final_norm(state)?
+            .to_device(&gpu)?
+            .to_dtype(inference_tensor::DType::F32)?
+            .reshape(((), in_dim))?;
+        rows += xs.dim(0)?;
+        hessian = (hessian + xs.t()?.matmul(&xs)?)?;
+    }
+    let hessian = (hessian / f64::from(u32::try_from(rows)?))?;
+    save_hessian(dir, HEAD, hessian.to_device(&Device::Cpu)?)?;
+    info!("Wrote the Hessians to `{}`.", dir.display());
     Ok(())
 }
 

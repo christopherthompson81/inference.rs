@@ -14,7 +14,7 @@ pub mod encode;
 #[cfg(feature = "cuda")]
 pub(crate) mod ffi;
 #[cfg(feature = "cuda")]
-mod linalg;
+pub(crate) mod linalg;
 #[cfg(feature = "cuda")]
 pub(crate) mod qffi;
 #[cfg(feature = "cuda")]

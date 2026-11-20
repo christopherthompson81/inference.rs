@@ -200,15 +200,25 @@ pub(super) fn run_calibration(
 
 /// Each tracked layer's input Hessian (`x^T x` over the calibration file's rows, over their count) written as
 /// `<key>.safetensors` holding `hin` (f32 `[in, in]`) under `dir`: the layout exllamav3's converter takes as
-/// `--hessians`. Layers collect in passes whose Hessians fit `HESSIAN_PASS_BYTES`.
+/// `--hessians`. Layers collect in passes whose Hessians fit `HESSIAN_PASS_BYTES`; a model loaded on the host whose
+/// layers stream (`weights` its safetensors) collects a layer at a time on the GPU instead.
 pub(crate) fn write_hessians(
     drive: &dyn CalibrationDrive,
     modules: &[TrackedModule],
     calibration_file: &PathBuf,
     dir: &PathBuf,
     ctx: &CalibrationCtx<'_>,
+    weights: Option<&[PathBuf]>,
 ) -> Result<()> {
     let tokens = calibration_tokens(calibration_file, ctx)?;
+    #[cfg(not(feature = "cuda"))]
+    let _ = weights;
+    #[cfg(feature = "cuda")]
+    if let (Some(stream), true, Some(weights)) =
+        (drive.layer_stream(), ctx.load_device.is_cpu(), weights)
+    {
+        return super::exl3_write::write_hessians_streamed(stream, &tokens, ctx, dir, weights);
+    }
     std::fs::create_dir_all(dir)?;
     let mut sized = Vec::with_capacity(modules.len());
     for module in modules {

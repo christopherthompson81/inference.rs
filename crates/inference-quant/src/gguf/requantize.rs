@@ -25,6 +25,9 @@ use super::kernel::GgufType;
 const ROWS_PER_TASK: usize = 64;
 // the source bytes read at once: one expert of an expert stack, else rows up to this
 const SLICE_BYTES: usize = 64 << 20;
+/// The share of a Hessian's mean diagonal GPTQ adds to it by default (its `percdamp`): 0.01 fit the calibration's
+/// domain and lost on other text, 0.1 held up across held-out text (quant_allocation_investigation Run 9).
+pub const DEFAULT_GPTQ_DAMP: f64 = 0.1;
 // f32 bytes of rows the GPU quantizes in one call (its scratch takes about three times this)
 const GPU_CHUNK_BYTES: usize = 1 << 30;
 const GGUF_ALIGNMENT: u64 = 32;
@@ -121,6 +124,41 @@ fn quantize_slice(
     Ok(chunks.concat())
 }
 
+/// Where `quantize gguf --hessians` finds a tensor's input Hessian (`X^T X / n`, `[cols, cols]` f32 row-major).
+pub trait HessianSource: Send + Sync {
+    /// The Hessian of tensor `name` (by GGUF name), or of expert `expert` of a stack (None where the stack has one
+    /// for all its experts or none).
+    fn hessian(&self, name: &str, expert: Option<usize>) -> Result<Option<Vec<f32>>>;
+}
+
+/// A safetensors file of Hessians keyed by GGUF tensor name.
+pub struct HessianFile(inference_tensor::safetensors::MmapedSafetensors);
+
+impl HessianFile {
+    pub fn open(path: &Path) -> Result<Self> {
+        // SAFETY: the file is only read while it is open here
+        Ok(Self(unsafe {
+            inference_tensor::safetensors::MmapedSafetensors::new(path)?
+        }))
+    }
+}
+
+impl HessianSource for HessianFile {
+    fn hessian(&self, name: &str, expert: Option<usize>) -> Result<Option<Vec<f32>>> {
+        if expert.is_some() {
+            return Ok(None);
+        }
+        let Ok(h) = self.0.load(name, &Device::Cpu) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            h.to_dtype(inference_tensor::DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+        ))
+    }
+}
+
 /// The rules for which tensors become which type, in order: the first pattern matching a name wins, and a tensor
 /// no pattern matches is copied as it is.
 pub struct RequantizePlan {
@@ -135,6 +173,13 @@ pub struct RequantizePlan {
     pub only: Option<Regex>,
     /// The device whose quantizers write the types they cover (the same bytes as the CPU's, sooner).
     pub gpu: Option<Device>,
+    /// Input Hessians: a tensor with one (each expert of a stack with its own or the stack's), of a type GPTQ covers,
+    /// is quantized with GPTQ-style error feedback on `gpu` (CUDA).
+    pub hessians: Option<Box<dyn HessianSource>>,
+    /// With `hessians`, only their diagonals weigh the quantizer (the baseline the feedback is measured against).
+    pub hessian_weights_only: bool,
+    /// The share of a Hessian's mean diagonal added to it before the feedback.
+    pub gptq_damp: f64,
 }
 
 #[derive(Debug, Default)]
@@ -143,6 +188,8 @@ pub struct RequantizeSummary {
     pub quantized: usize,
     /// Of the quantized, the ones copied from a `reuse` file.
     pub reused: usize,
+    /// Of the quantized, the ones written with GPTQ-style error feedback (or, weights only, their Hessian diagonals).
+    pub gptq: usize,
     /// Quantized tensors the imatrix had no entry for.
     pub without_imatrix: Vec<String>,
     pub bytes_in: u64,
@@ -215,6 +262,95 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
         target,
         size,
     })
+}
+
+// `t` quantized with GPTQ feedback when `hessians` has its Hessian (a stack's experts each with its own, or the stack's
+// for all); None leaves it to the ordinary path, the reader where it was
+#[cfg(feature = "cuda")]
+fn gptq_tensor(
+    t: &Planned<'_>,
+    ty: GgufType,
+    hessians: &dyn HessianSource,
+    plan: &RequantizePlan,
+    device: &Device,
+    reader: &mut BufReader<File>,
+    offset: u64,
+) -> Result<Option<Vec<u8>>> {
+    let cols = *t.dims.last().unwrap_or(&1);
+    let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
+    let shared = hessians.hessian(t.name, None)?;
+    let per_expert = if t.dims.len() == 3 {
+        (0..experts)
+            .map(|e| hessians.hessian(t.name, Some(e)))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    if shared.is_none() && per_expert.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let mut bytes = vec![0u8; t.source_bytes];
+    reader.seek(SeekFrom::Start(offset))?;
+    reader.read_exact(&mut bytes)?;
+    let values = to_f32(t.source_type, &bytes)?;
+    let per = values.len() / experts;
+    let prepare = |h: &[f32]| {
+        super::gptq::prepare(h, cols, !plan.hessian_weights_only, plan.gptq_damp, device)
+            .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))
+    };
+    let quantize = |values: &[f32], prepared: &super::gptq::Prepared| {
+        super::gptq::quantize(
+            ty,
+            cols,
+            values,
+            prepared,
+            plan.quantizer,
+            device,
+            quantize_slice,
+            dequantize_any,
+        )
+        .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))
+    };
+    // experts sharing one Hessian are rows of one matrix to it (GPTQ treats rows alone): one pass over them all
+    if per_expert.iter().all(Option::is_none) {
+        let shared = prepare(shared.as_deref().expect("a shared Hessian"))?;
+        return Ok(Some(quantize(&values, &shared)?));
+    }
+    let shared = shared.as_deref().map(prepare).transpose()?;
+    // experts with their own Hessians run side by side, each factoring its own
+    let parts = (0..experts)
+        .into_par_iter()
+        .map(|e| {
+            let own = per_expert[e].as_deref().map(prepare).transpose()?;
+            let prepared = own.as_ref().or(shared.as_ref()).ok_or_else(|| {
+                inference_tensor::Error::Msg(format!("{}: no Hessian for expert {e}", t.name))
+            })?;
+            quantize(&values[e * per..(e + 1) * per], prepared)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let out = parts.concat();
+    Ok(Some(out))
+}
+
+// rows of `cols` of `ty` back to f32: the raw types' dequantizers, or Candle's for the types it holds
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn dequantize_any(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f32>> {
+    if let Some(dtype) = ty.candle()
+        && !matches!(dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16)
+        && !matches!(ty, GgufType::Iq4Nl | GgufType::Iq4Xs)
+    {
+        let rows = bytes.len() / ty.row_bytes(cols).unwrap_or(1).max(1);
+        let storage = inference_tensor::quantized::QStorage::from_data(
+            std::borrow::Cow::Borrowed(bytes),
+            &Device::Cpu,
+            dtype,
+        )?;
+        return QTensor::new(storage, (rows, cols))?
+            .dequantize(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>();
+    }
+    super::raw::dequantize_rows(ty, cols, bytes)
 }
 
 #[cfg(feature = "cuda")]
@@ -382,6 +518,39 @@ pub fn requantize_gguf(
             let entry = by_type
                 .entry(t.target.map_or(t.source_type, |ty| ty.id()))
                 .or_default();
+            entry.0 += 1;
+            entry.1 += t.size as u64;
+            continue;
+        }
+        // GPTQ takes the whole matrix (each expert's) at once, its Hessian beside it
+        #[cfg(feature = "cuda")]
+        if let (Some(ty), Some(h), Some(device @ Device::Cuda(_))) =
+            (t.target, &plan.hessians, &plan.gpu)
+            && super::gptq::supports(ty)
+            && let Some(out) = gptq_tensor(
+                t,
+                ty,
+                h.as_ref(),
+                plan,
+                device,
+                &mut reader,
+                header.tensor_data_offset + info.offset,
+            )?
+        {
+            if out.len() != t.size {
+                inference_tensor::bail!(
+                    "{}: wrote {} bytes, planned {}",
+                    t.name,
+                    out.len(),
+                    t.size
+                );
+            }
+            writer.write_all(&out)?;
+            write_tensor_padding(&mut writer, t.size)?;
+            summary.gptq += 1;
+            summary.bytes_in += t.source_bytes as u64;
+            summary.bytes_out += t.size as u64;
+            let entry = by_type.entry(ty.id()).or_default();
             entry.0 += 1;
             entry.1 += t.size as u64;
             continue;
@@ -660,7 +829,7 @@ mod tests {
         ("iq1_m", 4877935477014574425, 546727153653379684),
     ];
 
-    const PINNED_IK: [(&str, u64, u64); 14] = [
+    const PINNED_IK: [(&str, u64, u64); 15] = [
         ("q2_k", 13302739417286923110, 11601392929549359756),
         ("q3_k", 16392672201002081248, 17943740573164000344),
         ("q4_k", 14679928973253263191, 14544912929349767743),
@@ -675,6 +844,7 @@ mod tests {
         ("iq4_xs", 1175151790720974940, 8216451137976519682),
         ("iq4_ks", 15587783422239331424, 2233139334062329897),
         ("iq4_kss", 6028622500172932859, 11259105053868730158),
+        ("iq3_ks", 9489437392515969846, 7909008254536332893),
     ];
 
     #[test]
@@ -734,6 +904,9 @@ mod tests {
             reuse: Vec::new(),
             only: None,
             gpu: None,
+            hessians: None,
+            hessian_weights_only: false,
+            gptq_damp: 0.0,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -756,6 +929,9 @@ mod tests {
             reuse: Vec::new(),
             only: Some(Regex::new(r"attn_q\.weight$").unwrap()),
             gpu: None,
+            hessians: None,
+            hessian_weights_only: false,
+            gptq_damp: 0.0,
         };
         let overlaid = requantize_gguf(&src, &overlay, &overlaying, |_, _, _| {})?;
         assert_eq!(overlaid.tensors, 1);

@@ -19,7 +19,7 @@ use inference_api::{
 use super::serve::{self, extract_device_settings};
 use crate::args::{
     AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, Exl3QuantizeOptions,
-    FormatOptions, GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions,
+    FormatOptions, GgufQuantizeOptions, GlobalOptions, HessiansOptions, HiDreamQuantizeOptions,
     ImatrixConvertOptions, MatformerSelection, MmprojOptions, ModelSourceOptions, ModelType,
     MultimodalAdapterOptions, MultimodalOptions, NemotronTranscribeAudioOptions,
     QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
@@ -150,9 +150,35 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         quantizer,
         reuse: options.reuse.clone(),
         only: options.only.as_deref().map(regex::Regex::new).transpose()?,
-        gpu: (!options.cpu)
+        gpu: (!options.cpu || options.hessians.is_some())
             .then(|| inference_tensor::Device::new_cuda(0).ok())
             .flatten(),
+        hessians: options
+            .hessians
+            .as_deref()
+            .map(|path| -> Result<Box<dyn gguf_requantize::HessianSource>> {
+                if path.is_dir() {
+                    let dir = gguf_requantize::hessians_for_gguf(path, &options.model)?;
+                    if !dir.unmatched.is_empty() {
+                        warn!(
+                            "{} Hessians bind to no tensor of the GGUF: {}",
+                            dir.unmatched.len(),
+                            dir.unmatched.join(", ")
+                        );
+                    }
+                    info!(
+                        "Hessians for {} tensors from `{}`",
+                        dir.len(),
+                        path.display()
+                    );
+                    Ok(Box::new(dir))
+                } else {
+                    Ok(Box::new(gguf_requantize::HessianFile::open(path)?))
+                }
+            })
+            .transpose()?,
+        hessian_weights_only: options.hessian_weights_only,
+        gptq_damp: options.gptq_damp,
     };
     let requantize = || {
         gguf_requantize::requantize_gguf(
@@ -240,6 +266,53 @@ pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptio
             paged_attn: Some(false),
             token_source: Some(global.token_source.to_string()),
             device: (!options.resident).then(|| HOST_DEVICE.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let engine = Engine::load(spec).await?;
+    engine.shutdown().await.map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+/// Loading with `hessians_out` set writes every linear's input Hessian; the engine is shut down once it has.
+pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Result<()> {
+    initialize_logging();
+    let model = ModelSelected::Run {
+        model_id: options.model_id,
+        quant: None,
+        tokenizer_json: None,
+        // the host's auto dtype is f32, twice what a streamed model holds in RAM
+        dtype: inference_api::engine::ModelDType::BF16,
+        topology: None,
+        organization: None,
+        write_uqff: None,
+        from_uqff: None,
+        imatrix: None,
+        calibration_file: Some(options.calibration_file),
+        hessians_out: Some(options.output_path),
+        exl3_out: None,
+        max_edge: None,
+        max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+        max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+        max_num_images: None,
+        max_image_length: None,
+        hf_cache_path: None,
+        matformer_config_path: None,
+        matformer_slice_name: None,
+    };
+    let model = resolve_model_source(model, &global.token_source, false, QuantPolicy::GgufInput)
+        .await?
+        .model;
+    let spec = EngineSpec {
+        model: Some(model),
+        model_id: None,
+        runtime: RuntimeSpec {
+            max_seqs: Some(1),
+            prefix_cache_n: Some(0),
+            paged_attn: Some(false),
+            token_source: Some(global.token_source.to_string()),
+            device: Some(HOST_DEVICE.to_string()),
             ..Default::default()
         },
         ..Default::default()
@@ -808,7 +881,8 @@ mod tests {
             | QuantizeCommand::Imatrix(_)
             | QuantizeCommand::NemotronTranscribeAudio(_)
             | QuantizeCommand::Mmproj(_)
-            | QuantizeCommand::Exl3(_) => {
+            | QuantizeCommand::Exl3(_)
+            | QuantizeCommand::Hessians(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

@@ -239,6 +239,9 @@ inference quantize gguf [OPTIONS] --model <MODEL> --output <OUTPUT_PATH> --tenso
 | `--reuse <REUSE>` |  | An earlier output from the same source, imatrix and quantizer, repeatable: tensors it holds at their planned type are copied from it rather than quantized again |
 | `--only <ONLY>` |  | Writes only the tensors whose names match this regex, as an overlay: listed after a model quantized from the same source (`--gguf model.gguf overlay.gguf`), its tensors replace the model's |
 | `--cpu` | `false` | Quantize on the CPU even where a GPU quantizer writes the type (both write the same bytes) |
+| `--hessians <HESSIANS>` |  | Input Hessians: a directory from `quantize hessians`, or a safetensors file of `[cols, cols]` f32 (`X^T X / n`) by GGUF tensor name. Tensors with one, of the types GPTQ covers, are quantized with its error feedback on the GPU |
+| `--hessian-weights-only` | `false` | With `--hessians`, weigh the quantizer by their diagonals only, without the error feedback |
+| `--gptq-damp <GPTQ_DAMP>` | `0.1` | With `--hessians`, the share of each Hessian's mean diagonal added to it before the feedback (GPTQ's damping) |
 
 ## inference quantize imatrix
 
@@ -299,4 +302,18 @@ inference quantize exl3 [OPTIONS] --model-id <MODEL_ID> --calibration-file <CALI
 | `--head-bits <HEAD_BITS>` |  | Bits per weight of the output head [default: 6] |
 | `--codebook <CODEBOOK>` |  | Codebook: mul1, mcg or 3inst [default: mul1] |
 | `--resident` | `false` | Load the model on the GPU and run it whole per layer, for models whose layers don't stream (the default loads it on the host and streams one layer at a time through the GPU, so the model may exceed its memory) |
+
+## inference quantize hessians
+
+Each linear's input Hessian (`X^T X / n`) of a text model over a calibration file, for `quantize gguf --hessians` (and exllamav3's converter): a layer at a time through the GPU, the model on the host
+
+```
+inference quantize hessians [OPTIONS] --model-id <MODEL_ID> --calibration-file <CALIBRATION_FILE> --output <OUTPUT_PATH>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local model directory (full precision) |
+| `--calibration-file <CALIBRATION_FILE>` | required | Calibration text, varied (several domains): GPTQ fit to one domain loses on others |
+| `-o, --output <OUTPUT_PATH>` | required | Output directory (one `<linear>.safetensors` each, holding `hin`) |
 

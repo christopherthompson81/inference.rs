@@ -184,6 +184,52 @@ pub(crate) fn solve_spd(a: Tensor, b: &Tensor) -> Result<Option<Tensor>> {
     Ok((info(&dev_info)? == 0).then_some(x))
 }
 
+/// The inverse of the symmetric positive definite `a` `(n, n)`, or None when `a` is not positive definite.
+pub(crate) fn inverse_spd(a: Tensor) -> Result<Option<Tensor>> {
+    let device = a.device().clone();
+    let Device::Cuda(dev) = &device else {
+        inference_tensor::bail!("the inverse runs on CUDA");
+    };
+    let n = a.dim(0)?;
+    let Some(factor) = cholesky(a)? else {
+        return Ok(None);
+    };
+    // the identity is symmetric, as the inverse is, so the row-major buffer reads the same in cuSOLVER's column order
+    let x = Tensor::eye(n, DType::F32, &device)?.contiguous()?.copy()?;
+    let dev_info = Tensor::zeros(1, DType::I32, &device)?;
+    let handle = Handle::get(dev)?;
+    {
+        let (f_s, f_l) = factor.storage_and_layout();
+        let (x_s, x_l) = x.storage_and_layout();
+        let (i_s, i_l) = dev_info.storage_and_layout();
+        let (Storage::Cuda(f_c), Storage::Cuda(x_c), Storage::Cuda(i_c)) = (&*f_s, &*x_s, &*i_s)
+        else {
+            inference_tensor::bail!("the inverse's tensors live on CUDA");
+        };
+        let (f_ptr, _f) = slice_ptr(f_c.as_cuda_slice::<f32>()?, f_l.start_offset());
+        let (x_ptr, _x) = slice_ptr(x_c.as_cuda_slice::<f32>()?, x_l.start_offset());
+        let (info_ptr, _i) = slice_ptr(i_c.as_cuda_slice::<i32>()?, i_l.start_offset());
+        // SAFETY: the factor cholesky made, and `x` this call's own identity, solved in place for all n columns
+        check(
+            unsafe {
+                cs::cusolverDnSpotrs(
+                    handle.0,
+                    cs::cublasFillMode_t::CUBLAS_FILL_MODE_UPPER,
+                    n as i32,
+                    n as i32,
+                    f_ptr as *const f32,
+                    n as i32,
+                    x_ptr as *mut f32,
+                    n as i32,
+                    info_ptr as *mut i32,
+                )
+            },
+            "invert",
+        )?;
+    }
+    Ok((info(&dev_info)? == 0).then_some(x))
+}
+
 #[cfg(test)]
 mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};

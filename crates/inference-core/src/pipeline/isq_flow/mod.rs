@@ -84,7 +84,14 @@ pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<Option<Vec<Pa
         return Ok(None);
     }
     if let (Some(dir), Some(calibration_file)) = (hessians_out, calibration_file) {
-        write_hessians(drive, &modules, calibration_file, dir, &calibration)?;
+        write_hessians(
+            drive,
+            &modules,
+            calibration_file,
+            dir,
+            &calibration,
+            exl3_source.as_ref().map(|s| s.weights),
+        )?;
         for module in modules {
             module.ct.resolve()?;
         }

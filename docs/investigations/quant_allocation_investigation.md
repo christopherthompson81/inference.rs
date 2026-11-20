@@ -228,3 +228,140 @@ embeddings: Q4_K `token_embd` cost +0.0005 alone but +0.0014 on top of the 20.27
 noise at ~0.0003). IQ4_KSS gate/up was the cheapest single saving per byte (+0.0020 for 645 MB), but IQ4_KSS down
 inside the 19.5 GB recipe measured no better than without it. A pick should be measured before it is trusted; with
 GPU quantizing that is ~1-3 min a recipe.
+
+## Run 9 - 2026-11-19 14:30
+
+Question (#1013 item 2): does GPTQ-style error feedback, kept inside the GGUF formats, lower KLD?
+
+Method: full input Hessians (`X^T X / n`) of every text linear of Qwen3.5-2B, collected with forward hooks in a
+transformers prototype (scratch `collect_hessians.py`, 128 chunks of 512 tokens, keyed by llama.cpp's GGUF names;
+the 35B's V-head reorder of `ssm_out`'s input columns applied when key and value heads differ). `quantize gguf
+--hessians` then quantizes a matrix a block of columns at a time with the type's own byte-exact quantizer (the
+Hessian's diagonal as its importances) and carries each block's error onto the columns not yet quantized:
+`W_rest -= E U_bb^-1 U_b,rest`, `U` the inverse Hessian's upper Cholesky factor (cuSOLVER). `--hessian-weights-only`
+keeps the diagonal weighting without the feedback, the baseline. Only types whose blocks carry their own scales for
+now (the K-quants, Q4_0-Q8_0, IQ4_NL, IQ4_XS); about a minute for the 2B.
+
+First run, WikiText-train calibration, scored on WikiText test (same domain), then on the repo's docs (another):
+
+```
+2B, uniform type      none              Hessian weights   GPTQ (damp 0.01)
+Q4_K   wiki / docs    0.0688 / 0.0598   0.0414 / 0.0405   0.0298 / 0.0443
+IQ4_XS wiki / docs    0.0646 / 0.0593   0.0505 / 0.0442   0.0317 / 0.0462
+```
+
+The feedback fit the calibration's domain (-28% / -37%) and lost on the other (+9% / +5%): GPTQ's calibration
+overfitting. Held-out sets for the next grid: WikiText test, the docs' even-numbered files (docs B), and 400 Rust
+sources from the repo (never calibrated on); a second calibration mixes WikiText train with the docs' odd files in
+4 KB pieces. Q4_K:
+
+```
+calibration, method          wiki     docs B   rust
+none                         0.06880  0.05461  0.04984
+wiki, Hessian weights        0.04143  0.03819  0.03349
+wiki, GPTQ damp 0.01         0.02975  0.04371  0.04214
+wiki, GPTQ damp 0.1          0.03036  0.03835  0.03667
+wiki, GPTQ damp 1.0          0.03173  0.03618  0.03237
+mixed, Hessian weights       0.04234  0.03596  0.03080
+mixed, GPTQ damp 0.01        0.03346  0.02269  0.02226
+mixed, GPTQ damp 0.1         0.03209  0.02319  0.02208
+```
+
+Findings: with a varied calibration the feedback lowers KLD 24-37% against the same Hessians used as weights only, on
+every held-out set, Rust included; damping trades in-domain gain for robustness when the calibration is narrow (1.0
+on WikiText alone still beat the weights everywhere). `--gptq-damp` defaults to 0.1.
+
+Next: Hessian collection in the engine (the EXL3 writer's per-linear Hessians) rather than transformers; the row-scale
+types (IQ4_KS, IQ4_KSS, IQ3_KS: the row scale has to be fixed before the first block); MoE experts, whose per-expert
+gate/up Hessians would not fit on disk for the 35B (16 MB each, 10,240 of them), so the feedback would run as the
+engine collects, layer by layer, as the EXL3 writer does.
+
+## Run 10 - 2026-11-19 15:20
+
+Question: GPTQ feedback for the row-scaled types (IQ4_KS, IQ4_KSS, IQ3_KS), whose row scale the CPU quantizers fix
+from all of a row's block scales before encoding any block.
+
+Change: each split into a block search and a block encoder, the row functions rebuilt from them (ik parity script 0
+bytes for all three; IQ3_KS now pinned in `the_ik_quantizer_writes_ik_llamas_bytes` too). GPTQ takes a row's scale
+from an ordinary first pass, then per 256 columns searches each block's scale on the columns as fed forward, encodes
+against the fixed row scale (decoding to `d * level`), carries the error on, and refits the row scale at the end.
+
+Qwen3.5-2B, every matrix at the type, mixed calibration (Run 9's), KLD:
+
+```
+type, method                 wiki     docs B   rust
+IQ4_KS none                  0.06277  0.05663  0.04521
+IQ4_KS Hessian weights       0.04354  0.03499  0.02997
+IQ4_KS GPTQ                  0.03170  0.02208  0.01987
+IQ3_KS none                  0.32068  0.27427  0.26983
+IQ3_KS Hessian weights       0.20556  0.15577  0.14163
+IQ3_KS GPTQ                  0.15954  0.09677  0.09432
+```
+
+-27 to -37% (IQ4_KS) and -22 to -38% (IQ3_KS) against the same Hessians as weights only. The row-scaled path runs on
+the CPU a super-block at a time (~90 s for the 2B).
+
+Next: Hessians from the engine instead of transformers (the safetensors loader's linears already collect them, the
+EXL3 writer's path), keyed by GGUF name through `gguf_tensor_names`; for MoE, one pooled Hessian per layer for the
+gate/up experts (they share the layer input; ~16 MB a layer instead of 4 GB) and per-expert ones for down (1 MB each).
+
+## Run 11 - 2026-11-19 15:45
+
+Question: Hessians from the engine instead of the transformers prototype, in a form the 35B's experts fit.
+
+Change: `inference quantize hessians -m <checkpoint> --calibration-file <text> -o <dir>` loads the checkpoint's text
+model on the host (a multimodal one's alone, as an EXL3 write does) and streams it through the GPU a layer at a time
+(the EXL3 writer's loop): each layer's Hessians over the calibration states, written as `<linear>.safetensors`
+(`hin`, exllamav3's layout), q/k/v and gate/up sharing one; the head's over the final normed states. Stacked gate/up
+experts read the layer's shared input, so they take the shared expert's Hessian (their pooled second moment); other
+stacks write one per expert (a 35B down expert's is 1 MB). `quantize gguf --hessians <dir>` binds each file to the
+tensor its weight loads from (`<stack>.<e>.<proj>` to expert e, `lm_head` to the output or, tied, `token_embd`), the
+GDN output projection's Hessian reordered as the converter orders its V heads; GPTQ runs per expert for stacks.
+
+Qwen3.5-2B, the mixed calibration's first ~65K tokens: 151 Hessians in 30 s (5.4 GB). GPTQ, KLD:
+
+```
+type, Hessians                 wiki     docs B   rust
+Q4_K, prototype (Run 9)        0.03209  0.02319  0.02208
+Q4_K, engine                   0.02749  0.01941  0.01859
+IQ4_KS, prototype (Run 10)     0.03170  0.02208  0.01987
+IQ4_KS, engine                 0.02597  0.01755  0.01724
+```
+
+The engine's do better mainly because they include the head's: the tied `token_embd` now gets the feedback too.
+Against no calibration at all (Q4_K 0.0688 / 0.0546 / 0.0498) that is -60 / -64 / -63%.
+
+## Run 12 - 2026-11-19 18:40
+
+Question: GPTQ on Qwen3.6-35B-A3B with the engine's Hessians.
+
+`quantize hessians` over the same ~65K mixed tokens, the model streamed from the host (67 GB of BF16): 40 layers in
+49 min (~60 s a layer; ~10 min of loading before), 10,571 files, 17 GB (dense Hessians, a pooled one for each gate/up
+expert stack from the shared expert, 256 per-expert down ones a layer). `quantize gguf --hessians` bound 371 of them.
+
+The allocated recipe at R1's size (Run 8: IQ4_KS experts, Q6_K `attn_qkv`/`attn_gate`/`ssm_out`, Q4_K `token_embd`,
+Q8_0 the rest), WikiText KLD:
+
+```
+calibration, method                        KLD      p99     same top
+Unsloth imatrix, no feedback (Run 8)       0.01829  0.1968  94.42%
+our Hessians' diagonals, no feedback       0.01718  0.1785  94.22%
+our Hessians, GPTQ                         0.01672  0.1666  94.61%
+```
+
+The feedback gives 2.7% here against 24-37% on the 2B; the calibration alone 6% over Unsloth's imatrix. Suspects:
+the gate/up experts take the pooled (all-token) Hessian rather than their own routed rows', and each down expert's
+Hessian comes from ~2K rows (65K tokens x 8 of 256 experts).
+
+Two false starts on the way: the first run left 169 tensors BF16 (the run script's `while read` dropped the rules
+file's unterminated last line, `\.weight$=q8_0`); and the first GPTQ took 66 s a layer at 7.5 of 16 threads and 3%
+GPU, the experts one at a time. Experts sharing a Hessian are rows of one matrix to GPTQ, so a stack now goes in one
+pass, and experts with their own Hessians run side by side: 37 min for the recipe.
+
+## Run 13 - 2026-11-19 19:25
+
+GPTQ's row-scaled loop on the GPU (each row's scale from the type's kernels, then per super-block the block search,
+the encoding against that scale with its levels, the row's fit sums continued in the CPU's order; the error and its
+carry already ran there). A GPU test checks the bytes equal the CPU loop's for IQ4_KS, IQ4_KSS and IQ3_KS.
+
+The 35B recipe: 252 s against 2,219 s (8.8x), KLD 0.01672 / p99 0.1666 / 94.61%, the same file's.

@@ -36,6 +36,8 @@ pub(crate) fn ensure_type_kernels_by_name(name: &str) -> std::result::Result<(),
     };
     open()
 }
+#[cfg(feature = "cuda")]
+pub mod gptq;
 mod iq_dequant;
 mod iq_grid_quantize;
 pub mod iq_quantize;
