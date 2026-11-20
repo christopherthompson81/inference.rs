@@ -549,3 +549,16 @@ Sequential inputs alone fit `Q X_q` to `W X_q`, the drifted input times the orig
 drift. The objective that does is the asymmetric one (GPTAQ): `min ||W X_fp - Q X_q||`, solved as GPTQ on the target
 `W C H_q^-1` with `C = X_fp X_q^T`, which needs each linear's full-precision and quantized inputs side by side (both
 models streamed together), and does not apply to routed experts whose rows route differently in the two models.
+
+## Run 21 - 2026-11-20 04:50
+
+Run 19's leftover: each GPTQ tensor's Hessians and source values loaded before its GPU pass (a down stack 0.16 s of
+Hessian files and 0.19 s of weights). A second thread now reads the next GPTQ tensor's Hessians and values (its own
+reader, widened to f32) while the GPU quantizes the current one, handed over a one-deep channel.
+
+```
+35B recipe, pooled 4x Hessians   before   after
+whole                            127 s    106 s   (peak RSS 6.0 GB; same bytes, cmp)
+ffn_down_exps (41)               44 s     36 s
+ffn_gate/up_exps (82)            44 s     35 s
+```
