@@ -486,3 +486,38 @@ feedback being noise.
 
 Next: the down experts' Hessians shrunk toward their stack's mean (more effective rows), or their feedback off; then
 sequential GPTQ (each layer's Hessians collected with the layers before it quantized) for the propagation gap.
+
+## Run 19 - 2026-11-20 04:30
+
+GPTQ quantize speed, the 35B recipe with the pooled 4x Hessians (a pass of ~214 s). Per kind: the expert stacks 156 s
+(gate/up 1.1-1.4 s each, down 1.1 s), Q6_K attn_qkv/attn_gate/ssm_out 38 s, the head and embedding 11 s. Timers in a
+stack: the IQ4_KS fixed-scale encode 0.80 s (8 launches over 131K rows), the carry 15 ms, reading and widening the
+BF16 0.18 s. ncu on `iq4_ks_search`: L1/TEX 99.7%, DRAM 1.5%, issue slots 38%: bound by its shuffles (a warp per
+32-value block, four chained sums of ~11 shuffles per scale try, 31 tries).
+
+Changes, each checked byte for byte (the full recipe's file identical to the one before, `cmp`; the GPU-vs-CPU and
+batched-vs-alone tests):
+- `iq4_ks_search`: eight lanes per block, lane k running the CPU's partial sum k over values k, k + 8, ... in
+  registers, the eight added in `hsum_float_8`'s order by three xor shuffles (IEEE addition commutes, so the pairs
+  are the same): 38 ms to 7.5 ms a call.
+- `iq4_ks_blocks`: a thread per value pair instead of per block (coalesced).
+- the super-block bytes copied into the output in parallel, not stripped byte by byte then scattered serially.
+- `quantize_blocks` / `from_float_imatrix`: tasks sized to fill every thread (a GPTQ call encodes one block column,
+  2 tasks of 1024 blocks on 16 threads for ssm_out).
+- per-expert Hessians: the stack's experts in one batched GPU pass (per-expert importance through the kernels'
+  rows-per-importance, the carry a batched matmul over stacked factors, up to 2 GiB a batch).
+- `quantize gguf` turns off cudarc's per-buffer event tracking (one stream): 37,440 event creates and destroys, ~20 s
+  of contended API time over four down stacks, half their setup.
+- BF16 widening in parallel; the values copy before upload only when a column is dead.
+
+```
+                          before   after
+whole recipe              214 s    127 s
+ffn_gate/up_exps (41)     110 s    44 s
+ffn_down_exps (41)        46 s     44 s
+attn_qkv/gate, ssm_out    38 s     22 s
+```
+
+Left: a down stack reads 256 Hessian files (0.16 s) and its weights (0.19 s) before the GPU starts; prefetching the
+next tensor during the current one's GPU pass would hide that (~25 s). The IQ4_KSS and IQ3_KS searches still use
+the chained warp sums.

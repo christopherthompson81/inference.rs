@@ -91,6 +91,34 @@ static __device__ __forceinline__ void load_tables(Tables* t) {
     __syncthreads();
 }
 
+// a block's values per lane when LANES lanes share it
+#define SLOTS (BLOCK / LANES)
+
+// the mask of this lane's aligned group of LANES lanes
+static __device__ __forceinline__ unsigned group_mask() {
+    return ((1u << LANES) - 1u) << ((threadIdx.x % 32) / LANES * LANES);
+}
+
+// the group's eight partial sums added in `hsum_float_8`'s order, ((p0 + p4) + (p2 + p6)) + ((p1 + p5) + (p3 + p7)):
+// the xor steps pair the same operands (addition commutes exactly), so every lane holds the same total
+static __device__ __forceinline__ float group_sum(float p, unsigned mask) {
+    p = __fadd_rn(p, __shfl_xor_sync(mask, p, 4, LANES));
+    p = __fadd_rn(p, __shfl_xor_sync(mask, p, 2, LANES));
+    return __fadd_rn(p, __shfl_xor_sync(mask, p, 1, LANES));
+}
+
+// the group's largest magnitude and its first index (the CPU's strict `>` scan), in every lane
+static __device__ __forceinline__ void group_first_max(float* amax, int* at, unsigned mask) {
+    for (int off = LANES / 2; off > 0; off /= 2) {
+        const float oa = __shfl_xor_sync(mask, *amax, off, LANES);
+        const int oat = __shfl_xor_sync(mask, *at, off, LANES);
+        if (oa > *amax || (oa == *amax && oat < *at)) {
+            *amax = oa;
+            *at = oat;
+        }
+    }
+}
+
 static __device__ __forceinline__ float candidate(const uint8_t* simple, const int8_t* values, float xi) {
     int ix = (int)xi - values[0];
     ix = ix < 0 ? 0 : (ix > 240 ? 240 : ix);

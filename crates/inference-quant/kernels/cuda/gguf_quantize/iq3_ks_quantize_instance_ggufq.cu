@@ -288,22 +288,24 @@ static __global__ void iq3_ks_accumulate(const float* x, const float* weights, i
 }
 
 // as launch_iq4_ks_row_scale, for IQ3_KS (the block scale of largest magnitude over -16)
-extern "C" int launch_iq3_ks_row_scale(const float* x, const float* importance, int64_t rows, int cols, float* weights,
+extern "C" int launch_iq3_ks_row_scale(const float* x, const float* importance, int64_t rows,
+                                       int64_t rows_per_importance, int cols, float* weights,
                                        float* scales, uint8_t* shifted, float* row_d, cudaStream_t stream) {
     const int64_t blocks = rows * (cols / BLOCK);
-    iq3_ks_weights<<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, cols, weights);
+    iq3_ks_weights<<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows_per_importance, blocks, cols, weights);
     iq3_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
     iq3_ks_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, row_d, nullptr);
     return (int)cudaGetLastError();
 }
 
 // as launch_iq4_ks_super_fixed, for IQ3_KS (`terms` unused; `out` rows of the f16 header's width then 102 bytes)
-extern "C" int launch_iq3_ks_super_fixed(const float* x, const float* importance, int64_t rows, const float* row_d,
+extern "C" int launch_iq3_ks_super_fixed(const float* x, const float* importance, int64_t rows,
+                                       int64_t rows_per_importance, const float* row_d,
                                          float* weights, float* scales, uint8_t* shifted, uint8_t* out, float* terms,
                                          float* levels, float* sums, cudaStream_t stream) {
     (void)terms;
     const int64_t blocks = rows * (QK_K / BLOCK);
-    iq3_ks_weights<<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, QK_K, weights);
+    iq3_ks_weights<<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows_per_importance, blocks, QK_K, weights);
     iq3_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
     iq3_ks_super<<<grid(rows), THREADS, 0, stream>>>(x, rows, QK_K, scales, shifted, row_d, out, levels);
     iq3_ks_accumulate<<<grid(rows), THREADS, 0, stream>>>(x, weights, rows, levels, sums);

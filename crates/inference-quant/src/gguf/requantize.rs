@@ -28,7 +28,11 @@ const SLICE_BYTES: usize = 64 << 20;
 /// The share of a Hessian's mean diagonal GPTQ adds to it by default (its `percdamp`): 0.01 fit the calibration's
 /// domain and lost on other text, 0.1 held up across held-out text (quant_allocation_investigation Run 9).
 // set, each GPTQ tensor logs its reconstruction error and its Hessians' off-diagonal share (a diagnostic)
+#[cfg(feature = "cuda")]
 const GPTQ_REPORT_ENV: &str = "INFERENCE_GPTQ_REPORT";
+// the stacked factors and rows one batched GPTQ pass over a stack's experts takes at most
+#[cfg(feature = "cuda")]
+const GPTQ_BATCH_BYTES: usize = 2 << 30;
 pub const DEFAULT_GPTQ_DAMP: f64 = 0.1;
 // f32 bytes of rows the GPU quantizes in one call (its scratch takes about three times this)
 const GPU_CHUNK_BYTES: usize = 1 << 30;
@@ -202,12 +206,12 @@ pub struct RequantizeSummary {
 }
 
 fn to_f32(ggml_dtype: u32, bytes: &[u8]) -> Result<Vec<f32>> {
-    let halves = || bytes.as_chunks::<2>().0.iter();
+    let halves = || bytes.as_chunks::<2>().0.par_iter();
     Ok(match ggml_dtype {
         0 => bytes
             .as_chunks::<4>()
             .0
-            .iter()
+            .par_iter()
             .map(|c| f32::from_le_bytes(*c))
             .collect(),
         1 => halves().map(|c| f16::from_le_bytes(*c).to_f32()).collect(),
@@ -337,17 +341,42 @@ fn gptq_tensor(
         return Ok(Some(out));
     }
     let shared_prepared = shared.as_deref().map(prepare).transpose()?;
-    // experts with their own Hessians run side by side, each factoring its own
-    let parts = (0..experts)
-        .into_par_iter()
-        .map(|e| {
-            let own = per_expert[e].as_deref().map(prepare).transpose()?;
-            let prepared = own.as_ref().or(shared_prepared.as_ref()).ok_or_else(|| {
+    let own = per_expert
+        .par_iter()
+        .map(|h| h.as_deref().map(prepare).transpose())
+        .collect::<Result<Vec<_>>>()?;
+    let prepared = own
+        .iter()
+        .enumerate()
+        .map(|(e, own)| {
+            own.as_ref().or(shared_prepared.as_ref()).ok_or_else(|| {
                 inference_tensor::Error::Msg(format!("{}: no Hessian for expert {e}", t.name))
-            })?;
-            quantize(&values[e * per..(e + 1) * per], prepared)
+            })
         })
         .collect::<Result<Vec<_>>>()?;
+    // experts with their own Hessians run together on the GPU, as many at once as their stacked factors and rows fit
+    // GPTQ_BATCH_BYTES; elsewhere side by side, each factoring its own
+    let batch = (GPTQ_BATCH_BYTES / (4 * (cols * cols + 3 * per))).clamp(1, experts);
+    let mut parts = Vec::new();
+    for e0 in (0..experts).step_by(batch) {
+        let e1 = (e0 + batch).min(experts);
+        let Some(part) = super::gptq::quantize_experts(
+            ty,
+            cols,
+            &values[e0 * per..e1 * per],
+            &prepared[e0..e1],
+            device,
+        )
+        .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))?
+        else {
+            parts = (0..experts)
+                .into_par_iter()
+                .map(|e| quantize(&values[e * per..(e + 1) * per], prepared[e]))
+                .collect::<Result<Vec<_>>>()?;
+            break;
+        };
+        parts.push(part);
+    }
     let out = parts.concat();
     if std::env::var_os(GPTQ_REPORT_ENV).is_some() {
         report(
@@ -366,6 +395,7 @@ fn gptq_tensor(
 }
 
 // the diagnostic report over the plan's report Hessians, or the ones the tensor was quantized with
+#[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 fn report(
     t: &Planned<'_>,
@@ -401,6 +431,7 @@ fn report(
 
 // a diagnostic line: the encoding's output error over the calibration inputs, `tr(dW H dW^T) / tr(W H W^T)` summed
 // over the experts, and the Hessians' off-diagonal share of their Frobenius norm (what GPTQ's feedback works with)
+#[cfg(feature = "cuda")]
 fn report_reconstruction(
     name: &str,
     ty: GgufType,

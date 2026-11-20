@@ -73,6 +73,15 @@ fn as_t_slice<T>(data: &[u8]) -> &[T] {
 
 // Blocks one quantization task takes: a few hundred thousand values, enough to outweigh scheduling it
 const QUANTIZE_BLOCKS_PER_TASK: usize = 1024;
+const QUANTIZE_TASKS_PER_THREAD: usize = 4;
+
+// whole rows per quantize task: QUANTIZE_BLOCKS_PER_TASK blocks, fewer when a call is too small to fill every thread
+// (GPTQ encodes one block column at a time)
+fn rows_per_task(rows: usize, block: usize, n_per_row: usize) -> usize {
+    (QUANTIZE_BLOCKS_PER_TASK * block / n_per_row)
+        .min(rows.div_ceil(rayon::current_num_threads() * QUANTIZE_TASKS_PER_THREAD))
+        .max(1)
+}
 pub struct QTensor {
     storage: QStorage,
     shape: Shape,
@@ -505,7 +514,7 @@ pub fn quantize_blocks(
     ) -> Vec<u8> {
         use rayon::prelude::*;
         let mut ys = vec![T::zeros(); xs.len() / T::BLCK_SIZE];
-        let rows = (QUANTIZE_BLOCKS_PER_TASK * T::BLCK_SIZE / n_per_row).max(1);
+        let rows = rows_per_task(xs.len() / n_per_row, T::BLCK_SIZE, n_per_row);
         xs.par_chunks(rows * n_per_row)
             .zip(ys.par_chunks_mut(rows * n_per_row / T::BLCK_SIZE))
             .for_each(|(xs, ys)| {
@@ -777,7 +786,7 @@ impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for $ty {
     // the importance weights index a row, so tasks take whole rows
     fn from_float_imatrix(&mut self, xs: &[f32], imatrix_weights: &[f32], n_per_row: usize) {
         use rayon::prelude::*;
-        let rows = (QUANTIZE_BLOCKS_PER_TASK * T::BLCK_SIZE / n_per_row).max(1);
+        let rows = rows_per_task(xs.len() / n_per_row, T::BLCK_SIZE, n_per_row);
         xs.par_chunks(rows * n_per_row)
             .zip(self.$blocks_mut().par_chunks_mut(rows * n_per_row / T::BLCK_SIZE))
             .for_each(|(xs, ys)| T::from_float_imatrix(xs, ys, imatrix_weights, n_per_row));

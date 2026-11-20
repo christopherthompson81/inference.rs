@@ -154,7 +154,17 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         only: options.only.as_deref().map(regex::Regex::new).transpose()?,
         gpu: (!options.cpu || options.hessians.is_some())
             .then(|| inference_tensor::Device::new_cuda(0).ok())
-            .flatten(),
+            .flatten()
+            .inspect(|device| {
+                #[cfg(feature = "cuda")]
+                if let inference_tensor::Device::Cuda(dev) = device {
+                    // SAFETY: every quantizer runs on the device's one stream, so no use crosses streams; the
+                    // per-buffer events otherwise cost a create and destroy each (most of a stack's GPTQ setup)
+                    unsafe { dev.disable_event_tracking() };
+                }
+                #[cfg(not(feature = "cuda"))]
+                let _ = device;
+            }),
         hessians: options
             .hessians
             .as_deref()
