@@ -17,6 +17,8 @@ const TOKEN_EMBD_TENSOR: &str = "token_embd.weight";
 const SSM_GROUP_COUNT: &str = "ssm.group_count";
 const SSM_TIME_STEP_RANK: &str = "ssm.time_step_rank";
 const SSM_OUT_SUFFIX: &str = ".ssm_out.weight";
+const UP_PROJ_SUFFIX: &str = ".up_proj.weight";
+const GATE_PROJ_SUFFIX: &str = ".gate_proj.weight";
 
 /// What [`cimatrix_for_gguf`] matched.
 #[derive(Debug, Default)]
@@ -214,6 +216,21 @@ pub fn hessians_for_gguf(dir: &Path, gguf: &Path) -> Result<HessianDir> {
                 out.experts.entry(gguf_name).or_default().insert(e, path);
             }
             None => out.unmatched.push(key),
+        }
+    }
+    // a stacked up projection reads its gate's input: an expert Hessian written once, under the gate
+    for (native, gguf_name) in &names {
+        let Some(gate) = native
+            .strip_suffix(UP_PROJ_SUFFIX)
+            .map(|stack| format!("{stack}{GATE_PROJ_SUFFIX}"))
+        else {
+            continue;
+        };
+        if out.experts.contains_key(gguf_name) {
+            continue;
+        }
+        if let Some(entries) = names.get(&gate).and_then(|g| out.experts.get(g)).cloned() {
+            out.experts.insert(gguf_name.clone(), entries);
         }
     }
     Ok(out)

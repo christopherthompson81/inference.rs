@@ -43,6 +43,8 @@ const PREFETCH_MERGE_GAP: u64 = 1 << 20;
 const SPLIT_EXPERT_HESSIANS_BYTES: usize = 1 << 30;
 const GATE_UP_PROJS: &[&str] = &["gate_proj", "up_proj", "gate_up_proj"];
 const SHARED_EXPERT: &str = "shared_expert";
+// set, stacked gate/up experts collect each expert's own routed Hessian (stored bf16) rather than the shared expert's
+const PER_EXPERT_HESSIANS_ENV: &str = "INFERENCE_PER_EXPERT_HESSIANS";
 
 /// The checkpoint a write copies its unquantized tensors and files from.
 pub(crate) struct Exl3Source<'a> {
@@ -642,12 +644,18 @@ fn save_hessian(dir: &Path, key: &str, h: Tensor) -> Result<()> {
     Ok(())
 }
 
-// a stacked projection's per-expert Hessians `[E, in, in]`: each as `<experts>.<e>.<proj>`, or, past
-// SPLIT_EXPERT_HESSIANS_BYTES, their mean under the stack's own key
-fn save_expert_hessians(dir: &Path, key: &str, h: Tensor) -> Result<()> {
-    if h.elem_count() * 4 > SPLIT_EXPERT_HESSIANS_BYTES {
+// a stacked projection's per-expert Hessians `[E, in, in]`: each as `<experts>.<e>.<proj>` (bf16 when `each` keeps
+// stacks past SPLIT_EXPERT_HESSIANS_BYTES whole), or, past that, their mean under the stack's own key
+fn save_expert_hessians(dir: &Path, key: &str, h: Tensor, each: bool) -> Result<()> {
+    let large = h.elem_count() * 4 > SPLIT_EXPERT_HESSIANS_BYTES;
+    if large && !each {
         return save_hessian(dir, key, h.mean(0)?);
     }
+    let h = if large {
+        h.to_dtype(inference_tensor::DType::BF16)?
+    } else {
+        h
+    };
     let (experts, proj) = key
         .rsplit_once('.')
         .with_context(|| format!("`{key}` names no projection"))?;
@@ -671,6 +679,7 @@ pub(crate) fn write_hessians_streamed(
 ) -> Result<()> {
     let gpu = Device::new_cuda(0)?;
     std::fs::create_dir_all(dir)?;
+    let each = std::env::var_os(PER_EXPERT_HESSIANS_ENV).is_some();
     let mut ranges = layer_ranges(weights)?;
     let mut states = Vec::new();
     for chunk in tokens.chunks(CALIBRATION_CHUNK_SIZE) {
@@ -704,9 +713,13 @@ pub(crate) fn write_hessians_streamed(
             .map(|m| weight_rank(m))
             .collect::<Result<Vec<_>>>()?;
         let proj = |m: &TrackedModule| m.key.rsplit_once('.').map_or("", |(_, p)| p).to_string();
-        let shared = group.iter().zip(&ranks).position(|(m, &r)| {
-            r == 2 && m.key.contains(SHARED_EXPERT) && GATE_UP_PROJS.contains(&proj(m).as_str())
-        });
+        let shared = group
+            .iter()
+            .zip(&ranks)
+            .position(|(m, &r)| {
+                r == 2 && m.key.contains(SHARED_EXPERT) && GATE_UP_PROJS.contains(&proj(m).as_str())
+            })
+            .filter(|_| !each);
         // each module's Hessian source: itself, the first reading the same input, or (stacked gate/up) the shared expert
         let mut first = HashMap::new();
         let sources = group
@@ -742,7 +755,9 @@ pub(crate) fn write_hessians_streamed(
                 continue;
             };
             match h.rank() {
-                3 => save_expert_hessians(dir, &module.key, h.clone())?,
+                // a stack reading another's input (up beside gate) is found through it, not written again
+                3 if each && sources[i] != i => {}
+                3 => save_expert_hessians(dir, &module.key, h.clone(), each)?,
                 _ => save_hessian(dir, &module.key, h.clone())?,
             }
         }
