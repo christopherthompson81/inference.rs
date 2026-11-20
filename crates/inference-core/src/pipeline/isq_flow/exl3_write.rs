@@ -57,6 +57,9 @@ const STREAM_TWIN_FREE_ENV: &str = "INFERENCE_STREAM_TWIN_FREE";
 const STREAM_ROUTER_DUMP_ENV: &str = "INFERENCE_STREAM_ROUTER_DUMP";
 #[cfg(feature = "cuda")]
 const ROUTER_INPUT_MODULE: &str = "mlp.shared_expert.gate_proj";
+// set to a path, a streamed scoring run writes each run's scores there as JSON, with each chunk's mean KLD
+#[cfg(feature = "cuda")]
+const STREAM_SCORES_OUT_ENV: &str = "INFERENCE_STREAM_SCORES_OUT";
 #[cfg(feature = "cuda")]
 const STREAM_SCORE_ONLY_ENV: &str = "INFERENCE_STREAM_SCORE_ONLY";
 #[cfg(feature = "cuda")]
@@ -883,12 +886,18 @@ fn run_streamed(
         states.push(stream.embed(&Tensor::new(ids.as_slice(), &Device::Cpu)?.unsqueeze(0)?)?);
     }
     let layers = stream.num_layers();
+    // variants of the model a scoring run scores beside it (INFERENCE_STREAM_CANDIDATES): each shares the model's
+    // states until its embedding or a layer it replaces sets its own apart
+    let candidates = match &run {
+        StreamedRun::Score(_) => inference_nn::decoder::take_stream_candidates(),
+        StreamedRun::Collect(_) => Vec::new(),
+    };
     // the states stay on the GPU when they fit beside a layer, so they never cross the bus
     let state_bytes: usize = states
         .iter()
         .map(|s| s.elem_count() * s.dtype().size_in_bytes())
         .sum();
-    let resident = state_bytes <= RESIDENT_STATE_BYTES;
+    let resident = state_bytes * (1 + candidates.len()) <= RESIDENT_STATE_BYTES;
     if resident {
         states = states
             .iter()
@@ -905,6 +914,33 @@ fn run_streamed(
     let twin = inference_nn::decoder::take_stream_twin();
     let free_routes = std::env::var_os(STREAM_TWIN_FREE_ENV).is_some();
     let mut twin_states = twin.as_ref().map(|_| states.clone());
+    if twin.is_some() && !candidates.is_empty() {
+        anyhow::bail!("a streamed run takes a twin or candidates, not both");
+    }
+    let mut candidate_states = candidates
+        .iter()
+        .map(|candidate| -> Result<Option<Vec<Tensor>>> {
+            if !candidate.embed {
+                return Ok(None);
+            }
+            let ids = chunks
+                .iter()
+                .map(|ids| Tensor::new(ids.as_slice(), &Device::Cpu)?.unsqueeze(0))
+                .collect::<inference_tensor::Result<Vec<_>>>()?;
+            stream
+                .embed_from(&ids, &candidate.weights)?
+                .into_iter()
+                .map(|state| {
+                    Ok(if resident {
+                        state.to_device(&gpu)?
+                    } else {
+                        state
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(Some)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut ahead: Option<std::thread::JoinHandle<()>> = None;
     for layer_idx in 0..layers {
         let start = std::time::Instant::now();
@@ -997,6 +1033,7 @@ fn run_streamed(
                 module.ct.begin_track_hessian()?;
             }
         }
+        let before = (!candidates.is_empty()).then(|| states.clone());
         // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed)
         for (i, state) in states.iter_mut().enumerate() {
             if twin_layer.is_some() && !free_routes {
@@ -1049,6 +1086,28 @@ fn run_streamed(
                 ]),
                 dir.join(format!("layer{layer_idx}.safetensors")),
             )?;
+        }
+        for (candidate, own_states) in candidates.iter().zip(&mut candidate_states) {
+            let replaced = candidate.layers.contains(&layer_idx);
+            let input = match own_states.take() {
+                Some(own) => own,
+                None if replaced => before.clone().context("the states before the layer")?,
+                None => continue,
+            };
+            let own_layer = replaced
+                .then(|| stream.build_layer_from(layer_idx, &gpu, &candidate.weights))
+                .transpose()?;
+            let run_layer = own_layer.as_deref().unwrap_or(&*layer);
+            let mut next = Vec::with_capacity(input.len());
+            for state in &input {
+                let out = run_layer.forward(&state.to_device(&gpu)?)?;
+                next.push(if resident {
+                    out
+                } else {
+                    out.to_device(&Device::Cpu)?
+                });
+            }
+            *own_states = Some(next);
         }
         let mut hessians = vec![None; group.len()];
         let mut crosses = vec![None; group.len()];
@@ -1106,13 +1165,25 @@ fn run_streamed(
             save_hessian(dir, HEAD, hessian.to_device(&Device::Cpu)?)?;
             info!("Wrote the Hessians to `{}`.", dir.display());
         }
-        StreamedRun::Score(base) => score_states(
-            stream,
-            twin_states.as_deref().unwrap_or(&states),
-            &chunks,
-            base,
-            &gpu,
-        )?,
+        StreamedRun::Score(base) => {
+            let model_states = twin_states.as_deref().unwrap_or(&states);
+            let mut runs = vec![ScoredRun {
+                name: "model".to_string(),
+                states: model_states,
+                head: None,
+            }];
+            for (candidate, own) in candidates.iter().zip(&candidate_states) {
+                runs.push(ScoredRun {
+                    name: candidate.name.clone(),
+                    states: own.as_deref().unwrap_or(model_states),
+                    head: candidate
+                        .head
+                        .then(|| stream.head_from(&gpu, &candidate.weights))
+                        .transpose()?,
+                });
+            }
+            score_states(stream, &runs, &chunks, base, &gpu)?
+        }
     }
     if let Some(path) = std::env::var_os(STREAM_LOGITS_OUT_ENV) {
         stream_logits(stream, &states, &gpu, LogitsUse::Record(Path::new(&path)))?;
@@ -1123,67 +1194,118 @@ fn run_streamed(
     Ok(())
 }
 
-// the final states' logits against the base's records chunk by chunk, reported as llama-perplexity's KLD summary
+// each run's final logits against the base's records chunk by chunk, reported as llama-perplexity's KLD summary
 #[cfg(feature = "cuda")]
 fn score_states(
     stream: &dyn inference_nn::model::LayerStream,
-    states: &[Tensor],
+    runs: &[ScoredRun<'_>],
     chunks: &[Vec<u32>],
     base: &mut inference_nn::logits_reference::KldBase,
     gpu: &Device,
 ) -> Result<()> {
     use inference_tensor::{D, DType};
-    let head = stream
-        .head()
-        .dequantize_w()?
-        .to_dtype(DType::BF16)?
-        .to_device(gpu)?;
-    let (mut klds, mut same, mut nll, mut nll_base) = (Vec::new(), 0usize, 0f64, 0f64);
+    let dense = |head: &std::sync::Arc<dyn QuantMethod>| -> Result<Tensor> {
+        Ok(head.dequantize_w()?.to_dtype(DType::BF16)?.to_device(gpu)?)
+    };
+    let model_head = dense(&stream.head())?;
+    let heads = runs
+        .iter()
+        .map(|run| run.head.as_ref().map(dense).transpose())
+        .collect::<Result<Vec<_>>>()?;
+    let mut scores = vec![RunScore::default(); runs.len()];
     let first = base.first_row();
-    for (state, tokens) in states.iter().zip(chunks) {
-        let xs = stream
-            .final_norm(state)?
-            .to_device(gpu)?
-            .to_dtype(DType::BF16)?
-            .squeeze(0)?;
-        let logits = xs.matmul(&head.t()?)?.to_dtype(DType::F32)?;
+    for (c, tokens) in chunks.iter().enumerate() {
+        // one read and decode of the chunk's base records serves every run
         let reference = base.next_chunk()?;
-        let divergence = inference_nn::logits_reference::divergence(&logits, tokens, &reference)?;
-        let rows = divergence.kld.len();
-        let next = Tensor::from_slice(&tokens[first + 1..first + 1 + rows], (rows, 1), gpu)?;
-        let logp =
-            inference_tensor::nn::ops::log_softmax(&logits.narrow(0, first, rows)?, D::Minus1)?;
-        nll -= logp
-            .gather(&next, 1)?
-            .to_dtype(DType::F64)?
-            .sum_all()?
-            .to_scalar::<f64>()?;
-        nll_base -= divergence
-            .reference_logprobs
-            .iter()
-            .map(|&l| f64::from(l))
-            .sum::<f64>();
-        same += divergence.same_top.iter().filter(|&&s| s).count();
-        klds.extend(divergence.kld);
+        let reference = inference_nn::logits_reference::decode_reference(
+            &reference,
+            tokens,
+            model_head.dim(0)?,
+            gpu,
+        )?;
+        for ((run, head), score) in runs.iter().zip(&heads).zip(&mut scores) {
+            let xs = stream
+                .final_norm(&run.states[c])?
+                .to_device(gpu)?
+                .to_dtype(DType::BF16)?
+                .squeeze(0)?;
+            let head = head.as_ref().unwrap_or(&model_head);
+            let logits = xs.matmul(&head.t()?)?.to_dtype(DType::F32)?;
+            let divergence =
+                inference_nn::logits_reference::divergence_decoded(&logits, &reference)?;
+            let rows = divergence.kld.len();
+            let next = Tensor::from_slice(&tokens[first + 1..first + 1 + rows], (rows, 1), gpu)?;
+            let logp =
+                inference_tensor::nn::ops::log_softmax(&logits.narrow(0, first, rows)?, D::Minus1)?;
+            score.nll -= logp
+                .gather(&next, 1)?
+                .to_dtype(DType::F64)?
+                .sum_all()?
+                .to_scalar::<f64>()?;
+            score.nll_base -= divergence
+                .reference_logprobs
+                .iter()
+                .map(|&l| f64::from(l))
+                .sum::<f64>();
+            score.same += divergence.same_top.iter().filter(|&&s| s).count();
+            score.chunk_means.push(
+                divergence.kld.iter().map(|&k| f64::from(k)).sum::<f64>()
+                    / f64::from(u32::try_from(rows)?),
+            );
+            score.klds.extend(divergence.kld);
+        }
     }
-    let n = f64::from(u32::try_from(klds.len())?);
-    let mean = klds.iter().map(|&k| f64::from(k)).sum::<f64>() / n;
-    klds.sort_by(f32::total_cmp);
-    // the q-quantile by index (q in hundredths, as the report names them)
-    let pick = |hundredths: usize| klds[(klds.len() - 1) * hundredths / 100];
-    info!(
-        "KLD over {} positions ({} chunks of {}): mean {mean:.5}, median {:.5}, p99 {:.4}, same top {:.2}%, \
-         PPL {:.4} (base {:.4})",
-        klds.len(),
-        chunks.len(),
-        base.n_ctx,
-        pick(50),
-        pick(99),
-        100.0 * f64::from(u32::try_from(same)?) / n,
-        (nll / n).exp(),
-        (nll_base / n).exp()
-    );
+    let mut report = Vec::with_capacity(runs.len());
+    for (run, score) in runs.iter().zip(&mut scores) {
+        let n = f64::from(u32::try_from(score.klds.len())?);
+        let mean = score.klds.iter().map(|&k| f64::from(k)).sum::<f64>() / n;
+        score.klds.sort_by(f32::total_cmp);
+        // the q-quantile by index (q in hundredths, as the report names them)
+        let pick = |hundredths: usize| score.klds[(score.klds.len() - 1) * hundredths / 100];
+        let same_top = 100.0 * f64::from(u32::try_from(score.same)?) / n;
+        info!(
+            "`{}`: KLD over {} positions ({} chunks of {}): mean {mean:.5}, median {:.5}, p99 {:.4}, same top \
+             {same_top:.2}%, PPL {:.4} (base {:.4})",
+            run.name,
+            score.klds.len(),
+            chunks.len(),
+            base.n_ctx,
+            pick(50),
+            pick(99),
+            (score.nll / n).exp(),
+            (score.nll_base / n).exp()
+        );
+        report.push(serde_json::json!({
+            "name": run.name,
+            "kld": mean,
+            "p99": pick(99),
+            "same_top": same_top,
+            "ppl": (score.nll / n).exp(),
+            "chunk_klds": score.chunk_means,
+        }));
+    }
+    if let Some(path) = std::env::var_os(STREAM_SCORES_OUT_ENV) {
+        std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+    }
     Ok(())
+}
+
+// one model a streamed scoring run scores: its final states and, where it has its own, its head
+#[cfg(feature = "cuda")]
+struct ScoredRun<'a> {
+    name: String,
+    states: &'a [Tensor],
+    head: Option<std::sync::Arc<dyn QuantMethod>>,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Default)]
+struct RunScore {
+    klds: Vec<f32>,
+    chunk_means: Vec<f64>,
+    same: usize,
+    nll: f64,
+    nll_base: f64,
 }
 
 // a diagnostic over a streamed run's final states: record its log-probabilities, or compare them with a recording

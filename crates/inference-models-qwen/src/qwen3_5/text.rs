@@ -1500,6 +1500,11 @@ fn rotary_on(
 pub(super) struct LayerRebuild {
     cfg: TextConfig,
     vb_l: ShardedVarBuilder,
+    // the embedding's path, the head's when untied, and the embedding's dtype, for a converter building them from
+    // another checkpoint
+    embed_prefix: String,
+    head_prefix: Option<String>,
+    dtype: DType,
     layer_types: Vec<LayerType>,
     mtp: bool,
     yarn: Option<YarnRopeConfig>,
@@ -1630,6 +1635,54 @@ impl crate::model::LayerStream for Qwen3_5TextModel {
             device,
             &weights.pp(rebuild.vb_l.prefix()),
         )?))
+    }
+
+    fn embed_from(&self, ids: &[Tensor], weights: &ShardedVarBuilder) -> Result<Vec<Tensor>> {
+        let Some(rebuild) = &self.rebuild else {
+            inference_tensor::bail!("this Qwen3.5 stack does not rebuild its layers");
+        };
+        let cfg = &rebuild.cfg;
+        let embedding = layers::embedding_with_legacy_tied_uqff(
+            cfg.vocab_size,
+            cfg.hidden_size,
+            weights.pp(&rebuild.embed_prefix),
+            None,
+            &cfg.quantization_config,
+        )?;
+        ids.iter()
+            .map(|ids| embedding.embedding_forward(ids, rebuild.dtype))
+            .collect()
+    }
+
+    fn head_from(
+        &self,
+        device: &Device,
+        weights: &ShardedVarBuilder,
+    ) -> Result<Arc<dyn QuantMethod>> {
+        let Some(rebuild) = &self.rebuild else {
+            inference_tensor::bail!("this Qwen3.5 stack does not rebuild its layers");
+        };
+        let cfg = &rebuild.cfg;
+        if cfg.decision_head_size.is_some() {
+            inference_tensor::bail!("a decision head is not rebuilt from other weights");
+        }
+        let vb = weights.clone().set_device(device.clone());
+        match &rebuild.head_prefix {
+            Some(prefix) => ReplicatedLayer::new(
+                cfg.hidden_size,
+                cfg.vocab_size,
+                &cfg.quantization_config,
+                false,
+                vb.pp(prefix),
+            ),
+            None => layers::embedding_with_legacy_tied_uqff(
+                cfg.vocab_size,
+                cfg.hidden_size,
+                vb.pp(&rebuild.embed_prefix),
+                None,
+                &cfg.quantization_config,
+            ),
+        }
     }
 
     fn final_norm(&self, xs: &Tensor) -> Result<Tensor> {
@@ -1904,6 +1957,9 @@ impl Qwen3_5TextModel {
                 LayerRebuild {
                     cfg: cfg.clone(),
                     vb_l: vb_l.clone(),
+                    embed_prefix: vb_m.pp("embed_tokens").prefix(),
+                    head_prefix: (!tie).then(|| vb.pp("lm_head").prefix()),
+                    dtype: vb.dtype(),
                     layer_types: layer_types.clone(),
                     mtp: mtp.is_some(),
                     yarn: yarn_rope_config.clone(),

@@ -1379,6 +1379,34 @@ pub fn take_stream_twin() -> Option<ShardedVarBuilder> {
     STREAM_TWIN.lock().ok().and_then(|mut twin| twin.take())
 }
 
+/// A variant of the model a streamed scoring run carries beside it: the model with some tensors replaced (an overlay),
+/// built from `weights`, which touch the layers in `layers`, the embedding (`embed`) or the head (`head`).
+pub struct StreamCandidate {
+    pub name: String,
+    pub weights: ShardedVarBuilder,
+    pub layers: std::collections::BTreeSet<usize>,
+    pub embed: bool,
+    pub head: bool,
+}
+
+static STREAM_CANDIDATES: std::sync::Mutex<Vec<StreamCandidate>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Sets the variants a streamed scoring run of the model being loaded scores beside it.
+pub fn set_stream_candidates(candidates: Vec<StreamCandidate>) {
+    if let Ok(mut set) = STREAM_CANDIDATES.lock() {
+        *set = candidates;
+    }
+}
+
+/// The variants [`set_stream_candidates`] set, taken.
+pub fn take_stream_candidates() -> Vec<StreamCandidate> {
+    STREAM_CANDIDATES
+        .lock()
+        .map(|mut set| std::mem::take(&mut *set))
+        .unwrap_or_default()
+}
+
 /// Ends a [`stop_after_layer`] scope.
 pub struct CalibrationStop(usize);
 

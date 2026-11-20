@@ -227,7 +227,7 @@ impl CudaDevice {
     }
 
     // the copy in chunks through the pinned ring: each chunk copied in on the host once its buffer's last copy is done,
-    // then sent asynchronously, so the host copy of one chunk overlaps the transfer of the one before
+    // then sent, so the host copy of one chunk overlaps the transfer of the one before
     fn memcpy_htod_staged<
         T: cudarc::driver::DeviceRepr,
         Src: cudarc::driver::HostSlice<T> + ?Sized,
@@ -290,6 +290,10 @@ impl CudaDevice {
             .w()?;
             event.record(&self.stream).w()?;
         }
+        // done before returning, as a pageable copy is: a reader on another stream (the quant kernels launch on the
+        // per-thread default stream) orders nothing after it
+        let last = (staging.next + STAGING_BUFFERS - 1) % STAGING_BUFFERS;
+        staging.buffers[last].1.synchronize().w()?;
         Ok(())
     }
 

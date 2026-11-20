@@ -58,6 +58,11 @@ use tracing::{debug, info, warn};
 // the architecture whose full-attention layers can read a prompt bidirectionally
 // the second GGUF a streamed run builds each layer from beside the model's own (a diagnostic, and GPTAQ's pairing)
 const STREAM_TWIN_ENV: &str = "INFERENCE_STREAM_TWIN";
+// overlays (comma-separated) a streamed scoring run scores beside the model, each over it as its own variant
+const STREAM_CANDIDATES_ENV: &str = "INFERENCE_STREAM_CANDIDATES";
+const GGUF_LAYER_PREFIX: &str = "blk.";
+const GGUF_EMBEDDING: &str = "token_embd.weight";
+const GGUF_HEAD: &str = "output.weight";
 const BIDIRECTIONAL_ARCHITECTURE: &str = "qwen35";
 // clef's GGUF is Qwen3.5 under its own name, with a joint decision head after the trunk
 const CLEF_ARCHITECTURE: &str = "clef";
@@ -944,6 +949,54 @@ impl GGUFLoader {
             ])?);
             let twin = inference_quant::GgufWeightSource::new(twin, bindings, dtype)?;
             inference_nn::decoder::set_stream_twin(Arc::new(twin).sharded_var_builder(Device::Cpu));
+        }
+        if let Some(list) = std::env::var_os(STREAM_CANDIDATES_ENV) {
+            let model_paths = archive
+                .shards()
+                .iter()
+                .map(|shard| shard.path().to_path_buf())
+                .collect::<Vec<_>>();
+            let mut candidates = Vec::new();
+            for overlay in list.to_string_lossy().split(',').filter(|p| !p.is_empty()) {
+                let overlay = std::path::PathBuf::from(overlay);
+                let mut candidate = inference_nn::decoder::StreamCandidate {
+                    name: overlay.display().to_string(),
+                    weights: Arc::new(inference_quant::GgufWeightSource::new(
+                        Arc::new(inference_quant::GgufArchive::open(
+                            model_paths.iter().cloned().chain([overlay.clone()]),
+                        )?),
+                        bindings,
+                        dtype,
+                    )?)
+                    .sharded_var_builder(Device::Cpu),
+                    layers: std::collections::BTreeSet::new(),
+                    embed: false,
+                    head: false,
+                };
+                for name in inference_quant::GgufArchive::open([&overlay])?
+                    .tensors()
+                    .keys()
+                {
+                    if let Some(layer) = name
+                        .strip_prefix(GGUF_LAYER_PREFIX)
+                        .and_then(|rest| rest.split('.').next())
+                        .and_then(|n| n.parse().ok())
+                    {
+                        candidate.layers.insert(layer);
+                    } else if name == GGUF_EMBEDDING {
+                        candidate.embed = true;
+                    } else if name == GGUF_HEAD {
+                        candidate.head = true;
+                    } else {
+                        anyhow::bail!(
+                            "overlay `{}` replaces `{name}`, which a candidate cannot",
+                            overlay.display()
+                        );
+                    }
+                }
+                candidates.push(candidate);
+            }
+            inference_nn::decoder::set_stream_candidates(candidates);
         }
         let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
         let generation_config = self

@@ -842,3 +842,47 @@ The two scorers disagree on that one move (ours -0.0007, llama.cpp 0.0000): on 4
 outweighs it, so the greedy loop needs paired per-chunk errors and more text per point. The streamed scorer
 (`quantize kld`, 16 s) builds each layer once per pass (0.2 s a layer, 0.05 s of it upload), so every candidate of
 a round can ride one pass on its own 80 MB of states, the shared layers uploaded once.
+
+## Run 31 - 2026-11-20 12:45
+
+Question: can every in-context move of a round be scored in one pass, and what does a measured greedy loop find
+around the v2 recipe (Run 29)?
+
+`quantize kld` with `INFERENCE_STREAM_CANDIDATES` (overlays from `quantize gguf --only`): each candidate rides the
+streamed pass on its own states, which it shares with the model until its embedding or a layer it replaces sets them
+apart (a head-only move costs only its scoring); each chunk's base records are read and decoded once for every run.
+Three candidates (`attn_gate` / `token_embd` / `output` Q8_0) score exactly as each merged file does alone (0.01530 /
+0.01534 / 0.01479, the model 0.01494), in 34.5 s against 68 s apart. Stacking 2-8 chunks into one layer call saved
+20% but moved the candidates' scores by up to 0.0004 (a different rounding order reshuffles the near-tie routes),
+so it was dropped.
+
+On the way: the streamed scorer had turned nondeterministic (the same file 0.0217 / 0.0178 / 0.0154). The pinned
+staging of Run 30 returned before its copy landed, where a pageable copy does not, and the quant kernels launched on
+the per-thread default stream read the weights early; the staged copy now waits for its last chunk (0.01494 three
+times, as before staging; the 20 GB load still 3.7 s).
+
+`scripts/quant_sweep.py refine` (both WikiText bases, 80 chunks, paired per-chunk KLD change and its standard error,
+a move taken when it beats twice that and fits): round 1 from v2 at its size (19,972,917,184 B, 0.01515):
+
+```
+move                       bytes          dKLD
+exps_gate_up iq4_kss       -687,865,856   +0.00286 +/- 0.00039
+exps_down iq4_kss          -343,932,928   +0.00149 +/- 0.00025
+attn_qkv q5_k               -66,846,720   +0.00087 +/- 0.00027
+attn_qkv q8_0              +121,896,960   -0.00021 +/- 0.00025
+attn_gate q5_k              -33,423,360   +0.00072 +/- 0.00029
+attn_gate q8_0              +60,948,480   +0.00020 +/- 0.00035
+ssm_out q6_k                -60,948,480   +0.00106 +/- 0.00031
+attention q6_k              -72,630,272   +0.00032 +/- 0.00025
+shexp q6_k                  -31,236,096   -0.00015 +/- 0.00021
+token_embd q5_k             -67,543,040   +0.00017 +/- 0.00021
+token_embd q8_0            +123,166,720   +0.00021 +/- 0.00019
+output q5_k                 -67,543,040   +0.00047 +/- 0.00005
+output q8_0                +123,166,720   -0.00015 +/- 0.00002
+```
+
+Nothing beats its noise within the size and no up/down pair is predicted to gain, so v2 is a local optimum at this
+size to what 80 chunks resolve (~0.0002-0.0004 per move). Head-only moves have tiny errors (they do not reshuffle
+routes): `output` Q8_0 is a real but small gain (-1% for 123 MB). The round took 15 min: recipe 2 min, 18 overlays
+~9 min, two passes 2 min each (6.5 s a candidate); overlays now carry over between rounds (each depends only on its
+group's type).

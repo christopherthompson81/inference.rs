@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use inference_tensor::{DType, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 // reference log-probs at or below this add nothing to the divergence, as llama-perplexity sums it
 const REFERENCE_LOG_PROB_FLOOR: f64 = -16.0;
@@ -48,38 +48,45 @@ fn first_max(rows: &Tensor, positions: &Tensor) -> inference_tensor::Result<Tens
         .min(1)
 }
 
-/// The reference rows scored on the logits' device, `DIVERGENCE_ROWS` at a time; only the codes go up and three
-/// numbers a row come back
-pub fn divergence(
-    logits: &Tensor,
-    tokens: &[u32],
+/// A reference's base log-probabilities decoded on a device, for scoring any number of logits against it.
+pub struct DecodedReference {
+    first_row: usize,
+    blocks: Vec<DecodedBlock>,
+    positions: Tensor,
+    reference_logprobs: Vec<f32>,
+}
+
+// up to DIVERGENCE_ROWS rows of a decoded reference: their log-probabilities, which of them count, and their top
+struct DecodedBlock {
+    start: usize,
+    len: usize,
+    base: Tensor,
+    counted: Tensor,
+    top: Tensor,
+}
+
+/// `reference` decoded on `device` for `vocab`-wide logits over `tokens`.
+pub fn decode_reference(
     reference: &LogitsReference,
-) -> inference_tensor::Result<Divergence> {
-    let (rows, vocab) = logits.dims2()?;
+    tokens: &[u32],
+    vocab: usize,
+    device: &Device,
+) -> inference_tensor::Result<DecodedReference> {
     let n = reference.scales.len();
     let width = reference.width;
-    if reference.floors.len() != n
-        || reference.codes.len() != 2 * n * width
-        || width < vocab
-        || reference.first_row + n >= rows
-    {
+    if reference.floors.len() != n || reference.codes.len() != 2 * n * width || width < vocab {
         inference_tensor::bail!(
-            "a reference of {n} rows of {width} from row {} does not fit {rows} rows of {vocab}",
-            reference.first_row
+            "a reference of {n} rows of {width} does not fit a vocab of {vocab}"
         );
     }
-    let device = logits.device();
-    let mut out = Divergence::default();
     let vocab_u32 = u32::try_from(vocab).map_err(inference_tensor::Error::wrap)?;
     let positions = Tensor::arange(0, vocab_u32, device)?
         .to_dtype(DType::F32)?
         .unsqueeze(0)?;
+    let mut blocks = Vec::new();
+    let mut reference_logprobs = Vec::with_capacity(n);
     for start in (0..n).step_by(DIVERGENCE_ROWS) {
         let len = DIVERGENCE_ROWS.min(n - start);
-        let ours = inference_tensor::nn::ops::log_softmax(
-            &logits.narrow(0, reference.first_row + start, len)?,
-            1,
-        )?;
         let bytes = &reference.codes[2 * start * width..][..2 * len * width];
         let pairs = Tensor::from_slice(bytes, (len, width, 2), device)?.narrow(1, 0, vocab)?;
         let codes = pairs
@@ -97,22 +104,74 @@ pub fn divergence(
             .broadcast_mul(&column(&reference.scales)?)?
             .broadcast_add(&column(&reference.floors)?)?;
         let counted = base.gt(REFERENCE_LOG_PROB_FLOOR)?.to_dtype(DType::F32)?;
-        let kld = base
-            .exp()?
-            .mul(&base.sub(&ours)?)?
-            .mul(&counted)?
-            .sum(1)?
-            .to_vec1::<f32>()?;
-        let same = first_max(&ours, &positions)?
-            .eq(&first_max(&base, &positions)?)?
-            .to_vec1::<u8>()?;
+        let top = first_max(&base, &positions)?;
         let next = tokens[reference.first_row + start + 1..][..len]
             .iter()
             .map(|&token| token.min(vocab_u32 - 1))
             .collect::<Vec<_>>();
         let next = Tensor::from_slice(&next, (len, 1), device)?;
-        out.reference_logprobs
-            .extend(base.gather(&next, 1)?.flatten_all()?.to_vec1::<f32>()?);
+        reference_logprobs.extend(base.gather(&next, 1)?.flatten_all()?.to_vec1::<f32>()?);
+        blocks.push(DecodedBlock {
+            start,
+            len,
+            base,
+            counted,
+            top,
+        });
+    }
+    Ok(DecodedReference {
+        first_row: reference.first_row,
+        blocks,
+        positions,
+        reference_logprobs,
+    })
+}
+
+/// Per row from the reference's first row, the KL divergence of `logits` `(rows, vocab)` from the reference, our top
+/// token's agreement with its top, and the reference's log-probability of the next token.
+pub fn divergence(
+    logits: &Tensor,
+    tokens: &[u32],
+    reference: &LogitsReference,
+) -> inference_tensor::Result<Divergence> {
+    let (rows, vocab) = logits.dims2()?;
+    if reference.first_row + reference.scales.len() >= rows {
+        inference_tensor::bail!(
+            "a reference of {} rows from row {} does not fit {rows} rows",
+            reference.scales.len(),
+            reference.first_row
+        );
+    }
+    divergence_decoded(
+        logits,
+        &decode_reference(reference, tokens, vocab, logits.device())?,
+    )
+}
+
+/// As [`divergence`], against a reference decoded once.
+pub fn divergence_decoded(
+    logits: &Tensor,
+    reference: &DecodedReference,
+) -> inference_tensor::Result<Divergence> {
+    let mut out = Divergence {
+        reference_logprobs: reference.reference_logprobs.clone(),
+        ..Default::default()
+    };
+    for block in &reference.blocks {
+        let ours = inference_tensor::nn::ops::log_softmax(
+            &logits.narrow(0, reference.first_row + block.start, block.len)?,
+            1,
+        )?;
+        let kld = block
+            .base
+            .exp()?
+            .mul(&block.base.sub(&ours)?)?
+            .mul(&block.counted)?
+            .sum(1)?
+            .to_vec1::<f32>()?;
+        let same = first_max(&ours, &reference.positions)?
+            .eq(&block.top)?
+            .to_vec1::<u8>()?;
         out.kld.extend(kld);
         out.same_top.extend(same.into_iter().map(|same| same != 0));
     }
