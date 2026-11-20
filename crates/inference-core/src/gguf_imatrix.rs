@@ -282,7 +282,10 @@ mod tests {
         assert_eq!(full, [1., 2., 3., 2., 4., 5., 3., 5., 6.]);
         // past one tile: symmetric, the upper triangle in order
         let n = 2 * super::MIRROR_TILE + 3;
-        let upper = (0u16..).take(n * (n + 1) / 2).map(f32::from).collect::<Vec<_>>();
+        let upper = (0u16..)
+            .take(n * (n + 1) / 2)
+            .map(f32::from)
+            .collect::<Vec<_>>();
         let (m, full) = super::unpack_upper(&upper);
         assert_eq!(m, n);
         let mut k = 0;

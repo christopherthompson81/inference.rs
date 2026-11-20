@@ -422,3 +422,39 @@ The quantize took 991 s (pooled: ~230 s) with 8 s between GPU bursts: a CPU tria
 per expert (column-strided, 45% of samples), then the 256 Hessian files of a stack read and unpacked one at a time
 (64%). Row-wise back substitution for the inverse, the files loaded in parallel and the triangle mirrored in 64x64
 tiles: 470 s, KLD 0.01699 unchanged.
+
+## Run 17 - 2026-11-20 03:30
+
+Why GPTQ's feedback moves the 35B so little (Run 12: diag-only 0.01718, GPTQ 0.01672, -2.7%; the 2B -27% to -34%).
+`INFERENCE_GPTQ_REPORT=1` logs each GPTQ tensor's output error over the calibration inputs, `tr(dW H dW^T) /
+tr(W H W^T)`, summed over experts, and the Hessians' off-diagonal share of their Frobenius norm. Both modes of each
+model quantized with it (the 2B from its GGUF Hessians, the 35B recipe from the pooled 4x ones); medians per kind:
+
+```
+2B, Q4_K / IQ4_KS        gptq/diag err   diag rel_err   offdiag
+attn_* / attn_qkv/gate   0.52-0.56       7e-4 - 3e-3    0.80
+attn_output              0.35            8.8e-3         0.98
+ffn_gate / ffn_up        0.55            1.4e-3 / 4e-3  0.81
+ffn_down                 0.49            4.4e-3         0.93
+ssm_out                  0.59-0.60       4.7e-3         0.91
+
+35B recipe
+attn_* (Q8_0)            0.27-0.35       4e-6 - 7e-5    0.78-0.96
+attn_qkv / gate (Q6_K)   0.58 / 0.63     8e-5 / 2e-5    0.80
+ssm_out (Q6_K)           0.61            2.6e-4         0.92
+shexp (Q8_0)             0.61-0.67       1e-5 - 3e-5    0.35-0.96
+ffn_gate/up_exps (IQ4_KS) 0.72           3.0e-3/4.8e-3  0.96
+ffn_down_exps (IQ4_KS)   0.86            4.6e-3         0.75
+```
+
+The error sits in the routed experts (rel_err 3-5e-3 against <= 2.6e-4 for everything else), and there GPTQ cuts it
+by 28% (gate/up) and 14% (down), against ~45-50% on every 2B tensor. Damping is not the cause: the 35B's expert input
+Hessians are flatter, not heavier-tailed (layer 20: mean/median diagonal 1.21 vs the 2B's 1.95, max/mean 47 vs 250,
+0.29% of eigenvalues below the 0.1 mean-diagonal damping vs 12.4%); a near-isotropic input leaves the feedback little
+correlation to trade error along. Down experts' inputs are flatter still (expert 0: max/mean 10.9, none below).
+
+And the cut that is there barely reaches KLD: a 14-28% lower error on the tensors carrying nearly all of it gave
+-2.7% KLD, where the 2B's ~50% gave ~30%. Measured in-sample (the calibration's own Hessians), so the next check is
+the same error over Hessians of the evaluation text: if the cut holds out of sample, the loss is between layer error
+and KLD (propagation, routing among 256 experts) and sequential GPTQ / router agreement come next; if it vanishes,
+the feedback is fitting the calibration and is done for this model's experts.

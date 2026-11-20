@@ -27,6 +27,8 @@ const ROWS_PER_TASK: usize = 64;
 const SLICE_BYTES: usize = 64 << 20;
 /// The share of a Hessian's mean diagonal GPTQ adds to it by default (its `percdamp`): 0.01 fit the calibration's
 /// domain and lost on other text, 0.1 held up across held-out text (quant_allocation_investigation Run 9).
+// set, each GPTQ tensor logs its reconstruction error and its Hessians' off-diagonal share (a diagnostic)
+const GPTQ_REPORT_ENV: &str = "INFERENCE_GPTQ_REPORT";
 pub const DEFAULT_GPTQ_DAMP: f64 = 0.1;
 // f32 bytes of rows the GPU quantizes in one call (its scratch takes about three times this)
 const GPU_CHUNK_BYTES: usize = 1 << 30;
@@ -315,23 +317,73 @@ fn gptq_tensor(
     };
     // experts sharing one Hessian are rows of one matrix to it (GPTQ treats rows alone): one pass over them all
     if per_expert.iter().all(Option::is_none) {
-        let shared = prepare(shared.as_deref().expect("a shared Hessian"))?;
-        return Ok(Some(quantize(&values, &shared)?));
+        let prepared = prepare(shared.as_deref().expect("a shared Hessian"))?;
+        let out = quantize(&values, &prepared)?;
+        if std::env::var_os(GPTQ_REPORT_ENV).is_some() {
+            let hs = vec![shared.as_deref(); experts];
+            report_reconstruction(t.name, ty, cols, &values, &out, &hs, device)?;
+        }
+        return Ok(Some(out));
     }
-    let shared = shared.as_deref().map(prepare).transpose()?;
+    let shared_prepared = shared.as_deref().map(prepare).transpose()?;
     // experts with their own Hessians run side by side, each factoring its own
     let parts = (0..experts)
         .into_par_iter()
         .map(|e| {
             let own = per_expert[e].as_deref().map(prepare).transpose()?;
-            let prepared = own.as_ref().or(shared.as_ref()).ok_or_else(|| {
+            let prepared = own.as_ref().or(shared_prepared.as_ref()).ok_or_else(|| {
                 inference_tensor::Error::Msg(format!("{}: no Hessian for expert {e}", t.name))
             })?;
             quantize(&values[e * per..(e + 1) * per], prepared)
         })
         .collect::<Result<Vec<_>>>()?;
     let out = parts.concat();
+    if std::env::var_os(GPTQ_REPORT_ENV).is_some() {
+        let hs = per_expert
+            .iter()
+            .map(|h| h.as_deref().or(shared.as_deref()))
+            .collect::<Vec<_>>();
+        report_reconstruction(t.name, ty, cols, &values, &out, &hs, device)?;
+    }
     Ok(Some(out))
+}
+
+// a diagnostic line: the encoding's output error over the calibration inputs, `tr(dW H dW^T) / tr(W H W^T)` summed
+// over the experts, and the Hessians' off-diagonal share of their Frobenius norm (what GPTQ's feedback works with)
+fn report_reconstruction(
+    name: &str,
+    ty: GgufType,
+    cols: usize,
+    values: &[f32],
+    out: &[u8],
+    hessians: &[Option<&[f32]>],
+    device: &Device,
+) -> Result<()> {
+    let decoded = dequantize_any(ty, cols, out)?;
+    let per = values.len() / hessians.len();
+    let (mut err, mut reference, mut off, mut total) = (0f64, 0f64, 0f64, 0f64);
+    for (e, h) in hessians.iter().enumerate() {
+        let Some(h) = h else { continue };
+        let rows = per / cols;
+        let w = Tensor::from_slice(&values[e * per..(e + 1) * per], (rows, cols), device)?;
+        let q = Tensor::from_slice(&decoded[e * per..(e + 1) * per], (rows, cols), device)?;
+        let ht = Tensor::from_slice(h, (cols, cols), device)?;
+        let dw = (&w - &q)?;
+        err += f64::from(dw.matmul(&ht)?.mul(&dw)?.sum_all()?.to_scalar::<f32>()?);
+        reference += f64::from(w.matmul(&ht)?.mul(&w)?.sum_all()?.to_scalar::<f32>()?);
+        let sq = ht.sqr()?.sum_all()?.to_scalar::<f32>()?;
+        let diag = (0..cols)
+            .map(|i| h[i * cols + i] * h[i * cols + i])
+            .sum::<f32>();
+        off += f64::from(sq - diag);
+        total += f64::from(sq);
+    }
+    tracing::info!(
+        "gptq-report {name} {ty:?} rel_err {:.6e} offdiag {:.4}",
+        err / reference,
+        (off / total).sqrt()
+    );
+    Ok(())
 }
 
 // rows of `cols` of `ty` back to f32: the raw types' dequantizers, or Candle's for the types it holds
