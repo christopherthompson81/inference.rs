@@ -118,3 +118,40 @@ ffn_down_exps (IQ3_KS)    1.72e-02    1.71e-02   0.995      0.994
 (dense groups unchanged from Run 3, same types). The penalty is the same 26-28% at 3 bits as at 4: it is the loss
 of the importance weights' and GPTQ's steering around the residual's large channels, which does not depend on the
 width. No KLD run: the reports already rule the 35B out at both widths.
+
+## Run 5 - 2026-11-20 16:45
+
+Question: does the rotation pay on a dense model? Qwen3.5-2B (`qwen35`, tied embedding), the scripts extended to
+dense FFNs (`ffn_gate/up` readers of `post_attention_norm`, `ffn_down` a writer) and to tied heads (an untied
+`output.weight` = E diag(g_out) Q written after the embedding). The rotated model is written as F32, so the
+quantizer reads unrounded weights; the control is the original with the embedding copied to `output.weight`
+(bit-exact, `--untie-only`), so both files have the same tensors. Fresh KLD bases from the original BF16 with the
+current ik build (the 2B's older bases read 0.00065 against the original itself):
+
+```
+file (ik llama-perplexity)   wiki      wiki_b
+original BF16                0.000331  0.000333   (the stored logits' floor)
+untied control               0.000331  0.000333
+rotated F32                  0.000331  0.000336
+```
+
+Exact. Quantized with the same rules (embedding and head Q6_K, ssm_alpha/beta/conv1d F32, every other block weight
+IQ4_KS or IQ3_KS), GPTQ with each file's Hessians (151 bound in both):
+
+```
+recipe          original           rotated            same top orig/rot (wiki)
+IQ4_KS bulk     0.01960 / 0.02101  0.02053 / 0.02189  92.78 / 92.30
+IQ3_KS bulk     0.09310 / 0.09810  0.08870 / 0.09566  85.37 / 85.36
+```
+
+Reconstruction (rot/orig, median per group; same at both widths within 0.03): attn_v 0.86, output 0.87, attn_k /
+attn_output / ssm_out 0.93-0.95, ffn_down 0.97, attn_q / attn_gate 0.94-0.99; attn_qkv 1.09-1.11, ffn_gate 1.18,
+ffn_up 1.22. So the dense FFN's gate/up lose to rotation just as the experts did: the penalty belongs to the
+post-attention norm's input, not to MoE routing, and it is the largest group in both models. Net: rotated 4-5% worse
+at 4 bits, 2.5-5% better at 3 bits, where the dense groups' own errors are large enough for their gains to outweigh
+the FFN's loss.
+
+Conclusion for item 3: residual-only rotation helps the attention-side readers and the writers, hurts the FFN /
+expert gate+up (their importance weights and GPTQ feedback lean on the residual's large channels), and nets a loss
+at the 4-bit widths the recipes use; a small gain only at a 3-bit bulk on the dense model. Not worth carrying in
+the quantizer.
