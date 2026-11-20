@@ -35,16 +35,23 @@ pub fn supports(ty: GgufType) -> bool {
         )
 }
 
-// the inverse of an upper triangular `n x n` matrix, in f64
+// the inverse of an upper triangular `n x n` matrix, in f64: back substitution a row at a time (row r from the rows
+// below it), so the inner loop runs along contiguous rows
 fn upper_inverse(u: &[f32], n: usize) -> Vec<f32> {
     let mut inv = vec![0f64; n * n];
-    for c in 0..n {
-        inv[c * n + c] = 1.0 / f64::from(u[c * n + c]);
-        for r in (0..c).rev() {
-            let s: f64 = (r + 1..=c)
-                .map(|k| f64::from(u[r * n + k]) * inv[k * n + c])
-                .sum();
-            inv[r * n + c] = -s / f64::from(u[r * n + r]);
+    let mut acc = vec![0f64; n];
+    for r in (0..n).rev() {
+        acc[r..].fill(0.0);
+        for k in r + 1..n {
+            let urk = f64::from(u[r * n + k]);
+            for (a, &v) in acc[k..].iter_mut().zip(&inv[k * n + k..(k + 1) * n]) {
+                *a += urk * v;
+            }
+        }
+        let d = 1.0 / f64::from(u[r * n + r]);
+        inv[r * n + r] = d;
+        for c in r + 1..n {
+            inv[r * n + c] = -acc[c] * d;
         }
     }
     inv.into_iter().map(|v| v as f32).collect()
@@ -56,6 +63,37 @@ pub struct Prepared {
     importance: Vec<f32>,
     dead: Vec<usize>,
     u: Option<Tensor>,
+    // GPTAQ's residual term `P = (dX X^T U^T) o M_U U`: each quantized column's input drift carried onto the
+    // columns after it, `W_rest += W_b P_b,rest`
+    p: Option<Tensor>,
+}
+
+impl Prepared {
+    /// GPTAQ (Li et al., 2025): with `cross` (`cols x cols`, `(X_fp - X_q)^T X_q / n`, the quantized model's inputs
+    /// `X_q` against the full-precision model's `X_fp`, and this Hessian over `X_q`), the feedback fits the layer's
+    /// output to the full-precision model's instead of to its own input.
+    pub fn with_cross(mut self, cross: &[f32], device: &Device) -> Result<Self> {
+        let Some(u) = &self.u else {
+            return Ok(self);
+        };
+        let cols = self.importance.len();
+        if cross.len() != cols * cols {
+            inference_tensor::bail!("a cross moment of {} for rows of {cols}", cross.len());
+        }
+        let c = Tensor::from_slice(cross, (cols, cols), device)?;
+        let index = Tensor::arange(
+            0u32,
+            u32::try_from(cols).map_err(inference_tensor::Error::wrap)?,
+            device,
+        )?;
+        let strictly_upper = index
+            .unsqueeze(1)?
+            .broadcast_lt(&index.unsqueeze(0)?)?
+            .to_dtype(DType::F32)?;
+        let p = c.matmul(&u.t()?)?.mul(&strictly_upper)?.matmul(u)?;
+        self.p = Some(p);
+        Ok(self)
+    }
 }
 
 /// `hessian` (`cols x cols`, the inputs' `X^T X / n`) damped by `damp` of its mean diagonal, a column no token reached
@@ -90,6 +128,7 @@ pub fn prepare(
         u: feedback
             .then(|| inverse_factor(&h, cols, device))
             .transpose()?,
+        p: None,
     })
 }
 
@@ -113,7 +152,49 @@ fn inverse_factor(h: &[f32], cols: usize, device: &Device) -> Result<Tensor> {
 }
 
 // the columns after block `b` (of `block`) moved by its error: `rest - E U_bb^-1 U_b,rest`
-fn carry(rest: &Tensor, error: &Tensor, u: &Tensor, b: usize, block: usize) -> Result<Tensor> {
+// `carry` for equal groups of rows each with its own factor (`u`: `[groups, cols, cols]`)
+fn carry_groups(
+    rest: &Tensor,
+    error: &Tensor,
+    u: &Tensor,
+    b: usize,
+    block: usize,
+) -> Result<Tensor> {
+    let (rows, width) = rest.dims2()?;
+    let groups = u.dim(0)?;
+    let ubb = u
+        .narrow(1, b * block, block)?
+        .narrow(2, b * block, block)?
+        .contiguous()?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let inverses = ubb
+        .par_chunks(block * block)
+        .map(|m| upper_inverse(m, block))
+        .collect::<Vec<_>>()
+        .concat();
+    let ubb_inv = Tensor::from_vec(inverses, (groups, block, block), rest.device())?;
+    let u_rest = u
+        .narrow(1, b * block, block)?
+        .narrow(2, (b + 1) * block, width - block)?
+        .contiguous()?;
+    let moved = error
+        .reshape((groups, rows / groups, block))?
+        .matmul(&ubb_inv)?
+        .matmul(&u_rest)?
+        .reshape((rows, width - block))?;
+    rest.narrow(1, block, width - block)? - moved
+}
+
+// with GPTAQ's `p`, also the block's pre-quantization values `current` times its rows of `p`
+fn carry(
+    rest: &Tensor,
+    error: &Tensor,
+    u: &Tensor,
+    b: usize,
+    block: usize,
+    asym: Option<(&Tensor, &Tensor)>,
+) -> Result<Tensor> {
     let width = rest.dim(1)?;
     let ubb = u
         .narrow(0, b * block, block)?
@@ -125,7 +206,137 @@ fn carry(rest: &Tensor, error: &Tensor, u: &Tensor, b: usize, block: usize) -> R
         .narrow(0, b * block, block)?
         .narrow(1, (b + 1) * block, width - block)?
         .contiguous()?;
-    rest.narrow(1, block, width - block)? - error.matmul(&ubb_inv)?.matmul(&u_rest)?
+    let moved =
+        (rest.narrow(1, block, width - block)? - error.matmul(&ubb_inv)?.matmul(&u_rest)?)?;
+    match asym {
+        Some((p, current)) => {
+            let p_rest = p
+                .narrow(0, b * block, block)?
+                .narrow(1, (b + 1) * block, width - block)?
+                .contiguous()?;
+            moved + current.matmul(&p_rest)?
+        }
+        None => Ok(moved),
+    }
+}
+
+/// A stack's experts (`values`: `prepared.len()` equal runs of rows of `cols`, each with its own prepared Hessian) as
+/// a row-scaled `ty`, all in one pass on the GPU; None where that pass does not cover `ty` or `device`.
+pub fn quantize_experts(
+    ty: GgufType,
+    cols: usize,
+    values: &[f32],
+    prepared: &[&Prepared],
+    device: &Device,
+) -> Result<Option<Vec<u8>>> {
+    let Device::Cuda(dev) = device else {
+        return Ok(None);
+    };
+    if super::iq_quantize::row_scaled(ty).is_none() || !super::quantize_cuda::fixed_supported(ty) {
+        return Ok(None);
+    }
+    if prepared
+        .iter()
+        .any(|p| p.importance.len() != cols || p.u.is_some() != prepared[0].u.is_some())
+    {
+        inference_tensor::bail!("{ty:?}: experts' Hessians differ in width or feedback");
+    }
+    let per = values.len() / prepared.len();
+    let mut w = std::borrow::Cow::Borrowed(values);
+    if prepared.iter().any(|p| !p.dead.is_empty()) {
+        let w = w.to_mut();
+        for (e, p) in prepared.iter().enumerate() {
+            for &i in &p.dead {
+                for r in 0..per / cols {
+                    w[e * per + r * cols + i] = 0.0;
+                }
+            }
+        }
+    }
+    let rest = Tensor::from_slice(&w, (values.len() / cols, cols), device)?;
+    gpu_row_scaled(ty, cols, rest, prepared, dev).map(Some)
+}
+
+// the row-scaled loop on the GPU over `rest` (dead columns zeroed), `prepared.len()` equal groups of its rows each
+// with its own Hessian: the row scales, each super-block's encoding against them, its error carried on through each
+// group's `U`, and the scales refit
+fn gpu_row_scaled(
+    ty: GgufType,
+    cols: usize,
+    mut rest: Tensor,
+    prepared: &[&Prepared],
+    dev: &inference_tensor::CudaDevice,
+) -> Result<Vec<u8>> {
+    let Some((header, super_bytes)) = super::iq_quantize::row_scaled(ty) else {
+        inference_tensor::bail!("{ty:?} is not row-scaled");
+    };
+    let rows = rest.dim(0)?;
+    let groups = prepared.len();
+    let per = rows / groups;
+    let blocks = cols / QK_K;
+    let row_bytes = header + blocks * super_bytes;
+    let importance: Vec<f32> = prepared
+        .iter()
+        .flat_map(|p| p.importance.iter().copied())
+        .collect();
+    // a group's factor, or the groups' stacked `[groups, cols, cols]`
+    let u = match prepared[0].u.as_ref() {
+        Some(u) if groups == 1 => Some(u.clone()),
+        Some(_) => Some(Tensor::stack(
+            &prepared
+                .iter()
+                .filter_map(|p| p.u.as_ref())
+                .collect::<Vec<_>>(),
+            0,
+        )?),
+        None => None,
+    };
+    let mut out = vec![0u8; rows * row_bytes];
+    let row_d = super::quantize_cuda::row_scales(dev, ty, &rest, &importance, per)?;
+    let mut sums = dev.alloc_zeros::<f32>(2 * rows)?;
+    for b in 0..blocks {
+        let current = rest.narrow(1, 0, QK_K)?.contiguous()?;
+        let imp: Vec<f32> = prepared
+            .iter()
+            .flat_map(|p| p.importance[b * QK_K..(b + 1) * QK_K].iter().copied())
+            .collect();
+        let (bytes, levels) = super::quantize_cuda::super_block_fixed(
+            dev, ty, &current, &imp, per, &row_d, &mut sums,
+        )?;
+        out.par_chunks_exact_mut(row_bytes)
+            .zip(bytes.par_chunks_exact(header + super_bytes))
+            .for_each(|(o, sb)| {
+                o[header + b * super_bytes..][..super_bytes].copy_from_slice(&sb[header..]);
+            });
+        if b + 1 == blocks {
+            break;
+        }
+        rest = match &u {
+            Some(u) => {
+                let error = (&current - levels.broadcast_mul(&row_d.unsqueeze(1)?)?)?;
+                if groups == 1 {
+                    let asym = prepared[0].p.as_ref().map(|p| (p, &current));
+                    carry(&rest, &error, u, b, QK_K, asym)?
+                } else {
+                    carry_groups(&rest, &error, u, b, QK_K)?
+                }
+            }
+            None => rest.narrow(1, QK_K, cols - (b + 1) * QK_K)?,
+        };
+    }
+    let d = row_d.to_vec1::<f32>()?;
+    let s = dev.clone_dtoh(&sums)?;
+    out.par_chunks_exact_mut(row_bytes)
+        .enumerate()
+        .for_each(|(r, o)| {
+            super::iq_quantize::row_scaled_header(
+                ty,
+                d[r],
+                (s[2 * r], s[2 * r + 1]),
+                &mut o[..header],
+            );
+        });
+    Ok(out)
 }
 
 /// `values` (rows of `cols`) as `ty` with the `prepared` Hessian, on `device`. A row-scaled type (IQ4_KS, IQ4_KSS,
@@ -174,57 +385,23 @@ fn quantize_on(
         );
     }
     // a column no token reached does nothing, so its weights are zeroed
-    let mut w = values.to_vec();
-    for &i in &prepared.dead {
-        for r in 0..rows {
-            w[r * cols + i] = 0.0;
+    let mut w = std::borrow::Cow::Borrowed(values);
+    if !prepared.dead.is_empty() {
+        let w = w.to_mut();
+        for &i in &prepared.dead {
+            for r in 0..rows {
+                w[r * cols + i] = 0.0;
+            }
         }
     }
     let importance = &prepared.importance;
     let u = &prepared.u;
     let blocks = cols / block;
     let mut rest = Tensor::from_slice(&w, (rows, cols), device)?;
-    if let (Some((header, super_bytes)), Device::Cuda(dev), true) = (row_scaled, device, gpu_encode)
+    if let (Some(_), Device::Cuda(dev), true) = (row_scaled, device, gpu_encode)
         && super::quantize_cuda::fixed_supported(ty)
     {
-        // the whole loop on the GPU: the row scales, each super-block's encoding and its error carried on
-        let row_bytes = header + blocks * super_bytes;
-        let mut out = vec![0u8; rows * row_bytes];
-        let row_d = super::quantize_cuda::row_scales(dev, ty, &rest, importance)?;
-        let mut sums = dev.alloc_zeros::<f32>(2 * rows)?;
-        for b in 0..blocks {
-            let current = rest.narrow(1, 0, block)?.contiguous()?;
-            let imp = &importance[b * block..(b + 1) * block];
-            let (bytes, levels) =
-                super::quantize_cuda::super_block_fixed(dev, ty, &current, imp, &row_d, &mut sums)?;
-            for (o, sb) in out
-                .chunks_exact_mut(row_bytes)
-                .zip(bytes.chunks_exact(super_bytes))
-            {
-                o[header + b * super_bytes..][..super_bytes].copy_from_slice(sb);
-            }
-            if b + 1 == blocks {
-                break;
-            }
-            match u {
-                Some(u) => {
-                    let decoded = levels.broadcast_mul(&row_d.unsqueeze(1)?)?;
-                    rest = carry(&rest, &(current - decoded)?, u, b, block)?;
-                }
-                None => rest = rest.narrow(1, block, cols - (b + 1) * block)?,
-            }
-        }
-        let d = row_d.to_vec1::<f32>()?;
-        let s = dev.clone_dtoh(&sums)?;
-        for (r, o) in out.chunks_exact_mut(row_bytes).enumerate() {
-            super::iq_quantize::row_scaled_header(
-                ty,
-                d[r],
-                (s[2 * r], s[2 * r + 1]),
-                &mut o[..header],
-            );
-        }
-        return Ok(out);
+        return gpu_row_scaled(ty, cols, rest, &[prepared], dev);
     }
     if let Some((header, super_bytes)) = row_scaled {
         let row_bytes = header + blocks * super_bytes;
@@ -254,8 +431,9 @@ fn quantize_on(
             if let Some(u) = &u
                 && b + 1 < blocks
             {
-                let error = (current - Tensor::from_slice(&decoded, (rows, block), device)?)?;
-                rest = carry(&rest, &error, u, b, block)?;
+                let error = (&current - Tensor::from_slice(&decoded, (rows, block), device)?)?;
+                let asym = prepared.p.as_ref().map(|p| (p, &current));
+                rest = carry(&rest, &error, u, b, block, asym)?;
             } else if b + 1 < blocks {
                 rest = rest.narrow(1, block, cols - (b + 1) * block)?;
             }
@@ -297,8 +475,9 @@ fn quantize_on(
         match &u {
             Some(u) => {
                 let q = decode(ty, block, &bytes)?;
-                let error = (current - Tensor::from_slice(&q, (rows, block), device)?)?;
-                rest = carry(&rest, &error, u, b, block)?;
+                let error = (&current - Tensor::from_slice(&q, (rows, block), device)?)?;
+                let asym = prepared.p.as_ref().map(|p| (p, &current));
+                rest = carry(&rest, &error, u, b, block, asym)?;
             }
             None => rest = rest.narrow(1, block, cols - (b + 1) * block)?,
         }
@@ -383,5 +562,125 @@ mod tests {
         Ok(())
     }
 
-    inference_tensor::gpu_cases!(cuda_cases, [gpu_and_cpu_encodings_agree]);
+    // a stack's experts in one batched pass write what each written alone does (three experts, each its own random
+    // Hessian, one with a dead column, so the batched carry runs)
+    fn experts_batched_match_alone() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let (experts, rows, cols, samples) = (3, 16, 512, 96);
+        let mut state = 11u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let values: Vec<f32> = (0..experts * rows * cols)
+            .map(|i| next() * if i % 37 == 0 { 0.5 } else { 0.05 })
+            .collect();
+        let mut prepared = Vec::new();
+        for e in 0..experts {
+            let x: Vec<f32> = (0..samples * cols)
+                .map(|i| if e == 1 && i % cols == 5 { 0.0 } else { next() })
+                .collect();
+            let x = Tensor::from_slice(&x, (samples, cols), &Device::Cpu)?;
+            let h = (x.t()?.matmul(&x)? / samples as f64)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            prepared.push(prepare(&h, cols, true, 0.1, &device)?);
+        }
+        let refs = prepared.iter().collect::<Vec<_>>();
+        let unused_encode =
+            |_: GgufType, _: usize, _: &[f32], _: Option<&[f32]>, _: Quantizer| Ok(Vec::new());
+        let unused_decode = |_: GgufType, _: usize, _: &[u8]| Ok(Vec::new());
+        let per = rows * cols;
+        for ty in [GgufType::Iq4Ks, GgufType::Iq4Kss, GgufType::Iq3Ks] {
+            let batched = quantize_experts(ty, cols, &values, &refs, &device)?.expect("a GPU pass");
+            let mut alone = Vec::new();
+            for (e, p) in prepared.iter().enumerate() {
+                alone.extend(quantize(
+                    ty,
+                    cols,
+                    &values[e * per..(e + 1) * per],
+                    p,
+                    Quantizer::IkLlama,
+                    &device,
+                    unused_encode,
+                    unused_decode,
+                )?);
+            }
+            let differing = batched.iter().zip(&alone).filter(|(a, b)| a != b).count();
+            assert_eq!((batched.len(), differing), (alone.len(), 0), "{ty:?}");
+        }
+        Ok(())
+    }
+
+    // GPTAQ fits the quantized layer to the full-precision output: with inputs drifted from the full-precision
+    // ones (a systematic map plus noise, as earlier quantized layers leave them), its `||W X_fp - Q X_q||` is below
+    // plain GPTQ's on the drifted inputs, and a zero cross moment changes nothing
+    fn asymmetric_feedback_fits_the_full_precision_output() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let cpu = Device::Cpu;
+        let (rows, cols, samples) = (32, 512, 1024);
+        let mut state = 23u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let mut random = |n: usize| (0..n).map(|_| next()).collect::<Vec<f32>>();
+        let w = Tensor::from_vec(random(rows * cols), (rows, cols), &cpu)?;
+        let mix = (Tensor::from_vec(random(cols * cols), (cols, cols), &cpu)? * 0.1)?;
+        let x_fp = Tensor::from_vec(random(samples * cols), (samples, cols), &cpu)?.matmul(&mix)?;
+        let drift = (Tensor::from_vec(random(cols * cols), (cols, cols), &cpu)? * 0.02)?;
+        let noise = (Tensor::from_vec(random(samples * cols), (samples, cols), &cpu)? * 0.005)?;
+        let x_q = ((&x_fp + x_fp.matmul(&drift)?)? + noise)?;
+        let n = samples as f64;
+        let h = (x_q.t()?.matmul(&x_q)? / n)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let cross = ((&x_fp - &x_q)?.t()?.matmul(&x_q)? / n)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let unused_encode =
+            |_: GgufType, _: usize, _: &[f32], _: Option<&[f32]>, _: Quantizer| Ok(Vec::new());
+        let unused_decode = |_: GgufType, _: usize, _: &[u8]| Ok(Vec::new());
+        let ty = GgufType::Iq4Ks;
+        let values = w.flatten_all()?.to_vec1::<f32>()?;
+        let error = |prepared: &Prepared| -> Result<f32> {
+            let bytes = quantize(
+                ty,
+                cols,
+                &values,
+                prepared,
+                Quantizer::IkLlama,
+                &device,
+                unused_encode,
+                unused_decode,
+            )?;
+            let q = Tensor::from_vec(
+                super::super::raw::dequantize_rows(ty, cols, &bytes)?,
+                (rows, cols),
+                &cpu,
+            )?;
+            (w.matmul(&x_fp.t()?)? - q.matmul(&x_q.t()?)?)?
+                .sqr()?
+                .sum_all()?
+                .sqrt()?
+                .to_scalar::<f32>()
+        };
+        let gptq = error(&prepare(&h, cols, true, 0.1, &device)?)?;
+        let gptaq = error(&prepare(&h, cols, true, 0.1, &device)?.with_cross(&cross, &device)?)?;
+        let zero = error(
+            &prepare(&h, cols, true, 0.1, &device)?.with_cross(&vec![0.0; cols * cols], &device)?,
+        )?;
+        assert!(gptaq < 0.9 * gptq, "GPTAQ {gptaq} against GPTQ {gptq}");
+        assert_eq!(zero, gptq, "a zero cross moment is plain GPTQ");
+        Ok(())
+    }
+
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            gpu_and_cpu_encodings_agree,
+            experts_batched_match_alone,
+            asymmetric_feedback_fits_the_full_precision_output
+        ]
+    );
 }

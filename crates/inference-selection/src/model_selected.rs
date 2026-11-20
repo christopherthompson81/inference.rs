@@ -443,6 +443,11 @@ pub enum ModelSelected {
         #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
+        /// A directory to write each linear's input Hessian to, from the calibration file, in place of loading to serve.
+        #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+        hessians_out: Option<PathBuf>,
+
         /// Automatically resize and pad images to this maximum edge length.
         #[serde(default)]
         max_edge: Option<u32>,

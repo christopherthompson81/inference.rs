@@ -10,7 +10,7 @@ mod plan;
 
 pub(crate) use drive::{
     CalibrationCtx, CalibrationDrive, EmbeddingCalibrationDrive, MultimodalCalibrationDrive,
-    NormalCalibrationDrive, resolve_imatrix_map, write_hessians,
+    NormalCalibrationDrive, added_bos, resolve_imatrix_map, write_hessians,
 };
 pub(crate) use exl3_write::Exl3Source;
 pub use online::CalibrationStatus;

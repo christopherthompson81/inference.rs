@@ -245,24 +245,26 @@ static __global__ void iq4_kss_accumulate(const float* x, const float* weights, 
 }
 
 // as launch_iq4_ks_row_scale, for IQ4_KSS (`shifted` unused)
-extern "C" int launch_iq4_kss_row_scale(const float* x, const float* importance, int64_t rows, int cols, float* weights,
+extern "C" int launch_iq4_kss_row_scale(const float* x, const float* importance, int64_t rows,
+                                       int64_t rows_per_importance, int cols, float* weights,
                                         float* scales, uint8_t* shifted, float* row_d, cudaStream_t stream) {
     (void)shifted;
     const int64_t blocks = rows * (cols / BLOCK);
-    iq4k_weights<false><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, cols, weights);
+    iq4k_weights<false><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows_per_importance, blocks, cols, weights);
     iq4_kss_search<<<grid(blocks), THREADS, 0, stream>>>(x, weights, blocks, scales);
     iq4k_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, 0, 1.0f, row_d, nullptr);
     return (int)cudaGetLastError();
 }
 
 // as launch_iq4_ks_super_fixed, for IQ4_KSS (`shifted` and `terms` unused)
-extern "C" int launch_iq4_kss_super_fixed(const float* x, const float* importance, int64_t rows, const float* row_d,
+extern "C" int launch_iq4_kss_super_fixed(const float* x, const float* importance, int64_t rows,
+                                       int64_t rows_per_importance, const float* row_d,
                                           float* weights, float* scales, uint8_t* shifted, uint8_t* out, float* terms,
                                           float* levels, float* sums, cudaStream_t stream) {
     (void)shifted;
     (void)terms;
     const int64_t blocks = rows * (QK_K / BLOCK);
-    iq4k_weights<false><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, QK_K, weights);
+    iq4k_weights<false><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows_per_importance, blocks, QK_K, weights);
     iq4_kss_search<<<grid(blocks), THREADS, 0, stream>>>(x, weights, blocks, scales);
     iq4_kss_blocks<<<grid(blocks), THREADS, 0, stream>>>(x, weights, blocks, QK_K, scales, row_d, out, levels);
     iq4_kss_accumulate<<<grid(rows), THREADS, 0, stream>>>(x, weights, rows, levels, sums);

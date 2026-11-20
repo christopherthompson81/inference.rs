@@ -365,3 +365,524 @@ the encoding against that scale with its levels, the row's fit sums continued in
 carry already ran there). A GPU test checks the bytes equal the CPU loop's for IQ4_KS, IQ4_KSS and IQ3_KS.
 
 The 35B recipe: 252 s against 2,219 s (8.8x), KLD 0.01672 / p99 0.1666 / 94.61%, the same file's.
+
+## Run 14 - 2026-11-20 01:00
+
+Where a 35B Hessian dump's 64 s a layer goes (the 4x calibration run, `quantize hessians` from the safetensors on an
+external USB drive): the drive reads at 71 MB/s at 100% utilization, ~1.7 GB a layer; the process at one core, the GPU
+idle between bursts, `memmove` high in the profile. The host load also built every layer (126 GB) though the
+streamed collector rebuilds each on the GPU, the states crossed to the host and back for each layer, and each layer
+ran twice (collect, then propagate).
+
+Changes: the states stay on the GPU when they fit (4 GiB; the 35B's 4x set is ~1.1 GB); one pass a layer collects and
+propagates (the layer as loaded, so nothing is lost); a Hessian dump skips the host layer build as an EXL3 write does;
+and `quantize hessians -m <file>.gguf` collects from a full-precision GGUF through its native bindings, read-ahead
+ranges from the GGUF's tensor table, so the BF16 GGUF on NVMe serves and the safetensors are not needed.
+
+2B check, Q4_K GPTQ scored on WikiText: Hessians from the GGUF 0.02731, from the safetensors 0.02749 (the Hessians
+differ by 0.04% median, 0.2% worst, down projections: bf16 rounding of the GGUF's stored norms). The states-on-GPU,
+one-pass change alone gave bit-identical Hessians on the 2B.
+
+35B 4x collection from the GGUF: 419 s total, 10-13 s a layer (was 61-67 s), peak RSS 71 GB.
+
+## Run 15 - 2026-11-20 01:30
+
+Experiment A: the alloc-r1size recipe (Run 12) with GPTQ from Hessians over 4x the calibration tokens (1,080,000
+characters of the WikiText + docs mix), gate/up still pooled.
+
+```
+Hessians                 KLD mean   p99     same top-1
+1x (Run 12/13)           0.01672    0.1666  94.61%
+4x                       0.01680    0.1738  94.33%
+```
+
+No gain: the token count was not what held the 35B back (down experts' ~2K rows each included). That leaves the
+pooled gate/up Hessians as the suspect; experiment B collects each expert's own.
+
+## Run 16 - 2026-11-20 02:40
+
+Experiment B: each gate/up expert's own routed Hessian (`INFERENCE_PER_EXPERT_HESSIANS`, collected from the GGUF over
+the 4x tokens; up binds to the gate's files, one input). First stored in bf16 to halve the 168 GB: 255 of layer 0's
+256 experts then failed to factor ("the damped Hessian is not positive definite"), min eigenvalue of H + 0.1 mean
+diag -0.04 to -0.18 (mean diag ~0.3). Each expert sees a few thousand rows of 2048 inputs, so its Hessian is near
+singular and bf16's rounding outweighs the damping. Stored instead as f32 packed upper triangles (`hin_upper`): exact,
+96 GB with the down experts, collected in 12 min (17-19 s a layer).
+
+```
+Hessians                        KLD mean   p99     same top-1
+pooled gate/up, 1x (Run 13)     0.01672    0.1666  94.61%
+pooled gate/up, 4x (Run 15)     0.01680    0.1738  94.33%
+per-expert gate/up, 4x          0.01699    0.1784  94.54%
+```
+
+No gain either: an expert's own few thousand rows fit GPTQ no better than the pooled second moment. Neither suspect
+from Run 12 explains the 35B's small feedback gain.
+
+The quantize took 991 s (pooled: ~230 s) with 8 s between GPU bursts: a CPU triangular inverse per 256-column block
+per expert (column-strided, 45% of samples), then the 256 Hessian files of a stack read and unpacked one at a time
+(64%). Row-wise back substitution for the inverse, the files loaded in parallel and the triangle mirrored in 64x64
+tiles: 470 s, KLD 0.01699 unchanged.
+
+## Run 17 - 2026-11-20 03:30
+
+Why GPTQ's feedback moves the 35B so little (Run 12: diag-only 0.01718, GPTQ 0.01672, -2.7%; the 2B -27% to -34%).
+`INFERENCE_GPTQ_REPORT=1` logs each GPTQ tensor's output error over the calibration inputs, `tr(dW H dW^T) /
+tr(W H W^T)`, summed over experts, and the Hessians' off-diagonal share of their Frobenius norm. Both modes of each
+model quantized with it (the 2B from its GGUF Hessians, the 35B recipe from the pooled 4x ones); medians per kind:
+
+```
+2B, Q4_K / IQ4_KS        gptq/diag err   diag rel_err   offdiag
+attn_* / attn_qkv/gate   0.52-0.56       7e-4 - 3e-3    0.80
+attn_output              0.35            8.8e-3         0.98
+ffn_gate / ffn_up        0.55            1.4e-3 / 4e-3  0.81
+ffn_down                 0.49            4.4e-3         0.93
+ssm_out                  0.59-0.60       4.7e-3         0.91
+
+35B recipe
+attn_* (Q8_0)            0.27-0.35       4e-6 - 7e-5    0.78-0.96
+attn_qkv / gate (Q6_K)   0.58 / 0.63     8e-5 / 2e-5    0.80
+ssm_out (Q6_K)           0.61            2.6e-4         0.92
+shexp (Q8_0)             0.61-0.67       1e-5 - 3e-5    0.35-0.96
+ffn_gate/up_exps (IQ4_KS) 0.72           3.0e-3/4.8e-3  0.96
+ffn_down_exps (IQ4_KS)   0.86            4.6e-3         0.75
+```
+
+The error sits in the routed experts (rel_err 3-5e-3 against <= 2.6e-4 for everything else), and there GPTQ cuts it
+by 28% (gate/up) and 14% (down), against ~45-50% on every 2B tensor. Damping is not the cause: the 35B's expert input
+Hessians are flatter, not heavier-tailed (layer 20: mean/median diagonal 1.21 vs the 2B's 1.95, max/mean 47 vs 250,
+0.29% of eigenvalues below the 0.1 mean-diagonal damping vs 12.4%); a near-isotropic input leaves the feedback little
+correlation to trade error along. Down experts' inputs are flatter still (expert 0: max/mean 10.9, none below).
+
+And the cut that is there barely reaches KLD: a 14-28% lower error on the tensors carrying nearly all of it gave
+-2.7% KLD, where the 2B's ~50% gave ~30%. Measured in-sample (the calibration's own Hessians), so the next check is
+the same error over Hessians of the evaluation text: if the cut holds out of sample, the loss is between layer error
+and KLD (propagation, routing among 256 experts) and sequential GPTQ / router agreement come next; if it vanishes,
+the feedback is fitting the calibration and is done for this model's experts.
+
+## Run 18 - 2026-11-20 03:15
+
+Out of sample: Run 17's two 35B files (same bytes, checked) with the report measured over Hessians of the KLD's own
+text (`INFERENCE_GPTQ_REPORT_HESSIANS`, the head of wiki.test.raw, ~21K tokens, collected in 109 s):
+
+```
+gptq/diag err            in sample (calibration)   out of sample (eval text)
+ffn_gate/up_exps         0.72                      0.78
+ffn_down_exps            0.86                      0.99
+shexp                    0.61-0.67                 0.65-0.67
+attn_* / attn_qkv/gate   0.27-0.63                 0.29-0.67
+ssm_out                  0.61                      0.64
+output                   0.36                      0.42
+```
+
+Two findings. The down experts' cut vanishes out of sample: each has its own Hessian over a few thousand routed rows
+(133K tokens x 8 / 256 ~ 4K, for 512 inputs), and the feedback fits those rows' noise. The same reason per-expert
+gate/up Hessians (Run 16) did worse than pooled ones. Every pooled or dense Hessian (gate/up from the shared input,
+shexp, attention, ssm_out) keeps most of its cut: gate/up 22% out of sample.
+
+That 22% still reaches KLD weakly. Rough share: gate/up IQ4_KS -> IQ3_KS (about 4x the error) added 0.0171 KLD in the
+sweep, so their part at IQ4_KS is ~0.0057 and a 22% cut predicts ~-0.0013; the whole recipe moved -0.0005. So some
+loss between layer error and output remains (propagation through 40 layers, routing), on top of the down experts'
+feedback being noise.
+
+Next: the down experts' Hessians shrunk toward their stack's mean (more effective rows), or their feedback off; then
+sequential GPTQ (each layer's Hessians collected with the layers before it quantized) for the propagation gap.
+
+## Run 19 - 2026-11-20 04:30
+
+GPTQ quantize speed, the 35B recipe with the pooled 4x Hessians (a pass of ~214 s). Per kind: the expert stacks 156 s
+(gate/up 1.1-1.4 s each, down 1.1 s), Q6_K attn_qkv/attn_gate/ssm_out 38 s, the head and embedding 11 s. Timers in a
+stack: the IQ4_KS fixed-scale encode 0.80 s (8 launches over 131K rows), the carry 15 ms, reading and widening the
+BF16 0.18 s. ncu on `iq4_ks_search`: L1/TEX 99.7%, DRAM 1.5%, issue slots 38%: bound by its shuffles (a warp per
+32-value block, four chained sums of ~11 shuffles per scale try, 31 tries).
+
+Changes, each checked byte for byte (the full recipe's file identical to the one before, `cmp`; the GPU-vs-CPU and
+batched-vs-alone tests):
+- `iq4_ks_search`: eight lanes per block, lane k running the CPU's partial sum k over values k, k + 8, ... in
+  registers, the eight added in `hsum_float_8`'s order by three xor shuffles (IEEE addition commutes, so the pairs
+  are the same): 38 ms to 7.5 ms a call.
+- `iq4_ks_blocks`: a thread per value pair instead of per block (coalesced).
+- the super-block bytes copied into the output in parallel, not stripped byte by byte then scattered serially.
+- `quantize_blocks` / `from_float_imatrix`: tasks sized to fill every thread (a GPTQ call encodes one block column,
+  2 tasks of 1024 blocks on 16 threads for ssm_out).
+- per-expert Hessians: the stack's experts in one batched GPU pass (per-expert importance through the kernels'
+  rows-per-importance, the carry a batched matmul over stacked factors, up to 2 GiB a batch).
+- `quantize gguf` turns off cudarc's per-buffer event tracking (one stream): 37,440 event creates and destroys, ~20 s
+  of contended API time over four down stacks, half their setup.
+- BF16 widening in parallel; the values copy before upload only when a column is dead.
+
+```
+                          before   after
+whole recipe              214 s    127 s
+ffn_gate/up_exps (41)     110 s    44 s
+ffn_down_exps (41)        46 s     44 s
+attn_qkv/gate, ssm_out    38 s     22 s
+```
+
+Left: a down stack reads 256 Hessian files (0.16 s) and its weights (0.19 s) before the GPU starts; prefetching the
+next tensor during the current one's GPU pass would hide that (~25 s). The IQ4_KSS and IQ3_KS searches still use
+the chained warp sums.
+
+## Run 20 - 2026-11-20 04:25
+
+First probe of the propagation gap (Run 18): GPTQ with each layer's Hessians collected from the activations of a
+model whose earlier layers are already quantized ("true sequential" GPTQ's inputs), done cheaply as one round of a
+fixed point: `quantize hessians` over the quantized GGUF itself (its earlier layers quantized with full-precision
+Hessians, so one iteration of the sequential scheme), then the BF16 quantized again with those Hessians. Needed:
+Hessian tracking on quantized GGUF layers (`GgufMatMul::begin_track_hessian`, input statistics on `GgufRawMatMul`,
+the ik types' layer), and `weight_rank` reading a quantized layer's shape.
+
+```
+2B, Q4_K on the linears (embedding BF16)   wiki     docsB    rust
+Hessians from the BF16 model               0.02233  0.01582  0.01596
+from the quantized model                   0.02195  0.01637  0.01632
+
+35B recipe (pooled 4x calibration)         KLD mean  p99     same top-1
+Hessians from the BF16 model               0.01680   0.1738  94.33%
+from the quantized model                   0.01710   0.1746  94.31%
+```
+
+No gain on either (the 2B mixed within ~3%, the 35B +1.8%). On the 35B the routed down experts' Hessians did not
+collect from the quantized model (the fused GGUF expert path does not call the routed-stats hook), so they came from
+the BF16 dump; their feedback is noise out of sample anyway (Run 18).
+
+Sequential inputs alone fit `Q X_q` to `W X_q`, the drifted input times the original weight, which does not undo the
+drift. The objective that does is the asymmetric one (GPTAQ): `min ||W X_fp - Q X_q||`, solved as GPTQ on the target
+`W C H_q^-1` with `C = X_fp X_q^T`, which needs each linear's full-precision and quantized inputs side by side (both
+models streamed together), and does not apply to routed experts whose rows route differently in the two models.
+
+## Run 21 - 2026-11-20 04:50
+
+Run 19's leftover: each GPTQ tensor's Hessians and source values loaded before its GPU pass (a down stack 0.16 s of
+Hessian files and 0.19 s of weights). A second thread now reads the next GPTQ tensor's Hessians and values (its own
+reader, widened to f32) while the GPU quantizes the current one, handed over a one-deep channel.
+
+```
+35B recipe, pooled 4x Hessians   before   after
+whole                            127 s    106 s   (peak RSS 6.0 GB; same bytes, cmp)
+ffn_down_exps (41)               44 s     36 s
+ffn_gate/up_exps (82)            44 s     35 s
+```
+
+## Run 22 - 2026-11-20 05:15
+
+Question (after a literature pass: GPTAQ is dense-only; MoEQuant, EAQuant, VSRAQ, GEMQ, ProQuant treat routing):
+how much does the quantized 35B's routing drift from the BF16 model's?
+
+`INFERENCE_ROUTE_DUMP=<file>` makes `moe_router_topk` append each call's expert ids and weights. Both models streamed
+through `quantize hessians` over the evaluation text (the head of wiki.test.raw, ~21K tokens; BF16 GGUF 103 s, the
+GPTQ recipe file 20 s), each on its own states, so the drift is end to end: every layer routes on the hidden state
+its own quantized predecessors produced.
+
+```
+layer   top-8 Jaccard   same top-8 set   same top-1   BF16 route weight on dropped experts
+0       0.930           69.6%            94.1%        0.022
+10      0.925           68.2%            94.6%        0.025
+15      0.883           54.2%            91.3%        0.047
+20      0.841           43.0%            88.7%        0.062
+25      0.804           33.7%            81.5%        0.084
+30      0.807           35.7%            82.4%        0.087
+35      0.832           40.8%            87.5%        0.072
+39      0.875           52.2%            87.8%        0.052
+all     0.865           50.7%            89.4%        0.055
+```
+
+Routing drift is large and grows with depth to layers 25-30: two tokens in three change at least one of their eight
+experts there, one in five its top expert, though the flips are mostly low-weight experts (5.5% of the routing weight
+on average). Whether it is a large share of the KLD needs the quantized model run with the BF16 routes forced.
+
+Two false starts: the BF16 model in the perplexity example maps layers 13-39 to the host, where the first MoE layer
+failed (`dtype mismatch in matmul, lhs: F32, rhs: BF16`: host layers run in f32 while an expert stack keeps its bf16,
+fixed: the unquantized gather takes its input in the weight's dtype), and after the fix it ran ~3.5 min a chunk
+(27 host layers) and stopped with an internal error two chunks in. The streamed collector does the same in 103 s.
+
+## Run 23 - 2026-11-20 06:10
+
+A streamed KLD scorer, `inference quantize kld -m <model> --kld-base <llama-perplexity base>`: the model streamed a
+layer at a time through the GPU (as `quantize hessians`) over the base's own chunks, each chunk's second half scored
+against the base's records by the engine's own divergence code (`LogitsReference`, `divergence`, now in
+`inference_nn::logits_reference` with a base reader), f32 logits. The 35B's BF16 scores in 115 s, a quantized file in
+~20 s; the engine could not run the BF16 35B (27 host layers, ~3.5 min a chunk, then an error).
+
+Validated on a small MoE that fits the GPU in BF16 (OLMoE-1B-7B, 64 experts top-8; BF16 GGUF from llama.cpp's
+converter, base from llama-perplexity, 40 x 512 of wiki.test):
+
+```
+KLD vs llama.cpp BF16 base     engine     streamed
+OLMoE BF16                     0.00495    0.00495
+OLMoE Q4_K                     0.10956    0.10957
+Qwen3.5-2B Q4_K (our base)     0.02233    0.02205
+35B GPTQ recipe                0.01680    0.01665
+35B BF16                       -          0.00556
+```
+
+A false start found the cause of every streamed-vs-engine mismatch so far (Runs 20, 22 and the first forced-route
+numbers): the streamed path put BOS at a chunk's first position for any model with a BOS token, where llama-perplexity
+(and the engine's scoring) swaps it in only when encoding adds one. Qwen3.6 adds none, so the streamed 35B read a
+different first token in every chunk: PPL 7.54 against 5.82, KLD 0.316 for its BF16. Found bottom-up: OLMoE's routes
+differed already at layer 0, at position 0 entirely; a per-layer dump showed the layer-0 input (the embedding) off in
+row 0 only. (`quantize hessians` still prepends the BOS to its calibration chunks; Runs 14-22's Hessians and route
+dumps ran on BOS-prefixed chunks.)
+
+Our BF16 35B is 0.00556 from llama.cpp's BF16: a third of the recipe's 0.0167 is between the two engines, not the
+quantization.
+
+Forced routing, measured right (`INFERENCE_ROUTE_DUMP` on the BF16 run, `INFERENCE_ROUTE_FORCE` on the quantized,
+the same calls in the same order):
+
+```
+35B                     own routes   BF16 routes forced
+GPTQ recipe             0.01665      0.01168
+Q4_K experts            0.01767      0.01229
+```
+
+Above the 0.0056 floor, forcing the BF16 routes takes the recipe from 0.0111 to 0.0061: routing flips are ~45% of
+the KLD the quantization adds. Routing agreement over these chunks: top-8 Jaccard 0.903, same top-8 set 60.7%, same
+top-1 92.9% (layer 25: 0.871 / 51.2% / 91.2%), weight on dropped experts 3.5%. Router consistency is worth pursuing.
+
+## Run 24 - 2026-11-20 07:40
+
+Where the routing flips come from: each recipe group quantized alone (the rest BF16, the router and GDN small tensors
+F32), scored with `quantize kld` against the llama.cpp BF16 base with its own routes and with our BF16's routes
+forced. Excess over our BF16 (0.00556):
+
+```
+group (alone)              own routes   BF16 routes forced   routing share
+exps gate/up (IQ4_KS)      0.00702      0.00393              44%
+exps down (IQ4_KS)         0.00508      0.00259              49%
+token_embd (Q4_K)          0.00213      0.00011              95%
+ssm_out (Q6_K)             0.00204      0.00054              74%
+attn_qkv (Q6_K)            0.00174      0.00023              87%
+attn_gate (Q6_K)           0.00099      0.00005              95%
+full attention (Q8_0)      0.00046      0.00008              83%
+shexp (Q8_0)               0.00025      0.00006              76%
+output (Q8_0)              0.00002      0.00002              -
+```
+
+Outside the routed experts nearly all of a group's harm is through the routing: an error in the residual stream
+(the embedding, GDN, attention, the shared expert) costs little at its own outputs and much through the routes it
+flips downstream. The routed experts' is half and half. So router consistency is the lever for every group; the
+allocation sweep (Run 5) priced the non-expert groups by an effect that is mostly routing.
+
+## Run 25 - 2026-11-20 08:00
+
+GPTAQ on the 35B recipe, its statistics from the twin stream (Run 24's commit): the BF16 model over the 4x
+calibration with the GPTQ recipe file as its twin, each dense input paired (`hin` the twin's Hessian, `dxx` the
+cross moment), 462 s; the routed down experts' Hessians from the BF16 dump. The twin stream reproduces the two-pass
+forced-route KLD exactly (0.01168), so the pairing is right; a GPU test pins GPTAQ below GPTQ on synthetic drift.
+
+```
+recipe, quantize kld vs llama.cpp BF16          KLD mean
+GPTQ (BF16 Hessians)                            0.01665 / 0.01695 (BOS-free Hessians)
+twin Hessians, no residual term (scale 0)       0.01674
+GPTAQ, twin routed as BF16, scale 1 / 0.5 / .25 0.01873 / 0.01736 / 0.01728
+GPTAQ, twin on its own routes, scale 1 / 0.5    0.01900 / 0.01747
+```
+
+A cheaper router-aware fix, the routers refit in closed form so that on the quantized model's inputs they give the
+BF16 model's logits (`W' = W (C + H) H^-1` at the MoE input, patched into the F32 `ffn_gate_inp`; the shared-expert
+gate too in the first try):
+
+```
+statistics           router + shexp gate   router only   router only, half
+twin routed as BF16  0.01770               0.01758       -
+twin own routes      -                     0.01785       0.01654
+```
+
+and routing agreement after the refit barely moves (top-8 Jaccard 0.9025 to 0.9039, same set 60.7% to 61.2%).
+
+Every linear correction of the input drift loses (one within noise). The drift each layer sees is not a linear
+function of its input that a weight or router change can undo: much of it is downstream of discrete routing flips,
+and a least-squares fit to it reshapes the softmax weights more than it saves routes. One-shot GPTAQ also corrects for
+the GPTQ file's drift rather than its own (the paper quantizes sequentially); a fused sequential build could still
+differ, but the router refit, which has no such mismatch, does not help either. Next lever for routing: reducing
+the drift itself, or a learned (gradient) router-consistency objective (EAQuant, VSRAQ), a larger build.
+
+## Run 26 - 2026-11-20 09:10
+
+Question: how does the allocated GPTQ recipe compare with Unsloth's published quants of about its size, on one
+scorer? ik's `llama-perplexity --kl-divergence` (WikiText, c512, 40 chunks, the BF16 base of every run here) on all
+three; the recipe rebuilt from `hessians-4x-nobos` (the Run 12 rules, 104 s, 19,904,022,464 B).
+
+```
+file                         bytes            KLD                  p99     same top   PPL(Q)/PPL(base)
+Unsloth UD-IQ4_NL_XL         19,500,506,080   0.02329 +/- 0.00063  0.2458  93.39%     1.0141
+ours, allocated + GPTQ       19,904,022,464   0.01599 +/- 0.00041  0.1712  94.60%     1.0042
+Unsloth UD-Q4_K_S            20,893,015,008   0.01604 +/- 0.00047  0.1739  94.28%     1.0037
+```
+
+Ours matches UD-Q4_K_S (KLD within error, lower p99, higher top-1 match) at 989 MB (4.7%) smaller, and is 31% under
+UD-IQ4_NL_XL at 2% larger. llama-perplexity scores the recipe 0.01599 where our engine scored the same recipe 0.0167-0.0170:
+the engine's BF16 floor against this base (0.0056, Run 23) shows up as about 0.001 on a quantized file.
+
+Next: the drift-reduction allocation (bits where routing flips start) to widen the margin at a fixed size.
+
+## Run 27 - 2026-11-20 09:40
+
+Question: does a router fit with the published router-consistency objectives (EAC-MoE's TopK-MSE, VSRAQ's rank and
+boundary-margin terms) recover the routing that Run 25's full least-squares refit did not?
+
+`INFERENCE_STREAM_ROUTER_DUMP` (new, with a twin): each layer's MoE input in the BF16 model (`xf`) and the GPTQ
+recipe twin on its own routes (`xq`), over the 1x calibration (65K tokens, 40 layers in 3 min, 21 GB). A scratch
+fitter (PyTorch) fits each F32 router on 80% of the tokens to the BF16 logits `W x_fp` and reports top-8 Jaccard on
+the other 20%:
+
+```
+method                                         held-out Jaccard (mean of 40 layers)   same set
+none                                           0.9055                                 0.627
+full least squares (Run 25's objective)        0.9081                                 0.638
+per-row TopK-MSE (k 16), closed form, ridge    0.8802                                 0.558
+TopK-MSE + rank + margin, Adam, 400 steps      0.9005                                 0.613
+same, 2000 steps, weaker anchor                0.8823                                 0.553
+```
+
+The per-row fit lets an expert's logits rise freely on the tokens it should not take (train agreement falls at
+layer 30); the gradient fits overfit (train up, held-out down). Why nothing fits, per layer:
+
+```
+layer  input drift  logit drift sd  BF16 top-8 margin p10/p50  tokens with a flip  drift R2 from x_q (train/held)
+0      5.2%         0.032           0.008/0.054                20%                 0.896/0.882
+1      5.8%         0.027           0.007/0.050                21%                 0.611/0.566
+2      6.1%         0.034           0.008/0.051                23%                 0.465/0.405
+5      6.8%         0.038           0.007/0.045                28%                 0.229/0.143
+10     8.9%         0.053           0.008/0.055                30%                 0.122/0.040
+20     14.4%        0.086           0.006/0.041                48%                 0.089/0.014
+30     14.4%        0.093           0.007/0.046                40%                 0.113/0.024
+39     12.2%        0.053           0.006/0.046                33%                 0.106/0.019
+```
+
+Past the first layers 1-4% of the router logits' drift is linearly predictable from the quantized input: it is
+noise to any router, at a spread (0.05-0.09) the size of the median routing margin, so a third to a half of tokens
+flip an expert. Layers 0-4 looked fixable (held-out Jaccard 0.945 -> 0.961 with full least squares), but refitting
+only those scores worse with llama-perplexity (recipe 0.01599; layers 0-4 0.01629, layers 0-2 0.01618), and on
+WikiText layer 0's agreement moves 0.9161 -> 0.9174 only (all layers 0.9037 -> 0.9054): the early drift is each
+token's own embedding error, learned for the calibration's tokens (the random held-out split shares them).
+
+Router-side fixes have nothing to work with on this model at this bit width; the published gains are at W4A4, 3 bits
+and NVFP4, and VSRAQ's 4-bit hybrid (Nemotron-3-Nano) moved WikiText PPL 10.79 -> 10.70. The lever is the drift
+itself. Next: Hessians weighting each expert row by its routing weight squared (how its error reaches the output).
+
+## Run 28 - 2026-11-20 10:05
+
+Question: do Hessians weighting each routed expert row by its routing weight (MoEQuant's affinity guidance; w^2 is
+how a routed expert's error reaches the output) beat the unweighted ones? An env switch scaled each slot's row by
+w^(p/2) before the routed Hessian; the 4x calibration again, the recipe quantized from each set, ik llama-perplexity:
+
+```
+down experts' Hessians     KLD      p99     same top
+unweighted (recipe)        0.01599  0.1712  94.60%
+weighted by w              0.01680  0.1807  -
+weighted by w^2            0.01700  0.1904  94.61%
+```
+
+Both lose (only the down experts change: gate/up take the shared expert's Hessian). Weighting concentrates each
+expert's ~2K rows onto its strongly routed few, and these statistics already overfit (Run 17). Switch removed.
+
+## Run 29 - 2026-11-20 10:40
+
+Question: priced inside the recipe rather than alone, which groups should move? Each group's type changed in the
+GPTQ recipe (`--reuse` of the rest), ik llama-perplexity. The sweep's prices were isolated, and Run 8 had shown
+compounding (Q4_K `token_embd` +0.0005 alone, +0.0014 in the recipe). A second BF16 base on later WikiText text
+(40 chunks from byte 600,000; experts on the host, 213 s) checks what the first set finds.
+
+```
+move (from the recipe, 19,904,022,464 B)   bytes          KLD set A   KLD set B
+none                                       19,904,022,464  0.01599     0.01565
+token_embd q4_k -> q6_k                    20,035,135,424  0.01600
+token_embd q4_k -> q8_0                    20,158,302,144  0.01568
+attn_qkv q6_k -> q8_0                      20,025,919,424  0.01679     0.01593
+attn_qkv q6_k -> q5_k                      19,837,175,744  0.01752
+attn_gate q6_k -> q8_0                     19,964,970,944  0.01626
+attn_gate q6_k -> q5_k                     19,870,599,104  0.01728
+ssm_out q6_k -> q8_0                       19,964,970,944  0.01527     0.01530
+ssm_out q6_k -> q5_k                       19,870,599,104  0.01905
+shexp q8_0 -> q6_k                         19,872,786,368  0.01735
+attention q8_0 -> q6_k                     19,831,392,192  0.01654
+output q8_0 -> q6_k                        19,780,855,744  0.01615
+exps down iq4_ks -> iq4_kss                19,560,089,536  0.01889
+exps gate/up iq4_ks -> iq4_kss             19,216,156,608  0.02012
+ssm_out q8_0, output q6_k                  19,841,804,224  0.01544     0.01547
+  + token_embd q6_k                        19,972,917,184  0.01399     0.01446
+  + token_embd q8_0                        20,096,083,904  0.01385     0.01454
+  + token_embd q8_0, attention q6_k        20,023,453,632  0.01402
+Unsloth UD-Q4_K_S                          20,893,015,008  0.01604     0.01580
+Unsloth UD-IQ4_NL_XL                       19,500,506,080  0.02329     0.02152
+```
+
+Two upgrades measure worse (`attn_qkv` and `attn_gate` to Q8_0, the first on both sets): a change reshuffles the
+near-tie flips of Run 27, so one move's KLD carries about +/-0.0008 of that on 40 chunks, and only larger effects
+read. Moves compound: `token_embd` Q6_K alone gives nothing, with `ssm_out` Q8_0 beside it -0.0014 / -0.0010 (two
+drift sources feeding the same flips). `ssm_out` is the most sensitive group per byte both ways (+0.0031 for 33 MB
+down, -0.0007 / -0.0004 for 61 MB up); `output` Q6_K is a cheap saving.
+
+The new recipe (`ssm_out` Q8_0, `output` Q6_K, `token_embd` Q6_K, the rest as Run 12) measures 0.01399 / 0.01446:
+8-12% under the recipe for 69 MB (0.35%), and 8-13% under UD-Q4_K_S at 920 MB smaller. Allocation should be priced
+in context (greedy moves from a recipe, measured jointly) and checked on a second text, not added from isolated costs.
+
+## Run 30 - 2026-11-20 11:40
+
+Question: where does an in-context point's time go, and is the GPU or CPU idle? One move (`attn_gate` Q8_0) timed
+by stage with utilization sampled each second, then nsys and perf on the scorer:
+
+```
+stage                                              time    GPU        CPU (16 threads)
+full-file quantize with --reuse (20 GB rewritten)  29 s    ~0%        ~10%
+overlay quantize (--only)                          5 s     low        ~10%
+model load, ours / llama.cpp                       15 / 14 s  ~15%    ~10%
+40 chunks scored, ours / llama.cpp                 12 / 8 s   60-100%  ~10%
+```
+
+The load was one thread: raw GGUF weights copied out of the mapped file into a `Vec` (52% of its samples), then
+pageable host-to-device copies (30%), while the file reads at 13 GB/s from the page cache and the copies themselves
+took 2.2 s of GPU time. Pinned staging buffers filled on every core plus uploads straight from the mapping: 10 s ->
+3.6 s. Scoring left the GPU idle ~60 ms a chunk while the example built the next chunk's 127 MB reference on its one
+thread; read ahead on a thread of its own: 40 chunks 21.5 s -> 12.6 s end to end (scores identical; 2,700 tok/s
+against llama.cpp's 2,510). Sending 4 or 8 chunks at once changed nothing (the engine runs them in turn).
+
+The two scorers disagree on that one move (ours -0.0007, llama.cpp 0.0000): on 40 chunks a move's flip reshuffle
+outweighs it, so the greedy loop needs paired per-chunk errors and more text per point. The streamed scorer
+(`quantize kld`, 16 s) builds each layer once per pass (0.2 s a layer, 0.05 s of it upload), so every candidate of
+a round can ride one pass on its own 80 MB of states, the shared layers uploaded once.
+
+## Run 31 - 2026-11-20 12:45
+
+Question: can every in-context move of a round be scored in one pass, and what does a measured greedy loop find
+around the v2 recipe (Run 29)?
+
+`quantize kld` with `INFERENCE_STREAM_CANDIDATES` (overlays from `quantize gguf --only`): each candidate rides the
+streamed pass on its own states, which it shares with the model until its embedding or a layer it replaces sets them
+apart (a head-only move costs only its scoring); each chunk's base records are read and decoded once for every run.
+Three candidates (`attn_gate` / `token_embd` / `output` Q8_0) score exactly as each merged file does alone (0.01530 /
+0.01534 / 0.01479, the model 0.01494), in 34.5 s against 68 s apart. Stacking 2-8 chunks into one layer call saved
+20% but moved the candidates' scores by up to 0.0004 (a different rounding order reshuffles the near-tie routes),
+so it was dropped.
+
+On the way: the streamed scorer had turned nondeterministic (the same file 0.0217 / 0.0178 / 0.0154). The pinned
+staging of Run 30 returned before its copy landed, where a pageable copy does not, and the quant kernels launched on
+the per-thread default stream read the weights early; the staged copy now waits for its last chunk (0.01494 three
+times, as before staging; the 20 GB load still 3.7 s).
+
+`scripts/quant_sweep.py refine` (both WikiText bases, 80 chunks, paired per-chunk KLD change and its standard error,
+a move taken when it beats twice that and fits): round 1 from v2 at its size (19,972,917,184 B, 0.01515):
+
+```
+move                       bytes          dKLD
+exps_gate_up iq4_kss       -687,865,856   +0.00286 +/- 0.00039
+exps_down iq4_kss          -343,932,928   +0.00149 +/- 0.00025
+attn_qkv q5_k               -66,846,720   +0.00087 +/- 0.00027
+attn_qkv q8_0              +121,896,960   -0.00021 +/- 0.00025
+attn_gate q5_k              -33,423,360   +0.00072 +/- 0.00029
+attn_gate q8_0              +60,948,480   +0.00020 +/- 0.00035
+ssm_out q6_k                -60,948,480   +0.00106 +/- 0.00031
+attention q6_k              -72,630,272   +0.00032 +/- 0.00025
+shexp q6_k                  -31,236,096   -0.00015 +/- 0.00021
+token_embd q5_k             -67,543,040   +0.00017 +/- 0.00021
+token_embd q8_0            +123,166,720   +0.00021 +/- 0.00019
+output q5_k                 -67,543,040   +0.00047 +/- 0.00005
+output q8_0                +123,166,720   -0.00015 +/- 0.00002
+```
+
+Nothing beats its noise within the size and no up/down pair is predicted to gain, so v2 is a local optimum at this
+size to what 80 chunks resolve (~0.0002-0.0004 per move). Head-only moves have tiny errors (they do not reshuffle
+routes): `output` Q8_0 is a real but small gain (-1% for 123 MB). The round took 15 min: recipe 2 min, 18 overlays
+~9 min, two passes 2 min each (6.5 s a candidate); overlays now carry over between rounds (each depends only on its
+group's type).

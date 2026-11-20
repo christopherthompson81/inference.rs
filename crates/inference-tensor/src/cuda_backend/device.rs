@@ -25,6 +25,22 @@ impl DeviceId {
     }
 }
 
+// host-to-device copies at least this large go through pinned staging buffers: the driver stages a pageable copy
+// itself and returns only when it has, at a fraction of the link's speed
+const STAGED_HTOD_MIN_BYTES: usize = 8 << 20;
+const STAGING_CHUNK_BYTES: usize = 32 << 20;
+const STAGING_BUFFERS: usize = 3;
+const STAGING_COPY_SLICE_BYTES: usize = 2 << 20;
+
+// a ring of pinned buffers, each with the event of the copy last made from it
+struct HtodStaging {
+    buffers: Vec<(
+        cudarc::driver::PinnedHostSlice<u8>,
+        cudarc::driver::CudaEvent,
+    )>,
+    next: usize,
+}
+
 struct CudaRng(cudarc::curand::CudaRng);
 unsafe impl Send for CudaRng {}
 
@@ -160,6 +176,7 @@ pub struct CudaDevice {
     seed_value: Arc<RwLock<u64>>,
     compute_cap: usize,
     sm_count: usize,
+    htod_staging: Arc<Mutex<Option<HtodStaging>>>,
 }
 
 impl std::fmt::Debug for CudaDevice {
@@ -201,7 +218,83 @@ impl CudaDevice {
         if cuda_graph_htod_cache_enabled() && !src.is_empty() {
             return self.memcpy_htod_capture_cached(src, dst);
         }
+        if src.len() * std::mem::size_of::<T>() >= STAGED_HTOD_MIN_BYTES
+            && !self.cuda_graph_capture_active()
+        {
+            return self.memcpy_htod_staged(src, dst);
+        }
         self.stream.memcpy_htod(src, dst).w()
+    }
+
+    // the copy in chunks through the pinned ring: each chunk copied in on the host once its buffer's last copy is done,
+    // then sent, so the host copy of one chunk overlaps the transfer of the one before
+    fn memcpy_htod_staged<
+        T: cudarc::driver::DeviceRepr,
+        Src: cudarc::driver::HostSlice<T> + ?Sized,
+        Dst: cudarc::driver::DevicePtrMut<T>,
+    >(
+        &self,
+        src: &Src,
+        dst: &mut Dst,
+    ) -> Result<()> {
+        if dst.len() < src.len() {
+            crate::bail!("a copy of {} elements into {}", src.len(), dst.len());
+        }
+        let mut guard = self
+            .htod_staging
+            .lock()
+            .map_err(|_| crate::Error::msg("the staging buffers' lock is poisoned"))?;
+        if guard.is_none() {
+            let buffers = (0..STAGING_BUFFERS)
+                .map(|_| {
+                    let buffer = unsafe {
+                        self.context.alloc_pinned_with_flags::<u8>(
+                            STAGING_CHUNK_BYTES,
+                            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+                        )
+                    }
+                    .w()?;
+                    let event = self.context.new_event(None).w()?;
+                    Ok((buffer, event))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            *guard = Some(HtodStaging { buffers, next: 0 });
+        }
+        let Some(staging) = guard.as_mut() else {
+            unreachable!()
+        };
+        self.context.bind_to_thread().w()?;
+        let (src, _src_sync) = unsafe { src.stream_synced_slice(&self.stream) };
+        let src = unsafe {
+            std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), std::mem::size_of_val(src))
+        };
+        let (dst, _dst_sync) = dst.device_ptr_mut(&self.stream);
+        for (i, chunk) in src.chunks(STAGING_CHUNK_BYTES).enumerate() {
+            let (buffer, event) = &mut staging.buffers[staging.next];
+            staging.next = (staging.next + 1) % STAGING_BUFFERS;
+            event.synchronize().w()?;
+            let host = &mut buffer.as_mut_slice().w()?[..chunk.len()];
+            // one thread copies out of a mapped file at a fraction of what the link takes
+            use rayon::prelude::*;
+            host.par_chunks_mut(STAGING_COPY_SLICE_BYTES)
+                .zip(chunk.par_chunks(STAGING_COPY_SLICE_BYTES))
+                .for_each(|(to, from)| to.copy_from_slice(from));
+            let offset = (i * STAGING_CHUNK_BYTES) as u64;
+            unsafe {
+                cudarc::driver::result::memcpy_htod_async(
+                    dst + offset,
+                    host,
+                    self.stream.cu_stream(),
+                )
+            }
+            .w()?;
+            event.record(&self.stream).w()?;
+        }
+        // done before returning, as a pageable copy is: a reader on another stream (the quant kernels launch on the
+        // per-thread default stream) orders nothing after it
+        let last = (staging.next + STAGING_BUFFERS - 1) % STAGING_BUFFERS;
+        staging.buffers[last].1.synchronize().w()?;
+        Ok(())
     }
 
     pub fn clone_dtoh<T: cudarc::driver::DeviceRepr, Src: cudarc::driver::DevicePtr<T>>(
@@ -562,6 +655,7 @@ impl CudaDevice {
             modules: Arc::new(std::sync::RwLock::new(module_store)),
             custom_modules: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seed_value: Arc::new(RwLock::new(299792458)),
+            htod_staging: Arc::new(Mutex::new(None)),
         })
     }
 }

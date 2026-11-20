@@ -43,11 +43,15 @@ pub enum QuantizeCommand {
     /// Each linear's input Hessian (`X^T X / n`) of a text model over a calibration file, for `quantize gguf --hessians`
     /// (and exllamav3's converter): a layer at a time through the GPU, the model on the host
     Hessians(HessiansOptions),
+
+    /// A model's KL divergence from a llama-perplexity base (`--kl-divergence-base`) over the base's own chunks, a
+    /// layer at a time through the GPU with the model on the host: models too large for the GPU score in minutes
+    Kld(KldOptions),
 }
 
 #[derive(Args, Clone)]
 pub struct HessiansOptions {
-    /// Hugging Face model ID or local model directory (full precision)
+    /// Hugging Face model ID, local model directory or full-precision GGUF file (BF16/F16/F32)
     #[arg(short = 'm', long)]
     pub model_id: String,
 
@@ -58,6 +62,17 @@ pub struct HessiansOptions {
     /// Output directory (one `<linear>.safetensors` each, holding `hin`)
     #[arg(short = 'o', long = "output")]
     pub output_path: PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct KldOptions {
+    /// Hugging Face model ID, local model directory or GGUF file
+    #[arg(short = 'm', long)]
+    pub model_id: String,
+
+    /// The llama-perplexity KL divergence base to score against
+    #[arg(long)]
+    pub kld_base: PathBuf,
 }
 
 #[derive(Args, Clone)]
@@ -698,7 +713,8 @@ pub fn resolve_quantize_command(
             | QuantizeCommand::NemotronTranscribeAudio(_)
             | QuantizeCommand::Mmproj(_)
             | QuantizeCommand::Exl3(_)
-            | QuantizeCommand::Hessians(_)),
+            | QuantizeCommand::Hessians(_)
+            | QuantizeCommand::Kld(_)),
         ) => {
             return Ok(other);
         }
@@ -767,7 +783,8 @@ mod tests {
             | QuantizeCommand::NemotronTranscribeAudio(_)
             | QuantizeCommand::Mmproj(_)
             | QuantizeCommand::Exl3(_)
-            | QuantizeCommand::Hessians(_) => {
+            | QuantizeCommand::Hessians(_)
+            | QuantizeCommand::Kld(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

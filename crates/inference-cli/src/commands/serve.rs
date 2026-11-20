@@ -784,6 +784,7 @@ fn convert_text_model(
             write_uqff: None,
             imatrix: quantization.imatrix.clone(),
             calibration_file: quantization.calibration_file.clone(),
+            hessians_out: None,
             max_edge: multimodal.and_then(|options| options.max_edge),
             max_seq_len: device.max_seq_len,
             max_batch_size: device.max_batch_size,

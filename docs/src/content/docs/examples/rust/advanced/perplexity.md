@@ -42,6 +42,8 @@ const KLD_BASE_MAGIC: &[u8; 8] = b"_logits_";
 // a base row keeps log-probs this far below its top as u16 steps between them (llama-perplexity's encoding)
 const KLD_BASE_RANGE: f32 = 16.0;
 const KLD_BASE_STEPS: f32 = 65535.0;
+// chunks of the base read ahead of the one being scored
+const KLD_READ_AHEAD: usize = 2;
 // llama-perplexity's chunking for a base written here: `-c 512 --chunks 40`, as the recipe investigations use
 const DEFAULT_KLD_CTX: usize = 512;
 const DEFAULT_KLD_CHUNKS: usize = 40;
@@ -468,6 +470,35 @@ async fn write_kld_base(
     Ok(())
 }
 
+// a chunk's base records as the engine scores them: each row's scale and floor, and the codes read straight into place
+fn read_reference(
+    reader: &mut impl Read,
+    first: usize,
+    record: usize,
+    rows: usize,
+) -> Result<LogitsReference> {
+    let width = record - 4;
+    let mut reference = LogitsReference {
+        first_row: first,
+        width,
+        codes: vec![0u8; rows * width * 2],
+        scales: Vec::with_capacity(rows),
+        floors: Vec::with_capacity(rows),
+    };
+    let mut head = [0u8; 8];
+    for row in reference.codes.chunks_mut(width * 2) {
+        reader.read_exact(&mut head)?;
+        reference
+            .scales
+            .push(f32::from_le_bytes(head[..4].try_into()?));
+        reference
+            .floors
+            .push(f32::from_le_bytes(head[4..].try_into()?));
+        reader.read_exact(row)?;
+    }
+    Ok(reference)
+}
+
 async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result<()> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut magic = [0u8; 8];
@@ -501,28 +532,27 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
     let first = n_ctx / 2;
     let bos = added_bos(model).await?;
     let record = 2 * n_vocab.div_ceil(2) + 4;
-    let record_bytes = record * 2;
     let (mut klds, mut nll, mut nll_base, mut same_top) = (Vec::new(), 0.0, 0.0, 0usize);
     let rows = first..n_ctx - 1;
-    let mut records = vec![0u8; record_bytes * rows.len()];
+    // the base read into references on a thread of its own, ahead of the chunk being scored, so the GPU does not
+    // wait on the host between chunks
+    let (sender, references) = std::sync::mpsc::sync_channel(KLD_READ_AHEAD);
+    let n_rows = rows.len();
+    let read_ahead = std::thread::spawn(move || {
+        for _ in 0..n_chunk {
+            if sender
+                .send(read_reference(&mut reader, first, record, n_rows))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
     for (c, chunk) in tokens.chunks(n_ctx).enumerate() {
         let start = Instant::now();
-        // the chunk's base records split into the per-row scale and floor and the codes, which the engine scores
-        // against the logits on their device
-        reader.read_exact(&mut records)?;
-        let mut reference = LogitsReference {
-            first_row: first,
-            width: record - 4,
-            codes: Vec::with_capacity(rows.len() * (record_bytes - 8)),
-            ..Default::default()
-        };
-        for row in records.chunks(record_bytes) {
-            let float =
-                |at: usize| f32::from_le_bytes(row[at..at + 4].try_into().expect("4 bytes"));
-            reference.scales.push(float(0));
-            reference.floors.push(float(4));
-            reference.codes.extend_from_slice(&row[8..]);
-        }
+        let reference = references
+            .recv()
+            .context("the base reader stopped early")??;
         let scored = model
             .prompt_logits(PromptLogitsRequest {
                 model: None,
@@ -574,6 +604,7 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
             start.elapsed().as_secs_f32()
         );
     }
+    let _ = read_ahead.join();
     if let Some(mut writer) = writer {
         writer.flush()?;
     }

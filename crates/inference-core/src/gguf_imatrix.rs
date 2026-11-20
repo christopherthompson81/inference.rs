@@ -9,7 +9,12 @@ use anyhow::Result;
 const UNSEEN_EXPERT_IMPORTANCE: f32 = 1.0;
 // an engine Hessian dump's file extension, the tensor each holds, and the head's key
 const HESSIAN_EXTENSION: &str = "safetensors";
-const HESSIAN_TENSOR: &str = "hin";
+pub(crate) const HESSIAN_TENSOR: &str = "hin";
+// a symmetric Hessian stored as its packed upper triangle, row-major
+pub(crate) const HESSIAN_UPPER_TENSOR: &str = "hin_upper";
+// GPTAQ's cross moment `(X_fp - X_q)^T X_q` beside a Hessian over the quantized model's inputs
+pub(crate) const CROSS_TENSOR: &str = "dxx";
+const MIRROR_TILE: usize = 64;
 const HEAD_KEY: &str = "lm_head";
 const OUTPUT_TENSOR: &str = "output.weight";
 const TOKEN_EMBD_TENSOR: &str = "token_embd.weight";
@@ -17,6 +22,8 @@ const TOKEN_EMBD_TENSOR: &str = "token_embd.weight";
 const SSM_GROUP_COUNT: &str = "ssm.group_count";
 const SSM_TIME_STEP_RANK: &str = "ssm.time_step_rank";
 const SSM_OUT_SUFFIX: &str = ".ssm_out.weight";
+const UP_PROJ_SUFFIX: &str = ".up_proj.weight";
+const GATE_PROJ_SUFFIX: &str = ".gate_proj.weight";
 
 /// What [`cimatrix_for_gguf`] matched.
 #[derive(Debug, Default)]
@@ -89,15 +96,48 @@ impl HessianDir {
     }
 }
 
+// the full matrix from its packed upper triangle
+fn unpack_upper(upper: &[f32]) -> (usize, Vec<f32>) {
+    let n = ((8 * upper.len() + 1).isqrt() - 1) / 2;
+    let mut full = vec![0f32; n * n];
+    let mut k = 0;
+    for i in 0..n {
+        full[i * n + i..(i + 1) * n].copy_from_slice(&upper[k..k + n - i]);
+        k += n - i;
+    }
+    // the lower triangle mirrored a tile at a time, so the strided side stays in cache
+    for bi in (0..n).step_by(MIRROR_TILE) {
+        for bj in (0..=bi).step_by(MIRROR_TILE) {
+            for i in bi..(bi + MIRROR_TILE).min(n) {
+                for j in bj..(bj + MIRROR_TILE).min(i) {
+                    full[i * n + j] = full[j * n + i];
+                }
+            }
+        }
+    }
+    (n, full)
+}
+
 fn load_hessian(path: &Path, order: Option<&[usize]>) -> inference_tensor::Result<Vec<f32>> {
-    let h = inference_tensor::safetensors::load(path, &inference_tensor::Device::Cpu)?
-        .remove(HESSIAN_TENSOR)
-        .ok_or_else(|| {
-            inference_tensor::Error::Msg(format!("{} holds no `{HESSIAN_TENSOR}`", path.display()))
-        })?
-        .to_dtype(inference_tensor::DType::F32)?;
-    let n = h.dim(0)?;
-    let values = h.flatten_all()?.to_vec1::<f32>()?;
+    let mut tensors = inference_tensor::safetensors::load(path, &inference_tensor::Device::Cpu)?;
+    let (n, values) = if let Some(upper) = tensors.remove(HESSIAN_UPPER_TENSOR) {
+        unpack_upper(
+            &upper
+                .to_dtype(inference_tensor::DType::F32)?
+                .to_vec1::<f32>()?,
+        )
+    } else {
+        let h = tensors
+            .remove(HESSIAN_TENSOR)
+            .ok_or_else(|| {
+                inference_tensor::Error::Msg(format!(
+                    "{} holds no `{HESSIAN_TENSOR}`",
+                    path.display()
+                ))
+            })?
+            .to_dtype(inference_tensor::DType::F32)?;
+        (h.dim(0)?, h.flatten_all()?.to_vec1::<f32>()?)
+    };
     let Some(order) = order.filter(|o| o.len() == n) else {
         return Ok(values);
     };
@@ -121,6 +161,33 @@ impl inference_quant::requantize::HessianSource for HessianDir {
             Some(e) => self.experts.get(name).and_then(|m| m.get(&e)),
         };
         path.map(|p| load_hessian(p, order)).transpose()
+    }
+
+    fn cross(&self, name: &str) -> inference_tensor::Result<Option<Vec<f32>>> {
+        let Some(path) = self.dense.get(name) else {
+            return Ok(None);
+        };
+        let order = name
+            .ends_with(SSM_OUT_SUFFIX)
+            .then_some(())
+            .and(self.ssm_out_order.as_deref());
+        let Some(cross) =
+            inference_tensor::safetensors::load(path, &inference_tensor::Device::Cpu)?
+                .remove(CROSS_TENSOR)
+        else {
+            return Ok(None);
+        };
+        let n = cross.dim(0)?;
+        let values = cross
+            .to_dtype(inference_tensor::DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        Ok(Some(match order.filter(|o| o.len() == n) {
+            Some(order) => (0..n * n)
+                .map(|i| values[order[i / n] * n + order[i % n]])
+                .collect(),
+            None => values,
+        }))
     }
 }
 
@@ -216,5 +283,50 @@ pub fn hessians_for_gguf(dir: &Path, gguf: &Path) -> Result<HessianDir> {
             None => out.unmatched.push(key),
         }
     }
+    // a stacked up projection reads its gate's input: an expert Hessian written once, under the gate
+    for (native, gguf_name) in &names {
+        let Some(gate) = native
+            .strip_suffix(UP_PROJ_SUFFIX)
+            .map(|stack| format!("{stack}{GATE_PROJ_SUFFIX}"))
+        else {
+            continue;
+        };
+        if out.experts.contains_key(gguf_name) {
+            continue;
+        }
+        if let Some(entries) = names.get(&gate).and_then(|g| out.experts.get(g)).cloned() {
+            out.experts.insert(gguf_name.clone(), entries);
+        }
+    }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn packed_upper_triangle_unpacks_symmetric() {
+        // [[1, 2, 3], [2, 4, 5], [3, 5, 6]]
+        let (n, full) = super::unpack_upper(&[1., 2., 3., 4., 5., 6.]);
+        assert_eq!(n, 3);
+        assert_eq!(full, [1., 2., 3., 2., 4., 5., 3., 5., 6.]);
+        // past one tile: symmetric, the upper triangle in order
+        let n = 2 * super::MIRROR_TILE + 3;
+        let upper = (0u16..)
+            .take(n * (n + 1) / 2)
+            .map(f32::from)
+            .collect::<Vec<_>>();
+        let (m, full) = super::unpack_upper(&upper);
+        assert_eq!(m, n);
+        let mut k = 0;
+        for i in 0..n {
+            for j in i..n {
+                assert_eq!(
+                    (full[i * n + j], full[j * n + i]),
+                    (upper[k], upper[k]),
+                    "{i},{j}"
+                );
+                k += 1;
+            }
+        }
+    }
 }

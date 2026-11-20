@@ -63,6 +63,52 @@ pub struct RawGgufTensor {
 
 impl RawGgufTensor {
     pub fn new(ty: GgufType, dims: &[usize], bytes: Vec<u8>, device: &Device) -> Result<Self> {
+        Self::check_len(ty, dims, bytes.len())?;
+        let cpu = Self {
+            ty,
+            shape: Shape::from(dims),
+            storage: RawStorage::Cpu(Arc::new(bytes)),
+        };
+        cpu.to_device(device)
+    }
+
+    /// As [`Self::new`] from bytes that may be borrowed (a mapped file's): a GPU takes them without a host copy.
+    pub fn from_bytes(
+        ty: GgufType,
+        dims: &[usize],
+        bytes: std::borrow::Cow<'_, [u8]>,
+        device: &Device,
+    ) -> Result<Self> {
+        #[cfg(feature = "cuda")]
+        if let Device::Cuda(cuda) = device {
+            Self::check_len(ty, dims, bytes.len())?;
+            return Ok(Self {
+                ty,
+                shape: Shape::from(dims),
+                storage: Self::cuda_storage(ty, &bytes, cuda)?,
+            });
+        }
+        Self::new(ty, dims, bytes.into_owned(), device)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_storage(
+        ty: GgufType,
+        bytes: &[u8],
+        device: &inference_tensor::cuda_backend::CudaDevice,
+    ) -> Result<RawStorage> {
+        super::ffi::ensure_type_loaded(ty).map_err(inference_tensor::Error::msg)?;
+        let padding = MATRIX_ROW_PADDING * ty.type_size() / ty.block_size();
+        let mut blocks = device.alloc_zeros::<u8>(bytes.len() + padding)?;
+        device.memcpy_htod(bytes, &mut blocks.slice_mut(..bytes.len()))?;
+        Ok(RawStorage::Cuda {
+            blocks: Arc::new(blocks),
+            len: bytes.len(),
+            device: device.clone(),
+        })
+    }
+
+    fn check_len(ty: GgufType, dims: &[usize], len: usize) -> Result<()> {
         let (rows, cols) = match *dims {
             [rows, cols] => (rows, cols),
             [experts, rows, cols] => (experts * rows, cols),
@@ -75,18 +121,10 @@ impl RawGgufTensor {
             );
         };
         let expected = rows * row_bytes;
-        if bytes.len() != expected {
-            inference_tensor::bail!(
-                "{ty:?} {dims:?} takes {expected} bytes, got {}",
-                bytes.len()
-            );
+        if len != expected {
+            inference_tensor::bail!("{ty:?} {dims:?} takes {expected} bytes, got {len}");
         }
-        let cpu = Self {
-            ty,
-            shape: Shape::from(dims),
-            storage: RawStorage::Cpu(Arc::new(bytes)),
-        };
-        cpu.to_device(device)
+        Ok(())
     }
 
     pub fn shape(&self) -> &Shape {
@@ -227,25 +265,10 @@ impl RawGgufTensor {
         let storage = match device {
             Device::Cpu => RawStorage::Cpu(Arc::new(self.bytes()?)),
             #[cfg(feature = "cuda")]
-            Device::Cuda(device) => {
-                super::ffi::ensure_type_loaded(self.ty).map_err(inference_tensor::Error::msg)?;
-                let owned;
-                let bytes = match &self.storage {
-                    RawStorage::Cpu(bytes) => bytes.as_slice(),
-                    _ => {
-                        owned = self.bytes()?;
-                        owned.as_slice()
-                    }
-                };
-                let padding = MATRIX_ROW_PADDING * self.ty.type_size() / self.ty.block_size();
-                let mut blocks = device.alloc_zeros::<u8>(bytes.len() + padding)?;
-                device.memcpy_htod(bytes, &mut blocks.slice_mut(..bytes.len()))?;
-                RawStorage::Cuda {
-                    blocks: Arc::new(blocks),
-                    len: bytes.len(),
-                    device: device.clone(),
-                }
-            }
+            Device::Cuda(device) => match &self.storage {
+                RawStorage::Cpu(bytes) => Self::cuda_storage(self.ty, bytes, device)?,
+                _ => Self::cuda_storage(self.ty, &self.bytes()?, device)?,
+            },
             #[cfg(feature = "metal")]
             Device::Metal(_) => {
                 let bytes = match &self.storage {
@@ -790,11 +813,17 @@ pub struct GgufRawMatMul {
     w: RawGgufTensor,
     b: Option<Tensor>,
     scale: Option<f32>,
+    stats: crate::ImatrixLayerStats,
 }
 
 impl GgufRawMatMul {
     pub fn new(w: RawGgufTensor, b: Option<Tensor>) -> Self {
-        Self { w, b, scale: None }
+        Self {
+            w,
+            b,
+            scale: None,
+            stats: crate::ImatrixLayerStats::empty(),
+        }
     }
 
     /// The weight's tensor-wide scale (llama.cpp's `<name>.scale`, NVFP4's second level), applied to each output.
@@ -903,6 +932,58 @@ impl QuantMethod for GgufRawMatMul {
         inference_tensor::bail!("raw GGUF layers are built by the GGUF weight source")
     }
 
+    fn weight_dims(&self) -> Option<Vec<usize>> {
+        Some(self.w.shape.dims().to_vec())
+    }
+
+    // a quantized model's input statistics (an imatrix or Hessian from its own activations)
+    fn begin_track_stats(&self) -> Result<()> {
+        let dims = self.w.shape.dims();
+        if dims.len() == 3 {
+            self.stats.enable_routed(dims[0], dims[2], &self.w.device())
+        } else {
+            self.stats.enable(dims[dims.len() - 1], &self.w.device())
+        }
+    }
+
+    fn begin_capture_inputs(&self) -> Result<()> {
+        self.stats.enable_capture();
+        Ok(())
+    }
+
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        self.stats.take_captured()
+    }
+
+    fn begin_track_hessian(&self) -> Result<()> {
+        let dims = self.w.shape.dims();
+        // stacked [E, out, in] experts collect one per expert, from the rows their router sends them
+        if dims.len() == 3 {
+            self.stats.enable_routed_hessian(dims[0], dims[2])
+        } else {
+            self.stats
+                .enable_hessian(dims[dims.len() - 1], &self.w.device())
+        }
+    }
+
+    fn process_routed_stats(&self, x: &Tensor, ids: &Tensor) -> Result<()> {
+        self.stats.process_routed(x, ids)
+    }
+
+    fn stats_snapshot(&self) -> Option<(usize, usize)> {
+        self.stats.snapshot()
+    }
+
+    fn end_track_stats(&self) -> Result<Tensor> {
+        if self.stats.is_enabled() {
+            let stats = self.stats.compute_imatrix();
+            self.stats.clear()?;
+            stats
+        } else {
+            inference_tensor::bail!("`{}` is not tracking stats.", self.name())
+        }
+    }
+
     fn dequantize_w(&self) -> Result<Tensor> {
         self.scaled(self.w.dequantize(&self.w.device())?)
     }
@@ -1006,6 +1087,7 @@ impl QuantMethod for GgufRawMatMul {
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
+        self.stats.process(a)?;
         #[cfg(feature = "cuda")]
         if let Some(out) = self.cuda_forward(a)? {
             return self.add_bias(out);

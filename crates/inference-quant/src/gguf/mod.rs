@@ -846,6 +846,29 @@ impl QuantMethod for GgufMatMul {
         }
     }
 
+    fn begin_capture_inputs(&self) -> Result<()> {
+        self.stats.enable_capture();
+        Ok(())
+    }
+
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        self.stats.take_captured()
+    }
+
+    fn begin_track_hessian(&self) -> Result<()> {
+        let dims = match &self.w {
+            QMatMul::QTensor(q) => q.shape().dims().to_vec(),
+            QMatMul::Tensor(t) | QMatMul::TensorF16(t) => t.dims().to_vec(),
+        };
+        // stacked [E, out, in] experts collect one per expert, from the rows their router sends them
+        if dims.len() == 3 {
+            self.stats.enable_routed_hessian(dims[0], dims[2])
+        } else {
+            self.stats
+                .enable_hessian(*dims.last().unwrap(), &self.dtype_and_device().1)
+        }
+    }
+
     fn process_routed_stats(&self, x: &Tensor, ids: &Tensor) -> Result<()> {
         self.stats.process_routed(x, ids)
     }

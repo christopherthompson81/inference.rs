@@ -1,35 +1,32 @@
 // ik_llama.cpp's IQ4_KS quantizer (`quantize_row_iq4_k_impl_bs32`, as its AVX2 build writes the bytes) on the GPU,
 // byte for byte the CPU port in iq_quantize.rs: every product, sum and fused multiply-add is an explicit rounding
 // intrinsic, so nvcc contracts nothing the CPU build does not.
-// Kernels: each block's weights; a warp per block searching its scale (lane j holds value j, and the CPU's eight
-// interleaved partial sums are chained lane j - 8 to lane j); a thread per row for the row scale; a thread per block
-// for its indices and refit terms; a thread per row adding the terms in the CPU's order.
+// Kernels: each block's weights; eight lanes per block searching its scale (lane k runs the CPU's partial sum k over
+// values k, k + 8, ..., the eight added in its order by xor shuffles); a thread per row for the row scale; a thread
+// per value pair for its indices and refit terms; a thread per row adding the terms in the CPU's order.
 #include "iq4k_common.cuh"
 
 #define BLOCK_BYTES (QK_K / BLOCK + QK_K / 2)
+#define PAIRS (BLOCK / 2)
 
-// lane j's `fma(a, b, acc)` chained through lanes j % 8, j % 8 + 8, ... as the CPU's eight partial sums run, then
-// those summed in `hsum_float_8`'s order; every lane gets the total
-static __device__ __forceinline__ float chained_sum(float a, float b, int lane) {
-    float acc = __fmaf_rn(a, b, 0.0f);
-    for (int step = 1; step < BLOCK / LANES; ++step) {
-        const float prev = __shfl_up_sync(0xffffffffu, acc, LANES);
-        if (lane / LANES == step) acc = __fmaf_rn(a, b, prev);
+// one scale try (`evaluate_block_iq4k`) by a block's lane group; true when it improved (d, best), the same in every
+// lane of the group
+static __device__ bool evaluate(const uint8_t* simple, float inverse, const int8_t* values, const float* x, const float* w,
+                                unsigned mask, float* d, float* best) {
+    float sqx_p = 0.0f, sq2_p = 0.0f, sqx_m = 0.0f, sq2_m = 0.0f;
+    for (int s = 0; s < SLOTS; ++s) {
+        const float xi = __fmul_rn(inverse, x[s]);
+        const float qp = candidate(simple, values, xi), qm = candidate(simple, values, -xi);
+        const float wp = __fmul_rn(w[s], qp), wm = __fmul_rn(w[s], qm);
+        sqx_p = __fmaf_rn(wp, x[s], sqx_p);
+        sq2_p = __fmaf_rn(wp, qp, sq2_p);
+        sqx_m = __fmaf_rn(wm, x[s], sqx_m);
+        sq2_m = __fmaf_rn(wm, qm, sq2_m);
     }
-    float l[LANES];
-    for (int k = 0; k < LANES; ++k) l[k] = __shfl_sync(0xffffffffu, acc, BLOCK - LANES + k);
-    return __fadd_rn(__fadd_rn(__fadd_rn(l[0], l[4]), __fadd_rn(l[2], l[6])),
-                     __fadd_rn(__fadd_rn(l[1], l[5]), __fadd_rn(l[3], l[7])));
-}
-
-// one scale try (`evaluate_block_iq4k`) by the warp; true when it improved (d, best), the same in every lane
-static __device__ bool evaluate(const uint8_t* simple, float inverse, const int8_t* values, float x, float w, int lane, float* d,
-                         float* best) {
-    const float xi = __fmul_rn(inverse, x);
-    const float qp = candidate(simple, values, xi), qm = candidate(simple, values, -xi);
-    const float wp = __fmul_rn(w, qp), wm = __fmul_rn(w, qm);
-    const float sqx_p = chained_sum(wp, x, lane), sq2_p = chained_sum(wp, qp, lane);
-    const float sqx_m = chained_sum(wm, x, lane), sq2_m = chained_sum(wm, qm, lane);
+    sqx_p = group_sum(sqx_p, mask);
+    sq2_p = group_sum(sq2_p, mask);
+    sqx_m = group_sum(sqx_m, mask);
+    sq2_m = group_sum(sq2_m, mask);
     bool updated = false;
     if (sq2_p > 0.0f && __fmul_rn(sqx_p, sqx_p) > __fmul_rn(sq2_p, *best)) {
         *d = __fdiv_rn(sqx_p, sq2_p);
@@ -44,30 +41,33 @@ static __device__ bool evaluate(const uint8_t* simple, float inverse, const int8
     return updated;
 }
 
-// a warp per block: its best scale and whether it takes the shifted codebook
+// a group of LANES lanes per block (lane k holding values k, k + 8, k + 16, k + 24: the CPU's partial sum k): its
+// best scale and whether it takes the shifted codebook
 static __global__ void iq4_ks_search(const float* x, const float* weights, int64_t blocks, float* scales, uint8_t* shifted) {
     __shared__ Tables t;
     load_tables(&t);
-    const int64_t b = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) / BLOCK;
-    const int lane = threadIdx.x % BLOCK;
+    const int64_t b = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) / LANES;
     if (b >= blocks) return;
-    const float v = x[b * BLOCK + lane], w = weights[b * BLOCK + lane];
+    const int k = threadIdx.x % LANES;
+    const unsigned mask = group_mask();
+    float v[SLOTS], w[SLOTS];
+    for (int s = 0; s < SLOTS; ++s) {
+        v[s] = x[b * BLOCK + k + s * LANES];
+        w[s] = weights[b * BLOCK + k + s * LANES];
+    }
     // the first index holding the largest magnitude, as the CPU's strict `>` scan finds it
-    float amax = fabsf(v);
-    int at = lane;
-    for (int off = BLOCK / 2; off > 0; off /= 2) {
-        const float oa = __shfl_down_sync(0xffffffffu, amax, off);
-        const int oat = __shfl_down_sync(0xffffffffu, at, off);
-        if (oa > amax || (oa == amax && oat < at)) {
-            amax = oa;
-            at = oat;
+    float amax = fabsf(v[0]);
+    int at = k;
+    for (int s = 1; s < SLOTS; ++s) {
+        if (fabsf(v[s]) > amax) {
+            amax = fabsf(v[s]);
+            at = k + s * LANES;
         }
     }
-    amax = __shfl_sync(0xffffffffu, amax, 0);
-    at = __shfl_sync(0xffffffffu, at, 0);
-    const float max = __shfl_sync(0xffffffffu, v, at);
+    group_first_max(&amax, &at, mask);
+    const float max = __shfl_sync(mask, v[at / LANES], at % LANES, LANES);
     if (amax < EPS) {
-        if (lane == 0) {
+        if (k == 0) {
             scales[b] = 0.0f;
             shifted[b] = 0;
         }
@@ -77,71 +77,69 @@ static __global__ void iq4_ks_search(const float* x, const float* weights, int64
     const int8_t* shift = t.values + 16;
     float d = __fdiv_rn(-max, (float)values[0]), best = 0.0f;
     bool is_shifted = false;
-    evaluate(t.simple, __fdiv_rn(1.0f, d), values, v, w, lane, &d, &best);
+    evaluate(t.simple, __fdiv_rn(1.0f, d), values, v, w, mask, &d, &best);
     for (int itry = -TRIES; itry <= TRIES; ++itry) {
-        if (evaluate(t.simple, __fdiv_rn(__fadd_rn((float)itry, (float)values[0]), max), values, v, w, lane, &d, &best))
+        if (evaluate(t.simple, __fdiv_rn(__fadd_rn((float)itry, (float)values[0]), max), values, v, w, mask, &d, &best))
             is_shifted = false;
-        if (evaluate(t.simple, __fdiv_rn(__fadd_rn((float)itry, (float)shift[0]), max), shift, v, w, lane, &d, &best))
+        if (evaluate(t.simple, __fdiv_rn(__fadd_rn((float)itry, (float)shift[0]), max), shift, v, w, mask, &d, &best))
             is_shifted = true;
     }
-    if (lane == 0) {
+    if (k == 0) {
         scales[b] = d;
         shifted[b] = is_shifted;
     }
 }
 
-// a thread per block: its 7-bit scale and indices, and its refit terms (the CPU adds them to the row's sums in order)
+// a thread per pair of a block's values (j, j + 16): the pair's indices and refit terms, the block's 7-bit scale written
+// by its first thread (the CPU adds the terms to the row's sums in order)
 static __global__ void iq4_ks_blocks(const float* x, const float* weights, int64_t blocks, int cols, const float* scales,
                               const uint8_t* shifted, const float* row_d, uint8_t* out, float* terms_qx,
                               float* terms_q2, float* levels) {
     __shared__ Tables t;
     load_tables(&t);
-    const int64_t b = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t pair = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t b = pair / PAIRS;
     if (b >= blocks) return;
+    const int j = (int)(pair % PAIRS);
     const int per_row = cols / BLOCK;
     const int64_t row = b / per_row;
     const int ib_row = (int)(b % per_row);
     const int ibl = ib_row / (QK_K / BLOCK), ib = ib_row % (QK_K / BLOCK);
     uint8_t* sb = out + row * (ROW_HEADER + (int64_t)(cols / QK_K) * BLOCK_BYTES) + ROW_HEADER + ibl * BLOCK_BYTES;
-    uint8_t* qs = sb + QK_K / BLOCK + ib * (BLOCK / 2);
-    float* tx = terms_qx + b * (BLOCK / 2);
-    float* t2 = terms_q2 + b * (BLOCK / 2);
+    uint8_t* qs = sb + QK_K / BLOCK + ib * PAIRS;
+    float* tx = terms_qx + b * PAIRS;
+    float* t2 = terms_q2 + b * PAIRS;
     const float d = row_d[row];
     float* lv = levels ? levels + b * BLOCK : nullptr;
     if (d == 0.0f) {
-        sb[ib] = 0;
-        for (int j = 0; j < BLOCK / 2; ++j) {
-            qs[j] = 0;
-            tx[j] = t2[j] = 0.0f;
-        }
-        if (lv)
-            for (int j = 0; j < BLOCK; ++j) lv[j] = 0.0f;
+        if (j == 0) sb[ib] = 0;
+        qs[j] = 0;
+        tx[j] = t2[j] = 0.0f;
+        if (lv) lv[j] = lv[j + PAIRS] = 0.0f;
         return;
     }
     const float id = __fdiv_rn(1.0f, d);
     const int8_t* codebook = shifted[b] ? t.values + 16 : t.values;
     int l = nearest_int(__fmul_rn(0.5f, __fadd_rn(__fmul_rn(id, scales[b]), (float)SCALE_MAX)));
     l = (l < 0 ? 0 : (l > SCALE_MAX ? SCALE_MAX : l)) << 1;
-    sb[ib] = (uint8_t)(shifted[b] | l);
+    if (j == 0) sb[ib] = (uint8_t)(shifted[b] | l);
     l -= SCALE_MAX;
     const float dl = __fmul_rn(d, (float)l);
     const float idl = dl != 0.0f ? __fdiv_rn(1.0f, dl) : 0.0f;
     const float* xb = x + b * BLOCK;
     const float* w = weights + b * BLOCK;
-    for (int j = 0; j < BLOCK / 2; ++j) {
-        const int i1 = best_index(t.index, codebook, __fmul_rn(idl, xb[j]));
-        const int i2 = best_index(t.index, codebook, __fmul_rn(idl, xb[j + BLOCK / 2]));
-        qs[j] = (uint8_t)(i1 | (i2 << 4));
-        const float q1 = __fmul_rn((float)codebook[i1], (float)l);
-        const float q2 = __fmul_rn((float)codebook[i2], (float)l);
-        if (lv) {
-            lv[j] = q1;
-            lv[j + BLOCK / 2] = q2;
-        }
-        const float w1 = __fmul_rn(w[j], q1), w2 = __fmul_rn(w[j + BLOCK / 2], q2);
-        tx[j] = __fmaf_rn(w1, xb[j], __fmul_rn(w2, xb[j + BLOCK / 2]));
-        t2[j] = __fmaf_rn(w1, q1, __fmul_rn(w2, q2));
+    const int i1 = best_index(t.index, codebook, __fmul_rn(idl, xb[j]));
+    const int i2 = best_index(t.index, codebook, __fmul_rn(idl, xb[j + PAIRS]));
+    qs[j] = (uint8_t)(i1 | (i2 << 4));
+    const float q1 = __fmul_rn((float)codebook[i1], (float)l);
+    const float q2 = __fmul_rn((float)codebook[i2], (float)l);
+    if (lv) {
+        lv[j] = q1;
+        lv[j + PAIRS] = q2;
     }
+    const float w1 = __fmul_rn(w[j], q1), w2 = __fmul_rn(w[j + PAIRS], q2);
+    tx[j] = __fmaf_rn(w1, xb[j], __fmul_rn(w2, xb[j + PAIRS]));
+    t2[j] = __fmaf_rn(w1, q1, __fmul_rn(w2, q2));
 }
 
 // per row: the terms added in the CPU's order, and the row scale refit to them
@@ -174,10 +172,10 @@ extern "C" int launch_iq4_ks_quantize(const void* source, int dtype, float* x, c
     const int64_t half = rows * cols / 2;
     to_f32<<<grid(rows * cols), THREADS, 0, stream>>>(source, dtype, rows * cols, x);
     iq4k_weights<true><<<grid(blocks), THREADS, 0, stream>>>(x, imatrix, rows_per_imatrix, blocks, cols, weights);
-    iq4_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
+    iq4_ks_search<<<grid(blocks * LANES), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
     iq4k_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, ROW_HEADER + (cols / QK_K) * BLOCK_BYTES,
                                                        1.0f, row_d, out);
-    iq4_ks_blocks<<<grid(blocks), THREADS, 0, stream>>>(x, weights, blocks, cols, scales, shifted, row_d, out, terms,
+    iq4_ks_blocks<<<grid(blocks * PAIRS), THREADS, 0, stream>>>(x, weights, blocks, cols, scales, shifted, row_d, out, terms,
                                                         terms + half, nullptr);
     iq4_ks_refit<<<grid(rows), THREADS, 0, stream>>>(rows, cols, row_d, terms, terms + half, out);
     return (int)cudaGetLastError();
@@ -198,25 +196,27 @@ static __global__ void iq4_ks_accumulate(int64_t rows, const float* terms_qx, co
 }
 
 // each row's scale from an ordinary first pass (the largest block scale over 127), `importance` its `cols` weights
-extern "C" int launch_iq4_ks_row_scale(const float* x, const float* importance, int64_t rows, int cols, float* weights,
+extern "C" int launch_iq4_ks_row_scale(const float* x, const float* importance, int64_t rows,
+                                       int64_t rows_per_importance, int cols, float* weights,
                                        float* scales, uint8_t* shifted, float* row_d, cudaStream_t stream) {
     const int64_t blocks = rows * (cols / BLOCK);
-    iq4k_weights<true><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, cols, weights);
-    iq4_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
+    iq4k_weights<true><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows_per_importance, blocks, cols, weights);
+    iq4_ks_search<<<grid(blocks * LANES), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
     iq4k_row_scale<<<grid(rows), THREADS, 0, stream>>>(scales, rows, cols, 0, 1.0f, row_d, nullptr);
     return (int)cudaGetLastError();
 }
 
 // one super-block of each row (`x`: rows of 256) against its fixed row scale: `out` rows of the header's width then the
 // super-block's bytes, `levels` each value's level, `sums` (2 a row) continued
-extern "C" int launch_iq4_ks_super_fixed(const float* x, const float* importance, int64_t rows, const float* row_d,
+extern "C" int launch_iq4_ks_super_fixed(const float* x, const float* importance, int64_t rows,
+                                       int64_t rows_per_importance, const float* row_d,
                                          float* weights, float* scales, uint8_t* shifted, uint8_t* out, float* terms,
                                          float* levels, float* sums, cudaStream_t stream) {
     const int64_t blocks = rows * (QK_K / BLOCK);
     const int64_t half = rows * QK_K / 2;
-    iq4k_weights<true><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows, blocks, QK_K, weights);
-    iq4_ks_search<<<grid(blocks * BLOCK), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
-    iq4_ks_blocks<<<grid(blocks), THREADS, 0, stream>>>(x, weights, blocks, QK_K, scales, shifted, row_d, out, terms,
+    iq4k_weights<true><<<grid(blocks), THREADS, 0, stream>>>(x, importance, rows_per_importance, blocks, QK_K, weights);
+    iq4_ks_search<<<grid(blocks * LANES), THREADS, 0, stream>>>(x, weights, blocks, scales, shifted);
+    iq4_ks_blocks<<<grid(blocks * PAIRS), THREADS, 0, stream>>>(x, weights, blocks, QK_K, scales, shifted, row_d, out, terms,
                                                         terms + half, levels);
     iq4_ks_accumulate<<<grid(rows), THREADS, 0, stream>>>(rows, terms, terms + half, sums);
     return (int)cudaGetLastError();

@@ -29,6 +29,33 @@ pub trait LayerStream {
         layer: usize,
         device: &Device,
     ) -> inference_tensor::Result<Box<dyn StreamedLayer>>;
+    /// Layer `layer` built on `device` from `weights`, a root over another checkpoint of the same model (a
+    /// quantization of it), in place of the model's own.
+    fn build_layer_from(
+        &self,
+        _layer: usize,
+        _device: &Device,
+        _weights: &inference_quant::ShardedVarBuilder,
+    ) -> inference_tensor::Result<Box<dyn StreamedLayer>> {
+        inference_tensor::bail!("this stack does not rebuild its layers from other weights")
+    }
+    /// As [`Self::embed`] over each of `ids`, from `weights` (as [`Self::build_layer_from`]) in place of the model's
+    /// own embedding.
+    fn embed_from(
+        &self,
+        _ids: &[Tensor],
+        _weights: &inference_quant::ShardedVarBuilder,
+    ) -> inference_tensor::Result<Vec<Tensor>> {
+        inference_tensor::bail!("this stack does not build its embedding from other weights")
+    }
+    /// The output head built on `device` from `weights`, in place of the model's own.
+    fn head_from(
+        &self,
+        _device: &Device,
+        _weights: &inference_quant::ShardedVarBuilder,
+    ) -> inference_tensor::Result<Arc<dyn inference_quant::QuantMethod>> {
+        inference_tensor::bail!("this stack does not build its head from other weights")
+    }
     /// The final norm of hidden states `(1, tokens, hidden)`.
     fn final_norm(&self, xs: &Tensor) -> inference_tensor::Result<Tensor>;
     /// The output head.

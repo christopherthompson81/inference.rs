@@ -101,25 +101,25 @@ inference_tensor::kernel_library! {
 
         /// GPTQ's first pass: each row's scale (`row_d`) of a row-scaled type from `rows` rows of `cols` f32 on the
         /// device, `importance` their `cols` weights; `weights`, `scales` and `shifted` scratch as above.
-        fn launch_iq4_ks_row_scale(x: *const f32, importance: *const f32, rows: i64, cols: i32, weights: *mut f32,
+        fn launch_iq4_ks_row_scale(x: *const f32, importance: *const f32, rows: i64, rows_per_importance: i64, cols: i32, weights: *mut f32,
             scales: *mut f32, shifted: *mut u8, row_d: *mut f32,
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
-        fn launch_iq4_kss_row_scale(x: *const f32, importance: *const f32, rows: i64, cols: i32, weights: *mut f32,
+        fn launch_iq4_kss_row_scale(x: *const f32, importance: *const f32, rows: i64, rows_per_importance: i64, cols: i32, weights: *mut f32,
             scales: *mut f32, shifted: *mut u8, row_d: *mut f32,
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
-        fn launch_iq3_ks_row_scale(x: *const f32, importance: *const f32, rows: i64, cols: i32, weights: *mut f32,
+        fn launch_iq3_ks_row_scale(x: *const f32, importance: *const f32, rows: i64, rows_per_importance: i64, cols: i32, weights: *mut f32,
             scales: *mut f32, shifted: *mut u8, row_d: *mut f32,
             stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
 
         /// One super-block (`x`: rows of 256 f32) encoded against the fixed `row_d`: `out` a row of the header's width
         /// then the super-block's bytes each, `levels` each value's level, `sums` (2 a row) continued in the CPU's order.
-        fn launch_iq4_ks_super_fixed(x: *const f32, importance: *const f32, rows: i64, row_d: *const f32,
+        fn launch_iq4_ks_super_fixed(x: *const f32, importance: *const f32, rows: i64, rows_per_importance: i64, row_d: *const f32,
             weights: *mut f32, scales: *mut f32, shifted: *mut u8, out: *mut u8, terms: *mut f32, levels: *mut f32,
             sums: *mut f32, stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
-        fn launch_iq4_kss_super_fixed(x: *const f32, importance: *const f32, rows: i64, row_d: *const f32,
+        fn launch_iq4_kss_super_fixed(x: *const f32, importance: *const f32, rows: i64, rows_per_importance: i64, row_d: *const f32,
             weights: *mut f32, scales: *mut f32, shifted: *mut u8, out: *mut u8, terms: *mut f32, levels: *mut f32,
             sums: *mut f32, stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
-        fn launch_iq3_ks_super_fixed(x: *const f32, importance: *const f32, rows: i64, row_d: *const f32,
+        fn launch_iq3_ks_super_fixed(x: *const f32, importance: *const f32, rows: i64, rows_per_importance: i64, row_d: *const f32,
             weights: *mut f32, scales: *mut f32, shifted: *mut u8, out: *mut u8, terms: *mut f32, levels: *mut f32,
             sums: *mut f32, stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
     }
@@ -166,6 +166,7 @@ type RowScaleLaunch = unsafe extern "C" fn(
     *const f32,
     *const f32,
     i64,
+    i64,
     i32,
     *mut f32,
     *mut f32,
@@ -176,6 +177,7 @@ type RowScaleLaunch = unsafe extern "C" fn(
 type SuperFixedLaunch = unsafe extern "C" fn(
     *const f32,
     *const f32,
+    i64,
     i64,
     *const f32,
     *mut f32,
@@ -227,13 +229,15 @@ fn tensor_ptr(t: &Tensor) -> Result<u64> {
     Ok(slice_ptr(c.as_cuda_slice::<f32>()?, layout.start_offset()).0)
 }
 
-/// Each row's scale for `ty` from an ordinary first pass over `x` (rows of `cols` f32 on `dev`), weighed by
-/// `importance` (`cols`): the row scale GPTQ encodes every super-block against.
+/// Each row's scale for `ty` from an ordinary first pass over `x` (rows of `cols` f32 on `dev`), each
+/// `rows_per_importance` rows weighed by the next `cols` of `importance` (an expert stack's experts in one call): the
+/// row scale GPTQ encodes every super-block against.
 pub fn row_scales(
     dev: &CudaDevice,
     ty: GgufType,
     x: &Tensor,
     importance: &[f32],
+    rows_per_importance: usize,
 ) -> Result<Tensor> {
     let Some((launch, ..)) = fixed_kernels(ty) else {
         inference_tensor::bail!("{ty:?} has no GPU row scale");
@@ -263,6 +267,7 @@ pub fn row_scales(
                 xp as *const f32,
                 wp as *const f32,
                 rows as i64,
+                rows_per_importance as i64,
                 cols as i32,
                 gp as *mut f32,
                 sp as *mut f32,
@@ -286,14 +291,16 @@ pub fn row_scales(
     )))
 }
 
-/// One super-block of each row (`x`: rows of 256 f32 on `dev`) as `ty` against the fixed `row_d`: the super-block's
-/// bytes for each row, and each value's level (the value decodes to `row_d * level`); `sums` (f32, 2 a row) carries
+/// One super-block of each row (`x`: rows of 256 f32 on `dev`, each `rows_per_importance` rows weighed by the next 256
+/// of `importance`) as `ty` against the fixed `row_d`: each row's
+/// super-block bytes after a header-wide gap (rows of the type's header plus super-block bytes), and each value's level (the value decodes to `row_d * level`); `sums` (f32, 2 a row) carries
 /// each row's fit on for the refit of its scale.
 pub fn super_block_fixed(
     dev: &CudaDevice,
     ty: GgufType,
     x: &Tensor,
     importance: &[f32],
+    rows_per_importance: usize,
     row_d: &Tensor,
     sums: &mut CudaSlice<f32>,
 ) -> Result<(Vec<u8>, Tensor)> {
@@ -303,7 +310,7 @@ pub fn super_block_fixed(
     ensure_loaded().map_err(inference_tensor::Error::msg)?;
     let x = x.to_dtype(DType::F32)?.contiguous()?;
     let (rows, cols) = x.dims2()?;
-    if cols != QK_K || importance.len() != QK_K {
+    if cols != QK_K || importance.len() * rows_per_importance != QK_K * rows {
         inference_tensor::bail!("a super-block is {QK_K} values, not {cols}");
     }
     let row_d = row_d.contiguous()?;
@@ -337,6 +344,7 @@ pub fn super_block_fixed(
                 xp as *const f32,
                 wp as *const f32,
                 rows as i64,
+                rows_per_importance as i64,
                 rp as *const f32,
                 gp as *mut f32,
                 sp as *mut f32,
@@ -355,10 +363,6 @@ pub fn super_block_fixed(
         }
     }
     let bytes = dev.clone_dtoh(&out)?;
-    let bytes = bytes
-        .chunks_exact(header + super_bytes)
-        .flat_map(|row| row[header..].iter().copied())
-        .collect();
     let levels = Tensor::from((
         inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
             levels,

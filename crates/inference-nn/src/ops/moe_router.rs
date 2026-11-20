@@ -53,6 +53,188 @@ pub fn moe_router_topk(
     selection_bias: Option<&Tensor>,
     expert_scale: Option<&Tensor>,
 ) -> Result<TopKOutput> {
+    let topk = route_topk(logits, config, selection_bias, expert_scale)?;
+    if let Some(dump) = route_dump() {
+        dump_routes(dump, &topk)?;
+    }
+    if let Some(forced) = route_force() {
+        return forced_routes(forced, &topk);
+    }
+    let mut tape = ROUTE_TAPE
+        .lock()
+        .map_err(|_| inference_tensor::Error::msg("the route tape's lock is poisoned"))?;
+    match &mut *tape {
+        RouteTape::Off => Ok(topk),
+        RouteTape::Recording(routes) => {
+            routes.push(TopKOutput {
+                values: topk.values.clone(),
+                indices: topk.indices.clone(),
+            });
+            Ok(topk)
+        }
+        RouteTape::Replaying(routes) => routes
+            .pop_front()
+            .ok_or_else(|| inference_tensor::Error::msg("the route tape ran out")),
+    }
+}
+
+// routing calls recorded in order, or replayed in place of the router's own (one model run routed as another was)
+enum RouteTape {
+    Off,
+    Recording(Vec<TopKOutput>),
+    Replaying(std::collections::VecDeque<TopKOutput>),
+}
+
+static ROUTE_TAPE: std::sync::Mutex<RouteTape> = std::sync::Mutex::new(RouteTape::Off);
+
+/// From now, every routing call's choice is recorded, for [`take_recorded_routes`].
+pub fn record_routes() {
+    if let Ok(mut tape) = ROUTE_TAPE.lock() {
+        *tape = RouteTape::Recording(Vec::new());
+    }
+}
+
+/// The routes recorded since [`record_routes`], the tape turned off.
+pub fn take_recorded_routes() -> Vec<TopKOutput> {
+    match ROUTE_TAPE
+        .lock()
+        .map(|mut tape| std::mem::replace(&mut *tape, RouteTape::Off))
+    {
+        Ok(RouteTape::Recording(routes)) => routes,
+        _ => Vec::new(),
+    }
+}
+
+/// The next routing calls take `routes` in order instead of their own; [`stop_replaying_routes`] ends it.
+pub fn replay_routes(routes: Vec<TopKOutput>) {
+    if let Ok(mut tape) = ROUTE_TAPE.lock() {
+        *tape = RouteTape::Replaying(routes.into());
+    }
+}
+
+/// Ends [`replay_routes`].
+pub fn stop_replaying_routes() {
+    if let Ok(mut tape) = ROUTE_TAPE.lock() {
+        *tape = RouteTape::Off;
+    }
+}
+
+// set to a route dump, each routing call takes its routes from the dump's next record instead (a diagnostic: a run
+// over the same calls as the dumped one, routed as it was)
+const ROUTE_FORCE_ENV: &str = "INFERENCE_ROUTE_FORCE";
+
+fn route_force() -> Option<&'static std::sync::Mutex<std::io::BufReader<std::fs::File>>> {
+    static FORCE: std::sync::OnceLock<Option<std::sync::Mutex<std::io::BufReader<std::fs::File>>>> =
+        std::sync::OnceLock::new();
+    FORCE
+        .get_or_init(|| {
+            let path = std::env::var_os(ROUTE_FORCE_ENV)?;
+            std::fs::File::open(path)
+                .ok()
+                .map(|f| std::sync::Mutex::new(std::io::BufReader::new(f)))
+        })
+        .as_ref()
+}
+
+// the next dumped record in place of `topk`, on its device and in its dtypes
+fn forced_routes(
+    forced: &std::sync::Mutex<std::io::BufReader<std::fs::File>>,
+    topk: &TopKOutput,
+) -> Result<TopKOutput> {
+    use std::io::Read;
+    let mut reader = forced
+        .lock()
+        .map_err(|_| inference_tensor::Error::msg("the forced routes' lock is poisoned"))?;
+    let mut head = [0u8; 8];
+    reader
+        .read_exact(&mut head)
+        .map_err(inference_tensor::Error::wrap)?;
+    let rows = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
+    let k = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+    if rows * k != topk.indices.elem_count() {
+        inference_tensor::bail!(
+            "forced routes: a record of {rows}x{k} for {:?}",
+            topk.indices.dims()
+        );
+    }
+    let mut ids = vec![0u8; 4 * rows * k];
+    reader
+        .read_exact(&mut ids)
+        .map_err(inference_tensor::Error::wrap)?;
+    let mut weights = vec![0u8; 4 * rows * k];
+    reader
+        .read_exact(&mut weights)
+        .map_err(inference_tensor::Error::wrap)?;
+    let ids = ids
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect::<Vec<_>>();
+    let weights = weights
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect::<Vec<_>>();
+    let device = topk.indices.device();
+    Ok(TopKOutput {
+        indices: Tensor::from_vec(ids, topk.indices.dims(), device)?
+            .to_dtype(topk.indices.dtype())?,
+        values: Tensor::from_vec(weights, topk.values.dims(), device)?
+            .to_dtype(topk.values.dtype())?,
+    })
+}
+
+// set to a path, every routing call appends its choices there (a diagnostic: routing agreement between two models)
+const ROUTE_DUMP_ENV: &str = "INFERENCE_ROUTE_DUMP";
+
+fn route_dump() -> Option<&'static std::sync::Mutex<std::fs::File>> {
+    static DUMP: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    DUMP.get_or_init(|| {
+        let path = std::env::var_os(ROUTE_DUMP_ENV)?;
+        std::fs::File::create(path).ok().map(std::sync::Mutex::new)
+    })
+    .as_ref()
+}
+
+// a record: rows and k (u32 each), the rows' expert ids (u32) and their weights (f32), little-endian
+fn dump_routes(dump: &std::sync::Mutex<std::fs::File>, topk: &TopKOutput) -> Result<()> {
+    use std::io::Write;
+    let k = topk.indices.dim(inference_tensor::D::Minus1)?;
+    let ids = topk
+        .indices
+        .flatten_all()?
+        .to_dtype(inference_tensor::DType::U32)?
+        .to_vec1::<u32>()?;
+    let weights = topk
+        .values
+        .flatten_all()?
+        .to_dtype(inference_tensor::DType::F32)?
+        .to_vec1::<f32>()?;
+    let mut bytes = Vec::with_capacity(8 + 8 * ids.len());
+    bytes.extend_from_slice(
+        &u32::try_from(ids.len() / k.max(1))
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&u32::try_from(k).unwrap_or(u32::MAX).to_le_bytes());
+    bytes.extend(ids.iter().flat_map(|v| v.to_le_bytes()));
+    bytes.extend(weights.iter().flat_map(|v| v.to_le_bytes()));
+    let mut file = dump
+        .lock()
+        .map_err(|_| inference_tensor::Error::msg("the route dump's lock is poisoned"))?;
+    file.write_all(&bytes)
+        .map_err(inference_tensor::Error::wrap)
+}
+
+fn route_topk(
+    logits: &Tensor,
+    config: MoeRouterTopKConfig,
+    selection_bias: Option<&Tensor>,
+    expert_scale: Option<&Tensor>,
+) -> Result<TopKOutput> {
     #[cfg(feature = "cuda")]
     if let Some(topk) =
         cuda_moe_router_topk_if_supported(logits, config, selection_bias, expert_scale)?

@@ -2229,6 +2229,11 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         false
     }
 
+    /// The weight's shape where the layer holds it in blocks only (no full-precision tensor, no QTensor).
+    fn weight_dims(&self) -> Option<Vec<usize>> {
+        None
+    }
+
     /// Begin tracking stats into an ImatrixLayerStats
     fn begin_track_stats(&self) -> Result<()> {
         inference_tensor::bail!("`{}` does not support tracking stats.", self.name())
@@ -2237,6 +2242,16 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// Begin collecting the input Hessian (`x^T x`) for EXL3 quantization; `end_track_stats` returns it.
     fn begin_track_hessian(&self) -> Result<()> {
         inference_tensor::bail!("`{}` does not collect Hessians.", self.name())
+    }
+
+    /// Begin keeping every forward's input (rows of `in`), for [`Self::take_captured_inputs`].
+    fn begin_capture_inputs(&self) -> Result<()> {
+        inference_tensor::bail!("`{}` does not capture its inputs.", self.name())
+    }
+
+    /// The inputs kept since capturing began or the last take, in order.
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        inference_tensor::bail!("`{}` does not capture its inputs.", self.name())
     }
 
     /// End tracking stats into an ImatrixLayerStats. Returns the computed imatrix.

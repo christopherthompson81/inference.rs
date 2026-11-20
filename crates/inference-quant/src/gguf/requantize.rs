@@ -27,6 +27,15 @@ const ROWS_PER_TASK: usize = 64;
 const SLICE_BYTES: usize = 64 << 20;
 /// The share of a Hessian's mean diagonal GPTQ adds to it by default (its `percdamp`): 0.01 fit the calibration's
 /// domain and lost on other text, 0.1 held up across held-out text (quant_allocation_investigation Run 9).
+// set, each GPTQ tensor logs its reconstruction error and its Hessians' off-diagonal share (a diagnostic)
+#[cfg(feature = "cuda")]
+const GPTQ_REPORT_ENV: &str = "INFERENCE_GPTQ_REPORT";
+// the stacked factors and rows one batched GPTQ pass over a stack's experts takes at most
+#[cfg(feature = "cuda")]
+const GPTQ_BATCH_BYTES: usize = 2 << 30;
+// GPTQ inputs read ahead of the GPU (each a tensor's values and Hessians, up to a few GB)
+#[cfg(feature = "cuda")]
+const GPTQ_PREFETCH_DEPTH: usize = 1;
 pub const DEFAULT_GPTQ_DAMP: f64 = 0.1;
 // f32 bytes of rows the GPU quantizes in one call (its scratch takes about three times this)
 const GPU_CHUNK_BYTES: usize = 1 << 30;
@@ -129,6 +138,12 @@ pub trait HessianSource: Send + Sync {
     /// The Hessian of tensor `name` (by GGUF name), or of expert `expert` of a stack (None where the stack has one
     /// for all its experts or none).
     fn hessian(&self, name: &str, expert: Option<usize>) -> Result<Option<Vec<f32>>>;
+
+    /// GPTAQ's cross moment beside tensor `name`'s Hessian (`(X_fp - X_q)^T X_q / n`, `[cols, cols]`), where its
+    /// Hessian was collected over a quantized model's inputs paired with the full-precision model's.
+    fn cross(&self, _name: &str) -> Result<Option<Vec<f32>>> {
+        Ok(None)
+    }
 }
 
 /// A safetensors file of Hessians keyed by GGUF tensor name.
@@ -180,6 +195,8 @@ pub struct RequantizePlan {
     pub hessian_weights_only: bool,
     /// The share of a Hessian's mean diagonal added to it before the feedback.
     pub gptq_damp: f64,
+    /// Hessians GPTQ's diagnostic report measures the encodings' error over in place of `hessians` (out of sample).
+    pub report_hessians: Option<Box<dyn HessianSource>>,
 }
 
 #[derive(Debug, Default)]
@@ -198,12 +215,12 @@ pub struct RequantizeSummary {
 }
 
 fn to_f32(ggml_dtype: u32, bytes: &[u8]) -> Result<Vec<f32>> {
-    let halves = || bytes.as_chunks::<2>().0.iter();
+    let halves = || bytes.as_chunks::<2>().0.par_iter();
     Ok(match ggml_dtype {
         0 => bytes
             .as_chunks::<4>()
             .0
-            .iter()
+            .par_iter()
             .map(|c| f32::from_le_bytes(*c))
             .collect(),
         1 => halves().map(|c| f16::from_le_bytes(*c).to_f32()).collect(),
@@ -264,23 +281,29 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
     })
 }
 
-// `t` quantized with GPTQ feedback when `hessians` has its Hessian (a stack's experts each with its own, or the stack's
-// for all); None leaves it to the ordinary path, the reader where it was
+// what GPTQ reads for a tensor before its GPU pass: its Hessians and its values widened to f32
 #[cfg(feature = "cuda")]
-fn gptq_tensor(
+struct GptqInput {
+    shared: Option<Vec<f32>>,
+    cross: Option<Vec<f32>>,
+    per_expert: Vec<Option<Vec<f32>>>,
+    values: Vec<f32>,
+}
+
+// `t`'s GPTQ input from the source at `offset`, or None when no Hessian covers it
+#[cfg(feature = "cuda")]
+fn load_gptq(
     t: &Planned<'_>,
-    ty: GgufType,
     hessians: &dyn HessianSource,
-    plan: &RequantizePlan,
-    device: &Device,
     reader: &mut BufReader<File>,
     offset: u64,
-) -> Result<Option<Vec<u8>>> {
-    let cols = *t.dims.last().unwrap_or(&1);
+) -> Result<Option<GptqInput>> {
     let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
     let shared = hessians.hessian(t.name, None)?;
     let per_expert = if t.dims.len() == 3 {
+        // each expert's file read and unpacked side by side (a stack's are GBs)
         (0..experts)
+            .into_par_iter()
             .map(|e| hessians.hessian(t.name, Some(e)))
             .collect::<Result<Vec<_>>>()?
     } else {
@@ -292,7 +315,32 @@ fn gptq_tensor(
     let mut bytes = vec![0u8; t.source_bytes];
     reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut bytes)?;
-    let values = to_f32(t.source_type, &bytes)?;
+    Ok(Some(GptqInput {
+        cross: hessians.cross(t.name)?,
+        shared,
+        per_expert,
+        values: to_f32(t.source_type, &bytes)?,
+    }))
+}
+
+// `t` quantized with GPTQ feedback from its loaded input (a stack's experts each with their own Hessian, or the
+// stack's for all)
+#[cfg(feature = "cuda")]
+fn gptq_tensor(
+    t: &Planned<'_>,
+    ty: GgufType,
+    input: GptqInput,
+    plan: &RequantizePlan,
+    device: &Device,
+) -> Result<Vec<u8>> {
+    let GptqInput {
+        shared,
+        cross,
+        per_expert,
+        values,
+    } = input;
+    let cols = *t.dims.last().unwrap_or(&1);
+    let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
     let per = values.len() / experts;
     let prepare = |h: &[f32]| {
         super::gptq::prepare(h, cols, !plan.hessian_weights_only, plan.gptq_damp, device)
@@ -313,23 +361,154 @@ fn gptq_tensor(
     };
     // experts sharing one Hessian are rows of one matrix to it (GPTQ treats rows alone): one pass over them all
     if per_expert.iter().all(Option::is_none) {
-        let shared = prepare(shared.as_deref().expect("a shared Hessian"))?;
-        return Ok(Some(quantize(&values, &shared)?));
+        let mut prepared = prepare(shared.as_deref().expect("a shared Hessian"))?;
+        if let Some(cross) = &cross {
+            prepared = prepared
+                .with_cross(cross, device)
+                .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))?;
+        }
+        let out = quantize(&values, &prepared)?;
+        if std::env::var_os(GPTQ_REPORT_ENV).is_some() {
+            report(
+                t,
+                ty,
+                cols,
+                &values,
+                &out,
+                shared.as_deref(),
+                &per_expert,
+                plan,
+                device,
+            )?;
+        }
+        return Ok(out);
     }
-    let shared = shared.as_deref().map(prepare).transpose()?;
-    // experts with their own Hessians run side by side, each factoring its own
-    let parts = (0..experts)
-        .into_par_iter()
-        .map(|e| {
-            let own = per_expert[e].as_deref().map(prepare).transpose()?;
-            let prepared = own.as_ref().or(shared.as_ref()).ok_or_else(|| {
+    let shared_prepared = shared.as_deref().map(prepare).transpose()?;
+    let own = per_expert
+        .par_iter()
+        .map(|h| h.as_deref().map(prepare).transpose())
+        .collect::<Result<Vec<_>>>()?;
+    let prepared = own
+        .iter()
+        .enumerate()
+        .map(|(e, own)| {
+            own.as_ref().or(shared_prepared.as_ref()).ok_or_else(|| {
                 inference_tensor::Error::Msg(format!("{}: no Hessian for expert {e}", t.name))
-            })?;
-            quantize(&values[e * per..(e + 1) * per], prepared)
+            })
         })
         .collect::<Result<Vec<_>>>()?;
+    // experts with their own Hessians run together on the GPU, as many at once as their stacked factors and rows fit
+    // GPTQ_BATCH_BYTES; elsewhere side by side, each factoring its own
+    let batch = (GPTQ_BATCH_BYTES / (4 * (cols * cols + 3 * per))).clamp(1, experts);
+    let mut parts = Vec::new();
+    for e0 in (0..experts).step_by(batch) {
+        let e1 = (e0 + batch).min(experts);
+        let Some(part) = super::gptq::quantize_experts(
+            ty,
+            cols,
+            &values[e0 * per..e1 * per],
+            &prepared[e0..e1],
+            device,
+        )
+        .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))?
+        else {
+            parts = (0..experts)
+                .into_par_iter()
+                .map(|e| quantize(&values[e * per..(e + 1) * per], prepared[e]))
+                .collect::<Result<Vec<_>>>()?;
+            break;
+        };
+        parts.push(part);
+    }
     let out = parts.concat();
-    Ok(Some(out))
+    if std::env::var_os(GPTQ_REPORT_ENV).is_some() {
+        report(
+            t,
+            ty,
+            cols,
+            &values,
+            &out,
+            shared.as_deref(),
+            &per_expert,
+            plan,
+            device,
+        )?;
+    }
+    Ok(out)
+}
+
+// the diagnostic report over the plan's report Hessians, or the ones the tensor was quantized with
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn report(
+    t: &Planned<'_>,
+    ty: GgufType,
+    cols: usize,
+    values: &[f32],
+    out: &[u8],
+    shared: Option<&[f32]>,
+    per_expert: &[Option<Vec<f32>>],
+    plan: &RequantizePlan,
+    device: &Device,
+) -> Result<()> {
+    let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
+    let (shared, per_expert) = match &plan.report_hessians {
+        Some(source) => (
+            source.hessian(t.name, None)?,
+            (0..experts)
+                .map(|e| source.hessian(t.name, (t.dims.len() == 3).then_some(e)))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        None => (shared.map(<[f32]>::to_vec), per_expert.to_vec()),
+    };
+    let hs = (0..experts)
+        .map(|e| {
+            per_expert
+                .get(e)
+                .and_then(Option::as_deref)
+                .or(shared.as_deref())
+        })
+        .collect::<Vec<_>>();
+    report_reconstruction(t.name, ty, cols, values, out, &hs, device)
+}
+
+// a diagnostic line: the encoding's output error over the calibration inputs, `tr(dW H dW^T) / tr(W H W^T)` summed
+// over the experts, and the Hessians' off-diagonal share of their Frobenius norm (what GPTQ's feedback works with)
+#[cfg(feature = "cuda")]
+fn report_reconstruction(
+    name: &str,
+    ty: GgufType,
+    cols: usize,
+    values: &[f32],
+    out: &[u8],
+    hessians: &[Option<&[f32]>],
+    device: &Device,
+) -> Result<()> {
+    let decoded = dequantize_any(ty, cols, out)?;
+    let per = values.len() / hessians.len();
+    let (mut err, mut reference, mut off, mut total) = (0f64, 0f64, 0f64, 0f64);
+    for (e, h) in hessians.iter().enumerate() {
+        let Some(h) = h else { continue };
+        let rows = per / cols;
+        let w = Tensor::from_slice(&values[e * per..(e + 1) * per], (rows, cols), device)?;
+        let q = Tensor::from_slice(&decoded[e * per..(e + 1) * per], (rows, cols), device)?;
+        let ht = Tensor::from_slice(h, (cols, cols), device)?;
+        let dw = (&w - &q)?;
+        err += f64::from(dw.matmul(&ht)?.mul(&dw)?.sum_all()?.to_scalar::<f32>()?);
+        reference += f64::from(w.matmul(&ht)?.mul(&w)?.sum_all()?.to_scalar::<f32>()?);
+        let sq = ht.sqr()?.sum_all()?.to_scalar::<f32>()?;
+        let diag = (0..cols)
+            .map(|i| h[i * cols + i] * h[i * cols + i])
+            .sum::<f32>();
+        off += f64::from(sq - diag);
+        total += f64::from(sq);
+    }
+    tracing::info!(
+        "gptq-report {name} {ty:?} rel_err {:.6e} offdiag {:.4}",
+        err / reference,
+        (off / total).sqrt()
+    );
+    Ok(())
 }
 
 // rows of `cols` of `ty` back to f32: the raw types' dequantizers, or Candle's for the types it holds
@@ -472,47 +651,186 @@ pub fn requantize_gguf(
         ..Default::default()
     };
     let mut by_type = HashMap::<u32, (usize, u64)>::new();
-    for (i, t) in tensors.iter().enumerate() {
-        progress(i, tensors.len(), t.name);
-        let info = &header.tensor_infos[t.name];
-        reader.seek(SeekFrom::Start(header.tensor_data_offset + info.offset))?;
-        let cols = *t.dims.last().unwrap_or(&1);
-        let rows = t.dims.iter().product::<usize>() / cols.max(1);
-        let source_row = t.source_bytes / rows.max(1);
-        let imatrix = t
-            .target
-            .and(plan.imatrix.as_ref())
-            .and_then(|m| m.get(t.name));
-        if t.target.is_some() {
-            if plan.imatrix.is_some() && imatrix.is_none() {
-                summary.without_imatrix.push(t.name.to_string());
-            }
-            summary.quantized += 1;
-        }
-        // an expert stack's imatrix holds `cols` per expert, so its slices are whole experts
-        let expert_rows = (t.dims.len() > 2).then(|| t.dims[t.dims.len() - 2]);
-        if let Some(w) = imatrix
-            && w.len() != cols * (rows / expert_rows.unwrap_or(rows))
-        {
-            inference_tensor::bail!("{}: an imatrix of {} for rows of {cols}", t.name, w.len());
-        }
-        let reused = t.target.and_then(|ty| {
-            reuse.iter_mut().find(|(_, h)| {
-                h.tensor_infos.get(t.name).is_some_and(|info| {
-                    info.ggml_dtype == ty.id() && info.shape.dims() == t.dims.as_slice()
+    // the tensors GPTQ takes (a type it covers, not reused, on a CUDA device with Hessians), whose Hessians and values
+    // a second thread reads ahead while the GPU works on the one before
+    #[cfg(feature = "cuda")]
+    let gptq_targets: std::collections::HashSet<usize> = tensors
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            plan.hessians.is_some()
+                && matches!(plan.gpu, Some(Device::Cuda(_)))
+                && t.target.is_some_and(super::gptq::supports)
+                && !t.target.is_some_and(|ty| {
+                    reuse.iter().any(|(_, h)| {
+                        h.tensor_infos.get(t.name).is_some_and(|info| {
+                            info.ggml_dtype == ty.id() && info.shape.dims() == t.dims.as_slice()
+                        })
+                    })
                 })
-            })
+        })
+        .map(|(i, _)| i)
+        .collect();
+    std::thread::scope(|scope| -> Result<()> {
+        #[cfg(not(feature = "cuda"))]
+        let _ = scope;
+        #[cfg(feature = "cuda")]
+        let prefetched = plan.hessians.as_deref().map(|hessians| {
+            let (tx, rx) = std::sync::mpsc::sync_channel(GPTQ_PREFETCH_DEPTH);
+            let mut order = gptq_targets.iter().copied().collect::<Vec<_>>();
+            order.sort_unstable();
+            let tensors = &tensors;
+            let header = &header;
+            scope.spawn(move || {
+                let mut reader = match File::open(src) {
+                    Ok(file) => BufReader::new(file),
+                    Err(e) => return drop(tx.send((usize::MAX, Err(e.into())))),
+                };
+                for i in order {
+                    let t = &tensors[i];
+                    let offset = header.tensor_data_offset + header.tensor_infos[t.name].offset;
+                    // a send fails only once the loop has stopped, which ends this thread too
+                    if tx
+                        .send((i, load_gptq(t, hessians, &mut reader, offset)))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+            rx
         });
-        if let Some((reader, h)) = reused {
-            reader.seek(SeekFrom::Start(
-                h.tensor_data_offset + h.tensor_infos[t.name].offset,
-            ))?;
-            let copied = std::io::copy(&mut reader.by_ref().take(t.size as u64), &mut writer)?;
-            if copied != t.size as u64 {
-                inference_tensor::bail!("{}: reused {copied} bytes, planned {}", t.name, t.size);
+        for (i, t) in tensors.iter().enumerate() {
+            progress(i, tensors.len(), t.name);
+            let info = &header.tensor_infos[t.name];
+            reader.seek(SeekFrom::Start(header.tensor_data_offset + info.offset))?;
+            let cols = *t.dims.last().unwrap_or(&1);
+            let rows = t.dims.iter().product::<usize>() / cols.max(1);
+            let source_row = t.source_bytes / rows.max(1);
+            let imatrix = t
+                .target
+                .and(plan.imatrix.as_ref())
+                .and_then(|m| m.get(t.name));
+            if t.target.is_some() {
+                if plan.imatrix.is_some() && imatrix.is_none() {
+                    summary.without_imatrix.push(t.name.to_string());
+                }
+                summary.quantized += 1;
+            }
+            // an expert stack's imatrix holds `cols` per expert, so its slices are whole experts
+            let expert_rows = (t.dims.len() > 2).then(|| t.dims[t.dims.len() - 2]);
+            if let Some(w) = imatrix
+                && w.len() != cols * (rows / expert_rows.unwrap_or(rows))
+            {
+                inference_tensor::bail!("{}: an imatrix of {} for rows of {cols}", t.name, w.len());
+            }
+            let reused = t.target.and_then(|ty| {
+                reuse.iter_mut().find(|(_, h)| {
+                    h.tensor_infos.get(t.name).is_some_and(|info| {
+                        info.ggml_dtype == ty.id() && info.shape.dims() == t.dims.as_slice()
+                    })
+                })
+            });
+            if let Some((reader, h)) = reused {
+                reader.seek(SeekFrom::Start(
+                    h.tensor_data_offset + h.tensor_infos[t.name].offset,
+                ))?;
+                let copied = std::io::copy(&mut reader.by_ref().take(t.size as u64), &mut writer)?;
+                if copied != t.size as u64 {
+                    inference_tensor::bail!(
+                        "{}: reused {copied} bytes, planned {}",
+                        t.name,
+                        t.size
+                    );
+                }
+                write_tensor_padding(&mut writer, t.size)?;
+                summary.reused += 1;
+                summary.bytes_in += t.source_bytes as u64;
+                summary.bytes_out += t.size as u64;
+                let entry = by_type
+                    .entry(t.target.map_or(t.source_type, |ty| ty.id()))
+                    .or_default();
+                entry.0 += 1;
+                entry.1 += t.size as u64;
+                continue;
+            }
+            // GPTQ takes the whole matrix (each expert's) at once, its Hessian beside it, read ahead by the prefetcher
+            #[cfg(feature = "cuda")]
+            if let (Some(ty), Some(device), Some(rx)) = (t.target, &plan.gpu, &prefetched)
+                && gptq_targets.contains(&i)
+                && let Some(input) = {
+                    let (j, input) = rx
+                        .recv()
+                        .map_err(|_| inference_tensor::Error::msg("the GPTQ prefetcher stopped"))?;
+                    debug_assert_eq!(i, j);
+                    input?
+                }
+            {
+                let out = gptq_tensor(t, ty, input, plan, device)?;
+                if out.len() != t.size {
+                    inference_tensor::bail!(
+                        "{}: wrote {} bytes, planned {}",
+                        t.name,
+                        out.len(),
+                        t.size
+                    );
+                }
+                writer.write_all(&out)?;
+                write_tensor_padding(&mut writer, t.size)?;
+                summary.gptq += 1;
+                summary.bytes_in += t.source_bytes as u64;
+                summary.bytes_out += t.size as u64;
+                let entry = by_type.entry(ty.id()).or_default();
+                entry.0 += 1;
+                entry.1 += t.size as u64;
+                continue;
+            }
+            let gpu = t.target.and_then(|ty| gpu_for(plan, ty));
+            let slice_rows = match (gpu.is_some(), expert_rows) {
+                // the GPU takes whole experts by the chunk, each weighed by its own imatrix slice
+                (true, Some(e)) => e * (GPU_CHUNK_BYTES / (e * cols * 4).max(1)).max(1),
+                (true, None) => (GPU_CHUNK_BYTES / (cols * 4).max(1)).clamp(1, rows.max(1)),
+                (false, Some(e)) => e,
+                (false, None) => (SLICE_BYTES / source_row.max(1)).clamp(1, rows.max(1)),
+            };
+            let mut written = 0usize;
+            let mut bytes = Vec::new();
+            for first in (0..rows).step_by(slice_rows) {
+                let n = slice_rows.min(rows - first);
+                bytes.resize(n * source_row, 0);
+                reader.read_exact(&mut bytes)?;
+                let Some(ty) = t.target else {
+                    writer.write_all(&bytes)?;
+                    written += bytes.len();
+                    continue;
+                };
+                let out = match gpu {
+                    Some(dev) => {
+                        let (w, per) = match expert_rows {
+                            Some(e) => (
+                                imatrix.map(|w| &w[first / e * cols..(first + n) / e * cols]),
+                                e,
+                            ),
+                            None => (imatrix.map(Vec::as_slice), n),
+                        };
+                        gpu_quantize(dev, ty, cols, t.source_type, &bytes, w, per)
+                    }
+                    None => {
+                        let w = imatrix.map(|w| {
+                            let expert = expert_rows.map_or(0, |e| first / e);
+                            &w[expert * cols..(expert + 1) * cols]
+                        });
+                        quantize_slice(ty, cols, &to_f32(t.source_type, &bytes)?, w, plan.quantizer)
+                    }
+                }
+                .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
+                writer.write_all(&out)?;
+                written += out.len();
+            }
+            if written != t.size {
+                inference_tensor::bail!("{}: wrote {written} bytes, planned {}", t.name, t.size);
             }
             write_tensor_padding(&mut writer, t.size)?;
-            summary.reused += 1;
             summary.bytes_in += t.source_bytes as u64;
             summary.bytes_out += t.size as u64;
             let entry = by_type
@@ -520,95 +838,9 @@ pub fn requantize_gguf(
                 .or_default();
             entry.0 += 1;
             entry.1 += t.size as u64;
-            continue;
         }
-        // GPTQ takes the whole matrix (each expert's) at once, its Hessian beside it
-        #[cfg(feature = "cuda")]
-        if let (Some(ty), Some(h), Some(device @ Device::Cuda(_))) =
-            (t.target, &plan.hessians, &plan.gpu)
-            && super::gptq::supports(ty)
-            && let Some(out) = gptq_tensor(
-                t,
-                ty,
-                h.as_ref(),
-                plan,
-                device,
-                &mut reader,
-                header.tensor_data_offset + info.offset,
-            )?
-        {
-            if out.len() != t.size {
-                inference_tensor::bail!(
-                    "{}: wrote {} bytes, planned {}",
-                    t.name,
-                    out.len(),
-                    t.size
-                );
-            }
-            writer.write_all(&out)?;
-            write_tensor_padding(&mut writer, t.size)?;
-            summary.gptq += 1;
-            summary.bytes_in += t.source_bytes as u64;
-            summary.bytes_out += t.size as u64;
-            let entry = by_type.entry(ty.id()).or_default();
-            entry.0 += 1;
-            entry.1 += t.size as u64;
-            continue;
-        }
-        let gpu = t.target.and_then(|ty| gpu_for(plan, ty));
-        let slice_rows = match (gpu.is_some(), expert_rows) {
-            // the GPU takes whole experts by the chunk, each weighed by its own imatrix slice
-            (true, Some(e)) => e * (GPU_CHUNK_BYTES / (e * cols * 4).max(1)).max(1),
-            (true, None) => (GPU_CHUNK_BYTES / (cols * 4).max(1)).clamp(1, rows.max(1)),
-            (false, Some(e)) => e,
-            (false, None) => (SLICE_BYTES / source_row.max(1)).clamp(1, rows.max(1)),
-        };
-        let mut written = 0usize;
-        let mut bytes = Vec::new();
-        for first in (0..rows).step_by(slice_rows) {
-            let n = slice_rows.min(rows - first);
-            bytes.resize(n * source_row, 0);
-            reader.read_exact(&mut bytes)?;
-            let Some(ty) = t.target else {
-                writer.write_all(&bytes)?;
-                written += bytes.len();
-                continue;
-            };
-            let out = match gpu {
-                Some(dev) => {
-                    let (w, per) = match expert_rows {
-                        Some(e) => (
-                            imatrix.map(|w| &w[first / e * cols..(first + n) / e * cols]),
-                            e,
-                        ),
-                        None => (imatrix.map(Vec::as_slice), n),
-                    };
-                    gpu_quantize(dev, ty, cols, t.source_type, &bytes, w, per)
-                }
-                None => {
-                    let w = imatrix.map(|w| {
-                        let expert = expert_rows.map_or(0, |e| first / e);
-                        &w[expert * cols..(expert + 1) * cols]
-                    });
-                    quantize_slice(ty, cols, &to_f32(t.source_type, &bytes)?, w, plan.quantizer)
-                }
-            }
-            .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
-            writer.write_all(&out)?;
-            written += out.len();
-        }
-        if written != t.size {
-            inference_tensor::bail!("{}: wrote {written} bytes, planned {}", t.name, t.size);
-        }
-        write_tensor_padding(&mut writer, t.size)?;
-        summary.bytes_in += t.source_bytes as u64;
-        summary.bytes_out += t.size as u64;
-        let entry = by_type
-            .entry(t.target.map_or(t.source_type, |ty| ty.id()))
-            .or_default();
-        entry.0 += 1;
-        entry.1 += t.size as u64;
-    }
+        Ok(())
+    })?;
     writer
         .into_inner()
         .map_err(|e| e.into_error())?
@@ -907,6 +1139,7 @@ mod tests {
             hessians: None,
             hessian_weights_only: false,
             gptq_damp: 0.0,
+            report_hessians: None,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -932,6 +1165,7 @@ mod tests {
             hessians: None,
             hessian_weights_only: false,
             gptq_damp: 0.0,
+            report_hessians: None,
         };
         let overlaid = requantize_gguf(&src, &overlay, &overlaying, |_, _, _| {})?;
         assert_eq!(overlaid.tensors, 1);

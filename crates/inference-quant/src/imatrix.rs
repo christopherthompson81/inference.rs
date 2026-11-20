@@ -40,6 +40,12 @@ enum ImatrixLayerStats_ {
         counts: Vec<usize>,
         h: Vec<Option<Tensor>>,
     },
+    /// Every forward's input as it came (rows of `in`), for a caller pairing them with another model's.
+    Capture {
+        ncalls: usize,
+        rows: usize,
+        inputs: Vec<Tensor>,
+    },
 }
 
 // `h` (zero when None) plus x^T x for `x` (rows, in), in f32
@@ -177,6 +183,23 @@ impl ImatrixLayerStats {
         Ok(())
     }
 
+    /// Start keeping every forward's input, for [`Self::take_captured`].
+    pub fn enable_capture(&self) {
+        *self.0.write().unwrap() = Some(ImatrixLayerStats_::Capture {
+            ncalls: 0,
+            rows: 0,
+            inputs: Vec::new(),
+        });
+    }
+
+    /// The inputs kept since [`Self::enable_capture`] or the last take, in order; capturing goes on.
+    pub fn take_captured(&self) -> Result<Vec<Tensor>> {
+        match self.0.write().unwrap().as_mut() {
+            Some(ImatrixLayerStats_::Capture { inputs, .. }) => Ok(std::mem::take(inputs)),
+            _ => inference_tensor::bail!("this layer is not capturing its inputs"),
+        }
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.0.read().unwrap().is_some()
     }
@@ -189,7 +212,8 @@ impl ImatrixLayerStats {
             } => (*ncalls, *row_counts),
             ImatrixLayerStats_::Routed { ncalls, rows, .. }
             | ImatrixLayerStats_::Hessian { ncalls, rows, .. }
-            | ImatrixLayerStats_::RoutedHessian { ncalls, rows, .. } => (*ncalls, *rows),
+            | ImatrixLayerStats_::RoutedHessian { ncalls, rows, .. }
+            | ImatrixLayerStats_::Capture { ncalls, rows, .. } => (*ncalls, *rows),
         })
     }
 
@@ -203,6 +227,18 @@ impl ImatrixLayerStats {
             *ncalls += 1;
             *rows += x.dim(0)?;
             *h = add_gram(Some(h.clone()), &x)?;
+            return Ok(());
+        }
+        if let Some(ImatrixLayerStats_::Capture {
+            ncalls,
+            rows,
+            inputs,
+        }) = handle.as_mut()
+        {
+            let x = inp.reshape(((), inp.dim(D::Minus1)?))?;
+            *ncalls += 1;
+            *rows += x.dim(0)?;
+            inputs.push(x);
             return Ok(());
         }
         // routed layers are observed by their router; a stray plain forward contributes nothing
@@ -348,6 +384,9 @@ impl ImatrixLayerStats {
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Tensor::stack(&per_expert, 0)
+            }
+            ImatrixLayerStats_::Capture { .. } => {
+                inference_tensor::bail!("a capturing layer's inputs are taken, not summarized")
             }
         }
     }

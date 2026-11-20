@@ -313,7 +313,20 @@ inference quantize hessians [OPTIONS] --model-id <MODEL_ID> --calibration-file <
 
 | Option | Default | Description |
 |---|---|---|
-| `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local model directory (full precision) |
+| `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID, local model directory or full-precision GGUF file (BF16/F16/F32) |
 | `--calibration-file <CALIBRATION_FILE>` | required | Calibration text, varied (several domains): GPTQ fit to one domain loses on others |
 | `-o, --output <OUTPUT_PATH>` | required | Output directory (one `<linear>.safetensors` each, holding `hin`) |
+
+## inference quantize kld
+
+A model's KL divergence from a llama-perplexity base (`--kl-divergence-base`) over the base's own chunks, a layer at a time through the GPU with the model on the host: models too large for the GPU score in minutes
+
+```
+inference quantize kld [OPTIONS] --model-id <MODEL_ID> --kld-base <KLD_BASE>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID, local model directory or GGUF file |
+| `--kld-base <KLD_BASE>` | required | The llama-perplexity KL divergence base to score against |
 

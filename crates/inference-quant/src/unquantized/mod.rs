@@ -282,6 +282,8 @@ impl QuantMethod for UnquantLinear {
     }
 
     fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        // host-mapped layers run in f32 while an expert stack keeps its checkpoint's bf16 (f32 would double it)
+        let a = &a.to_dtype(self.w.dtype())?;
         if let Some(y) = self.grouped_gather(a, indices)? {
             return self.add_gather_bias(y, indices);
         }
@@ -664,6 +666,15 @@ impl QuantMethod for UnquantLinear {
         }
     }
 
+    fn begin_capture_inputs(&self) -> Result<()> {
+        self.stats.enable_capture();
+        Ok(())
+    }
+
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        self.stats.take_captured()
+    }
+
     fn begin_track_hessian(&self) -> Result<()> {
         let in_dim = self.w.dim(inference_tensor::D::Minus1)?;
         // stacked [E, out, in] experts collect one per expert, from the rows their router sends them
@@ -856,6 +867,28 @@ mod tests {
         assert_eq!(output.dims(), &[2, 2, 2]);
         assert_eq!(
             output.flatten_all()?.to_vec1::<f32>()?,
+            &[1., 2., 3., 6., 6., 15., 4., 5.]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gather_forward_takes_inputs_of_another_dtype() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = test_layer(&device)?.w.to_dtype(DType::BF16)?;
+        let layer = <UnquantLinear as QuantMethod>::new(QuantMethodConfig::Unquantized(
+            Linear::new(weight, None),
+        ))?;
+        let input = Tensor::from_vec(vec![1f32, 2., 3., 4., 5., 6.], (2, 1, 3), &device)?;
+        let indices = Tensor::from_vec(vec![0u32, 1, 1, 0], (2, 2), &device)?;
+
+        let output = layer.gather_forward(&input, &indices)?;
+
+        assert_eq!(
+            output
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
             &[1., 2., 3., 6., 6., 15., 4., 5.]
         );
         Ok(())

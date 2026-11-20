@@ -205,6 +205,7 @@ impl GgufModelBuilder {
             write_uqff: self.write_uqff.clone(),
             imatrix: self.imatrix.clone(),
             calibration_file: self.calibration_file.clone(),
+            hessians_out: None,
             max_edge: self.max_edge,
             max_seq_len: self.options.auto_map.max_seq_len,
             max_batch_size: self.options.auto_map.max_batch_size,

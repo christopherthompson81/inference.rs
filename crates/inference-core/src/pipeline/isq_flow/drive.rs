@@ -121,12 +121,28 @@ fn reset_either_cache(cache: &EitherCache) -> inference_tensor::Result<()> {
 
 pub(crate) struct CalibrationCtx<'a> {
     pub tokenizer: &'a Tokenizer,
+    /// The BOS each calibration chunk starts with: the one encoding adds, if it adds one ([`added_bos`]).
     pub bos_tok_id: Option<u32>,
     pub load_device: &'a Device,
     pub mapper: Option<&'a dyn crate::device_map::DeviceMapper>,
 }
 
 pub(super) const CALIBRATION_CHUNK_SIZE: usize = 1024;
+// the text whose encoding with and without special tokens tells whether the vocab adds a BOS
+const BOS_PROBE_TEXT: &str = " ";
+
+/// The BOS encoding adds before a text, as llama.cpp's tools start each chunk (none where the vocab adds none: a
+/// model that never sees one in use is not calibrated on one).
+pub(crate) fn added_bos(tokenizer: &Tokenizer) -> Option<u32> {
+    let encode = |special| {
+        tokenizer
+            .encode_fast(BOS_PROBE_TEXT, special)
+            .ok()
+            .map(|e| e.get_ids().to_vec())
+    };
+    let (with, without) = (encode(true)?, encode(false)?);
+    (with.len() > without.len()).then(|| with[0])
+}
 const TIED_EMBEDDING: &str = "embed_tokens";
 const TIED_HEAD: &str = "lm_head";
 // the Hessians one calibration pass collects at once (f32 `[in, in]` per layer); more layers take more passes
@@ -210,6 +226,14 @@ pub(crate) fn write_hessians(
     ctx: &CalibrationCtx<'_>,
     weights: Option<&[PathBuf]>,
 ) -> Result<()> {
+    // a llama-perplexity KL-divergence base in place of calibration text: score against it, streamed
+    #[cfg(feature = "cuda")]
+    if let (Some(stream), true, Some(weights)) =
+        (drive.layer_stream(), ctx.load_device.is_cpu(), weights)
+        && inference_nn::logits_reference::KldBase::is_base(calibration_file)
+    {
+        return super::exl3_write::score_kld_streamed(stream, calibration_file, ctx, weights);
+    }
     let tokens = calibration_tokens(calibration_file, ctx)?;
     #[cfg(not(feature = "cuda"))]
     let _ = weights;

@@ -296,8 +296,11 @@ impl NormalLoader {
             &mut paged_attn_config,
         )?;
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
-        // an EXL3 write from the host streams the layers through the GPU, so the host load builds none
-        let streamed = self.config.exl3_out.is_some() && device.is_cpu();
+        // an EXL3 write or Hessian dump from the host streams the layers through the GPU, so the host load builds none
+        // (a build without CUDA collects Hessians over the loaded model)
+        let streamed = (self.config.exl3_out.is_some()
+            || (cfg!(feature = "cuda") && self.config.hessians_out.is_some()))
+            && device.is_cpu();
         let _stream = streamed.then(inference_nn::decoder::stream_layers);
         let (model, tracker, dynamic_lora, switch_adapters) = super::loading::load_model(
             &*self.inner,
@@ -364,10 +367,7 @@ impl NormalLoader {
             }),
             calibration: super::isq_flow::CalibrationCtx {
                 tokenizer: &tokenizer,
-                bos_tok_id: chat_template
-                    .bos_tok()
-                    .as_deref()
-                    .and_then(|tok| tokenizer.token_to_id(tok)),
+                bos_tok_id: super::isq_flow::added_bos(&tokenizer),
                 load_device: &load_device,
                 mapper: Some(pipeline_mapper.as_ref()),
             },

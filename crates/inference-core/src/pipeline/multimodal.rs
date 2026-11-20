@@ -523,10 +523,7 @@ impl MultimodalLoader {
             exl3_source: None,
             calibration: super::isq_flow::CalibrationCtx {
                 tokenizer: &tokenizer,
-                bos_tok_id: chat_template
-                    .bos_tok()
-                    .as_deref()
-                    .and_then(|tok| tokenizer.token_to_id(tok)),
+                bos_tok_id: super::isq_flow::added_bos(&tokenizer),
                 load_device: &load_device,
                 mapper: Some(pipeline_mapper.as_ref()),
             },

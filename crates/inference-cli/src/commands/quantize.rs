@@ -20,8 +20,8 @@ use super::serve::{self, extract_device_settings};
 use crate::args::{
     AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, Exl3QuantizeOptions,
     FormatOptions, GgufQuantizeOptions, GlobalOptions, HessiansOptions, HiDreamQuantizeOptions,
-    ImatrixConvertOptions, MatformerSelection, MmprojOptions, ModelSourceOptions, ModelType,
-    MultimodalAdapterOptions, MultimodalOptions, NemotronTranscribeAudioOptions,
+    ImatrixConvertOptions, KldOptions, MatformerSelection, MmprojOptions, ModelSourceOptions,
+    ModelType, MultimodalAdapterOptions, MultimodalOptions, NemotronTranscribeAudioOptions,
     QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
     QuantizeMultimodalOptions, QuantizeQuantizationOptions, QuantizerChoice,
     WorldgenQuantizeOptions,
@@ -30,6 +30,10 @@ use crate::args::{
 const MIB: f64 = (1u64 << 20) as f64;
 // a streamed EXL3 write holds the model on the host, its layers built on the GPU one at a time
 const HOST_DEVICE: &str = "cpu";
+const GGUF_EXTENSION: &str = "gguf";
+const REPORT_HESSIANS_ENV: &str = "INFERENCE_GPTQ_REPORT_HESSIANS";
+// the Hessian directory a scoring run names but never writes
+const KLD_SCRATCH_DIR: &str = "inference-kld";
 
 /// Extract ISQ values from the QuantizeModelType
 fn get_isq_values(model_type: &QuantizeModelType) -> &[String] {
@@ -152,7 +156,17 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         only: options.only.as_deref().map(regex::Regex::new).transpose()?,
         gpu: (!options.cpu || options.hessians.is_some())
             .then(|| inference_tensor::Device::new_cuda(0).ok())
-            .flatten(),
+            .flatten()
+            .inspect(|device| {
+                #[cfg(feature = "cuda")]
+                if let inference_tensor::Device::Cuda(dev) = device {
+                    // SAFETY: every quantizer runs on the device's one stream, so no use crosses streams; the
+                    // per-buffer events otherwise cost a create and destroy each (most of a stack's GPTQ setup)
+                    unsafe { dev.disable_event_tracking() };
+                }
+                #[cfg(not(feature = "cuda"))]
+                let _ = device;
+            }),
         hessians: options
             .hessians
             .as_deref()
@@ -179,6 +193,15 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
             .transpose()?,
         hessian_weights_only: options.hessian_weights_only,
         gptq_damp: options.gptq_damp,
+        // a diagnostic: GPTQ's report measured over another calibration's Hessians
+        report_hessians: std::env::var_os(REPORT_HESSIANS_ENV)
+            .map(|dir| -> Result<Box<dyn gguf_requantize::HessianSource>> {
+                Ok(Box::new(gguf_requantize::hessians_for_gguf(
+                    Path::new(&dir),
+                    &options.model,
+                )?))
+            })
+            .transpose()?,
     };
     let requantize = || {
         gguf_requantize::requantize_gguf(
@@ -276,30 +299,78 @@ pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptio
 }
 
 /// Loading with `hessians_out` set writes every linear's input Hessian; the engine is shut down once it has.
+pub async fn run_kld(options: KldOptions, global: GlobalOptions) -> Result<()> {
+    // the streamed load that collects Hessians scores against a base given as its calibration file, writing nothing
+    run_hessians(
+        HessiansOptions {
+            model_id: options.model_id,
+            calibration_file: options.kld_base,
+            output_path: std::env::temp_dir().join(KLD_SCRATCH_DIR),
+        },
+        global,
+    )
+    .await
+}
+
 pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Result<()> {
     initialize_logging();
-    let model = ModelSelected::Run {
-        model_id: options.model_id,
-        quant: None,
-        tokenizer_json: None,
-        // the host's auto dtype is f32, twice what a streamed model holds in RAM
-        dtype: inference_api::engine::ModelDType::BF16,
-        topology: None,
-        organization: None,
-        write_uqff: None,
-        from_uqff: None,
-        imatrix: None,
-        calibration_file: Some(options.calibration_file),
-        hessians_out: Some(options.output_path),
-        exl3_out: None,
-        max_edge: None,
-        max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
-        max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
-        max_num_images: None,
-        max_image_length: None,
-        hf_cache_path: None,
-        matformer_config_path: None,
-        matformer_slice_name: None,
+    let gguf = Path::new(&options.model_id);
+    let model = if gguf.is_file() && gguf.extension().is_some_and(|e| e == GGUF_EXTENSION) {
+        ModelSelected::GGUF {
+            tok_model_id: None,
+            quantized_model_id: gguf
+                .parent()
+                .map_or_else(|| ".".into(), |p| p.display().to_string()),
+            quantized_filename: gguf
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            quant: None,
+            tokenizer_json: None,
+            mmproj_filename: None,
+            mmproj_selection: inference_api::engine::MmprojSelection::Given,
+            lora_adapters: Vec::new(),
+            lora_runtime_config: None,
+            dtype: inference_api::engine::ModelDType::BF16,
+            topology: None,
+            organization: None,
+            write_uqff: None,
+            imatrix: None,
+            calibration_file: Some(options.calibration_file),
+            hessians_out: Some(options.output_path),
+            max_edge: None,
+            max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+            max_num_images: None,
+            max_image_length: None,
+            hf_cache_path: None,
+            matformer_config_path: None,
+            matformer_slice_name: None,
+        }
+    } else {
+        ModelSelected::Run {
+            model_id: options.model_id,
+            quant: None,
+            tokenizer_json: None,
+            // the host's auto dtype is f32, twice what a streamed model holds in RAM
+            dtype: inference_api::engine::ModelDType::BF16,
+            topology: None,
+            organization: None,
+            write_uqff: None,
+            from_uqff: None,
+            imatrix: None,
+            calibration_file: Some(options.calibration_file),
+            hessians_out: Some(options.output_path),
+            exl3_out: None,
+            max_edge: None,
+            max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+            max_num_images: None,
+            max_image_length: None,
+            hf_cache_path: None,
+            matformer_config_path: None,
+            matformer_slice_name: None,
+        }
     };
     let model = resolve_model_source(model, &global.token_source, false, QuantPolicy::GgufInput)
         .await?
@@ -882,7 +953,8 @@ mod tests {
             | QuantizeCommand::NemotronTranscribeAudio(_)
             | QuantizeCommand::Mmproj(_)
             | QuantizeCommand::Exl3(_)
-            | QuantizeCommand::Hessians(_) => {
+            | QuantizeCommand::Hessians(_)
+            | QuantizeCommand::Kld(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }
