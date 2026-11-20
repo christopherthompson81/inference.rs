@@ -9902,6 +9902,13 @@
                     ],
                     "default": "auto"
                   },
+                  "hessians_out": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A directory to write each linear's input Hessian to, from the calibration file, in place of loading to serve."
+                  },
                   "hf_cache_path": {
                     "type": [
                       "string",

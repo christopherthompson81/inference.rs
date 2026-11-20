@@ -297,7 +297,9 @@ impl NormalLoader {
         )?;
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
         // an EXL3 write or Hessian dump from the host streams the layers through the GPU, so the host load builds none
-        let streamed = (self.config.exl3_out.is_some() || self.config.hessians_out.is_some())
+        // (a build without CUDA collects Hessians over the loaded model)
+        let streamed = (self.config.exl3_out.is_some()
+            || (cfg!(feature = "cuda") && self.config.hessians_out.is_some()))
             && device.is_cpu();
         let _stream = streamed.then(inference_nn::decoder::stream_layers);
         let (model, tracker, dynamic_lora, switch_adapters) = super::loading::load_model(

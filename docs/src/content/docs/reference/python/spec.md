@@ -369,6 +369,7 @@ Select a GGUF model.
 | --- | --- | --- |
 | `calibration_file` | `str \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
+| `hessians_out` | `str \| None` | optional |
 | `hf_cache_path` | `str \| None` | optional |
 | `imatrix` | `str \| None` | optional |
 | `lora_adapters` | `list[LoraAdapterSpec] \| None` | optional |

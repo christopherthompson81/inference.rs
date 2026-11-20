@@ -2040,6 +2040,7 @@ class ModelSelectedGGUF:
 
     calibration_file: str | None = None
     dtype: ModelDType | None = ModelDType.AUTO
+    hessians_out: str | None = None
     hf_cache_path: str | None = None
     imatrix: str | None = None
     lora_adapters: list[LoraAdapterSpec] | None = None
