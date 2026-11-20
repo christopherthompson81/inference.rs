@@ -300,10 +300,10 @@ pub struct GgufWeightSource {
     multi_row_decode: bool,
 }
 
-struct PackedBinding {
+struct PackedBinding<'a> {
     dtype: GgufType,
     dims: Vec<usize>,
-    data: Vec<u8>,
+    data: std::borrow::Cow<'a, [u8]>,
 }
 
 impl std::fmt::Debug for GgufWeightSource {
@@ -425,7 +425,7 @@ impl GgufWeightSource {
     }
 
     // A tensor Candle cannot hold, as its ggml blocks in little-endian order.
-    fn raw_tensor(&self, name: &str) -> Result<PackedBinding> {
+    fn raw_tensor(&self, name: &str) -> Result<PackedBinding<'_>> {
         let info = self.archive.tensor_info(name)?;
         if self.archive.shards()[info.shard_index()].endian() != GgufEndian::Little {
             inference_tensor::bail!("big-endian GGUF tensor loading is not supported");
@@ -433,7 +433,7 @@ impl GgufWeightSource {
         Ok(PackedBinding {
             dtype: quant_type(info.dtype(), name)?,
             dims: info.shape().to_vec(),
-            data: self.archive.tensor_data(name)?.into_bytes().into_owned(),
+            data: self.archive.tensor_data(name)?.into_bytes(),
         })
     }
 
@@ -629,7 +629,7 @@ impl GgufWeightSource {
             PackedBinding {
                 dtype,
                 dims: dims.clone(),
-                data: bytes,
+                data: bytes.into(),
             }
         } else if info.dtype().candle_dtype().is_err() {
             self.raw_tensor(source_name)?
@@ -671,7 +671,8 @@ impl GgufWeightSource {
                 dim,
                 start,
                 len,
-            )?;
+            )?
+            .into();
             packed.dims[dim] = len;
         }
         let bias = self.load_bias(key, device, range, packed.dims.len())?;
@@ -682,7 +683,7 @@ impl GgufWeightSource {
     fn materialize_packed_binding(
         &self,
         binding: &GgufTensorBinding,
-    ) -> Result<Option<PackedBinding>> {
+    ) -> Result<Option<PackedBinding<'_>>> {
         match binding {
             GgufTensorBinding::Tensor(name) => {
                 let info = self.archive.tensor_info(name)?;
@@ -693,7 +694,7 @@ impl GgufWeightSource {
                 Ok(Some(PackedBinding {
                     dtype,
                     dims: info.shape().to_vec(),
-                    data: self.archive.tensor_data(name)?.into_bytes().into_owned(),
+                    data: self.archive.tensor_data(name)?.into_bytes(),
                 }))
             }
             GgufTensorBinding::Slice {
@@ -715,7 +716,8 @@ impl GgufWeightSource {
                     *dim,
                     *start,
                     *len,
-                )?;
+                )?
+                .into();
                 packed.dims[*dim] = *len;
                 Ok(Some(packed))
             }
@@ -1090,7 +1092,10 @@ impl QuantizedWeightSource for GgufWeightSource {
     }
 }
 
-fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<PackedBinding> {
+fn concat_packed_bindings(
+    inputs: Vec<PackedBinding<'_>>,
+    dim: usize,
+) -> Result<PackedBinding<'static>> {
     let Some(first) = inputs.first() else {
         inference_tensor::bail!("cannot concatenate zero packed GGUF bindings");
     };
@@ -1182,7 +1187,11 @@ fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<Pack
         }
     }
     dims[dim] = inputs.iter().map(|input| input.dims[dim]).sum();
-    Ok(PackedBinding { dtype, dims, data })
+    Ok(PackedBinding {
+        dtype,
+        dims,
+        data: data.into(),
+    })
 }
 
 // The ggml type of a quantized source tensor, whether Candle holds it or our raw-block kernels do.
@@ -1207,7 +1216,7 @@ fn unscaled(key: &str, scale: Option<f32>) -> Result<()> {
 }
 
 fn quant_linear(
-    weight: PackedBinding,
+    weight: PackedBinding<'_>,
     bias: Option<Tensor>,
     scale: Option<f32>,
     device: &Device,
@@ -1228,12 +1237,12 @@ fn quant_linear(
             {
                 RawGgufTensor::tiled(&weight.dims, &weight.data, device)?
             } else {
-                RawGgufTensor::new(weight.dtype, &weight.dims, weight.data, device)?
+                RawGgufTensor::from_bytes(weight.dtype, &weight.dims, weight.data, device)?
             };
             #[cfg(not(feature = "cuda"))]
             let raw = {
                 let _ = multi_row_decode;
-                RawGgufTensor::new(weight.dtype, &weight.dims, weight.data, device)?
+                RawGgufTensor::from_bytes(weight.dtype, &weight.dims, weight.data, device)?
             };
             Arc::new(GgufRawMatMul::new(raw, bias).with_output_scale(scale))
         }
@@ -1983,10 +1992,13 @@ mod tests {
         let half = |range: std::ops::Range<usize>| PackedBinding {
             dtype,
             dims: vec![2, COLS],
-            data: data[range].to_vec(),
+            data: data[range].to_vec().into(),
         };
         let joined = concat_packed_bindings(vec![half(0..240), half(240..480)], 0)?;
-        assert_eq!((joined.dims, joined.data), (dims.to_vec(), data.clone()));
+        assert_eq!(
+            (joined.dims, joined.data.into_owned()),
+            (dims.to_vec(), data.clone())
+        );
         assert!(concat_packed_bindings(vec![half(0..240), half(240..480)], 1).is_err());
         assert_eq!(shard_unit(dtype), ROW_SCALED_SHARD_ALIGNMENT);
         Ok(())
