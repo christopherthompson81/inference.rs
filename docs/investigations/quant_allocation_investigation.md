@@ -562,3 +562,35 @@ whole                            127 s    106 s   (peak RSS 6.0 GB; same bytes, 
 ffn_down_exps (41)               44 s     36 s
 ffn_gate/up_exps (82)            44 s     35 s
 ```
+
+## Run 22 - 2026-11-20 05:15
+
+Question (after a literature pass: GPTAQ is dense-only; MoEQuant, EAQuant, VSRAQ, GEMQ, ProQuant treat routing):
+how much does the quantized 35B's routing drift from the BF16 model's?
+
+`INFERENCE_ROUTE_DUMP=<file>` makes `moe_router_topk` append each call's expert ids and weights. Both models streamed
+through `quantize hessians` over the evaluation text (the head of wiki.test.raw, ~21K tokens; BF16 GGUF 103 s, the
+GPTQ recipe file 20 s), each on its own states, so the drift is end to end: every layer routes on the hidden state
+its own quantized predecessors produced.
+
+```
+layer   top-8 Jaccard   same top-8 set   same top-1   BF16 route weight on dropped experts
+0       0.930           69.6%            94.1%        0.022
+10      0.925           68.2%            94.6%        0.025
+15      0.883           54.2%            91.3%        0.047
+20      0.841           43.0%            88.7%        0.062
+25      0.804           33.7%            81.5%        0.084
+30      0.807           35.7%            82.4%        0.087
+35      0.832           40.8%            87.5%        0.072
+39      0.875           52.2%            87.8%        0.052
+all     0.865           50.7%            89.4%        0.055
+```
+
+Routing drift is large and grows with depth to layers 25-30: two tokens in three change at least one of their eight
+experts there, one in five its top expert, though the flips are mostly low-weight experts (5.5% of the routing weight
+on average). Whether it is a large share of the KLD needs the quantized model run with the BF16 routes forced.
+
+Two false starts: the BF16 model in the perplexity example maps layers 13-39 to the host, where the first MoE layer
+failed (`dtype mismatch in matmul, lhs: F32, rhs: BF16`: host layers run in f32 while an expert stack keeps its bf16,
+fixed: the unquantized gather takes its input in the weight's dtype), and after the fix it ran ~3.5 min a chunk
+(27 host layers) and stopped with an internal error two chunks in. The streamed collector does the same in 103 s.

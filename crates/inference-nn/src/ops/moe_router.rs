@@ -53,6 +53,62 @@ pub fn moe_router_topk(
     selection_bias: Option<&Tensor>,
     expert_scale: Option<&Tensor>,
 ) -> Result<TopKOutput> {
+    let topk = route_topk(logits, config, selection_bias, expert_scale)?;
+    if let Some(dump) = route_dump() {
+        dump_routes(dump, &topk)?;
+    }
+    Ok(topk)
+}
+
+// set to a path, every routing call appends its choices there (a diagnostic: routing agreement between two models)
+const ROUTE_DUMP_ENV: &str = "INFERENCE_ROUTE_DUMP";
+
+fn route_dump() -> Option<&'static std::sync::Mutex<std::fs::File>> {
+    static DUMP: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    DUMP.get_or_init(|| {
+        let path = std::env::var_os(ROUTE_DUMP_ENV)?;
+        std::fs::File::create(path).ok().map(std::sync::Mutex::new)
+    })
+    .as_ref()
+}
+
+// a record: rows and k (u32 each), the rows' expert ids (u32) and their weights (f32), little-endian
+fn dump_routes(dump: &std::sync::Mutex<std::fs::File>, topk: &TopKOutput) -> Result<()> {
+    use std::io::Write;
+    let k = topk.indices.dim(inference_tensor::D::Minus1)?;
+    let ids = topk
+        .indices
+        .flatten_all()?
+        .to_dtype(inference_tensor::DType::U32)?
+        .to_vec1::<u32>()?;
+    let weights = topk
+        .values
+        .flatten_all()?
+        .to_dtype(inference_tensor::DType::F32)?
+        .to_vec1::<f32>()?;
+    let mut bytes = Vec::with_capacity(8 + 8 * ids.len());
+    bytes.extend_from_slice(
+        &u32::try_from(ids.len() / k.max(1))
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&u32::try_from(k).unwrap_or(u32::MAX).to_le_bytes());
+    bytes.extend(ids.iter().flat_map(|v| v.to_le_bytes()));
+    bytes.extend(weights.iter().flat_map(|v| v.to_le_bytes()));
+    let mut file = dump
+        .lock()
+        .map_err(|_| inference_tensor::Error::msg("the route dump's lock is poisoned"))?;
+    file.write_all(&bytes)
+        .map_err(inference_tensor::Error::wrap)
+}
+
+fn route_topk(
+    logits: &Tensor,
+    config: MoeRouterTopKConfig,
+    selection_bias: Option<&Tensor>,
+    expert_scale: Option<&Tensor>,
+) -> Result<TopKOutput> {
     #[cfg(feature = "cuda")]
     if let Some(topk) =
         cuda_moe_router_topk_if_supported(logits, config, selection_bias, expert_scale)?
