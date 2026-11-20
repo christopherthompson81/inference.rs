@@ -330,3 +330,38 @@ IQ4_KS, engine                 0.02597  0.01755  0.01724
 
 The engine's do better mainly because they include the head's: the tied `token_embd` now gets the feedback too.
 Against no calibration at all (Q4_K 0.0688 / 0.0546 / 0.0498) that is -60 / -64 / -63%.
+
+## Run 12 - 2026-11-19 18:40
+
+Question: GPTQ on Qwen3.6-35B-A3B with the engine's Hessians.
+
+`quantize hessians` over the same ~65K mixed tokens, the model streamed from the host (67 GB of BF16): 40 layers in
+49 min (~60 s a layer; ~10 min of loading before), 10,571 files, 17 GB (dense Hessians, a pooled one for each gate/up
+expert stack from the shared expert, 256 per-expert down ones a layer). `quantize gguf --hessians` bound 371 of them.
+
+The allocated recipe at R1's size (Run 8: IQ4_KS experts, Q6_K `attn_qkv`/`attn_gate`/`ssm_out`, Q4_K `token_embd`,
+Q8_0 the rest), WikiText KLD:
+
+```
+calibration, method                        KLD      p99     same top
+Unsloth imatrix, no feedback (Run 8)       0.01829  0.1968  94.42%
+our Hessians' diagonals, no feedback       0.01718  0.1785  94.22%
+our Hessians, GPTQ                         0.01672  0.1666  94.61%
+```
+
+The feedback gives 2.7% here against 24-37% on the 2B; the calibration alone 6% over Unsloth's imatrix. Suspects:
+the gate/up experts take the pooled (all-token) Hessian rather than their own routed rows', and each down expert's
+Hessian comes from ~2K rows (65K tokens x 8 of 256 experts).
+
+Two false starts on the way: the first run left 169 tensors BF16 (the run script's `while read` dropped the rules
+file's unterminated last line, `\.weight$=q8_0`); and the first GPTQ took 66 s a layer at 7.5 of 16 threads and 3%
+GPU, the experts one at a time. Experts sharing a Hessian are rows of one matrix to GPTQ, so a stack now goes in one
+pass, and experts with their own Hessians run side by side: 37 min for the recipe.
+
+## Run 13 - 2026-11-19 19:25
+
+GPTQ's row-scaled loop on the GPU (each row's scale from the type's kernels, then per super-block the block search,
+the encoding against that scale with its levels, the row's fit sums continued in the CPU's order; the error and its
+carry already ran there). A GPU test checks the bytes equal the CPU loop's for IQ4_KS, IQ4_KSS and IQ3_KS.
+
+The 35B recipe: 252 s against 2,219 s (8.8x), KLD 0.01672 / p99 0.1666 / 94.61%, the same file's.
