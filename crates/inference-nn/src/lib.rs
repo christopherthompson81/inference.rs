@@ -36,6 +36,7 @@ pub mod gguf;
 pub mod kv_cache;
 pub mod layers;
 pub mod loaders;
+pub mod logits_reference;
 pub mod lora;
 pub mod loss;
 pub mod matformer;

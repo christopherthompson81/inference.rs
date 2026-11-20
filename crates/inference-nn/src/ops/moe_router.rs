@@ -57,7 +57,77 @@ pub fn moe_router_topk(
     if let Some(dump) = route_dump() {
         dump_routes(dump, &topk)?;
     }
+    if let Some(forced) = route_force() {
+        return forced_routes(forced, &topk);
+    }
     Ok(topk)
+}
+
+// set to a route dump, each routing call takes its routes from the dump's next record instead (a diagnostic: a run
+// over the same calls as the dumped one, routed as it was)
+const ROUTE_FORCE_ENV: &str = "INFERENCE_ROUTE_FORCE";
+
+fn route_force() -> Option<&'static std::sync::Mutex<std::io::BufReader<std::fs::File>>> {
+    static FORCE: std::sync::OnceLock<Option<std::sync::Mutex<std::io::BufReader<std::fs::File>>>> =
+        std::sync::OnceLock::new();
+    FORCE
+        .get_or_init(|| {
+            let path = std::env::var_os(ROUTE_FORCE_ENV)?;
+            std::fs::File::open(path)
+                .ok()
+                .map(|f| std::sync::Mutex::new(std::io::BufReader::new(f)))
+        })
+        .as_ref()
+}
+
+// the next dumped record in place of `topk`, on its device and in its dtypes
+fn forced_routes(
+    forced: &std::sync::Mutex<std::io::BufReader<std::fs::File>>,
+    topk: &TopKOutput,
+) -> Result<TopKOutput> {
+    use std::io::Read;
+    let mut reader = forced
+        .lock()
+        .map_err(|_| inference_tensor::Error::msg("the forced routes' lock is poisoned"))?;
+    let mut head = [0u8; 8];
+    reader
+        .read_exact(&mut head)
+        .map_err(inference_tensor::Error::wrap)?;
+    let rows = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
+    let k = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+    if rows * k != topk.indices.elem_count() {
+        inference_tensor::bail!(
+            "forced routes: a record of {rows}x{k} for {:?}",
+            topk.indices.dims()
+        );
+    }
+    let mut ids = vec![0u8; 4 * rows * k];
+    reader
+        .read_exact(&mut ids)
+        .map_err(inference_tensor::Error::wrap)?;
+    let mut weights = vec![0u8; 4 * rows * k];
+    reader
+        .read_exact(&mut weights)
+        .map_err(inference_tensor::Error::wrap)?;
+    let ids = ids
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect::<Vec<_>>();
+    let weights = weights
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect::<Vec<_>>();
+    let device = topk.indices.device();
+    Ok(TopKOutput {
+        indices: Tensor::from_vec(ids, topk.indices.dims(), device)?
+            .to_dtype(topk.indices.dtype())?,
+        values: Tensor::from_vec(weights, topk.values.dims(), device)?
+            .to_dtype(topk.values.dtype())?,
+    })
 }
 
 // set to a path, every routing call appends its choices there (a diagnostic: routing agreement between two models)

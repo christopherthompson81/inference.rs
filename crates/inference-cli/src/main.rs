@@ -24,7 +24,7 @@ use commands::{
     AgentModel, BenchRunConfig, LaunchRequest, list_agent_sessions, run_agent, run_asr_quantize,
     run_bench, run_cache_delete, run_cache_list, run_doctor, run_exl3_quantize, run_from_config,
     run_gguf_quantize, run_hessians, run_hidream_quantize, run_imatrix_convert, run_interactive,
-    run_kernels_fetch, run_kernels_prune, run_launch, run_login, run_mmproj_quantize,
+    run_kernels_fetch, run_kernels_prune, run_kld, run_launch, run_login, run_mmproj_quantize,
     run_nemotron_transcribe_audio, run_quantize, run_server, run_tune, run_uninstall, run_update,
     run_uqff, run_worldgen_quantize,
 };
@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
             QuantizeCommand::Mmproj(options) => run_mmproj_quantize(options)?,
             QuantizeCommand::Exl3(options) => run_exl3_quantize(options, cli.global).await?,
             QuantizeCommand::Hessians(options) => run_hessians(options, cli.global).await?,
+            QuantizeCommand::Kld(options) => run_kld(options, cli.global).await?,
         },
 
         Command::Uqff { command } => {

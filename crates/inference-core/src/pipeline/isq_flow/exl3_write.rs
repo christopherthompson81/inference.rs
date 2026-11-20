@@ -49,6 +49,18 @@ const GGUF_BLOCK: &str = "blk.";
 const PER_EXPERT_HESSIANS_ENV: &str = "INFERENCE_PER_EXPERT_HESSIANS";
 // the hidden states Hessian collection keeps on the GPU at most (beyond, on the host)
 const RESIDENT_STATE_BYTES: usize = 4 << 30;
+// diagnostics: a streamed run records its final log-probabilities to this file, or compares its own with them
+// the text whose encoding with and without special tokens tells whether the vocab adds a BOS
+#[cfg(feature = "cuda")]
+const PROBE_TEXT: &str = " ";
+#[cfg(feature = "cuda")]
+const STREAM_SCORE_ONLY_ENV: &str = "INFERENCE_STREAM_SCORE_ONLY";
+#[cfg(feature = "cuda")]
+const STREAM_LOGITS_OUT_ENV: &str = "INFERENCE_STREAM_LOGITS_OUT";
+#[cfg(feature = "cuda")]
+const STREAM_LOGITS_REF_ENV: &str = "INFERENCE_STREAM_LOGITS_REF";
+#[cfg(feature = "cuda")]
+const LOGP_TENSOR: &str = "logp";
 
 /// The checkpoint a write copies its unquantized tensors and files from.
 pub(crate) struct Exl3Source<'a> {
@@ -725,18 +737,82 @@ pub(crate) fn write_hessians_streamed(
     dir: &Path,
     weights: &[PathBuf],
 ) -> Result<()> {
+    let chunks = tokens
+        .chunks(CALIBRATION_CHUNK_SIZE)
+        .map(|chunk| {
+            ctx.bos_tok_id
+                .into_iter()
+                .chain(chunk.iter().copied())
+                .collect()
+        })
+        .collect();
+    run_streamed(stream, chunks, StreamedRun::Collect(dir), weights)
+}
+
+/// The model's KL divergence from a llama-perplexity base (`--kl-divergence-base`), streamed a layer at a time
+/// through the GPU over the base's own chunks (each chunk's first token the BOS where encoding adds one, as
+/// llama-perplexity runs it): mean, p99 and median KLD, the top token's agreement, and both perplexities.
+#[cfg(feature = "cuda")]
+pub(crate) fn score_kld_streamed(
+    stream: &dyn inference_nn::model::LayerStream,
+    base: &Path,
+    ctx: &CalibrationCtx<'_>,
+    weights: &[PathBuf],
+) -> Result<()> {
+    let mut base = inference_nn::logits_reference::KldBase::open(base)?;
+    // llama-perplexity swaps a chunk's first token for BOS only when the vocab adds one when encoding
+    let encode = |special| {
+        ctx.tokenizer
+            .encode_fast(PROBE_TEXT, special)
+            .map(|e| e.get_ids().to_vec())
+            .map_err(anyhow::Error::msg)
+    };
+    let (with, without) = (encode(true)?, encode(false)?);
+    let bos = (with.len() > without.len()).then(|| with[0]);
+    let chunks = base
+        .tokens
+        .chunks(base.n_ctx)
+        .map(|chunk| {
+            let mut chunk = chunk.to_vec();
+            if let Some(bos) = bos {
+                chunk[0] = bos;
+            }
+            chunk
+        })
+        .collect();
+    run_streamed(stream, chunks, StreamedRun::Score(&mut base), weights)
+}
+
+// what a streamed run does with the states: collect each linear's Hessian into a directory, or score the final
+// logits against a KL-divergence base
+#[cfg(feature = "cuda")]
+enum StreamedRun<'a> {
+    Collect(&'a Path),
+    Score(&'a mut inference_nn::logits_reference::KldBase),
+}
+
+#[cfg(feature = "cuda")]
+fn run_streamed(
+    stream: &dyn inference_nn::model::LayerStream,
+    chunks: Vec<Vec<u32>>,
+    mut run: StreamedRun<'_>,
+    weights: &[PathBuf],
+) -> Result<()> {
     let gpu = Device::new_cuda(0)?;
-    std::fs::create_dir_all(dir)?;
+    let dir = match &run {
+        StreamedRun::Collect(dir) => {
+            std::fs::create_dir_all(dir)?;
+            Some(*dir)
+        }
+        StreamedRun::Score(_) => None,
+    };
     let each = std::env::var_os(PER_EXPERT_HESSIANS_ENV).is_some();
+    // a scoring run collects nothing, so the experts take the engine's kernels instead of the collecting gather path
+    let score_only = dir.is_none() || std::env::var_os(STREAM_SCORE_ONLY_ENV).is_some();
     let mut ranges = layer_ranges(weights)?;
     let mut states = Vec::new();
-    for chunk in tokens.chunks(CALIBRATION_CHUNK_SIZE) {
-        let ids = ctx
-            .bos_tok_id
-            .into_iter()
-            .chain(chunk.iter().copied())
-            .collect::<Vec<_>>();
-        states.push(stream.embed(&Tensor::new(ids, &Device::Cpu)?.unsqueeze(0)?)?);
+    for ids in &chunks {
+        states.push(stream.embed(&Tensor::new(ids.as_slice(), &Device::Cpu)?.unsqueeze(0)?)?);
     }
     let layers = stream.num_layers();
     // the states stay on the GPU when they fit beside a layer, so they never cross the bus
@@ -796,7 +872,7 @@ pub(crate) fn write_hessians_streamed(
             })
             .collect::<Vec<_>>();
         for (i, module) in group.iter().enumerate() {
-            if sources[i] == i {
+            if sources[i] == i && !score_only {
                 module.ct.begin_track_hessian()?;
             }
         }
@@ -811,14 +887,14 @@ pub(crate) fn write_hessians_streamed(
         }
         let mut hessians = vec![None; group.len()];
         for (i, module) in group.iter().enumerate() {
-            if sources[i] == i {
+            if sources[i] == i && !score_only {
                 hessians[i] = take_hessian(module)?
                     .map(|h| h.to_device(&Device::Cpu))
                     .transpose()?;
             }
         }
         for (i, module) in group.iter().enumerate() {
-            let Some(h) = &hessians[sources[i]] else {
+            let (Some(h), Some(dir)) = (&hessians[sources[i]], dir) else {
                 continue;
             };
             match h.rank() {
@@ -836,21 +912,175 @@ pub(crate) fn write_hessians_streamed(
             start.elapsed().as_secs_f32()
         );
     }
-    let in_dim = states[0].dim(states[0].rank() - 1)?;
-    let mut hessian = Tensor::zeros((in_dim, in_dim), inference_tensor::DType::F32, &gpu)?;
-    let mut rows = 0;
-    for state in &states {
+    match &mut run {
+        StreamedRun::Collect(dir) => {
+            let in_dim = states[0].dim(states[0].rank() - 1)?;
+            let mut hessian = Tensor::zeros((in_dim, in_dim), inference_tensor::DType::F32, &gpu)?;
+            let mut rows = 0;
+            for state in &states {
+                let xs = stream
+                    .final_norm(state)?
+                    .to_device(&gpu)?
+                    .to_dtype(inference_tensor::DType::F32)?
+                    .reshape(((), in_dim))?;
+                rows += xs.dim(0)?;
+                hessian = (hessian + xs.t()?.matmul(&xs)?)?;
+            }
+            let hessian = (hessian / f64::from(u32::try_from(rows)?))?;
+            save_hessian(dir, HEAD, hessian.to_device(&Device::Cpu)?)?;
+            info!("Wrote the Hessians to `{}`.", dir.display());
+        }
+        StreamedRun::Score(base) => score_states(stream, &states, &chunks, base, &gpu)?,
+    }
+    if let Some(path) = std::env::var_os(STREAM_LOGITS_OUT_ENV) {
+        stream_logits(stream, &states, &gpu, LogitsUse::Record(Path::new(&path)))?;
+    }
+    if let Some(path) = std::env::var_os(STREAM_LOGITS_REF_ENV) {
+        stream_logits(stream, &states, &gpu, LogitsUse::Compare(Path::new(&path)))?;
+    }
+    Ok(())
+}
+
+// the final states' logits against the base's records chunk by chunk, reported as llama-perplexity's KLD summary
+#[cfg(feature = "cuda")]
+fn score_states(
+    stream: &dyn inference_nn::model::LayerStream,
+    states: &[Tensor],
+    chunks: &[Vec<u32>],
+    base: &mut inference_nn::logits_reference::KldBase,
+    gpu: &Device,
+) -> Result<()> {
+    use inference_tensor::{D, DType};
+    let head = stream
+        .head()
+        .dequantize_w()?
+        .to_dtype(DType::BF16)?
+        .to_device(gpu)?;
+    let (mut klds, mut same, mut nll, mut nll_base) = (Vec::new(), 0usize, 0f64, 0f64);
+    let first = base.first_row();
+    for (state, tokens) in states.iter().zip(chunks) {
         let xs = stream
             .final_norm(state)?
-            .to_device(&gpu)?
-            .to_dtype(inference_tensor::DType::F32)?
-            .reshape(((), in_dim))?;
-        rows += xs.dim(0)?;
-        hessian = (hessian + xs.t()?.matmul(&xs)?)?;
+            .to_device(gpu)?
+            .to_dtype(DType::BF16)?
+            .squeeze(0)?;
+        let logits = xs.matmul(&head.t()?)?.to_dtype(DType::F32)?;
+        let reference = base.next_chunk()?;
+        let divergence = inference_nn::logits_reference::divergence(&logits, tokens, &reference)?;
+        let rows = divergence.kld.len();
+        let next = Tensor::from_slice(&tokens[first + 1..first + 1 + rows], (rows, 1), gpu)?;
+        let logp =
+            inference_tensor::nn::ops::log_softmax(&logits.narrow(0, first, rows)?, D::Minus1)?;
+        nll -= logp
+            .gather(&next, 1)?
+            .to_dtype(DType::F64)?
+            .sum_all()?
+            .to_scalar::<f64>()?;
+        nll_base -= divergence
+            .reference_logprobs
+            .iter()
+            .map(|&l| f64::from(l))
+            .sum::<f64>();
+        same += divergence.same_top.iter().filter(|&&s| s).count();
+        klds.extend(divergence.kld);
     }
-    let hessian = (hessian / f64::from(u32::try_from(rows)?))?;
-    save_hessian(dir, HEAD, hessian.to_device(&Device::Cpu)?)?;
-    info!("Wrote the Hessians to `{}`.", dir.display());
+    let n = f64::from(u32::try_from(klds.len())?);
+    let mean = klds.iter().map(|&k| f64::from(k)).sum::<f64>() / n;
+    klds.sort_by(f32::total_cmp);
+    // the q-quantile by index (q in hundredths, as the report names them)
+    let pick = |hundredths: usize| klds[(klds.len() - 1) * hundredths / 100];
+    info!(
+        "KLD over {} positions ({} chunks of {}): mean {mean:.5}, median {:.5}, p99 {:.4}, same top {:.2}%, \
+         PPL {:.4} (base {:.4})",
+        klds.len(),
+        chunks.len(),
+        base.n_ctx,
+        pick(50),
+        pick(99),
+        100.0 * f64::from(u32::try_from(same)?) / n,
+        (nll / n).exp(),
+        (nll_base / n).exp()
+    );
+    Ok(())
+}
+
+// a diagnostic over a streamed run's final states: record its log-probabilities, or compare them with a recording
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+enum LogitsUse<'a> {
+    Record(&'a Path),
+    Compare(&'a Path),
+}
+
+// each chunk's log-probabilities (f16, every position) saved as `<dir>/<chunk>.safetensors`, or read back and the KL
+// divergence of this run from the recorded one reported per position (mean, p99) with the top token's agreement
+#[cfg(feature = "cuda")]
+fn stream_logits(
+    stream: &dyn inference_nn::model::LayerStream,
+    states: &[Tensor],
+    gpu: &Device,
+    use_: LogitsUse<'_>,
+) -> Result<()> {
+    use inference_tensor::{D, DType};
+    let head = stream
+        .head()
+        .dequantize_w()?
+        .to_dtype(DType::BF16)?
+        .to_device(gpu)?;
+    if let LogitsUse::Record(dir) = use_ {
+        std::fs::create_dir_all(dir)?;
+    }
+    let (mut klds, mut same) = (Vec::new(), 0usize);
+    // the positions past half a chunk, as llama-perplexity scores them
+    let mut late = Vec::new();
+    for (i, state) in states.iter().enumerate() {
+        let xs = stream
+            .final_norm(state)?
+            .to_device(gpu)?
+            .to_dtype(DType::BF16)?
+            .squeeze(0)?;
+        let logp = inference_tensor::nn::ops::log_softmax(
+            &xs.matmul(&head.t()?)?.to_dtype(DType::F32)?,
+            D::Minus1,
+        )?;
+        match use_ {
+            LogitsUse::Record(dir) => inference_tensor::safetensors::save(
+                &HashMap::from([(
+                    LOGP_TENSOR.to_string(),
+                    logp.to_dtype(DType::F16)?.to_device(&Device::Cpu)?,
+                )]),
+                dir.join(format!("{i}.safetensors")),
+            )?,
+            LogitsUse::Compare(dir) => {
+                let ref_logp =
+                    inference_tensor::safetensors::load(dir.join(format!("{i}.safetensors")), gpu)?
+                        .remove(LOGP_TENSOR)
+                        .context("a recorded chunk holds no log-probabilities")?
+                        .to_dtype(DType::F32)?;
+                let kld = (ref_logp.exp()? * (&ref_logp - &logp)?)?
+                    .sum(D::Minus1)?
+                    .to_vec1::<f32>()?;
+                late.extend_from_slice(&kld[kld.len() / 2..]);
+                klds.extend(kld);
+                let agree = ref_logp.argmax(D::Minus1)?.eq(&logp.argmax(D::Minus1)?)?;
+                same +=
+                    usize::try_from(agree.to_dtype(DType::U32)?.sum_all()?.to_scalar::<u32>()?)?;
+            }
+        }
+    }
+    if let LogitsUse::Compare(_) = use_ {
+        let n = klds.len();
+        let count = f64::from(u32::try_from(n)?);
+        let mean = klds.iter().map(|&k| f64::from(k)).sum::<f64>() / count;
+        klds.sort_by(f32::total_cmp);
+        let late_mean = late.iter().map(|&k| f64::from(k)).sum::<f64>()
+            / f64::from(u32::try_from(late.len().max(1))?);
+        info!(
+            "Streamed KLD over {n} positions: mean {mean:.5} (second halves {late_mean:.5}), p99 {:.4}, same top {:.2}%",
+            klds[n * 99 / 100],
+            100.0 * f64::from(u32::try_from(same)?) / count
+        );
+    }
     Ok(())
 }
 

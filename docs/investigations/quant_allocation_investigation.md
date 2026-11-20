@@ -594,3 +594,47 @@ Two false starts: the BF16 model in the perplexity example maps layers 13-39 to 
 failed (`dtype mismatch in matmul, lhs: F32, rhs: BF16`: host layers run in f32 while an expert stack keeps its bf16,
 fixed: the unquantized gather takes its input in the weight's dtype), and after the fix it ran ~3.5 min a chunk
 (27 host layers) and stopped with an internal error two chunks in. The streamed collector does the same in 103 s.
+
+## Run 23 - 2026-11-20 06:10
+
+A streamed KLD scorer, `inference quantize kld -m <model> --kld-base <llama-perplexity base>`: the model streamed a
+layer at a time through the GPU (as `quantize hessians`) over the base's own chunks, each chunk's second half scored
+against the base's records by the engine's own divergence code (`LogitsReference`, `divergence`, now in
+`inference_nn::logits_reference` with a base reader), f32 logits. The 35B's BF16 scores in 115 s, a quantized file in
+~20 s; the engine could not run the BF16 35B (27 host layers, ~3.5 min a chunk, then an error).
+
+Validated on a small MoE that fits the GPU in BF16 (OLMoE-1B-7B, 64 experts top-8; BF16 GGUF from llama.cpp's
+converter, base from llama-perplexity, 40 x 512 of wiki.test):
+
+```
+KLD vs llama.cpp BF16 base     engine     streamed
+OLMoE BF16                     0.00495    0.00495
+OLMoE Q4_K                     0.10956    0.10957
+Qwen3.5-2B Q4_K (our base)     0.02233    0.02205
+35B GPTQ recipe                0.01680    0.01665
+35B BF16                       -          0.00556
+```
+
+A false start found the cause of every streamed-vs-engine mismatch so far (Runs 20, 22 and the first forced-route
+numbers): the streamed path put BOS at a chunk's first position for any model with a BOS token, where llama-perplexity
+(and the engine's scoring) swaps it in only when encoding adds one. Qwen3.6 adds none, so the streamed 35B read a
+different first token in every chunk: PPL 7.54 against 5.82, KLD 0.316 for its BF16. Found bottom-up: OLMoE's routes
+differed already at layer 0, at position 0 entirely; a per-layer dump showed the layer-0 input (the embedding) off in
+row 0 only. (`quantize hessians` still prepends the BOS to its calibration chunks; Runs 14-22's Hessians and route
+dumps ran on BOS-prefixed chunks.)
+
+Our BF16 35B is 0.00556 from llama.cpp's BF16: a third of the recipe's 0.0167 is between the two engines, not the
+quantization.
+
+Forced routing, measured right (`INFERENCE_ROUTE_DUMP` on the BF16 run, `INFERENCE_ROUTE_FORCE` on the quantized,
+the same calls in the same order):
+
+```
+35B                     own routes   BF16 routes forced
+GPTQ recipe             0.01665      0.01168
+Q4_K experts            0.01767      0.01229
+```
+
+Above the 0.0056 floor, forcing the BF16 routes takes the recipe from 0.0111 to 0.0061: routing flips are ~45% of
+the KLD the quantization adds. Routing agreement over these chunks: top-8 Jaccard 0.903, same top-8 set 60.7%, same
+top-1 92.9% (layer 25: 0.871 / 51.2% / 91.2%), weight on dropped experts 3.5%. Router consistency is worth pursuing.

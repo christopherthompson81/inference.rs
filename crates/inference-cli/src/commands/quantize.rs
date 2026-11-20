@@ -20,8 +20,8 @@ use super::serve::{self, extract_device_settings};
 use crate::args::{
     AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, Exl3QuantizeOptions,
     FormatOptions, GgufQuantizeOptions, GlobalOptions, HessiansOptions, HiDreamQuantizeOptions,
-    ImatrixConvertOptions, MatformerSelection, MmprojOptions, ModelSourceOptions, ModelType,
-    MultimodalAdapterOptions, MultimodalOptions, NemotronTranscribeAudioOptions,
+    ImatrixConvertOptions, KldOptions, MatformerSelection, MmprojOptions, ModelSourceOptions,
+    ModelType, MultimodalAdapterOptions, MultimodalOptions, NemotronTranscribeAudioOptions,
     QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
     QuantizeMultimodalOptions, QuantizeQuantizationOptions, QuantizerChoice,
     WorldgenQuantizeOptions,
@@ -32,6 +32,8 @@ const MIB: f64 = (1u64 << 20) as f64;
 const HOST_DEVICE: &str = "cpu";
 const GGUF_EXTENSION: &str = "gguf";
 const REPORT_HESSIANS_ENV: &str = "INFERENCE_GPTQ_REPORT_HESSIANS";
+// the Hessian directory a scoring run names but never writes
+const KLD_SCRATCH_DIR: &str = "inference-kld";
 
 /// Extract ISQ values from the QuantizeModelType
 fn get_isq_values(model_type: &QuantizeModelType) -> &[String] {
@@ -297,6 +299,19 @@ pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptio
 }
 
 /// Loading with `hessians_out` set writes every linear's input Hessian; the engine is shut down once it has.
+pub async fn run_kld(options: KldOptions, global: GlobalOptions) -> Result<()> {
+    // the streamed load that collects Hessians scores against a base given as its calibration file, writing nothing
+    run_hessians(
+        HessiansOptions {
+            model_id: options.model_id,
+            calibration_file: options.kld_base,
+            output_path: std::env::temp_dir().join(KLD_SCRATCH_DIR),
+        },
+        global,
+    )
+    .await
+}
+
 pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Result<()> {
     initialize_logging();
     let gguf = Path::new(&options.model_id);
@@ -938,7 +953,8 @@ mod tests {
             | QuantizeCommand::NemotronTranscribeAudio(_)
             | QuantizeCommand::Mmproj(_)
             | QuantizeCommand::Exl3(_)
-            | QuantizeCommand::Hessians(_) => {
+            | QuantizeCommand::Hessians(_)
+            | QuantizeCommand::Kld(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }
