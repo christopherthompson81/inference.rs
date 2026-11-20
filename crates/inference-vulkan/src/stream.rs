@@ -133,6 +133,16 @@ impl Profile {
         }
     }
 
+    // each kernel's dispatches and GPU nanoseconds since the last take or print, for a bench
+    #[cfg(test)]
+    pub(crate) fn take(&mut self) -> Vec<(&'static str, u64, f64)> {
+        self.since = None;
+        self.kernels
+            .drain()
+            .map(|((name, _), (count, ns, _))| (name, count, ns))
+            .collect()
+    }
+
     fn add(&mut self, dispatches: &[Profiled], ticks: &[u64]) {
         for (i, d) in dispatches.iter().enumerate() {
             let (shape, macs) = d.shape.clone().unwrap_or_default();

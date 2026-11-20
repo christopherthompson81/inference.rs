@@ -623,6 +623,21 @@ impl Context {
         stream.reap(&self.device, true)
     }
 
+    // the profile this thread's stream gathered since the last take, after synchronizing (empty unless profiling)
+    #[cfg(test)]
+    pub(crate) fn take_profile(&self) -> Result<Vec<(&'static str, u64, f64)>> {
+        self.synchronize()?;
+        let mut stream = self.lanes[self.current_stream()]
+            .stream
+            .lock()
+            .expect("vulkan stream poisoned");
+        Ok(stream
+            .profile
+            .as_mut()
+            .map(|p| p.take())
+            .unwrap_or_default())
+    }
+
     /// [`Self::synchronize`] on every stream.
     pub fn synchronize_all(&self) -> Result<()> {
         for index in 0..self.lanes.len() {

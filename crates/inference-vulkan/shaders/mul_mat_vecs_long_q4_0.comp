@@ -1,0 +1,7 @@
+#version 450
+// The multi-row matvec over a Q4_0 W, in 64 threads for long rows.
+#extension GL_GOOGLE_include_directive : require
+#define MATVEC_THREADS 64
+#include "mat_vec_head.glsl"
+#include "q4_0_int8.glsl"
+#include "mat_vec_main.glsl"
