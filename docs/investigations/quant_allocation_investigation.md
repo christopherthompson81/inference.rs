@@ -458,3 +458,31 @@ And the cut that is there barely reaches KLD: a 14-28% lower error on the tensor
 the same error over Hessians of the evaluation text: if the cut holds out of sample, the loss is between layer error
 and KLD (propagation, routing among 256 experts) and sequential GPTQ / router agreement come next; if it vanishes,
 the feedback is fitting the calibration and is done for this model's experts.
+
+## Run 18 - 2026-11-20 03:15
+
+Out of sample: Run 17's two 35B files (same bytes, checked) with the report measured over Hessians of the KLD's own
+text (`INFERENCE_GPTQ_REPORT_HESSIANS`, the head of wiki.test.raw, ~21K tokens, collected in 109 s):
+
+```
+gptq/diag err            in sample (calibration)   out of sample (eval text)
+ffn_gate/up_exps         0.72                      0.78
+ffn_down_exps            0.86                      0.99
+shexp                    0.61-0.67                 0.65-0.67
+attn_* / attn_qkv/gate   0.27-0.63                 0.29-0.67
+ssm_out                  0.61                      0.64
+output                   0.36                      0.42
+```
+
+Two findings. The down experts' cut vanishes out of sample: each has its own Hessian over a few thousand routed rows
+(133K tokens x 8 / 256 ~ 4K, for 512 inputs), and the feedback fits those rows' noise. The same reason per-expert
+gate/up Hessians (Run 16) did worse than pooled ones. Every pooled or dense Hessian (gate/up from the shared input,
+shexp, attention, ssm_out) keeps most of its cut: gate/up 22% out of sample.
+
+That 22% still reaches KLD weakly. Rough share: gate/up IQ4_KS -> IQ3_KS (about 4x the error) added 0.0171 KLD in the
+sweep, so their part at IQ4_KS is ~0.0057 and a 22% cut predicts ~-0.0013; the whole recipe moved -0.0005. So some
+loss between layer error and output remains (propagation through 40 layers, routing), on top of the down experts'
+feedback being noise.
+
+Next: the down experts' Hessians shrunk toward their stack's mean (more effective rows), or their feedback off; then
+sequential GPTQ (each layer's Hessians collected with the layers before it quantized) for the propagation gap.

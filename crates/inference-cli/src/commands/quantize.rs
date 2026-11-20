@@ -31,6 +31,7 @@ const MIB: f64 = (1u64 << 20) as f64;
 // a streamed EXL3 write holds the model on the host, its layers built on the GPU one at a time
 const HOST_DEVICE: &str = "cpu";
 const GGUF_EXTENSION: &str = "gguf";
+const REPORT_HESSIANS_ENV: &str = "INFERENCE_GPTQ_REPORT_HESSIANS";
 
 /// Extract ISQ values from the QuantizeModelType
 fn get_isq_values(model_type: &QuantizeModelType) -> &[String] {
@@ -180,6 +181,15 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
             .transpose()?,
         hessian_weights_only: options.hessian_weights_only,
         gptq_damp: options.gptq_damp,
+        // a diagnostic: GPTQ's report measured over another calibration's Hessians
+        report_hessians: std::env::var_os(REPORT_HESSIANS_ENV)
+            .map(|dir| -> Result<Box<dyn gguf_requantize::HessianSource>> {
+                Ok(Box::new(gguf_requantize::hessians_for_gguf(
+                    Path::new(&dir),
+                    &options.model,
+                )?))
+            })
+            .transpose()?,
     };
     let requantize = || {
         gguf_requantize::requantize_gguf(

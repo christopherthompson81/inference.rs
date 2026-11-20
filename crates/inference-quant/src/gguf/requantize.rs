@@ -182,6 +182,8 @@ pub struct RequantizePlan {
     pub hessian_weights_only: bool,
     /// The share of a Hessian's mean diagonal added to it before the feedback.
     pub gptq_damp: f64,
+    /// Hessians GPTQ's diagnostic report measures the encodings' error over in place of `hessians` (out of sample).
+    pub report_hessians: Option<Box<dyn HessianSource>>,
 }
 
 #[derive(Debug, Default)]
@@ -320,8 +322,17 @@ fn gptq_tensor(
         let prepared = prepare(shared.as_deref().expect("a shared Hessian"))?;
         let out = quantize(&values, &prepared)?;
         if std::env::var_os(GPTQ_REPORT_ENV).is_some() {
-            let hs = vec![shared.as_deref(); experts];
-            report_reconstruction(t.name, ty, cols, &values, &out, &hs, device)?;
+            report(
+                t,
+                ty,
+                cols,
+                &values,
+                &out,
+                shared.as_deref(),
+                &per_expert,
+                plan,
+                device,
+            )?;
         }
         return Ok(Some(out));
     }
@@ -339,13 +350,53 @@ fn gptq_tensor(
         .collect::<Result<Vec<_>>>()?;
     let out = parts.concat();
     if std::env::var_os(GPTQ_REPORT_ENV).is_some() {
-        let hs = per_expert
-            .iter()
-            .map(|h| h.as_deref().or(shared.as_deref()))
-            .collect::<Vec<_>>();
-        report_reconstruction(t.name, ty, cols, &values, &out, &hs, device)?;
+        report(
+            t,
+            ty,
+            cols,
+            &values,
+            &out,
+            shared.as_deref(),
+            &per_expert,
+            plan,
+            device,
+        )?;
     }
     Ok(Some(out))
+}
+
+// the diagnostic report over the plan's report Hessians, or the ones the tensor was quantized with
+#[allow(clippy::too_many_arguments)]
+fn report(
+    t: &Planned<'_>,
+    ty: GgufType,
+    cols: usize,
+    values: &[f32],
+    out: &[u8],
+    shared: Option<&[f32]>,
+    per_expert: &[Option<Vec<f32>>],
+    plan: &RequantizePlan,
+    device: &Device,
+) -> Result<()> {
+    let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
+    let (shared, per_expert) = match &plan.report_hessians {
+        Some(source) => (
+            source.hessian(t.name, None)?,
+            (0..experts)
+                .map(|e| source.hessian(t.name, (t.dims.len() == 3).then_some(e)))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        None => (shared.map(<[f32]>::to_vec), per_expert.to_vec()),
+    };
+    let hs = (0..experts)
+        .map(|e| {
+            per_expert
+                .get(e)
+                .and_then(Option::as_deref)
+                .or(shared.as_deref())
+        })
+        .collect::<Vec<_>>();
+    report_reconstruction(t.name, ty, cols, values, out, &hs, device)
 }
 
 // a diagnostic line: the encoding's output error over the calibration inputs, `tr(dW H dW^T) / tr(W H W^T)` summed
@@ -961,6 +1012,7 @@ mod tests {
             hessians: None,
             hessian_weights_only: false,
             gptq_damp: 0.0,
+            report_hessians: None,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -986,6 +1038,7 @@ mod tests {
             hessians: None,
             hessian_weights_only: false,
             gptq_damp: 0.0,
+            report_hessians: None,
         };
         let overlaid = requantize_gguf(&src, &overlay, &overlaying, |_, _, _| {})?;
         assert_eq!(overlaid.tensors, 1);
