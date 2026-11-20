@@ -50,9 +50,6 @@ const PER_EXPERT_HESSIANS_ENV: &str = "INFERENCE_PER_EXPERT_HESSIANS";
 // the hidden states Hessian collection keeps on the GPU at most (beyond, on the host)
 const RESIDENT_STATE_BYTES: usize = 4 << 30;
 // diagnostics: a streamed run records its final log-probabilities to this file, or compares its own with them
-// the text whose encoding with and without special tokens tells whether the vocab adds a BOS
-#[cfg(feature = "cuda")]
-const PROBE_TEXT: &str = " ";
 #[cfg(feature = "cuda")]
 const STREAM_SCORE_ONLY_ENV: &str = "INFERENCE_STREAM_SCORE_ONLY";
 #[cfg(feature = "cuda")]
@@ -761,14 +758,7 @@ pub(crate) fn score_kld_streamed(
 ) -> Result<()> {
     let mut base = inference_nn::logits_reference::KldBase::open(base)?;
     // llama-perplexity swaps a chunk's first token for BOS only when the vocab adds one when encoding
-    let encode = |special| {
-        ctx.tokenizer
-            .encode_fast(PROBE_TEXT, special)
-            .map(|e| e.get_ids().to_vec())
-            .map_err(anyhow::Error::msg)
-    };
-    let (with, without) = (encode(true)?, encode(false)?);
-    let bos = (with.len() > without.len()).then(|| with[0]);
+    let bos = ctx.bos_tok_id;
     let chunks = base
         .tokens
         .chunks(base.n_ctx)
