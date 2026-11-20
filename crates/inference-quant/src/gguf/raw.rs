@@ -923,6 +923,15 @@ impl QuantMethod for GgufRawMatMul {
         }
     }
 
+    fn begin_capture_inputs(&self) -> Result<()> {
+        self.stats.enable_capture();
+        Ok(())
+    }
+
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        self.stats.take_captured()
+    }
+
     fn begin_track_hessian(&self) -> Result<()> {
         let dims = self.w.shape.dims();
         // stacked [E, out, in] experts collect one per expert, from the rows their router sends them

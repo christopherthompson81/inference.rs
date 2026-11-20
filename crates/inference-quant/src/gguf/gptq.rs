@@ -63,6 +63,37 @@ pub struct Prepared {
     importance: Vec<f32>,
     dead: Vec<usize>,
     u: Option<Tensor>,
+    // GPTAQ's residual term `P = (dX X^T U^T) o M_U U`: each quantized column's input drift carried onto the
+    // columns after it, `W_rest += W_b P_b,rest`
+    p: Option<Tensor>,
+}
+
+impl Prepared {
+    /// GPTAQ (Li et al., 2025): with `cross` (`cols x cols`, `(X_fp - X_q)^T X_q / n`, the quantized model's inputs
+    /// `X_q` against the full-precision model's `X_fp`, and this Hessian over `X_q`), the feedback fits the layer's
+    /// output to the full-precision model's instead of to its own input.
+    pub fn with_cross(mut self, cross: &[f32], device: &Device) -> Result<Self> {
+        let Some(u) = &self.u else {
+            return Ok(self);
+        };
+        let cols = self.importance.len();
+        if cross.len() != cols * cols {
+            inference_tensor::bail!("a cross moment of {} for rows of {cols}", cross.len());
+        }
+        let c = Tensor::from_slice(cross, (cols, cols), device)?;
+        let index = Tensor::arange(
+            0u32,
+            u32::try_from(cols).map_err(inference_tensor::Error::wrap)?,
+            device,
+        )?;
+        let strictly_upper = index
+            .unsqueeze(1)?
+            .broadcast_lt(&index.unsqueeze(0)?)?
+            .to_dtype(DType::F32)?;
+        let p = c.matmul(&u.t()?)?.mul(&strictly_upper)?.matmul(u)?;
+        self.p = Some(p);
+        Ok(self)
+    }
 }
 
 /// `hessian` (`cols x cols`, the inputs' `X^T X / n`) damped by `damp` of its mean diagonal, a column no token reached
@@ -97,6 +128,7 @@ pub fn prepare(
         u: feedback
             .then(|| inverse_factor(&h, cols, device))
             .transpose()?,
+        p: None,
     })
 }
 
@@ -154,7 +186,15 @@ fn carry_groups(
     rest.narrow(1, block, width - block)? - moved
 }
 
-fn carry(rest: &Tensor, error: &Tensor, u: &Tensor, b: usize, block: usize) -> Result<Tensor> {
+// with GPTAQ's `p`, also the block's pre-quantization values `current` times its rows of `p`
+fn carry(
+    rest: &Tensor,
+    error: &Tensor,
+    u: &Tensor,
+    b: usize,
+    block: usize,
+    asym: Option<(&Tensor, &Tensor)>,
+) -> Result<Tensor> {
     let width = rest.dim(1)?;
     let ubb = u
         .narrow(0, b * block, block)?
@@ -166,7 +206,18 @@ fn carry(rest: &Tensor, error: &Tensor, u: &Tensor, b: usize, block: usize) -> R
         .narrow(0, b * block, block)?
         .narrow(1, (b + 1) * block, width - block)?
         .contiguous()?;
-    rest.narrow(1, block, width - block)? - error.matmul(&ubb_inv)?.matmul(&u_rest)?
+    let moved =
+        (rest.narrow(1, block, width - block)? - error.matmul(&ubb_inv)?.matmul(&u_rest)?)?;
+    match asym {
+        Some((p, current)) => {
+            let p_rest = p
+                .narrow(0, b * block, block)?
+                .narrow(1, (b + 1) * block, width - block)?
+                .contiguous()?;
+            moved + current.matmul(&p_rest)?
+        }
+        None => Ok(moved),
+    }
 }
 
 /// A stack's experts (`values`: `prepared.len()` equal runs of rows of `cols`, each with its own prepared Hessian) as
@@ -262,9 +313,10 @@ fn gpu_row_scaled(
         }
         rest = match &u {
             Some(u) => {
-                let error = (current - levels.broadcast_mul(&row_d.unsqueeze(1)?)?)?;
+                let error = (&current - levels.broadcast_mul(&row_d.unsqueeze(1)?)?)?;
                 if groups == 1 {
-                    carry(&rest, &error, u, b, QK_K)?
+                    let asym = prepared[0].p.as_ref().map(|p| (p, &current));
+                    carry(&rest, &error, u, b, QK_K, asym)?
                 } else {
                     carry_groups(&rest, &error, u, b, QK_K)?
                 }
@@ -379,8 +431,9 @@ fn quantize_on(
             if let Some(u) = &u
                 && b + 1 < blocks
             {
-                let error = (current - Tensor::from_slice(&decoded, (rows, block), device)?)?;
-                rest = carry(&rest, &error, u, b, block)?;
+                let error = (&current - Tensor::from_slice(&decoded, (rows, block), device)?)?;
+                let asym = prepared.p.as_ref().map(|p| (p, &current));
+                rest = carry(&rest, &error, u, b, block, asym)?;
             } else if b + 1 < blocks {
                 rest = rest.narrow(1, block, cols - (b + 1) * block)?;
             }
@@ -422,8 +475,9 @@ fn quantize_on(
         match &u {
             Some(u) => {
                 let q = decode(ty, block, &bytes)?;
-                let error = (current - Tensor::from_slice(&q, (rows, block), device)?)?;
-                rest = carry(&rest, &error, u, b, block)?;
+                let error = (&current - Tensor::from_slice(&q, (rows, block), device)?)?;
+                let asym = prepared.p.as_ref().map(|p| (p, &current));
+                rest = carry(&rest, &error, u, b, block, asym)?;
             }
             None => rest = rest.narrow(1, block, cols - (b + 1) * block)?,
         }
@@ -558,8 +612,75 @@ mod tests {
         Ok(())
     }
 
+    // GPTAQ fits the quantized layer to the full-precision output: with inputs drifted from the full-precision
+    // ones (a systematic map plus noise, as earlier quantized layers leave them), its `||W X_fp - Q X_q||` is below
+    // plain GPTQ's on the drifted inputs, and a zero cross moment changes nothing
+    fn asymmetric_feedback_fits_the_full_precision_output() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let cpu = Device::Cpu;
+        let (rows, cols, samples) = (32, 512, 1024);
+        let mut state = 23u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let mut random = |n: usize| (0..n).map(|_| next()).collect::<Vec<f32>>();
+        let w = Tensor::from_vec(random(rows * cols), (rows, cols), &cpu)?;
+        let mix = (Tensor::from_vec(random(cols * cols), (cols, cols), &cpu)? * 0.1)?;
+        let x_fp = Tensor::from_vec(random(samples * cols), (samples, cols), &cpu)?.matmul(&mix)?;
+        let drift = (Tensor::from_vec(random(cols * cols), (cols, cols), &cpu)? * 0.02)?;
+        let noise = (Tensor::from_vec(random(samples * cols), (samples, cols), &cpu)? * 0.005)?;
+        let x_q = ((&x_fp + x_fp.matmul(&drift)?)? + noise)?;
+        let n = samples as f64;
+        let h = (x_q.t()?.matmul(&x_q)? / n)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let cross = ((&x_fp - &x_q)?.t()?.matmul(&x_q)? / n)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let unused_encode =
+            |_: GgufType, _: usize, _: &[f32], _: Option<&[f32]>, _: Quantizer| Ok(Vec::new());
+        let unused_decode = |_: GgufType, _: usize, _: &[u8]| Ok(Vec::new());
+        let ty = GgufType::Iq4Ks;
+        let values = w.flatten_all()?.to_vec1::<f32>()?;
+        let error = |prepared: &Prepared| -> Result<f32> {
+            let bytes = quantize(
+                ty,
+                cols,
+                &values,
+                prepared,
+                Quantizer::IkLlama,
+                &device,
+                unused_encode,
+                unused_decode,
+            )?;
+            let q = Tensor::from_vec(
+                super::super::raw::dequantize_rows(ty, cols, &bytes)?,
+                (rows, cols),
+                &cpu,
+            )?;
+            (w.matmul(&x_fp.t()?)? - q.matmul(&x_q.t()?)?)?
+                .sqr()?
+                .sum_all()?
+                .sqrt()?
+                .to_scalar::<f32>()
+        };
+        let gptq = error(&prepare(&h, cols, true, 0.1, &device)?)?;
+        let gptaq = error(&prepare(&h, cols, true, 0.1, &device)?.with_cross(&cross, &device)?)?;
+        let zero = error(
+            &prepare(&h, cols, true, 0.1, &device)?.with_cross(&vec![0.0; cols * cols], &device)?,
+        )?;
+        assert!(gptaq < 0.9 * gptq, "GPTAQ {gptaq} against GPTQ {gptq}");
+        assert_eq!(zero, gptq, "a zero cross moment is plain GPTQ");
+        Ok(())
+    }
+
     inference_tensor::gpu_cases!(
         cuda_cases,
-        [gpu_and_cpu_encodings_agree, experts_batched_match_alone]
+        [
+            gpu_and_cpu_encodings_agree,
+            experts_batched_match_alone,
+            asymmetric_feedback_fits_the_full_precision_output
+        ]
     );
 }

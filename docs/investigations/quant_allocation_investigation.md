@@ -638,3 +638,27 @@ Q4_K experts            0.01767      0.01229
 Above the 0.0056 floor, forcing the BF16 routes takes the recipe from 0.0111 to 0.0061: routing flips are ~45% of
 the KLD the quantization adds. Routing agreement over these chunks: top-8 Jaccard 0.903, same top-8 set 60.7%, same
 top-1 92.9% (layer 25: 0.871 / 51.2% / 91.2%), weight on dropped experts 3.5%. Router consistency is worth pursuing.
+
+## Run 24 - 2026-11-20 07:40
+
+Where the routing flips come from: each recipe group quantized alone (the rest BF16, the router and GDN small tensors
+F32), scored with `quantize kld` against the llama.cpp BF16 base with its own routes and with our BF16's routes
+forced. Excess over our BF16 (0.00556):
+
+```
+group (alone)              own routes   BF16 routes forced   routing share
+exps gate/up (IQ4_KS)      0.00702      0.00393              44%
+exps down (IQ4_KS)         0.00508      0.00259              49%
+token_embd (Q4_K)          0.00213      0.00011              95%
+ssm_out (Q6_K)             0.00204      0.00054              74%
+attn_qkv (Q6_K)            0.00174      0.00023              87%
+attn_gate (Q6_K)           0.00099      0.00005              95%
+full attention (Q8_0)      0.00046      0.00008              83%
+shexp (Q8_0)               0.00025      0.00006              76%
+output (Q8_0)              0.00002      0.00002              -
+```
+
+Outside the routed experts nearly all of a group's harm is through the routing: an error in the residual stream
+(the embedding, GDN, attention, the shared expert) costs little at its own outputs and much through the routes it
+flips downstream. The routed experts' is half and half. So router consistency is the lever for every group; the
+allocation sweep (Run 5) priced the non-expert groups by an effect that is mostly routing.

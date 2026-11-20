@@ -282,6 +282,14 @@ impl QuantMethod for PendingIsqLayer {
         self.resolve()?.begin_track_stats()
     }
 
+    fn begin_capture_inputs(&self) -> Result<()> {
+        self.resolve()?.begin_capture_inputs()
+    }
+
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        self.resolve()?.take_captured_inputs()
+    }
+
     fn end_track_stats(&self) -> Result<Tensor> {
         self.resolve()?.end_track_stats()
     }

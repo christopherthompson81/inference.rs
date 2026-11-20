@@ -60,7 +60,63 @@ pub fn moe_router_topk(
     if let Some(forced) = route_force() {
         return forced_routes(forced, &topk);
     }
-    Ok(topk)
+    let mut tape = ROUTE_TAPE
+        .lock()
+        .map_err(|_| inference_tensor::Error::msg("the route tape's lock is poisoned"))?;
+    match &mut *tape {
+        RouteTape::Off => Ok(topk),
+        RouteTape::Recording(routes) => {
+            routes.push(TopKOutput {
+                values: topk.values.clone(),
+                indices: topk.indices.clone(),
+            });
+            Ok(topk)
+        }
+        RouteTape::Replaying(routes) => routes
+            .pop_front()
+            .ok_or_else(|| inference_tensor::Error::msg("the route tape ran out")),
+    }
+}
+
+// routing calls recorded in order, or replayed in place of the router's own (one model run routed as another was)
+enum RouteTape {
+    Off,
+    Recording(Vec<TopKOutput>),
+    Replaying(std::collections::VecDeque<TopKOutput>),
+}
+
+static ROUTE_TAPE: std::sync::Mutex<RouteTape> = std::sync::Mutex::new(RouteTape::Off);
+
+/// From now, every routing call's choice is recorded, for [`take_recorded_routes`].
+pub fn record_routes() {
+    if let Ok(mut tape) = ROUTE_TAPE.lock() {
+        *tape = RouteTape::Recording(Vec::new());
+    }
+}
+
+/// The routes recorded since [`record_routes`], the tape turned off.
+pub fn take_recorded_routes() -> Vec<TopKOutput> {
+    match ROUTE_TAPE
+        .lock()
+        .map(|mut tape| std::mem::replace(&mut *tape, RouteTape::Off))
+    {
+        Ok(RouteTape::Recording(routes)) => routes,
+        _ => Vec::new(),
+    }
+}
+
+/// The next routing calls take `routes` in order instead of their own; [`stop_replaying_routes`] ends it.
+pub fn replay_routes(routes: Vec<TopKOutput>) {
+    if let Ok(mut tape) = ROUTE_TAPE.lock() {
+        *tape = RouteTape::Replaying(routes.into());
+    }
+}
+
+/// Ends [`replay_routes`].
+pub fn stop_replaying_routes() {
+    if let Ok(mut tape) = ROUTE_TAPE.lock() {
+        *tape = RouteTape::Off;
+    }
 }
 
 // set to a route dump, each routing call takes its routes from the dump's next record instead (a diagnostic: a run

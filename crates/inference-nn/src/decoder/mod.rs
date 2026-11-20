@@ -1363,6 +1363,22 @@ pub fn layers_streamed() -> bool {
     STREAM_LAYERS.get()
 }
 
+// a second checkpoint of the streamed model (a quantization of it) whose layers a streamed run builds beside its own
+static STREAM_TWIN: std::sync::Mutex<Option<ShardedVarBuilder>> = std::sync::Mutex::new(None);
+
+/// Sets the root of a second checkpoint of the model being loaded for a streamed run to build its layers from too
+/// ([`crate::model::LayerStream::build_layer_from`]).
+pub fn set_stream_twin(weights: ShardedVarBuilder) {
+    if let Ok(mut twin) = STREAM_TWIN.lock() {
+        *twin = Some(weights);
+    }
+}
+
+/// The second checkpoint [`set_stream_twin`] set, taken.
+pub fn take_stream_twin() -> Option<ShardedVarBuilder> {
+    STREAM_TWIN.lock().ok().and_then(|mut twin| twin.take())
+}
+
 /// Ends a [`stop_after_layer`] scope.
 pub struct CalibrationStop(usize);
 

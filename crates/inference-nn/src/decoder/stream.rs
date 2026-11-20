@@ -29,14 +29,16 @@ pub(super) struct LayerRebuild {
 }
 
 impl LayerRebuild {
-    // layer `layer_idx` on `device`, with the modules it added to the load's tracker taken back out of it
+    // layer `layer_idx` on `device` from `vb_m` (the stack's own, or another checkpoint's under the same path), with
+    // the modules it added to its tracker taken back out of it
     fn layer(
         &self,
         layer_idx: usize,
         device: &Device,
+        vb_m: &ShardedVarBuilder,
     ) -> Result<(DecoderLayer<AttentionBlock, Ffn>, Vec<TrackedModule>)> {
         let mapper = DummyDeviceMapper::new(device.clone());
-        let vb_m = self.vb_m.clone().set_device(device.clone());
+        let vb_m = vb_m.clone().set_device(device.clone());
         let rope = |kind| -> Result<_> {
             let rope = self
                 .spec
@@ -104,6 +106,28 @@ impl StreamedLayer for Layer {
     }
 }
 
+impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
+    // layer `layer` rebuilt from `vb_m`, the stack's module root or another checkpoint's at its path
+    fn layer_from(
+        &self,
+        layer: usize,
+        device: &Device,
+        vb_m: &ShardedVarBuilder,
+    ) -> Result<Box<dyn StreamedLayer>> {
+        let Some(rebuild) = &self.stack.rebuild else {
+            inference_tensor::bail!("this decoder stack does not rebuild its layers");
+        };
+        let (built, modules) = rebuild.layer(layer, device, vb_m)?;
+        let window = built.self_attn.sliding_window();
+        Ok(Box::new(Layer {
+            layer: built,
+            layer_idx: layer,
+            window,
+            modules,
+        }))
+    }
+}
+
 impl<A: LayerAttention, F: LayerFfn> LayerStream for CausalLm<A, F> {
     fn num_layers(&self) -> usize {
         self.stack
@@ -120,14 +144,19 @@ impl<A: LayerAttention, F: LayerFfn> LayerStream for CausalLm<A, F> {
         let Some(rebuild) = &self.stack.rebuild else {
             inference_tensor::bail!("this decoder stack does not rebuild its layers");
         };
-        let (built, modules) = rebuild.layer(layer, device)?;
-        let window = built.self_attn.sliding_window();
-        Ok(Box::new(Layer {
-            layer: built,
-            layer_idx: layer,
-            window,
-            modules,
-        }))
+        self.layer_from(layer, device, &rebuild.vb_m)
+    }
+
+    fn build_layer_from(
+        &self,
+        layer: usize,
+        device: &Device,
+        weights: &ShardedVarBuilder,
+    ) -> Result<Box<dyn StreamedLayer>> {
+        let Some(rebuild) = &self.stack.rebuild else {
+            inference_tensor::bail!("this decoder stack does not rebuild its layers");
+        };
+        self.layer_from(layer, device, &weights.pp(rebuild.vb_m.prefix()))
     }
 
     fn final_norm(&self, xs: &Tensor) -> Result<Tensor> {

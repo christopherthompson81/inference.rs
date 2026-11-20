@@ -12,6 +12,8 @@ const HESSIAN_EXTENSION: &str = "safetensors";
 pub(crate) const HESSIAN_TENSOR: &str = "hin";
 // a symmetric Hessian stored as its packed upper triangle, row-major
 pub(crate) const HESSIAN_UPPER_TENSOR: &str = "hin_upper";
+// GPTAQ's cross moment `(X_fp - X_q)^T X_q` beside a Hessian over the quantized model's inputs
+pub(crate) const CROSS_TENSOR: &str = "dxx";
 const MIRROR_TILE: usize = 64;
 const HEAD_KEY: &str = "lm_head";
 const OUTPUT_TENSOR: &str = "output.weight";
@@ -159,6 +161,33 @@ impl inference_quant::requantize::HessianSource for HessianDir {
             Some(e) => self.experts.get(name).and_then(|m| m.get(&e)),
         };
         path.map(|p| load_hessian(p, order)).transpose()
+    }
+
+    fn cross(&self, name: &str) -> inference_tensor::Result<Option<Vec<f32>>> {
+        let Some(path) = self.dense.get(name) else {
+            return Ok(None);
+        };
+        let order = name
+            .ends_with(SSM_OUT_SUFFIX)
+            .then_some(())
+            .and(self.ssm_out_order.as_deref());
+        let Some(cross) =
+            inference_tensor::safetensors::load(path, &inference_tensor::Device::Cpu)?
+                .remove(CROSS_TENSOR)
+        else {
+            return Ok(None);
+        };
+        let n = cross.dim(0)?;
+        let values = cross
+            .to_dtype(inference_tensor::DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        Ok(Some(match order.filter(|o| o.len() == n) {
+            Some(order) => (0..n * n)
+                .map(|i| values[order[i / n] * n + order[i % n]])
+                .collect(),
+            None => values,
+        }))
     }
 }
 

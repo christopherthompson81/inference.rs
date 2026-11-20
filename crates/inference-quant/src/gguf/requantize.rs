@@ -138,6 +138,12 @@ pub trait HessianSource: Send + Sync {
     /// The Hessian of tensor `name` (by GGUF name), or of expert `expert` of a stack (None where the stack has one
     /// for all its experts or none).
     fn hessian(&self, name: &str, expert: Option<usize>) -> Result<Option<Vec<f32>>>;
+
+    /// GPTAQ's cross moment beside tensor `name`'s Hessian (`(X_fp - X_q)^T X_q / n`, `[cols, cols]`), where its
+    /// Hessian was collected over a quantized model's inputs paired with the full-precision model's.
+    fn cross(&self, _name: &str) -> Result<Option<Vec<f32>>> {
+        Ok(None)
+    }
 }
 
 /// A safetensors file of Hessians keyed by GGUF tensor name.
@@ -279,6 +285,7 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
 #[cfg(feature = "cuda")]
 struct GptqInput {
     shared: Option<Vec<f32>>,
+    cross: Option<Vec<f32>>,
     per_expert: Vec<Option<Vec<f32>>>,
     values: Vec<f32>,
 }
@@ -309,6 +316,7 @@ fn load_gptq(
     reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut bytes)?;
     Ok(Some(GptqInput {
+        cross: hessians.cross(t.name)?,
         shared,
         per_expert,
         values: to_f32(t.source_type, &bytes)?,
@@ -327,6 +335,7 @@ fn gptq_tensor(
 ) -> Result<Vec<u8>> {
     let GptqInput {
         shared,
+        cross,
         per_expert,
         values,
     } = input;
@@ -352,7 +361,12 @@ fn gptq_tensor(
     };
     // experts sharing one Hessian are rows of one matrix to it (GPTQ treats rows alone): one pass over them all
     if per_expert.iter().all(Option::is_none) {
-        let prepared = prepare(shared.as_deref().expect("a shared Hessian"))?;
+        let mut prepared = prepare(shared.as_deref().expect("a shared Hessian"))?;
+        if let Some(cross) = &cross {
+            prepared = prepared
+                .with_cross(cross, device)
+                .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))?;
+        }
         let out = quantize(&values, &prepared)?;
         if std::env::var_os(GPTQ_REPORT_ENV).is_some() {
             report(

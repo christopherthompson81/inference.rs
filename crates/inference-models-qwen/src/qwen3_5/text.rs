@@ -1506,10 +1506,16 @@ pub(super) struct LayerRebuild {
 }
 
 impl LayerRebuild {
-    // layer `layer_idx` on `device`, with the modules it added to the load's tracker taken back out of it
-    fn layer(&self, layer_idx: usize, device: &Device) -> Result<StreamedQwenLayer> {
+    // layer `layer_idx` on `device` from `vb_l` (the stack's own, or another checkpoint's under the same path), with
+    // the modules it added to its tracker taken back out of it
+    fn layer(
+        &self,
+        layer_idx: usize,
+        device: &Device,
+        vb_l: &ShardedVarBuilder,
+    ) -> Result<StreamedQwenLayer> {
         let mapper = crate::device_map::DummyDeviceMapper::new(device.clone());
-        let vb_l = self.vb_l.clone().set_device(device.clone());
+        let vb_l = vb_l.clone().set_device(device.clone());
         let ropes = HashMap::from([(
             device.location(),
             Arc::new(rotary_on(&self.cfg, self.yarn.as_ref(), device)?),
@@ -1607,7 +1613,23 @@ impl crate::model::LayerStream for Qwen3_5TextModel {
         let Some(rebuild) = &self.rebuild else {
             inference_tensor::bail!("this Qwen3.5 stack does not rebuild its layers");
         };
-        Ok(Box::new(rebuild.layer(layer, device)?))
+        Ok(Box::new(rebuild.layer(layer, device, &rebuild.vb_l)?))
+    }
+
+    fn build_layer_from(
+        &self,
+        layer: usize,
+        device: &Device,
+        weights: &ShardedVarBuilder,
+    ) -> Result<Box<dyn crate::model::StreamedLayer>> {
+        let Some(rebuild) = &self.rebuild else {
+            inference_tensor::bail!("this Qwen3.5 stack does not rebuild its layers");
+        };
+        Ok(Box::new(rebuild.layer(
+            layer,
+            device,
+            &weights.pp(rebuild.vb_l.prefix()),
+        )?))
     }
 
     fn final_norm(&self, xs: &Tensor) -> Result<Tensor> {

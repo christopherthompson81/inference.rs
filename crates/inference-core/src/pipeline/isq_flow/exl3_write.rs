@@ -51,6 +51,8 @@ const PER_EXPERT_HESSIANS_ENV: &str = "INFERENCE_PER_EXPERT_HESSIANS";
 const RESIDENT_STATE_BYTES: usize = 4 << 30;
 // diagnostics: a streamed run records its final log-probabilities to this file, or compares its own with them
 #[cfg(feature = "cuda")]
+const STREAM_TWIN_FREE_ENV: &str = "INFERENCE_STREAM_TWIN_FREE";
+#[cfg(feature = "cuda")]
 const STREAM_SCORE_ONLY_ENV: &str = "INFERENCE_STREAM_SCORE_ONLY";
 #[cfg(feature = "cuda")]
 const STREAM_LOGITS_OUT_ENV: &str = "INFERENCE_STREAM_LOGITS_OUT";
@@ -682,6 +684,77 @@ fn save_hessian(dir: &Path, key: &str, h: Tensor) -> Result<()> {
     Ok(())
 }
 
+// GPTAQ's statistics as `<key>.safetensors`: the twin's Hessian `hin` and the cross moment `dxx`
+#[cfg(feature = "cuda")]
+fn save_hessian_pair(dir: &Path, key: &str, h: Tensor, cross: Tensor) -> Result<()> {
+    inference_tensor::safetensors::save(
+        &HashMap::from([
+            (crate::gguf_imatrix::HESSIAN_TENSOR.to_string(), h),
+            (crate::gguf_imatrix::CROSS_TENSOR.to_string(), cross),
+        ]),
+        dir.join(format!("{key}.safetensors")),
+    )?;
+    Ok(())
+}
+
+// one dense input's GPTAQ statistics over the chunks: `X_q^T X_q` and `(X_fp - X_q)^T X_q`, `X_fp` the model's
+// inputs to the linear and `X_q` the twin's, row for row (the twin routed as the model)
+#[cfg(feature = "cuda")]
+struct Gptaq {
+    index: usize,
+    model: TrackedModule,
+    twin: TrackedModule,
+    h: Option<Tensor>,
+    cross: Option<Tensor>,
+    rows: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl Gptaq {
+    // this chunk's inputs of both, taken and folded in
+    fn add_chunk(&mut self) -> Result<()> {
+        use inference_tensor::DType;
+        let model = self.model.ct.take_captured_inputs()?;
+        let twin = self.twin.ct.take_captured_inputs()?;
+        if model.len() != twin.len() {
+            anyhow::bail!(
+                "`{}`: {} inputs in the model against {} in the twin",
+                self.model.key,
+                model.len(),
+                twin.len()
+            );
+        }
+        for (xf, xq) in model.iter().zip(&twin) {
+            let xq = xq.to_dtype(DType::F32)?;
+            let drift = (xf.to_device(xq.device())?.to_dtype(DType::F32)? - &xq)?;
+            let h = xq.t()?.matmul(&xq)?;
+            let cross = drift.t()?.matmul(&xq)?;
+            self.h = Some(match self.h.take() {
+                Some(acc) => (acc + h)?,
+                None => h,
+            });
+            self.cross = Some(match self.cross.take() {
+                Some(acc) => (acc + cross)?,
+                None => cross,
+            });
+            self.rows += xq.dim(0)?;
+        }
+        Ok(())
+    }
+
+    // both over the rows, on the host
+    fn finish(self) -> Result<Option<(Tensor, Tensor)>> {
+        let (Some(h), Some(cross)) = (self.h, self.cross) else {
+            return Ok(None);
+        };
+        let rows = f64::from(u32::try_from(self.rows)?);
+        Ok(Some((
+            (h / rows)?.to_device(&Device::Cpu)?,
+            (cross / rows)?.to_device(&Device::Cpu)?,
+        )))
+    }
+}
+
 // a Hessian as its packed upper triangle (row-major, `i <= j`): exact at half the bytes, where bf16's rounding left
 // rank-deficient expert Hessians indefinite past GPTQ's damping
 fn save_upper_hessian(dir: &Path, key: &str, h: &Tensor) -> Result<()> {
@@ -822,6 +895,11 @@ fn run_streamed(
         states.len(),
         if resident { "it" } else { "the host" }
     );
+    // a second checkpoint (INFERENCE_STREAM_TWIN) runs its own states beside: each of its layers on the states its
+    // layers before gave, routed as the model's own layer routed (INFERENCE_STREAM_TWIN_FREE leaves it its own routes)
+    let twin = inference_nn::decoder::take_stream_twin();
+    let free_routes = std::env::var_os(STREAM_TWIN_FREE_ENV).is_some();
+    let mut twin_states = twin.as_ref().map(|_| states.clone());
     let mut ahead: Option<std::thread::JoinHandle<()>> = None;
     for layer_idx in 0..layers {
         let start = std::time::Instant::now();
@@ -830,6 +908,10 @@ fn run_streamed(
         }
         ahead = ranges.remove(&(layer_idx + 1)).map(prefetch);
         let layer = stream.build_layer(layer_idx, &gpu)?;
+        let twin_layer = twin
+            .as_ref()
+            .map(|weights| stream.build_layer_from(layer_idx, &gpu, weights))
+            .transpose()?;
         let group = layer
             .modules()
             .iter()
@@ -861,26 +943,77 @@ fn run_streamed(
                 },
             })
             .collect::<Vec<_>>();
+        // with a twin a collection pairs each dense input of the two (GPTAQ's statistics): the twin's own Hessian,
+        // and its inputs' cross moment with the drift from the model's
+        let gptaq = twin_layer.is_some() && dir.is_some();
+        let mut pairs = Vec::new();
+        if let (true, Some(twin_layer)) = (gptaq, &twin_layer) {
+            for (i, module) in group.iter().enumerate() {
+                if sources[i] != i || ranks[i] != 2 {
+                    continue;
+                }
+                let Some(twin) = twin_layer.modules().iter().find(|m| m.key == module.key) else {
+                    continue;
+                };
+                module.ct.begin_capture_inputs()?;
+                twin.ct.begin_capture_inputs()?;
+                pairs.push(Gptaq {
+                    index: i,
+                    model: (*module).clone(),
+                    twin: twin.clone(),
+                    h: None,
+                    cross: None,
+                    rows: 0,
+                });
+            }
+        }
         for (i, module) in group.iter().enumerate() {
-            if sources[i] == i && !score_only {
+            if sources[i] == i && !score_only && !gptaq {
                 module.ct.begin_track_hessian()?;
             }
         }
         // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed)
-        for state in &mut states {
+        for (i, state) in states.iter_mut().enumerate() {
+            if twin_layer.is_some() && !free_routes {
+                inference_nn::ops::record_routes();
+            }
             let next = layer.forward(&state.to_device(&gpu)?)?;
             *state = if resident {
                 next
             } else {
                 next.to_device(&Device::Cpu)?
             };
+            if let (Some(twin_layer), Some(twin_states)) = (&twin_layer, &mut twin_states) {
+                if !free_routes {
+                    inference_nn::ops::replay_routes(inference_nn::ops::take_recorded_routes());
+                }
+                let twin_state = &mut twin_states[i];
+                let next = twin_layer.forward(&twin_state.to_device(&gpu)?);
+                inference_nn::ops::stop_replaying_routes();
+                *twin_state = if resident {
+                    next?
+                } else {
+                    next?.to_device(&Device::Cpu)?
+                };
+            }
+            for pair in &mut pairs {
+                pair.add_chunk()?;
+            }
         }
         let mut hessians = vec![None; group.len()];
+        let mut crosses = vec![None; group.len()];
         for (i, module) in group.iter().enumerate() {
-            if sources[i] == i && !score_only {
+            if sources[i] == i && !score_only && !gptaq {
                 hessians[i] = take_hessian(module)?
                     .map(|h| h.to_device(&Device::Cpu))
                     .transpose()?;
+            }
+        }
+        for pair in pairs {
+            let index = pair.index;
+            if let Some((h, cross)) = pair.finish()? {
+                hessians[index] = Some(h);
+                crosses[index] = Some(cross);
             }
         }
         for (i, module) in group.iter().enumerate() {
@@ -891,7 +1024,10 @@ fn run_streamed(
                 // a stack reading another's input (up beside gate) is found through it, not written again
                 3 if each && sources[i] != i => {}
                 3 => save_expert_hessians(dir, &module.key, h.clone(), each)?,
-                _ => save_hessian(dir, &module.key, h.clone())?,
+                _ => match &crosses[sources[i]] {
+                    Some(cross) => save_hessian_pair(dir, &module.key, h.clone(), cross.clone())?,
+                    None => save_hessian(dir, &module.key, h.clone())?,
+                },
             }
         }
         drop(group);
@@ -920,7 +1056,13 @@ fn run_streamed(
             save_hessian(dir, HEAD, hessian.to_device(&Device::Cpu)?)?;
             info!("Wrote the Hessians to `{}`.", dir.display());
         }
-        StreamedRun::Score(base) => score_states(stream, &states, &chunks, base, &gpu)?,
+        StreamedRun::Score(base) => score_states(
+            stream,
+            twin_states.as_deref().unwrap_or(&states),
+            &chunks,
+            base,
+            &gpu,
+        )?,
     }
     if let Some(path) = std::env::var_os(STREAM_LOGITS_OUT_ENV) {
         stream_logits(stream, &states, &gpu, LogitsUse::Record(Path::new(&path)))?;

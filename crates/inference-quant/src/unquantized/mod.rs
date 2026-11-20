@@ -666,6 +666,15 @@ impl QuantMethod for UnquantLinear {
         }
     }
 
+    fn begin_capture_inputs(&self) -> Result<()> {
+        self.stats.enable_capture();
+        Ok(())
+    }
+
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        self.stats.take_captured()
+    }
+
     fn begin_track_hessian(&self) -> Result<()> {
         let in_dim = self.w.dim(inference_tensor::D::Minus1)?;
         // stacked [E, out, in] experts collect one per expert, from the rows their router sends them

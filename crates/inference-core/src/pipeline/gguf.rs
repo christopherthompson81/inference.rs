@@ -56,6 +56,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 // the architecture whose full-attention layers can read a prompt bidirectionally
+// the second GGUF a streamed run builds each layer from beside the model's own (a diagnostic, and GPTAQ's pairing)
+const STREAM_TWIN_ENV: &str = "INFERENCE_STREAM_TWIN";
 const BIDIRECTIONAL_ARCHITECTURE: &str = "qwen35";
 // clef's GGUF is Qwen3.5 under its own name, with a joint decision head after the trunk
 const CLEF_ARCHITECTURE: &str = "clef";
@@ -935,6 +937,14 @@ impl GGUFLoader {
             inference_quant::GgufWeightSource::new(archive.clone(), bindings, dtype)?
                 .with_multi_row_decode(options.multi_row_decode),
         );
+        // a streamed run's second checkpoint of the same model (a quantization of this one), bound alike
+        if let Some(twin) = std::env::var_os(STREAM_TWIN_ENV) {
+            let twin = Arc::new(inference_quant::GgufArchive::open([
+                std::path::PathBuf::from(twin),
+            ])?);
+            let twin = inference_quant::GgufWeightSource::new(twin, bindings, dtype)?;
+            inference_nn::decoder::set_stream_twin(Arc::new(twin).sharded_var_builder(Device::Cpu));
+        }
         let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
         let generation_config = self
             .resolve_generation_config(paths, &tokenizer)

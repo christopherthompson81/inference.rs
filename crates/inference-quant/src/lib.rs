@@ -2244,6 +2244,16 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         inference_tensor::bail!("`{}` does not collect Hessians.", self.name())
     }
 
+    /// Begin keeping every forward's input (rows of `in`), for [`Self::take_captured_inputs`].
+    fn begin_capture_inputs(&self) -> Result<()> {
+        inference_tensor::bail!("`{}` does not capture its inputs.", self.name())
+    }
+
+    /// The inputs kept since capturing began or the last take, in order.
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        inference_tensor::bail!("`{}` does not capture its inputs.", self.name())
+    }
+
     /// End tracking stats into an ImatrixLayerStats. Returns the computed imatrix.
     fn end_track_stats(&self) -> Result<Tensor> {
         inference_tensor::bail!("`{}` does not support tracking stats.", self.name())

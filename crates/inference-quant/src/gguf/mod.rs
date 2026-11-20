@@ -846,6 +846,15 @@ impl QuantMethod for GgufMatMul {
         }
     }
 
+    fn begin_capture_inputs(&self) -> Result<()> {
+        self.stats.enable_capture();
+        Ok(())
+    }
+
+    fn take_captured_inputs(&self) -> Result<Vec<Tensor>> {
+        self.stats.take_captured()
+    }
+
     fn begin_track_hessian(&self) -> Result<()> {
         let dims = match &self.w {
             QMatMul::QTensor(q) => q.shape().dims().to_vec(),
