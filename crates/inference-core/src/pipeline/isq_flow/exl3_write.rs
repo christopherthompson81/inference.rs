@@ -52,6 +52,11 @@ const RESIDENT_STATE_BYTES: usize = 4 << 30;
 // diagnostics: a streamed run records its final log-probabilities to this file, or compares its own with them
 #[cfg(feature = "cuda")]
 const STREAM_TWIN_FREE_ENV: &str = "INFERENCE_STREAM_TWIN_FREE";
+// set to a directory (with a twin), each layer's MoE input in the model and the twin is written there, row for row
+#[cfg(feature = "cuda")]
+const STREAM_ROUTER_DUMP_ENV: &str = "INFERENCE_STREAM_ROUTER_DUMP";
+#[cfg(feature = "cuda")]
+const ROUTER_INPUT_MODULE: &str = "mlp.shared_expert.gate_proj";
 #[cfg(feature = "cuda")]
 const STREAM_SCORE_ONLY_ENV: &str = "INFERENCE_STREAM_SCORE_ONLY";
 #[cfg(feature = "cuda")]
@@ -945,7 +950,8 @@ fn run_streamed(
             .collect::<Vec<_>>();
         // with a twin a collection pairs each dense input of the two (GPTAQ's statistics): the twin's own Hessian,
         // and its inputs' cross moment with the drift from the model's
-        let gptaq = twin_layer.is_some() && dir.is_some();
+        let dump_dir = std::env::var_os(STREAM_ROUTER_DUMP_ENV);
+        let gptaq = twin_layer.is_some() && dir.is_some() && dump_dir.is_none();
         let mut pairs = Vec::new();
         if let (true, Some(twin_layer)) = (gptaq, &twin_layer) {
             for (i, module) in group.iter().enumerate() {
@@ -967,8 +973,27 @@ fn run_streamed(
                 });
             }
         }
+        let mut router_dump = dump_dir
+            .zip(twin_layer.as_ref())
+            .and_then(|(dir, twin_layer)| {
+                let model = group
+                    .iter()
+                    .find(|m| m.key.ends_with(ROUTER_INPUT_MODULE))?;
+                let twin = twin_layer.modules().iter().find(|m| m.key == model.key)?;
+                Some((
+                    PathBuf::from(dir),
+                    (*model).clone(),
+                    twin.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            });
+        if let Some((_, model, twin, _, _)) = &router_dump {
+            model.ct.begin_capture_inputs()?;
+            twin.ct.begin_capture_inputs()?;
+        }
         for (i, module) in group.iter().enumerate() {
-            if sources[i] == i && !score_only && !gptaq {
+            if sources[i] == i && !score_only && !gptaq && router_dump.is_none() {
                 module.ct.begin_track_hessian()?;
             }
         }
@@ -999,11 +1024,36 @@ fn run_streamed(
             for pair in &mut pairs {
                 pair.add_chunk()?;
             }
+            if let Some((_, model, twin, xf, xq)) = &mut router_dump {
+                for x in model.ct.take_captured_inputs()? {
+                    xf.push(
+                        x.to_dtype(inference_tensor::DType::BF16)?
+                            .to_device(&Device::Cpu)?,
+                    );
+                }
+                for x in twin.ct.take_captured_inputs()? {
+                    xq.push(
+                        x.to_dtype(inference_tensor::DType::BF16)?
+                            .to_device(&Device::Cpu)?,
+                    );
+                }
+            }
+        }
+        let dumping = router_dump.is_some();
+        if let Some((dir, _, _, xf, xq)) = router_dump {
+            std::fs::create_dir_all(&dir)?;
+            inference_tensor::safetensors::save(
+                &HashMap::from([
+                    ("xf".to_string(), Tensor::cat(&xf, 0)?),
+                    ("xq".to_string(), Tensor::cat(&xq, 0)?),
+                ]),
+                dir.join(format!("layer{layer_idx}.safetensors")),
+            )?;
         }
         let mut hessians = vec![None; group.len()];
         let mut crosses = vec![None; group.len()];
         for (i, module) in group.iter().enumerate() {
-            if sources[i] == i && !score_only && !gptaq {
+            if sources[i] == i && !score_only && !gptaq && !dumping {
                 hessians[i] = take_hessian(module)?
                     .map(|h| h.to_device(&Device::Cpu))
                     .transpose()?;

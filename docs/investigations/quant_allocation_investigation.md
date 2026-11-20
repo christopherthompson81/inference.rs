@@ -715,3 +715,105 @@ UD-IQ4_NL_XL at 2% larger. llama-perplexity scores the recipe 0.01599 where our 
 the engine's BF16 floor against this base (0.0056, Run 23) shows up as about 0.001 on a quantized file.
 
 Next: the drift-reduction allocation (bits where routing flips start) to widen the margin at a fixed size.
+
+## Run 27 - 2026-11-20 09:40
+
+Question: does a router fit with the published router-consistency objectives (EAC-MoE's TopK-MSE, VSRAQ's rank and
+boundary-margin terms) recover the routing that Run 25's full least-squares refit did not?
+
+`INFERENCE_STREAM_ROUTER_DUMP` (new, with a twin): each layer's MoE input in the BF16 model (`xf`) and the GPTQ
+recipe twin on its own routes (`xq`), over the 1x calibration (65K tokens, 40 layers in 3 min, 21 GB). A scratch
+fitter (PyTorch) fits each F32 router on 80% of the tokens to the BF16 logits `W x_fp` and reports top-8 Jaccard on
+the other 20%:
+
+```
+method                                         held-out Jaccard (mean of 40 layers)   same set
+none                                           0.9055                                 0.627
+full least squares (Run 25's objective)        0.9081                                 0.638
+per-row TopK-MSE (k 16), closed form, ridge    0.8802                                 0.558
+TopK-MSE + rank + margin, Adam, 400 steps      0.9005                                 0.613
+same, 2000 steps, weaker anchor                0.8823                                 0.553
+```
+
+The per-row fit lets an expert's logits rise freely on the tokens it should not take (train agreement falls at
+layer 30); the gradient fits overfit (train up, held-out down). Why nothing fits, per layer:
+
+```
+layer  input drift  logit drift sd  BF16 top-8 margin p10/p50  tokens with a flip  drift R2 from x_q (train/held)
+0      5.2%         0.032           0.008/0.054                20%                 0.896/0.882
+1      5.8%         0.027           0.007/0.050                21%                 0.611/0.566
+2      6.1%         0.034           0.008/0.051                23%                 0.465/0.405
+5      6.8%         0.038           0.007/0.045                28%                 0.229/0.143
+10     8.9%         0.053           0.008/0.055                30%                 0.122/0.040
+20     14.4%        0.086           0.006/0.041                48%                 0.089/0.014
+30     14.4%        0.093           0.007/0.046                40%                 0.113/0.024
+39     12.2%        0.053           0.006/0.046                33%                 0.106/0.019
+```
+
+Past the first layers 1-4% of the router logits' drift is linearly predictable from the quantized input: it is
+noise to any router, at a spread (0.05-0.09) the size of the median routing margin, so a third to a half of tokens
+flip an expert. Layers 0-4 looked fixable (held-out Jaccard 0.945 -> 0.961 with full least squares), but refitting
+only those scores worse with llama-perplexity (recipe 0.01599; layers 0-4 0.01629, layers 0-2 0.01618), and on
+WikiText layer 0's agreement moves 0.9161 -> 0.9174 only (all layers 0.9037 -> 0.9054): the early drift is each
+token's own embedding error, learned for the calibration's tokens (the random held-out split shares them).
+
+Router-side fixes have nothing to work with on this model at this bit width; the published gains are at W4A4, 3 bits
+and NVFP4, and VSRAQ's 4-bit hybrid (Nemotron-3-Nano) moved WikiText PPL 10.79 -> 10.70. The lever is the drift
+itself. Next: Hessians weighting each expert row by its routing weight squared (how its error reaches the output).
+
+## Run 28 - 2026-11-20 10:05
+
+Question: do Hessians weighting each routed expert row by its routing weight (MoEQuant's affinity guidance; w^2 is
+how a routed expert's error reaches the output) beat the unweighted ones? An env switch scaled each slot's row by
+w^(p/2) before the routed Hessian; the 4x calibration again, the recipe quantized from each set, ik llama-perplexity:
+
+```
+down experts' Hessians     KLD      p99     same top
+unweighted (recipe)        0.01599  0.1712  94.60%
+weighted by w              0.01680  0.1807  -
+weighted by w^2            0.01700  0.1904  94.61%
+```
+
+Both lose (only the down experts change: gate/up take the shared expert's Hessian). Weighting concentrates each
+expert's ~2K rows onto its strongly routed few, and these statistics already overfit (Run 17). Switch removed.
+
+## Run 29 - 2026-11-20 10:40
+
+Question: priced inside the recipe rather than alone, which groups should move? Each group's type changed in the
+GPTQ recipe (`--reuse` of the rest), ik llama-perplexity. The sweep's prices were isolated, and Run 8 had shown
+compounding (Q4_K `token_embd` +0.0005 alone, +0.0014 in the recipe). A second BF16 base on later WikiText text
+(40 chunks from byte 600,000; experts on the host, 213 s) checks what the first set finds.
+
+```
+move (from the recipe, 19,904,022,464 B)   bytes          KLD set A   KLD set B
+none                                       19,904,022,464  0.01599     0.01565
+token_embd q4_k -> q6_k                    20,035,135,424  0.01600
+token_embd q4_k -> q8_0                    20,158,302,144  0.01568
+attn_qkv q6_k -> q8_0                      20,025,919,424  0.01679     0.01593
+attn_qkv q6_k -> q5_k                      19,837,175,744  0.01752
+attn_gate q6_k -> q8_0                     19,964,970,944  0.01626
+attn_gate q6_k -> q5_k                     19,870,599,104  0.01728
+ssm_out q6_k -> q8_0                       19,964,970,944  0.01527     0.01530
+ssm_out q6_k -> q5_k                       19,870,599,104  0.01905
+shexp q8_0 -> q6_k                         19,872,786,368  0.01735
+attention q8_0 -> q6_k                     19,831,392,192  0.01654
+output q8_0 -> q6_k                        19,780,855,744  0.01615
+exps down iq4_ks -> iq4_kss                19,560,089,536  0.01889
+exps gate/up iq4_ks -> iq4_kss             19,216,156,608  0.02012
+ssm_out q8_0, output q6_k                  19,841,804,224  0.01544     0.01547
+  + token_embd q6_k                        19,972,917,184  0.01399     0.01446
+  + token_embd q8_0                        20,096,083,904  0.01385     0.01454
+  + token_embd q8_0, attention q6_k        20,023,453,632  0.01402
+Unsloth UD-Q4_K_S                          20,893,015,008  0.01604     0.01580
+Unsloth UD-IQ4_NL_XL                       19,500,506,080  0.02329     0.02152
+```
+
+Two upgrades measure worse (`attn_qkv` and `attn_gate` to Q8_0, the first on both sets): a change reshuffles the
+near-tie flips of Run 27, so one move's KLD carries about +/-0.0008 of that on 40 chunks, and only larger effects
+read. Moves compound: `token_embd` Q6_K alone gives nothing, with `ssm_out` Q8_0 beside it -0.0014 / -0.0010 (two
+drift sources feeding the same flips). `ssm_out` is the most sensitive group per byte both ways (+0.0031 for 33 MB
+down, -0.0007 / -0.0004 for 61 MB up); `output` Q6_K is a cheap saving.
+
+The new recipe (`ssm_out` Q8_0, `output` Q6_K, `token_embd` Q6_K, the rest as Run 12) measures 0.01399 / 0.01446:
+8-12% under the recipe for 69 MB (0.35%), and 8-13% under UD-Q4_K_S at 920 MB smaller. Allocation should be priced
+in context (greedy moves from a recipe, measured jointly) and checked on a second text, not added from isolated costs.
