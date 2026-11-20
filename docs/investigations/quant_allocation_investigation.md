@@ -521,3 +521,31 @@ attn_qkv/gate, ssm_out    38 s     22 s
 Left: a down stack reads 256 Hessian files (0.16 s) and its weights (0.19 s) before the GPU starts; prefetching the
 next tensor during the current one's GPU pass would hide that (~25 s). The IQ4_KSS and IQ3_KS searches still use
 the chained warp sums.
+
+## Run 20 - 2026-11-20 04:25
+
+First probe of the propagation gap (Run 18): GPTQ with each layer's Hessians collected from the activations of a
+model whose earlier layers are already quantized ("true sequential" GPTQ's inputs), done cheaply as one round of a
+fixed point: `quantize hessians` over the quantized GGUF itself (its earlier layers quantized with full-precision
+Hessians, so one iteration of the sequential scheme), then the BF16 quantized again with those Hessians. Needed:
+Hessian tracking on quantized GGUF layers (`GgufMatMul::begin_track_hessian`, input statistics on `GgufRawMatMul`,
+the ik types' layer), and `weight_rank` reading a quantized layer's shape.
+
+```
+2B, Q4_K on the linears (embedding BF16)   wiki     docsB    rust
+Hessians from the BF16 model               0.02233  0.01582  0.01596
+from the quantized model                   0.02195  0.01637  0.01632
+
+35B recipe (pooled 4x calibration)         KLD mean  p99     same top-1
+Hessians from the BF16 model               0.01680   0.1738  94.33%
+from the quantized model                   0.01710   0.1746  94.31%
+```
+
+No gain on either (the 2B mixed within ~3%, the 35B +1.8%). On the 35B the routed down experts' Hessians did not
+collect from the quantized model (the fused GGUF expert path does not call the routed-stats hook), so they came from
+the BF16 dump; their feedback is noise out of sample anyway (Run 18).
+
+Sequential inputs alone fit `Q X_q` to `W X_q`, the drifted input times the original weight, which does not undo the
+drift. The objective that does is the asymmetric one (GPTAQ): `min ||W X_fp - Q X_q||`, solved as GPTQ on the target
+`W C H_q^-1` with `C = X_fp X_q^T`, which needs each linear's full-precision and quantized inputs side by side (both
+models streamed together), and does not apply to routed experts whose rows route differently in the two models.

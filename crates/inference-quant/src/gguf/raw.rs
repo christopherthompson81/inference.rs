@@ -790,11 +790,17 @@ pub struct GgufRawMatMul {
     w: RawGgufTensor,
     b: Option<Tensor>,
     scale: Option<f32>,
+    stats: crate::ImatrixLayerStats,
 }
 
 impl GgufRawMatMul {
     pub fn new(w: RawGgufTensor, b: Option<Tensor>) -> Self {
-        Self { w, b, scale: None }
+        Self {
+            w,
+            b,
+            scale: None,
+            stats: crate::ImatrixLayerStats::empty(),
+        }
     }
 
     /// The weight's tensor-wide scale (llama.cpp's `<name>.scale`, NVFP4's second level), applied to each output.
@@ -903,6 +909,49 @@ impl QuantMethod for GgufRawMatMul {
         inference_tensor::bail!("raw GGUF layers are built by the GGUF weight source")
     }
 
+    fn weight_dims(&self) -> Option<Vec<usize>> {
+        Some(self.w.shape.dims().to_vec())
+    }
+
+    // a quantized model's input statistics (an imatrix or Hessian from its own activations)
+    fn begin_track_stats(&self) -> Result<()> {
+        let dims = self.w.shape.dims();
+        if dims.len() == 3 {
+            self.stats.enable_routed(dims[0], dims[2], &self.w.device())
+        } else {
+            self.stats.enable(dims[dims.len() - 1], &self.w.device())
+        }
+    }
+
+    fn begin_track_hessian(&self) -> Result<()> {
+        let dims = self.w.shape.dims();
+        // stacked [E, out, in] experts collect one per expert, from the rows their router sends them
+        if dims.len() == 3 {
+            self.stats.enable_routed_hessian(dims[0], dims[2])
+        } else {
+            self.stats
+                .enable_hessian(dims[dims.len() - 1], &self.w.device())
+        }
+    }
+
+    fn process_routed_stats(&self, x: &Tensor, ids: &Tensor) -> Result<()> {
+        self.stats.process_routed(x, ids)
+    }
+
+    fn stats_snapshot(&self) -> Option<(usize, usize)> {
+        self.stats.snapshot()
+    }
+
+    fn end_track_stats(&self) -> Result<Tensor> {
+        if self.stats.is_enabled() {
+            let stats = self.stats.compute_imatrix();
+            self.stats.clear()?;
+            stats
+        } else {
+            inference_tensor::bail!("`{}` is not tracking stats.", self.name())
+        }
+    }
+
     fn dequantize_w(&self) -> Result<Tensor> {
         self.scaled(self.w.dequantize(&self.w.device())?)
     }
@@ -1006,6 +1055,7 @@ impl QuantMethod for GgufRawMatMul {
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
+        self.stats.process(a)?;
         #[cfg(feature = "cuda")]
         if let Some(out) = self.cuda_forward(a)? {
             return self.add_bias(out);

@@ -655,10 +655,13 @@ fn write_shard(
 // a module's weight rank (3 for stacked experts `[E, out, in]`)
 fn weight_rank(module: &TrackedModule) -> Result<usize> {
     let layer = module.ct.resolve()?;
-    let (weight, _) = layer
+    // a quantized GGUF source's layers hold their blocks (collecting from a quantized model's activations)
+    layer
         .unquant_weight_bias()
-        .with_context(|| format!("`{}` holds no full-precision weight", module.key))?;
-    Ok(weight.rank())
+        .map(|(w, _)| w.rank())
+        .or_else(|| layer.get_qtensor().map(|q| q.shape().rank()))
+        .or_else(|| layer.weight_dims().map(|d| d.len()))
+        .with_context(|| format!("`{}` holds no weight", module.key))
 }
 
 // a Hessian written as `<key>.safetensors` holding `hin`, exllamav3's `--hessians` layout

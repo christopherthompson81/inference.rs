@@ -2229,6 +2229,11 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         false
     }
 
+    /// The weight's shape where the layer holds it in blocks only (no full-precision tensor, no QTensor).
+    fn weight_dims(&self) -> Option<Vec<usize>> {
+        None
+    }
+
     /// Begin tracking stats into an ImatrixLayerStats
     fn begin_track_stats(&self) -> Result<()> {
         inference_tensor::bail!("`{}` does not support tracking stats.", self.name())
