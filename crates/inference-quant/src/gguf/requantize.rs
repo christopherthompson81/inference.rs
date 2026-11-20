@@ -280,7 +280,9 @@ fn gptq_tensor(
     let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
     let shared = hessians.hessian(t.name, None)?;
     let per_expert = if t.dims.len() == 3 {
+        // each expert's file read and unpacked side by side (a stack's are GBs)
         (0..experts)
+            .into_par_iter()
             .map(|e| hessians.hessian(t.name, Some(e)))
             .collect::<Result<Vec<_>>>()?
     } else {

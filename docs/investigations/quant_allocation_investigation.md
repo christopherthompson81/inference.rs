@@ -398,3 +398,27 @@ Hessians                 KLD mean   p99     same top-1
 
 No gain: the token count was not what held the 35B back (down experts' ~2K rows each included). That leaves the
 pooled gate/up Hessians as the suspect; experiment B collects each expert's own.
+
+## Run 16 - 2026-11-20 02:40
+
+Experiment B: each gate/up expert's own routed Hessian (`INFERENCE_PER_EXPERT_HESSIANS`, collected from the GGUF over
+the 4x tokens; up binds to the gate's files, one input). First stored in bf16 to halve the 168 GB: 255 of layer 0's
+256 experts then failed to factor ("the damped Hessian is not positive definite"), min eigenvalue of H + 0.1 mean
+diag -0.04 to -0.18 (mean diag ~0.3). Each expert sees a few thousand rows of 2048 inputs, so its Hessian is near
+singular and bf16's rounding outweighs the damping. Stored instead as f32 packed upper triangles (`hin_upper`): exact,
+96 GB with the down experts, collected in 12 min (17-19 s a layer).
+
+```
+Hessians                        KLD mean   p99     same top-1
+pooled gate/up, 1x (Run 13)     0.01672    0.1666  94.61%
+pooled gate/up, 4x (Run 15)     0.01680    0.1738  94.33%
+per-expert gate/up, 4x          0.01699    0.1784  94.54%
+```
+
+No gain either: an expert's own few thousand rows fit GPTQ no better than the pooled second moment. Neither suspect
+from Run 12 explains the 35B's small feedback gain.
+
+The quantize took 991 s (pooled: ~230 s) with 8 s between GPU bursts: a CPU triangular inverse per 256-column block
+per expert (column-strided, 45% of samples), then the 256 Hessian files of a stack read and unpacked one at a time
+(64%). Row-wise back substitution for the inverse, the files loaded in parallel and the triangle mirrored in 64x64
+tiles: 470 s, KLD 0.01699 unchanged.

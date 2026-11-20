@@ -35,16 +35,23 @@ pub fn supports(ty: GgufType) -> bool {
         )
 }
 
-// the inverse of an upper triangular `n x n` matrix, in f64
+// the inverse of an upper triangular `n x n` matrix, in f64: back substitution a row at a time (row r from the rows
+// below it), so the inner loop runs along contiguous rows
 fn upper_inverse(u: &[f32], n: usize) -> Vec<f32> {
     let mut inv = vec![0f64; n * n];
-    for c in 0..n {
-        inv[c * n + c] = 1.0 / f64::from(u[c * n + c]);
-        for r in (0..c).rev() {
-            let s: f64 = (r + 1..=c)
-                .map(|k| f64::from(u[r * n + k]) * inv[k * n + c])
-                .sum();
-            inv[r * n + c] = -s / f64::from(u[r * n + r]);
+    let mut acc = vec![0f64; n];
+    for r in (0..n).rev() {
+        acc[r..].fill(0.0);
+        for k in r + 1..n {
+            let urk = f64::from(u[r * n + k]);
+            for (a, &v) in acc[k..].iter_mut().zip(&inv[k * n + k..(k + 1) * n]) {
+                *a += urk * v;
+            }
+        }
+        let d = 1.0 / f64::from(u[r * n + r]);
+        inv[r * n + r] = d;
+        for c in r + 1..n {
+            inv[r * n + c] = -acc[c] * d;
         }
     }
     inv.into_iter().map(|v| v as f32).collect()

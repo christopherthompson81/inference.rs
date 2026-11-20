@@ -9,7 +9,10 @@ use anyhow::Result;
 const UNSEEN_EXPERT_IMPORTANCE: f32 = 1.0;
 // an engine Hessian dump's file extension, the tensor each holds, and the head's key
 const HESSIAN_EXTENSION: &str = "safetensors";
-const HESSIAN_TENSOR: &str = "hin";
+pub(crate) const HESSIAN_TENSOR: &str = "hin";
+// a symmetric Hessian stored as its packed upper triangle, row-major
+pub(crate) const HESSIAN_UPPER_TENSOR: &str = "hin_upper";
+const MIRROR_TILE: usize = 64;
 const HEAD_KEY: &str = "lm_head";
 const OUTPUT_TENSOR: &str = "output.weight";
 const TOKEN_EMBD_TENSOR: &str = "token_embd.weight";
@@ -91,15 +94,48 @@ impl HessianDir {
     }
 }
 
+// the full matrix from its packed upper triangle
+fn unpack_upper(upper: &[f32]) -> (usize, Vec<f32>) {
+    let n = ((8 * upper.len() + 1).isqrt() - 1) / 2;
+    let mut full = vec![0f32; n * n];
+    let mut k = 0;
+    for i in 0..n {
+        full[i * n + i..(i + 1) * n].copy_from_slice(&upper[k..k + n - i]);
+        k += n - i;
+    }
+    // the lower triangle mirrored a tile at a time, so the strided side stays in cache
+    for bi in (0..n).step_by(MIRROR_TILE) {
+        for bj in (0..=bi).step_by(MIRROR_TILE) {
+            for i in bi..(bi + MIRROR_TILE).min(n) {
+                for j in bj..(bj + MIRROR_TILE).min(i) {
+                    full[i * n + j] = full[j * n + i];
+                }
+            }
+        }
+    }
+    (n, full)
+}
+
 fn load_hessian(path: &Path, order: Option<&[usize]>) -> inference_tensor::Result<Vec<f32>> {
-    let h = inference_tensor::safetensors::load(path, &inference_tensor::Device::Cpu)?
-        .remove(HESSIAN_TENSOR)
-        .ok_or_else(|| {
-            inference_tensor::Error::Msg(format!("{} holds no `{HESSIAN_TENSOR}`", path.display()))
-        })?
-        .to_dtype(inference_tensor::DType::F32)?;
-    let n = h.dim(0)?;
-    let values = h.flatten_all()?.to_vec1::<f32>()?;
+    let mut tensors = inference_tensor::safetensors::load(path, &inference_tensor::Device::Cpu)?;
+    let (n, values) = if let Some(upper) = tensors.remove(HESSIAN_UPPER_TENSOR) {
+        unpack_upper(
+            &upper
+                .to_dtype(inference_tensor::DType::F32)?
+                .to_vec1::<f32>()?,
+        )
+    } else {
+        let h = tensors
+            .remove(HESSIAN_TENSOR)
+            .ok_or_else(|| {
+                inference_tensor::Error::Msg(format!(
+                    "{} holds no `{HESSIAN_TENSOR}`",
+                    path.display()
+                ))
+            })?
+            .to_dtype(inference_tensor::DType::F32)?;
+        (h.dim(0)?, h.flatten_all()?.to_vec1::<f32>()?)
+    };
     let Some(order) = order.filter(|o| o.len() == n) else {
         return Ok(values);
     };
@@ -234,4 +270,31 @@ pub fn hessians_for_gguf(dir: &Path, gguf: &Path) -> Result<HessianDir> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn packed_upper_triangle_unpacks_symmetric() {
+        // [[1, 2, 3], [2, 4, 5], [3, 5, 6]]
+        let (n, full) = super::unpack_upper(&[1., 2., 3., 4., 5., 6.]);
+        assert_eq!(n, 3);
+        assert_eq!(full, [1., 2., 3., 2., 4., 5., 3., 5., 6.]);
+        // past one tile: symmetric, the upper triangle in order
+        let n = 2 * super::MIRROR_TILE + 3;
+        let upper = (0u16..).take(n * (n + 1) / 2).map(f32::from).collect::<Vec<_>>();
+        let (m, full) = super::unpack_upper(&upper);
+        assert_eq!(m, n);
+        let mut k = 0;
+        for i in 0..n {
+            for j in i..n {
+                assert_eq!(
+                    (full[i * n + j], full[j * n + i]),
+                    (upper[k], upper[k]),
+                    "{i},{j}"
+                );
+                k += 1;
+            }
+        }
+    }
 }

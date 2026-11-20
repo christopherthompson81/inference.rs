@@ -664,29 +664,48 @@ fn weight_rank(module: &TrackedModule) -> Result<usize> {
 // a Hessian written as `<key>.safetensors` holding `hin`, exllamav3's `--hessians` layout
 fn save_hessian(dir: &Path, key: &str, h: Tensor) -> Result<()> {
     inference_tensor::safetensors::save(
-        &HashMap::from([("hin".to_string(), h)]),
+        &HashMap::from([(crate::gguf_imatrix::HESSIAN_TENSOR.to_string(), h)]),
         dir.join(format!("{key}.safetensors")),
     )?;
     Ok(())
 }
 
-// a stacked projection's per-expert Hessians `[E, in, in]`: each as `<experts>.<e>.<proj>` (bf16 when `each` keeps
-// stacks past SPLIT_EXPERT_HESSIANS_BYTES whole), or, past that, their mean under the stack's own key
+// a Hessian as its packed upper triangle (row-major, `i <= j`): exact at half the bytes, where bf16's rounding left
+// rank-deficient expert Hessians indefinite past GPTQ's damping
+fn save_upper_hessian(dir: &Path, key: &str, h: &Tensor) -> Result<()> {
+    let n = h.dim(0)?;
+    let full = h.flatten_all()?.to_vec1::<f32>()?;
+    let upper = (0..n)
+        .flat_map(|i| full[i * n + i..(i + 1) * n].iter().copied())
+        .collect::<Vec<_>>();
+    let len = upper.len();
+    inference_tensor::safetensors::save(
+        &HashMap::from([(
+            crate::gguf_imatrix::HESSIAN_UPPER_TENSOR.to_string(),
+            Tensor::from_vec(upper, len, &Device::Cpu)?,
+        )]),
+        dir.join(format!("{key}.safetensors")),
+    )?;
+    Ok(())
+}
+
+// a stacked projection's per-expert Hessians `[E, in, in]`: each as `<experts>.<e>.<proj>` (packed upper triangles
+// when `each` keeps stacks past SPLIT_EXPERT_HESSIANS_BYTES whole), or, past that, their mean under the stack's own key
 fn save_expert_hessians(dir: &Path, key: &str, h: Tensor, each: bool) -> Result<()> {
     let large = h.elem_count() * 4 > SPLIT_EXPERT_HESSIANS_BYTES;
     if large && !each {
         return save_hessian(dir, key, h.mean(0)?);
     }
-    let h = if large {
-        h.to_dtype(inference_tensor::DType::BF16)?
-    } else {
-        h
-    };
     let (experts, proj) = key
         .rsplit_once('.')
         .with_context(|| format!("`{key}` names no projection"))?;
     for e in 0..h.dim(0)? {
-        save_hessian(dir, &format!("{experts}.{e}.{proj}"), h.get(e)?)?;
+        let key = format!("{experts}.{e}.{proj}");
+        if large {
+            save_upper_hessian(dir, &key, &h.get(e)?.to_device(&Device::Cpu)?)?;
+        } else {
+            save_hessian(dir, &key, h.get(e)?)?;
+        }
     }
     Ok(())
 }
