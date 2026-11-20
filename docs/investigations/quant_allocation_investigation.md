@@ -662,3 +662,37 @@ Outside the routed experts nearly all of a group's harm is through the routing: 
 (the embedding, GDN, attention, the shared expert) costs little at its own outputs and much through the routes it
 flips downstream. The routed experts' is half and half. So router consistency is the lever for every group; the
 allocation sweep (Run 5) priced the non-expert groups by an effect that is mostly routing.
+
+## Run 25 - 2026-11-20 08:00
+
+GPTAQ on the 35B recipe, its statistics from the twin stream (Run 24's commit): the BF16 model over the 4x
+calibration with the GPTQ recipe file as its twin, each dense input paired (`hin` the twin's Hessian, `dxx` the
+cross moment), 462 s; the routed down experts' Hessians from the BF16 dump. The twin stream reproduces the two-pass
+forced-route KLD exactly (0.01168), so the pairing is right; a GPU test pins GPTAQ below GPTQ on synthetic drift.
+
+```
+recipe, quantize kld vs llama.cpp BF16          KLD mean
+GPTQ (BF16 Hessians)                            0.01665 / 0.01695 (BOS-free Hessians)
+twin Hessians, no residual term (scale 0)       0.01674
+GPTAQ, twin routed as BF16, scale 1 / 0.5 / .25 0.01873 / 0.01736 / 0.01728
+GPTAQ, twin on its own routes, scale 1 / 0.5    0.01900 / 0.01747
+```
+
+A cheaper router-aware fix, the routers refit in closed form so that on the quantized model's inputs they give the
+BF16 model's logits (`W' = W (C + H) H^-1` at the MoE input, patched into the F32 `ffn_gate_inp`; the shared-expert
+gate too in the first try):
+
+```
+statistics           router + shexp gate   router only   router only, half
+twin routed as BF16  0.01770               0.01758       -
+twin own routes      -                     0.01785       0.01654
+```
+
+and routing agreement after the refit barely moves (top-8 Jaccard 0.9025 to 0.9039, same set 60.7% to 61.2%).
+
+Every linear correction of the input drift loses (one within noise). The drift each layer sees is not a linear
+function of its input that a weight or router change can undo: much of it is downstream of discrete routing flips,
+and a least-squares fit to it reshapes the softmax weights more than it saves routes. One-shot GPTAQ also corrects for
+the GPTQ file's drift rather than its own (the paper quantizes sequentially); a fused sequential build could still
+differ, but the router refit, which has no such mismatch, does not help either. Next lever for routing: reducing
+the drift itself, or a learned (gradient) router-consistency objective (EAQuant, VSRAQ), a larger build.
