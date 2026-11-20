@@ -696,3 +696,22 @@ and a least-squares fit to it reshapes the softmax weights more than it saves ro
 the GPTQ file's drift rather than its own (the paper quantizes sequentially); a fused sequential build could still
 differ, but the router refit, which has no such mismatch, does not help either. Next lever for routing: reducing
 the drift itself, or a learned (gradient) router-consistency objective (EAQuant, VSRAQ), a larger build.
+
+## Run 26 - 2026-11-20 09:10
+
+Question: how does the allocated GPTQ recipe compare with Unsloth's published quants of about its size, on one
+scorer? ik's `llama-perplexity --kl-divergence` (WikiText, c512, 40 chunks, the BF16 base of every run here) on all
+three; the recipe rebuilt from `hessians-4x-nobos` (the Run 12 rules, 104 s, 19,904,022,464 B).
+
+```
+file                         bytes            KLD                  p99     same top   PPL(Q)/PPL(base)
+Unsloth UD-IQ4_NL_XL         19,500,506,080   0.02329 +/- 0.00063  0.2458  93.39%     1.0141
+ours, allocated + GPTQ       19,904,022,464   0.01599 +/- 0.00041  0.1712  94.60%     1.0042
+Unsloth UD-Q4_K_S            20,893,015,008   0.01604 +/- 0.00047  0.1739  94.28%     1.0037
+```
+
+Ours matches UD-Q4_K_S (KLD within error, lower p99, higher top-1 match) at 989 MB (4.7%) smaller, and is 31% under
+UD-IQ4_NL_XL at 2% larger. llama-perplexity scores the recipe 0.01599 where our engine scored the same recipe 0.0167-0.0170:
+the engine's BF16 floor against this base (0.0056, Run 23) shows up as about 0.001 on a quantized file.
+
+Next: the drift-reduction allocation (bits where routing flips start) to widen the margin at a fixed size.
