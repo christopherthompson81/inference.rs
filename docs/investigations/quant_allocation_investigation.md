@@ -817,3 +817,28 @@ down, -0.0007 / -0.0004 for 61 MB up); `output` Q6_K is a cheap saving.
 The new recipe (`ssm_out` Q8_0, `output` Q6_K, `token_embd` Q6_K, the rest as Run 12) measures 0.01399 / 0.01446:
 8-12% under the recipe for 69 MB (0.35%), and 8-13% under UD-Q4_K_S at 920 MB smaller. Allocation should be priced
 in context (greedy moves from a recipe, measured jointly) and checked on a second text, not added from isolated costs.
+
+## Run 30 - 2026-11-20 11:40
+
+Question: where does an in-context point's time go, and is the GPU or CPU idle? One move (`attn_gate` Q8_0) timed
+by stage with utilization sampled each second, then nsys and perf on the scorer:
+
+```
+stage                                              time    GPU        CPU (16 threads)
+full-file quantize with --reuse (20 GB rewritten)  29 s    ~0%        ~10%
+overlay quantize (--only)                          5 s     low        ~10%
+model load, ours / llama.cpp                       15 / 14 s  ~15%    ~10%
+40 chunks scored, ours / llama.cpp                 12 / 8 s   60-100%  ~10%
+```
+
+The load was one thread: raw GGUF weights copied out of the mapped file into a `Vec` (52% of its samples), then
+pageable host-to-device copies (30%), while the file reads at 13 GB/s from the page cache and the copies themselves
+took 2.2 s of GPU time. Pinned staging buffers filled on every core plus uploads straight from the mapping: 10 s ->
+3.6 s. Scoring left the GPU idle ~60 ms a chunk while the example built the next chunk's 127 MB reference on its one
+thread; read ahead on a thread of its own: 40 chunks 21.5 s -> 12.6 s end to end (scores identical; 2,700 tok/s
+against llama.cpp's 2,510). Sending 4 or 8 chunks at once changed nothing (the engine runs them in turn).
+
+The two scorers disagree on that one move (ours -0.0007, llama.cpp 0.0000): on 40 chunks a move's flip reshuffle
+outweighs it, so the greedy loop needs paired per-chunk errors and more text per point. The streamed scorer
+(`quantize kld`, 16 s) builds each layer once per pass (0.2 s a layer, 0.05 s of it upload), so every candidate of
+a round can ride one pass on its own 80 MB of states, the shared layers uploaded once.
