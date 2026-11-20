@@ -566,6 +566,7 @@ impl GgufBase {
             write_uqff: self.write_uqff,
             imatrix: self.imatrix,
             calibration_file: self.calibration_file,
+            hessians_out: None,
             max_edge: self.max_edge,
             max_seq_len: self.max_seq_len,
             max_batch_size: self.max_batch_size,

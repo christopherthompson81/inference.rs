@@ -196,6 +196,8 @@ pub struct GGUFSpecificConfig {
     pub write_uqff: Option<UqffWriteConfig>,
     pub imatrix: Option<PathBuf>,
     pub calibration_file: Option<PathBuf>,
+    /// A directory to write each linear's input Hessian to (as the normal loader's), in place of loading to serve.
+    pub hessians_out: Option<PathBuf>,
     pub max_edge: Option<u32>,
     pub max_model_len: Option<usize>,
     pub hf_cache_path: Option<PathBuf>,
@@ -1218,7 +1220,7 @@ impl GGUFLoader {
                 write_uqff: self.config.write_uqff.clone(),
                 imatrix: self.config.imatrix.clone(),
                 calibration_file: self.config.calibration_file.clone(),
-                hessians_out: None,
+                hessians_out: self.config.hessians_out.clone(),
                 exl3_out: None,
                 hf_cache_path: self.config.hf_cache_path.clone(),
                 matformer_config_path: self.config.matformer_config_path.clone(),

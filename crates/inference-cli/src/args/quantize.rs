@@ -47,7 +47,7 @@ pub enum QuantizeCommand {
 
 #[derive(Args, Clone)]
 pub struct HessiansOptions {
-    /// Hugging Face model ID or local model directory (full precision)
+    /// Hugging Face model ID, local model directory or full-precision GGUF file (BF16/F16/F32)
     #[arg(short = 'm', long)]
     pub model_id: String,
 

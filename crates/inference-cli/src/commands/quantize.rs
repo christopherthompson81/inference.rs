@@ -30,6 +30,7 @@ use crate::args::{
 const MIB: f64 = (1u64 << 20) as f64;
 // a streamed EXL3 write holds the model on the host, its layers built on the GPU one at a time
 const HOST_DEVICE: &str = "cpu";
+const GGUF_EXTENSION: &str = "gguf";
 
 /// Extract ISQ values from the QuantizeModelType
 fn get_isq_values(model_type: &QuantizeModelType) -> &[String] {
@@ -278,28 +279,63 @@ pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptio
 /// Loading with `hessians_out` set writes every linear's input Hessian; the engine is shut down once it has.
 pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Result<()> {
     initialize_logging();
-    let model = ModelSelected::Run {
-        model_id: options.model_id,
-        quant: None,
-        tokenizer_json: None,
-        // the host's auto dtype is f32, twice what a streamed model holds in RAM
-        dtype: inference_api::engine::ModelDType::BF16,
-        topology: None,
-        organization: None,
-        write_uqff: None,
-        from_uqff: None,
-        imatrix: None,
-        calibration_file: Some(options.calibration_file),
-        hessians_out: Some(options.output_path),
-        exl3_out: None,
-        max_edge: None,
-        max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
-        max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
-        max_num_images: None,
-        max_image_length: None,
-        hf_cache_path: None,
-        matformer_config_path: None,
-        matformer_slice_name: None,
+    let gguf = Path::new(&options.model_id);
+    let model = if gguf.is_file() && gguf.extension().is_some_and(|e| e == GGUF_EXTENSION) {
+        ModelSelected::GGUF {
+            tok_model_id: None,
+            quantized_model_id: gguf
+                .parent()
+                .map_or_else(|| ".".into(), |p| p.display().to_string()),
+            quantized_filename: gguf
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            quant: None,
+            tokenizer_json: None,
+            mmproj_filename: None,
+            mmproj_selection: inference_api::engine::MmprojSelection::Given,
+            lora_adapters: Vec::new(),
+            lora_runtime_config: None,
+            dtype: inference_api::engine::ModelDType::BF16,
+            topology: None,
+            organization: None,
+            write_uqff: None,
+            imatrix: None,
+            calibration_file: Some(options.calibration_file),
+            hessians_out: Some(options.output_path),
+            max_edge: None,
+            max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+            max_num_images: None,
+            max_image_length: None,
+            hf_cache_path: None,
+            matformer_config_path: None,
+            matformer_slice_name: None,
+        }
+    } else {
+        ModelSelected::Run {
+            model_id: options.model_id,
+            quant: None,
+            tokenizer_json: None,
+            // the host's auto dtype is f32, twice what a streamed model holds in RAM
+            dtype: inference_api::engine::ModelDType::BF16,
+            topology: None,
+            organization: None,
+            write_uqff: None,
+            from_uqff: None,
+            imatrix: None,
+            calibration_file: Some(options.calibration_file),
+            hessians_out: Some(options.output_path),
+            exl3_out: None,
+            max_edge: None,
+            max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+            max_num_images: None,
+            max_image_length: None,
+            hf_cache_path: None,
+            matformer_config_path: None,
+            matformer_slice_name: None,
+        }
     };
     let model = resolve_model_source(model, &global.token_source, false, QuantPolicy::GgufInput)
         .await?

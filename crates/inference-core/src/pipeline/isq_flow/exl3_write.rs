@@ -43,6 +43,8 @@ const PREFETCH_MERGE_GAP: u64 = 1 << 20;
 const SPLIT_EXPERT_HESSIANS_BYTES: usize = 1 << 30;
 const GATE_UP_PROJS: &[&str] = &["gate_proj", "up_proj", "gate_up_proj"];
 const SHARED_EXPERT: &str = "shared_expert";
+const GGUF_MAGIC: &[u8] = b"GGUF";
+const GGUF_BLOCK: &str = "blk.";
 // set, stacked gate/up experts collect each expert's own routed Hessian (stored bf16) rather than the shared expert's
 const PER_EXPERT_HESSIANS_ENV: &str = "INFERENCE_PER_EXPERT_HESSIANS";
 // the hidden states Hessian collection keeps on the GPU at most (beyond, on the host)
@@ -63,7 +65,16 @@ fn layer_of(key: &str) -> Option<usize> {
 // a shard's bytes `[start, end)`
 type Run = (PathBuf, u64, u64);
 
-// each layer's tensor bytes in the source shards, as runs with near neighbours merged
+// a GGUF tensor's layer, from its `blk.<n>.` name
+fn gguf_layer_of(name: &str) -> Option<usize> {
+    name.strip_prefix(GGUF_BLOCK)?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+// each layer's tensor bytes in the source shards (safetensors or GGUF), as runs with near neighbours merged
 fn layer_ranges(weights: &[PathBuf]) -> Result<BTreeMap<usize, Vec<Run>>> {
     use std::io::Read;
     let mut layers: BTreeMap<usize, Vec<Run>> = BTreeMap::new();
@@ -71,6 +82,19 @@ fn layer_ranges(weights: &[PathBuf]) -> Result<BTreeMap<usize, Vec<Run>>> {
         let mut file = std::fs::File::open(path)?;
         let mut len = [0u8; 8];
         file.read_exact(&mut len)?;
+        if len.starts_with(GGUF_MAGIC) {
+            let archive = inference_quant::GgufArchive::open_file(path)?;
+            for (name, info) in archive.tensors() {
+                if let (Some(layer), Some(range)) = (gguf_layer_of(name), info.data_range()) {
+                    layers.entry(layer).or_default().push((
+                        path.clone(),
+                        range.start as u64,
+                        range.end as u64,
+                    ));
+                }
+            }
+            continue;
+        }
         let len = u64::from_le_bytes(len);
         let mut header = vec![0u8; usize::try_from(len)?];
         file.read_exact(&mut header)?;
