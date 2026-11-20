@@ -2165,13 +2165,18 @@ mod tests {
     }
 
     // one decode step's attention over Gemma 4 26B-A4B's f16 caches (sliding: 8 kv heads at 256, a 1024 window;
-    // global: 2 kv heads at 512), 16 query heads, at each of paged_decode_stream's chunk sizes and the one it picks
+    // global: 2 kv heads at 512), 16 query heads, at each of paged_decode_stream's chunk sizes and the one it picks;
+    // GPU time from the profiler's timestamps (run with INFERENCE_VULKAN_PROFILE set)
     #[test]
     #[ignore = "benchmark"]
     fn decode_attention_at_each_chunk() -> Result<()> {
         let Some(context) = context() else {
             return Ok(());
         };
+        if std::env::var_os(crate::stream::PROFILE_ENV).is_none() {
+            eprintln!("skipping: {} unset", crate::stream::PROFILE_ENV);
+            return Ok(());
+        }
         const REPEATS: usize = 200;
         const BLOCK: usize = 16;
         const HEADS: usize = 16;
@@ -2221,15 +2226,22 @@ mod tests {
                         }
                         context.synchronize()
                     };
-                    // twice, the clocks ramping on the first
+                    // the clocks ramp on the first runs
                     run()?;
                     run()?;
-                    let start = std::time::Instant::now();
+                    context.take_profile()?;
                     run()?;
-                    let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
+                    let mut kernels = context.take_profile()?;
+                    kernels.sort_by_key(|k| k.0);
+                    let each: Vec<String> = kernels
+                        .iter()
+                        .map(|(name, count, ns)| {
+                            format!("{name} {:.1} us", ns / 1e3 / *count as f64)
+                        })
+                        .collect();
                     println!(
-                        "head {head}, {kv_heads} kv heads, {len} positions, chunk {chunk:?}: {:.1} us",
-                        secs * 1e6
+                        "head {head}, {kv_heads} kv heads, {len} positions, chunk {chunk:?}: {}",
+                        each.join(", ")
                     );
                 }
             }
