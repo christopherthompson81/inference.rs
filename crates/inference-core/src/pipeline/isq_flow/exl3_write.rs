@@ -45,6 +45,8 @@ const GATE_UP_PROJS: &[&str] = &["gate_proj", "up_proj", "gate_up_proj"];
 const SHARED_EXPERT: &str = "shared_expert";
 // set, stacked gate/up experts collect each expert's own routed Hessian (stored bf16) rather than the shared expert's
 const PER_EXPERT_HESSIANS_ENV: &str = "INFERENCE_PER_EXPERT_HESSIANS";
+// the hidden states Hessian collection keeps on the GPU at most (beyond, on the host)
+const RESIDENT_STATE_BYTES: usize = 4 << 30;
 
 /// The checkpoint a write copies its unquantized tensors and files from.
 pub(crate) struct Exl3Source<'a> {
@@ -691,9 +693,22 @@ pub(crate) fn write_hessians_streamed(
         states.push(stream.embed(&Tensor::new(ids, &Device::Cpu)?.unsqueeze(0)?)?);
     }
     let layers = stream.num_layers();
+    // the states stay on the GPU when they fit beside a layer, so they never cross the bus
+    let state_bytes: usize = states
+        .iter()
+        .map(|s| s.elem_count() * s.dtype().size_in_bytes())
+        .sum();
+    let resident = state_bytes <= RESIDENT_STATE_BYTES;
+    if resident {
+        states = states
+            .iter()
+            .map(|s| s.to_device(&gpu))
+            .collect::<inference_tensor::Result<_>>()?;
+    }
     info!(
-        "Collecting Hessians: {layers} layers streamed through {gpu:?}, {} chunks of states on the host.",
-        states.len()
+        "Collecting Hessians: {layers} layers streamed through {gpu:?}, {} chunks of states on {}.",
+        states.len(),
+        if resident { "it" } else { "the host" }
     );
     let mut ahead: Option<std::thread::JoinHandle<()>> = None;
     for layer_idx in 0..layers {
@@ -739,8 +754,14 @@ pub(crate) fn write_hessians_streamed(
                 module.ct.begin_track_hessian()?;
             }
         }
-        for state in &states {
-            layer.forward(&state.to_device(&gpu)?)?;
+        // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed)
+        for state in &mut states {
+            let next = layer.forward(&state.to_device(&gpu)?)?;
+            *state = if resident {
+                next
+            } else {
+                next.to_device(&Device::Cpu)?
+            };
         }
         let mut hessians = vec![None; group.len()];
         for (i, module) in group.iter().enumerate() {
@@ -760,11 +781,6 @@ pub(crate) fn write_hessians_streamed(
                 3 => save_expert_hessians(dir, &module.key, h.clone(), each)?,
                 _ => save_hessian(dir, &module.key, h.clone())?,
             }
-        }
-        for state in &mut states {
-            *state = layer
-                .forward(&state.to_device(&gpu)?)?
-                .to_device(&Device::Cpu)?;
         }
         drop(group);
         drop(layer);
