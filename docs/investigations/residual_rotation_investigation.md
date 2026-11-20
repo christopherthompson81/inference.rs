@@ -25,7 +25,7 @@ embedding E' = E Q
 `shared_head_norm` cannot fold exactly (its head is the main one, folded with `output_norm`'s gain); it becomes the
 best scalar multiple, 1.114, residual 3.5% of the gain's norm. Hessians come from the original's by algebra: a
 reader's input is x diag(1/g) Q, so H' = Q^T diag(1/g) H diag(1/g) Q (251 transformed, the writers' 10,320 linked).
-Scripts: `rotate_gguf.py` (gguf-py, tensor by tensor on the GPU in f64, 10 min for 71 GB), `rotate_hessians.py`.
+Spike scripts, not kept (gguf-py, tensor by tensor on the GPU in f64, 10 min for 71 GB; the Hessians by the algebra above).
 
 ik `llama-perplexity`, against the unrotated BF16's base:
 
@@ -105,7 +105,7 @@ quantization most.
 ## Run 4 - 2026-11-20 16:20
 
 Question: does the experts' penalty shrink at 3 bits, where rotation is reported to help weight-only quantization
-most? Run 3's reports again with the routed experts at IQ3_KS (`rules-iq3.txt`: the v2 rules, iq4_ks -> iq3_ks),
+most? Run 3's reports again with the routed experts at IQ3_KS (the v2 rules with iq4_ks -> iq3_ks),
 original and rotated.
 
 ```
@@ -125,7 +125,7 @@ Question: does the rotation pay on a dense model? Qwen3.5-2B (`qwen35`, tied emb
 dense FFNs (`ffn_gate/up` readers of `post_attention_norm`, `ffn_down` a writer) and to tied heads (an untied
 `output.weight` = E diag(g_out) Q written after the embedding). The rotated model is written as F32, so the
 quantizer reads unrounded weights; the control is the original with the embedding copied to `output.weight`
-(bit-exact, `--untie-only`), so both files have the same tensors. Fresh KLD bases from the original BF16 with the
+(bit-exact), so both files have the same tensors. Fresh KLD bases from the original BF16 with the
 current ik build (the 2B's older bases read 0.00065 against the original itself):
 
 ```
