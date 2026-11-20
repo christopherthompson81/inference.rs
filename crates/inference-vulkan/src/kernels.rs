@@ -10,6 +10,9 @@ use crate::{Error, Recorder, Result, shaders};
 pub(crate) const BLOCK_VALUES: usize = 32;
 // rows one matvec workgroup takes (the shader's `ROWS`), and the most workgroups one grid dimension holds
 const MATVEC_ROWS: usize = 4;
+// rows from this long take the 64-thread build where one exists (780M: Q4_0 2816 x 8192 181 -> 169 us, Q8_0 2688 x
+// 4096 161 -> 146; Q6_K's 262144 x 2816 head and the shorter rows run as fast or faster at 32)
+const MATVEC_LONG_COLS: usize = 4096;
 // the matvecs' buffers and push constants, and an int8 block's bytes (8 packed words, then its (d, d * sum q) in the
 // same buffer)
 const MATVECS_BINDINGS: usize = 4;
@@ -96,6 +99,8 @@ kernels! {
     embed_mxfp4: EMBED_MXFP4, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     mat_vecs_q5_0: MUL_MAT_VECS_Q5_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q4_0: MUL_MAT_VECS_Q4_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_long_q4_0: MUL_MAT_VECS_LONG_Q4_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_long_q8_0: MUL_MAT_VECS_LONG_Q8_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q4_1: MUL_MAT_VECS_Q4_1, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q5_1: MUL_MAT_VECS_Q5_1, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q4_k: MUL_MAT_VECS_Q4_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
@@ -1326,7 +1331,10 @@ impl Recorder<'_> {
             op.x_rows,
             s_off,
         ])?;
+        let long = op.cols >= MATVEC_LONG_COLS;
         let pipeline = match op.ty {
+            BlockType::Q8_0 if long => &kernels.mat_vecs_long_q8_0,
+            BlockType::Q4_0 if long => &kernels.mat_vecs_long_q4_0,
             BlockType::Q8_0 => &kernels.mat_vecs_q8_0,
             BlockType::Q5_0 => &kernels.mat_vecs_q5_0,
             BlockType::Q4_0 => &kernels.mat_vecs_q4_0,
@@ -1524,6 +1532,10 @@ mod tests {
     fn value(ty: BlockType, block: &[u8], j: usize) -> f64 {
         match ty {
             BlockType::Q8_0 => f64::from(block[2 + j] as i8),
+            BlockType::Q4_0 => {
+                let byte = block[2 + j % 16];
+                f64::from(if j < 16 { byte & 0xf } else { byte >> 4 }) - 8.0
+            }
             BlockType::Q5_0 => {
                 let qh = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
                 let byte = block[6 + j % 16];
@@ -1844,38 +1856,44 @@ mod tests {
         };
         const ROWS: usize = 333;
         const COLS: usize = 2688;
+        // past MATVEC_LONG_COLS, so its 64-thread builds
+        const LONG_COLS: usize = 4160;
         const X_AT: usize = 3;
-        for (ty, x_rows) in [
-            (BlockType::Q8_0, 1),
-            (BlockType::Q8_0, 3),
-            (BlockType::Q8_0, 70),
-            (BlockType::Q5_0, 1),
-            (BlockType::Q5_0, 3),
-            (BlockType::Q5_0, 70),
+        for (ty, x_rows, cols) in [
+            (BlockType::Q8_0, 1, COLS),
+            (BlockType::Q8_0, 3, COLS),
+            (BlockType::Q8_0, 70, COLS),
+            (BlockType::Q5_0, 1, COLS),
+            (BlockType::Q5_0, 3, COLS),
+            (BlockType::Q5_0, 70, COLS),
+            (BlockType::Q8_0, 1, LONG_COLS),
+            (BlockType::Q8_0, 3, LONG_COLS),
+            (BlockType::Q4_0, 1, LONG_COLS),
+            (BlockType::Q4_0, 3, LONG_COLS),
         ] {
-            let len = len(ty, ROWS, COLS);
+            let len = len(ty, ROWS, cols);
             let mut pages = Pages::new(len);
-            weights(ty, pages.bytes(), ROWS, COLS);
-            let x: Vec<f32> = (0..x_rows * COLS)
-                .map(|i| ((i * 37 % 101) as f32 - 50.0) / (25.0 + (i / COLS) as f32))
+            weights(ty, pages.bytes(), ROWS, cols);
+            let x: Vec<f32> = (0..x_rows * cols)
+                .map(|i| ((i * 37 % 101) as f32 - 50.0) / (25.0 + (i / cols) as f32))
                 .collect();
             let size = ty.block_bytes();
-            let blocks = COLS / BLOCK_VALUES;
+            let blocks = cols / BLOCK_VALUES;
             let weights: Arc<dyn Bound> =
                 Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
-            let mut xs = Buffer::new(&context, (X_AT + x_rows * COLS) * 4)?;
+            let mut xs = Buffer::new(&context, (X_AT + x_rows * cols) * 4)?;
             xs.write(X_AT * 4, f32_bytes(&x))?;
             let (xs, ys) = (
                 Arc::new(xs),
                 Arc::new(Buffer::new(&context, x_rows * ROWS * 4)?),
             );
-            let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(x_rows, COLS))?);
+            let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(x_rows, cols))?);
             context.submit(|r| {
                 r.mat_vec(&MatVec {
                     ty,
                     weights: &weights,
                     rows: ROWS,
-                    cols: COLS,
+                    cols,
                     x: &xs,
                     x_offset: X_AT,
                     y: &ys,
@@ -1886,8 +1904,8 @@ mod tests {
             })?;
             let got = ys.read_f32()?;
             for m in 0..x_rows {
-                let xm = &x[m * COLS..][..COLS];
-                let want = reference(ty, pages.bytes(), ROWS, COLS, xm);
+                let xm = &x[m * cols..][..cols];
+                let want = reference(ty, pages.bytes(), ROWS, cols, xm);
                 for (row, &want) in want.iter().enumerate() {
                     let bound: f64 = (0..blocks)
                         .map(|b| {
@@ -2109,6 +2127,7 @@ mod tests {
             return Ok(());
         };
         const REPEATS: usize = 200;
+        const WARMUP: std::time::Duration = std::time::Duration::from_millis(200);
         let shapes = [
             (BlockType::Q8_0, 10_304, 2688),
             (BlockType::Q8_0, 2688, 4096),
@@ -2119,6 +2138,9 @@ mod tests {
             (BlockType::Q4_0, 4096, 2816),
             (BlockType::Q4_0, 2816, 4096),
             (BlockType::Q4_0, 8192, 2816),
+            (BlockType::Q4_0, 2816, 8192),
+            (BlockType::Q4_0, 2048, 2816),
+            (BlockType::Q4_0, 2816, 2112),
             (BlockType::Q4_0, 1024, 2816),
             (BlockType::Q6K, 262_144, 2816),
             (BlockType::Q8_0, 262_144, 2816),
@@ -2151,14 +2173,26 @@ mod tests {
                 }
                 context.synchronize()
             };
-            run()?;
+            // long enough for the clocks to ramp after the host's weight generation
+            let warm = std::time::Instant::now();
+            while warm.elapsed() < WARMUP {
+                run()?;
+            }
+            context.take_profile()?;
             let start = std::time::Instant::now();
             run()?;
             let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
+            // each kernel's GPU time, with INFERENCE_VULKAN_PROFILE set
+            let gpu: Vec<String> = context
+                .take_profile()?
+                .iter()
+                .map(|(name, count, ns)| format!("{name} {:.1} us", ns / 1e3 / *count as f64))
+                .collect();
             println!(
-                "{ty:?} {rows} x {cols}: {:.1} us, {:.0} GB/s",
+                "{ty:?} {rows} x {cols}: {:.1} us, {:.0} GB/s {}",
                 secs * 1e6,
-                len as f64 / secs / 1e9
+                len as f64 / secs / 1e9,
+                gpu.join(", ")
             );
         }
         Ok(())

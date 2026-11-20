@@ -13,7 +13,11 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_basic : require
 
-layout(local_size_x = 32) in;
+// a long row's build takes 64 threads, halving each one's walk over the row's blocks
+#ifndef MATVEC_THREADS
+#define MATVEC_THREADS 32
+#endif
+layout(local_size_x = MATVEC_THREADS) in;
 
 layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
 layout(std430, binding = 1) readonly buffer Q { uvec4 xq[]; };
@@ -45,7 +49,7 @@ layout(push_constant) uniform PushConstants {
 #endif
 } pc;
 
-const uint THREADS = 32;
+const uint THREADS = MATVEC_THREADS;
 const uint QK = 32;
 const uint ROWS = 4;
 const uint MAX_M = 8;
