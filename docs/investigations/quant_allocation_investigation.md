@@ -365,3 +365,36 @@ the encoding against that scale with its levels, the row's fit sums continued in
 carry already ran there). A GPU test checks the bytes equal the CPU loop's for IQ4_KS, IQ4_KSS and IQ3_KS.
 
 The 35B recipe: 252 s against 2,219 s (8.8x), KLD 0.01672 / p99 0.1666 / 94.61%, the same file's.
+
+## Run 14 - 2026-11-20 01:00
+
+Where a 35B Hessian dump's 64 s a layer goes (the 4x calibration run, `quantize hessians` from the safetensors on an
+external USB drive): the drive reads at 71 MB/s at 100% utilization, ~1.7 GB a layer; the process at one core, the GPU
+idle between bursts, `memmove` high in the profile. The host load also built every layer (126 GB) though the
+streamed collector rebuilds each on the GPU, the states crossed to the host and back for each layer, and each layer
+ran twice (collect, then propagate).
+
+Changes: the states stay on the GPU when they fit (4 GiB; the 35B's 4x set is ~1.1 GB); one pass a layer collects and
+propagates (the layer as loaded, so nothing is lost); a Hessian dump skips the host layer build as an EXL3 write does;
+and `quantize hessians -m <file>.gguf` collects from a full-precision GGUF through its native bindings, read-ahead
+ranges from the GGUF's tensor table, so the BF16 GGUF on NVMe serves and the safetensors are not needed.
+
+2B check, Q4_K GPTQ scored on WikiText: Hessians from the GGUF 0.02731, from the safetensors 0.02749 (the Hessians
+differ by 0.04% median, 0.2% worst, down projections: bf16 rounding of the GGUF's stored norms). The states-on-GPU,
+one-pass change alone gave bit-identical Hessians on the 2B.
+
+35B 4x collection from the GGUF: 419 s total, 10-13 s a layer (was 61-67 s), peak RSS 71 GB.
+
+## Run 15 - 2026-11-20 01:30
+
+Experiment A: the alloc-r1size recipe (Run 12) with GPTQ from Hessians over 4x the calibration tokens (1,080,000
+characters of the WikiText + docs mix), gate/up still pooled.
+
+```
+Hessians                 KLD mean   p99     same top-1
+1x (Run 12/13)           0.01672    0.1666  94.61%
+4x                       0.01680    0.1738  94.33%
+```
+
+No gain: the token count was not what held the 35B back (down experts' ~2K rows each included). That leaves the
+pooled gate/up Hessians as the suspect; experiment B collects each expert's own.
