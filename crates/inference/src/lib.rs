@@ -268,6 +268,7 @@ pub use inference_api::{
     engine_chat::{AgenticToolCallData, AgenticToolCallPhase, ChatStreamEvent, Usage},
     engine_logits::{
         Divergence, LogitsOutput, LogitsReference, PromptInput, PromptLogits, PromptLogitsRequest,
+        base_record,
     },
     generation::SpeechAudio,
     initialize_logging,

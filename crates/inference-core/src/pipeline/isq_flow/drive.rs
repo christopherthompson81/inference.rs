@@ -226,6 +226,14 @@ pub(crate) fn write_hessians(
     ctx: &CalibrationCtx<'_>,
     weights: Option<&[PathBuf]>,
 ) -> Result<()> {
+    // a base job in place of calibration text: write a llama-perplexity KL-divergence base to `dir`, streamed
+    #[cfg(feature = "cuda")]
+    if let (Some(stream), true, Some(weights)) =
+        (drive.layer_stream(), ctx.load_device.is_cpu(), weights)
+        && let Some(job) = inference_nn::logits_reference::KldBaseJob::read(calibration_file)?
+    {
+        return super::exl3_write::write_kld_base_streamed(stream, &job, dir, ctx, weights);
+    }
     // a llama-perplexity KL-divergence base in place of calibration text: score against it, streamed
     #[cfg(feature = "cuda")]
     if let (Some(stream), true, Some(weights)) =

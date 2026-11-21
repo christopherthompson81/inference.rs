@@ -298,18 +298,40 @@ pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptio
     Ok(())
 }
 
-/// Loading with `hessians_out` set writes every linear's input Hessian; the engine is shut down once it has.
+/// Score against a KL-divergence base, or with `--text` write one, through the streamed load that collects Hessians.
 pub async fn run_kld(options: KldOptions, global: GlobalOptions) -> Result<()> {
-    // the streamed load that collects Hessians scores against a base given as its calibration file, writing nothing
-    run_hessians(
+    let Some(text) = options.text else {
+        // a base given as the calibration file is scored against, writing nothing
+        return run_hessians(
+            HessiansOptions {
+                model_id: options.model_id,
+                calibration_file: options.kld_base,
+                output_path: std::env::temp_dir().join(KLD_SCRATCH_DIR),
+            },
+            global,
+        )
+        .await;
+    };
+    // a base job given as the calibration file writes the base where the Hessians would go
+    let job_path =
+        std::env::temp_dir().join(format!("{KLD_SCRATCH_DIR}-job-{}", std::process::id()));
+    inference_api::engine_logits::KldBaseJob {
+        text,
+        n_ctx: options.ctx,
+        chunks: options.chunks,
+    }
+    .write(&job_path)?;
+    let written = run_hessians(
         HessiansOptions {
             model_id: options.model_id,
-            calibration_file: options.kld_base,
-            output_path: std::env::temp_dir().join(KLD_SCRATCH_DIR),
+            calibration_file: job_path.clone(),
+            output_path: options.kld_base,
         },
         global,
     )
-    .await
+    .await;
+    let _ = std::fs::remove_file(&job_path);
+    written
 }
 
 pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Result<()> {

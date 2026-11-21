@@ -856,12 +856,67 @@ pub(crate) fn score_kld_streamed(
     run_streamed(stream, chunks, StreamedRun::Score(&mut base), weights)
 }
 
-// what a streamed run does with the states: collect each linear's Hessian into a directory, or score the final
-// logits against a KL-divergence base
+/// A new llama-perplexity KL-divergence base at `out` from the model over `job`'s text, streamed a layer at a time
+/// through the GPU: the text tokenized with its special tokens (and the BOS before it where encoding adds one), its
+/// first `job.chunks` chunks of `job.n_ctx` tokens, each chunk's second half recorded.
+#[cfg(feature = "cuda")]
+pub(crate) fn write_kld_base_streamed(
+    stream: &dyn inference_nn::model::LayerStream,
+    job: &inference_nn::logits_reference::KldBaseJob,
+    out: &Path,
+    ctx: &CalibrationCtx<'_>,
+    weights: &[PathBuf],
+) -> Result<()> {
+    let text = std::fs::read_to_string(&job.text)?;
+    // added tokens (a chat template's) match in the text either way; `false` keeps the template's own BOS out
+    let encoded = ctx
+        .tokenizer
+        .encode_fast(text, false)
+        .map_err(anyhow::Error::msg)?;
+    let tokens = ctx
+        .bos_tok_id
+        .into_iter()
+        .chain(encoded.get_ids().iter().copied())
+        .collect::<Vec<_>>();
+    let n_chunk = job.chunks.min(tokens.len() / job.n_ctx);
+    anyhow::ensure!(
+        n_chunk > 0,
+        "{} holds {} tokens, less than one chunk of {}",
+        job.text.display(),
+        tokens.len(),
+        job.n_ctx
+    );
+    let tokens = &tokens[..n_chunk * job.n_ctx];
+    let chunks = tokens
+        .chunks(job.n_ctx)
+        .map(|chunk| {
+            let mut chunk = chunk.to_vec();
+            if let Some(bos) = ctx.bos_tok_id {
+                chunk[0] = bos;
+            }
+            chunk
+        })
+        .collect();
+    let vocab = stream.head().dequantize_w()?.dim(0)?;
+    let mut writer =
+        inference_nn::logits_reference::KldBaseWriter::create(out, job.n_ctx, vocab, tokens)?;
+    run_streamed(stream, chunks, StreamedRun::WriteBase(&mut writer), weights)?;
+    writer.finish()?;
+    info!(
+        "Wrote a base of {n_chunk} chunks of {} tokens to `{}`.",
+        job.n_ctx,
+        out.display()
+    );
+    Ok(())
+}
+
+// what a streamed run does with the states: collect each linear's Hessian into a directory, score the final logits
+// against a KL-divergence base, or write them as a new one
 #[cfg(feature = "cuda")]
 enum StreamedRun<'a> {
     Collect(&'a Path),
     Score(&'a mut inference_nn::logits_reference::KldBase),
+    WriteBase(&'a mut inference_nn::logits_reference::KldBaseWriter),
 }
 
 #[cfg(feature = "cuda")]
@@ -877,7 +932,7 @@ fn run_streamed(
             std::fs::create_dir_all(dir)?;
             Some(*dir)
         }
-        StreamedRun::Score(_) => None,
+        StreamedRun::Score(_) | StreamedRun::WriteBase(_) => None,
     };
     let each = std::env::var_os(PER_EXPERT_HESSIANS_ENV).is_some();
     // a scoring run collects nothing, so the experts take the engine's kernels instead of the collecting gather path
@@ -892,7 +947,7 @@ fn run_streamed(
     // states until its embedding or a layer it replaces sets its own apart
     let candidates = match &run {
         StreamedRun::Score(_) => inference_nn::decoder::take_stream_candidates(),
-        StreamedRun::Collect(_) => Vec::new(),
+        StreamedRun::Collect(_) | StreamedRun::WriteBase(_) => Vec::new(),
     };
     // the states stay on the GPU when they fit beside a layer, so they never cross the bus
     let state_bytes: usize = states
@@ -1219,12 +1274,45 @@ fn run_streamed(
             }
             score_states(stream, &runs, &chunks, base, &gpu)?
         }
+        StreamedRun::WriteBase(writer) => {
+            write_base_states(stream, &states, &chunks, writer, &gpu)?
+        }
     }
     if let Some(path) = std::env::var_os(STREAM_LOGITS_OUT_ENV) {
         stream_logits(stream, &states, &gpu, LogitsUse::Record(Path::new(&path)))?;
     }
     if let Some(path) = std::env::var_os(STREAM_LOGITS_REF_ENV) {
         stream_logits(stream, &states, &gpu, LogitsUse::Compare(Path::new(&path)))?;
+    }
+    Ok(())
+}
+
+// each chunk's final logits over its second half (llama-perplexity's scored rows) into the base
+#[cfg(feature = "cuda")]
+fn write_base_states(
+    stream: &dyn inference_nn::model::LayerStream,
+    states: &[Tensor],
+    chunks: &[Vec<u32>],
+    writer: &mut inference_nn::logits_reference::KldBaseWriter,
+    gpu: &Device,
+) -> Result<()> {
+    use inference_tensor::DType;
+    let head = stream
+        .head()
+        .dequantize_w()?
+        .to_dtype(DType::BF16)?
+        .to_device(gpu)?;
+    for (state, tokens) in states.iter().zip(chunks) {
+        let first = tokens.len() / 2;
+        let rows = tokens.len() - 1 - first;
+        let xs = stream
+            .final_norm(state)?
+            .to_device(gpu)?
+            .to_dtype(DType::BF16)?
+            .squeeze(0)?
+            .narrow(0, first, rows)?;
+        let logits = xs.matmul(&head.t()?)?.to_dtype(DType::F32)?;
+        writer.write_chunk(&logits.flatten_all()?.to_vec1::<f32>()?)?;
     }
     Ok(())
 }

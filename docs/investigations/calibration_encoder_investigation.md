@@ -133,3 +133,37 @@ buffered, BF16 as stored, batched 133 s     0.01663   0.01571   0.00890   0.0111
 ```
 
 Within the route-flip noise either way (+0.0005, -0.0003, -0.0010, +0.0002); 4.3x faster.
+
+## Run 6 - 2026-11-20 21:30
+
+Question: can our own tooling write and score the KL-divergence bases, so no eval runs through a patched
+llama-perplexity (Run 2's chat base needed one, since it tokenizes without the template's special tokens)?
+
+The perplexity example could not write the 35B's BF16 base: with `--moe-expert-cache` it still mapped layers 12-39
+to the CPU (1% GPU, killed after 33 min). The planner keeps experts in host memory only for types the CPU expert
+kernels run (`layer_expert_bytes`), which BF16 is not, and then maps whole layers. Rather than CPU BF16 experts
+(llama-perplexity's `-ot exps=CPU` path, 5 min for this base), `inference quantize kld` now writes bases through the
+streamed path that scores against them: `--kld-base OUT --text FILE --ctx N --chunks N` (the text tokenized with its
+special tokens, BOS before it where the vocab adds one, each chunk's second half recorded in llama-perplexity's
+encoding, shared with the example as `logits_reference::base_record`). One chunk a layer call, as scoring runs, so a
+model scores 0 against its own base.
+
+```
+the chat eval base (40 x 1024), BF16 35B             time     header and tokens
+ik llama-perplexity, patched for special tokens      317 s
+inference quantize kld --text                        83 s     identical to ik's; same file size
+
+scorer                     model          base     KLD       same top
+ours (streamed)            BF16           ours     0.00000   100.00%
+ours (streamed)            BF16           ik's     0.00343   98.08%
+ik                         v2-half        ik's     0.00938   96.46%
+ik                         v2-half        ours     0.01007   96.39%
+ours (streamed, 33 s)      v2-half        ours     0.01035   96.60%
+ours (streamed, 39 s)      recipe-v2      ours     0.01208   96.53%
+ik                         recipe-v2      ik's     0.01112
+```
+
+Each engine reads ~0 against its own BF16 base; across them the BF16 forwards differ by 0.0034 on this model (its
+route flips amplify any rounding difference), so cross-engine numbers carry that floor. Within an engine the
+comparisons agree: v2-half against the current recipe is -0.0017 by ours and by ik. Our scorer now covers every
+step (writing, scoring, any model size) at the speed of ik's.

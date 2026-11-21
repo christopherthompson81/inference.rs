@@ -2,8 +2,10 @@
 //! such a base file (its tokens, chunk layout and per-row records).
 
 use std::fs::File;
-use std::io::{BufReader, Read};
-use std::path::Path;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+
+use rayon::prelude::*;
 
 use inference_tensor::{DType, Device, Result, Tensor};
 
@@ -12,6 +14,10 @@ const REFERENCE_LOG_PROB_FLOOR: f64 = -16.0;
 // rows of the divergence computed at once, which bounds its temporaries (a few `[rows, vocab]` f32 tensors)
 const DIVERGENCE_ROWS: usize = 64;
 const KLD_BASE_MAGIC: &[u8; 8] = b"_logits_";
+// a record codes log-probs this far below the row's top as 0, and the range above in this many steps
+const KLD_BASE_RANGE: f32 = 16.0;
+const KLD_BASE_STEPS: f32 = 65535.0;
+const KLD_JOB_MAGIC: &[u8; 8] = b"_kldjob_";
 
 /// Reference log-probabilities for consecutive logits rows from `first_row`, in llama-perplexity's KL-divergence base
 /// encoding: row `r`'s token `t` has `log p = scales[r] * codes[r * width + t] + floors[r]`.
@@ -258,5 +264,198 @@ impl KldBase {
             reference.codes.extend_from_slice(&row[8..]);
         }
         Ok(reference)
+    }
+}
+
+/// `logits` (one row) as a base record of `n_vocab` codes, as llama-perplexity writes one: scale and floor as two f32,
+/// then a u16 per token (the ones past the logits and those over the range below the top at 0).
+// a code is at most the step count, and the log-sum-exp narrows to the record's f32
+#[allow(clippy::cast_possible_truncation)]
+pub fn base_record(logits: &[f32], n_vocab: usize) -> Vec<u8> {
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let min_logit = logits
+        .iter()
+        .copied()
+        .fold(f32::INFINITY, f32::min)
+        .max(max_logit - KLD_BASE_RANGE);
+    let log_sum_exp = logits
+        .iter()
+        .map(|v| f64::from((v - max_logit).exp()))
+        .sum::<f64>()
+        .ln() as f32;
+    let scale = (max_logit - min_logit) / KLD_BASE_STEPS;
+    let mut record = Vec::with_capacity(2 * n_vocab.div_ceil(2) * 2 + 8);
+    record.extend_from_slice(&scale.to_le_bytes());
+    record.extend_from_slice(&(min_logit - max_logit - log_sum_exp).to_le_bytes());
+    for i in 0..2 * n_vocab.div_ceil(2) {
+        let code = match logits.get(i) {
+            Some(&v) if scale > 0.0 && v > min_logit => ((v - min_logit) / scale).round() as u16,
+            _ => 0,
+        };
+        record.extend_from_slice(&code.to_le_bytes());
+    }
+    record
+}
+
+/// A new KL-divergence base written chunk by chunk: the header and every chunk's tokens first, then each chunk's
+/// records from [`KldBase::first_row`] on.
+pub struct KldBaseWriter {
+    writer: BufWriter<File>,
+    n_vocab: usize,
+}
+
+impl KldBaseWriter {
+    pub fn create(path: &Path, n_ctx: usize, n_vocab: usize, tokens: &[u32]) -> Result<Self> {
+        let mut writer = BufWriter::new(File::create(path)?);
+        writer.write_all(KLD_BASE_MAGIC)?;
+        let n_chunk = tokens.len() / n_ctx;
+        for v in [n_ctx, n_vocab, n_chunk] {
+            writer.write_all(
+                &i32::try_from(v)
+                    .map_err(inference_tensor::Error::wrap)?
+                    .to_le_bytes(),
+            )?;
+        }
+        for &token in &tokens[..n_chunk * n_ctx] {
+            writer.write_all(
+                &i32::try_from(token)
+                    .map_err(inference_tensor::Error::wrap)?
+                    .to_le_bytes(),
+            )?;
+        }
+        Ok(Self { writer, n_vocab })
+    }
+
+    /// One chunk's scored rows of logits (`rows x n_vocab`, row-major), encoded side by side.
+    pub fn write_chunk(&mut self, logits: &[f32]) -> Result<()> {
+        let records = logits
+            .par_chunks(self.n_vocab)
+            .map(|row| base_record(row, self.n_vocab))
+            .collect::<Vec<_>>();
+        for record in records {
+            self.writer.write_all(&record)?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        Ok(self.writer.flush()?)
+    }
+}
+
+/// A request to write a base: the text, the tokens a chunk and the most chunks. Passed where a calibration file goes,
+/// recognized by its magic as a base is; the base goes where Hessians would.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KldBaseJob {
+    pub text: PathBuf,
+    pub n_ctx: usize,
+    pub chunks: usize,
+}
+
+impl KldBaseJob {
+    pub fn write(&self, path: &Path) -> Result<()> {
+        let mut f = BufWriter::new(File::create(path)?);
+        f.write_all(KLD_JOB_MAGIC)?;
+        writeln!(
+            f,
+            "{}\n{}\n{}",
+            self.n_ctx,
+            self.chunks,
+            self.text.display()
+        )?;
+        Ok(f.flush()?)
+    }
+
+    /// The job at `path`, or `None` when the file is not one.
+    pub fn read(path: &Path) -> Result<Option<Self>> {
+        let Ok(bytes) = std::fs::read(path) else {
+            return Ok(None);
+        };
+        let Some(body) = bytes.strip_prefix(KLD_JOB_MAGIC.as_slice()) else {
+            return Ok(None);
+        };
+        let body = String::from_utf8_lossy(body);
+        let mut lines = body.lines();
+        let mut int = || -> Result<usize> {
+            lines.next().and_then(|l| l.parse().ok()).ok_or_else(|| {
+                inference_tensor::Error::Msg(format!("{}: a malformed base job", path.display()))
+            })
+        };
+        let (n_ctx, chunks) = (int()?, int()?);
+        let text = lines.next().ok_or_else(|| {
+            inference_tensor::Error::Msg(format!("{}: a base job names no text", path.display()))
+        })?;
+        Ok(Some(Self {
+            text: PathBuf::from(text),
+            n_ctx,
+            chunks,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_job_round_trips() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(inference_tensor::Error::wrap)?;
+        let path = dir.path().join("job");
+        let job = KldBaseJob {
+            text: PathBuf::from("/data/eval text.txt"),
+            n_ctx: 1024,
+            chunks: 40,
+        };
+        job.write(&path)?;
+        assert_eq!(KldBaseJob::read(&path)?, Some(job));
+        std::fs::write(&path, b"plain calibration text")?;
+        assert_eq!(KldBaseJob::read(&path)?, None);
+        Ok(())
+    }
+
+    // a written base reads back as its tokens and each scored row's log-softmax, to the code's step
+    #[test]
+    fn written_base_reads_back_as_log_probs() -> Result<()> {
+        let (n_ctx, vocab, chunks) = (8, 5, 2);
+        let dir = tempfile::tempdir().map_err(inference_tensor::Error::wrap)?;
+        let path = dir.path().join("base.kld");
+        let tokens = (0u32..).take(n_ctx * chunks + 3).collect::<Vec<_>>();
+        let rows = n_ctx - 1 - n_ctx / 2;
+        let mut v = 0f32;
+        let logits = (0..chunks * rows * vocab)
+            .map(|_| {
+                v = (v * 1.7 + 0.9) % 7.0;
+                v - 3.5
+            })
+            .collect::<Vec<_>>();
+        let mut writer = KldBaseWriter::create(&path, n_ctx, vocab, &tokens)?;
+        for chunk in logits.chunks(rows * vocab) {
+            writer.write_chunk(chunk)?;
+        }
+        writer.finish()?;
+        let mut base = KldBase::open(&path)?;
+        assert_eq!(
+            (base.n_ctx, base.n_vocab, base.n_chunk),
+            (n_ctx, vocab, chunks)
+        );
+        assert_eq!(base.tokens, tokens[..n_ctx * chunks]);
+        for chunk in logits.chunks(rows * vocab) {
+            let reference = base.next_chunk()?;
+            for (r, row) in chunk.chunks(vocab).enumerate() {
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let lse = max + row.iter().map(|v| (v - max).exp()).sum::<f32>().ln();
+                for (t, &v) in row.iter().enumerate() {
+                    let at = 2 * (r * reference.width + t);
+                    let code = u16::from_le_bytes([reference.codes[at], reference.codes[at + 1]]);
+                    let logp = reference.scales[r] * f32::from(code) + reference.floors[r];
+                    assert!(
+                        (logp - (v - lse)).abs() < 1e-3,
+                        "row {r} token {t}: {logp} vs {}",
+                        v - lse
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
