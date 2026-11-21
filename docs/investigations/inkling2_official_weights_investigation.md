@@ -166,3 +166,32 @@ Upstream's mmq is rewritten since ours was vendored (config per type, J and `ggm
 its NVFP4 launch is 4% faster than ours; its IQ4_NL is 9% slower than ours. Most of the gap is NVFP4's scale per 16
 values (the `q8_0_16` MMA path Q3_K takes, twice the scale work of IQ4_NL's one per 32), not a fix we lack. Porting
 upstream's mmq rewrite for 4% of one kernel is not worth it; prefill stays ~20% behind IQ4_NL with NVFP4 experts.
+
+## Run 7 - 2026-11-21 22:40
+
+Where recipe A's KLD comes from. A lossless source GGUF: llama.cpp's converter (`conversion/inkling2.py`) run at
+`--outtype bf16` with layers 0-19's NVFP4 stacks filtered out (MXFP8 dequantizes exactly into BF16), then recipe A's
+NVFP4 stacks and scales merged in (gguf-py; the converter interleaves blocks' tensors, so a block's additions go after
+its last). 22.9 GB: too big for the 3090 with working memory, and the auto map's CPU layers fail (the depth mix read
+states across devices and dtypes, fixed by moving each to the current state's device in F32; then the fused attention
+has no CPU path). So variants derived from it with `quantize gguf`:
+
+```
+quantize kld --resident, official base          size       mean KLD   p99      same top
+V0  dense Q8_0, layers 20-23 experts Q8_0       16.41 GiB  0.00376    0.0384   97.56%   (recipe A: 0.00374)
+V1  dense BF16, layers 20-23 experts Q8_0       17.78 GiB  0.00317    0.0308   97.64%
+V3  as V1, layers 20-21 experts BF16            19.56 GiB  0.00316    0.0310   97.58%
+V5  as V0, layers 20-23 gate_up Q6_K            15.79 GiB  0.00381    0.0374   97.55%
+official checkpoint against its own base                   0.00000
+```
+
+Dense Q8_0 costs 0.0006; MXFP8 to Q8_0 costs nothing measurable (V3 = V1), and to Q6_K (gate_up; down's rows of 1152
+take no K-quant) 0.00005 for 0.62 GiB. V5 benches as recipe A (pp512 1539, tg128 81.7). The rest, ~0.0031, is not
+in the weights: V3 holds layers 0-21 exactly as the checkpoint does and still scores 0.0031, with both loads at BF16
+activations. Some compute difference between the GGUF load and the checkpoint load, which every GGUF recipe pays
+(IQ4_NL's 0.00995 included). Next: find it bottom-up (one layer's outputs, GGUF against checkpoint load).
+
+Not the router: V6 (V0 with `ffn_gate_inp` at BF16, as the checkpoint computes it) scores 0.00376, as V0. Not the
+tokens: the base stores them, and neither load has a BOS to put first. The checkpoint's `hf_quant_config.json` also
+asks for NVFP4 activations (per-token amax, blocks of 16, `fouroversix_mae`) into the NVFP4 experts and MXFP8 ones
+into the MXFP8 experts; both our loads quantize activations to Q8_1 there, so the base itself departs from that.

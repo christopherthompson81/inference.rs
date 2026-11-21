@@ -302,8 +302,9 @@ fn mix(
         .states
         .iter()
         .chain(std::iter::once(cur))
-        .cloned()
-        .collect::<Vec<_>>();
+        // a block's output is its weights' dtype (BF16 from unquantized ones, F32 from quantized) and on its device
+        .map(|state| state.to_device(cur.device())?.to_dtype(DType::F32))
+        .collect::<Result<Vec<_>>>()?;
     let states = &owned.iter().collect::<Vec<_>>();
     let stacked = Tensor::stack(states, 2)?;
     let stacked = unit_rms(&stacked, UNIT_NORM_EPS)?.reshape((b * t, states.len(), hidden))?;
