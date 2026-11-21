@@ -167,3 +167,21 @@ Each engine reads ~0 against its own BF16 base; across them the BF16 forwards di
 route flips amplify any rounding difference), so cross-engine numbers carry that floor. Within an engine the
 comparisons agree: v2-half against the current recipe is -0.0017 by ours and by ik. Our scorer now covers every
 step (writing, scoring, any model size) at the speed of ik's.
+
+## Run 7 - 2026-11-20 22:00
+
+Question: where does a 35B GPTQ quantize (the v2 recipe, 106 s) spend its time, with the GPU 33% busy?
+
+Timed per tensor (temporary log lines, removed): the loader thread (read, BF16 to f32, the Hessians) runs ahead of
+the quantizer and is hidden, 56.6 s against the quantizer's 82.5 s.
+
+```
+quantizer, by group           seconds   where
+ffn_down_exps                 26.3      GPU (per-expert Hessians: factoring all 256 is 0.08 s of each 0.7 s)
+ffn_gate_exps + ffn_up_exps   27.3      GPU
+attn_qkv, output, attn_gate   20.8      CPU: Q6_K's block encoder (make_qx_quants) inside the feedback loop
+ssm_out and the rest          8.1
+```
+
+`perf` agrees (make_qx_quants 30% of the host's time). The one lever left is a GPU Q6_K (and Q8_0) encoder for the
+feedback loop, ~20 s of the 106; the experts' GPU loop is the rest. Not done here.
