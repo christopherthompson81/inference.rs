@@ -689,10 +689,6 @@ impl QuantMethod for UnquantLinear {
         self.stats.process_routed(x, ids)
     }
 
-    fn process_sorted_routed_stats(&self, x: &Tensor, counts: &[usize]) -> Result<()> {
-        self.stats.process_sorted(x, counts)
-    }
-
     fn stats_snapshot(&self) -> Option<(usize, usize)> {
         self.stats.snapshot()
     }

@@ -122,3 +122,25 @@ quantize gguf, v2 recipe                54-58 s    52-53 s (GPU 61%)
 
 Collection now: ~1.1 s a layer, of it the layer's build ~0.58 s (1.6 GB of BF16 uploaded from the mapping), the
 Hessians' save ~0.25 s, the forward the rest.
+
+## Run 5 - 2026-11-21 03:30
+
+Collection again (266K chat tokens, 97 s after Run 4):
+
+- Each layer's Hessian files (~400 MB) are written on a background thread while the next layer runs, one layer's
+  writes in flight: 97 -> 94 s (the writes mostly land in the page cache, so cheaper than the profiled 0.25 s a
+  layer suggested).
+- The grouped call concatenated gate and up into `[E, 2I, H]` every call (7.3 ms of 22); a one-entry cache keyed by
+  the two tensors' ids makes it once a layer: -> 91 s.
+- Two runs in a row then differed in the down experts' Hessians (relative 1e-7, the dense ones identical): the
+  kernels' row sort places rows with atomics, so their order within an expert's run, and the Gram's f32 summation
+  order, varied. The GLU outputs now go back to slot order (`index_select` by the weighted gather's own
+  permutation) and through `process_routed_stats`, which orders rows on the host as the gather path did; the
+  sorted-rows entry point is gone. Two runs: 0 of 10,571 files differ. -> 88 s.
+- Uploading the layer's weights through the pinned staging ring: 17.9 -> 16.3 s of profiled build time (733
+  uploads, ~4.3 GB/s from the mapping), 45 -> 43 s plain on 64K tokens. Too small to keep; the build reads the
+  mapped file page by page, which the read-ahead's `read()` warms but does not map.
+
+```
+Hessian collection, 266K tokens     start 578 s   calibration Run 5 133 s   Run 4 97 s   now 88 s (GPU 74%)
+```

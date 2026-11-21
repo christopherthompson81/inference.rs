@@ -1613,7 +1613,7 @@ impl FastExpertsWeights {
     }
 
     // BF16 experts collecting their down projection's per-expert Hessians, through the grouped GEMMs instead of a
-    // pass per expert: the kernels' own expert-ordered GLU outputs feed the statistics
+    // pass per expert: the kernels' GLU outputs, back in slot order, feed the statistics
     #[cfg(feature = "cuda")]
     fn forward_tracked_grouped(
         &self,
@@ -1655,8 +1655,8 @@ impl FastExpertsWeights {
             .process_routed_stats(forward.xs_flat, ids)?;
         self.fused_up_proj
             .process_routed_stats(forward.xs_flat, ids)?;
-        let gate_up = Tensor::cat(&[&gate, &up], 1)?;
-        let (out, down_in, counts) = inference_quant::moe::cutlass_fused_moe_routed(
+        let gate_up = fused_gate_up(&gate, &up)?;
+        let (out, down_in) = inference_quant::moe::cutlass_fused_moe_routed(
             forward.xs_flat,
             &gate_up,
             &down,
@@ -1666,8 +1666,11 @@ impl FastExpertsWeights {
             act,
             dev,
         )?;
-        self.fused_down_proj
-            .process_sorted_routed_stats(&down_in, &counts)?;
+        let inter = down_in.dim(D::Minus1)?;
+        self.fused_down_proj.process_routed_stats(
+            &down_in.reshape((forward.shape.num_tokens, config.num_experts_per_tok, inter))?,
+            ids,
+        )?;
         Ok(Some(out.to_dtype(forward.original_dtype)?))
     }
 
@@ -1935,6 +1938,33 @@ impl FastExpertsWeights {
         };
         grouped_with([gate, up, down], forward, config)
     }
+}
+
+#[cfg(feature = "cuda")]
+thread_local! {
+    // the last stack's gate and up as the grouped kernels take them, by the two tensors' ids: a streamed layer's every
+    // call after its first reuses it, and the next layer's replaces it
+    static FUSED_GATE_UP: std::cell::RefCell<Option<(inference_tensor::TensorId, inference_tensor::TensorId, Tensor)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// `[gate; up]` along the intermediate dim (the grouped kernels' `[E, 2I, H]`), made once a stack
+#[cfg(feature = "cuda")]
+fn fused_gate_up(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    let key = (gate.id(), up.id());
+    let found = FUSED_GATE_UP.with_borrow(|cached| {
+        cached
+            .as_ref()
+            .filter(|(g, u, _)| (*g, *u) == key)
+            .map(|(.., fused)| fused.clone())
+    });
+    if let Some(fused) = found {
+        return Ok(fused);
+    }
+    FUSED_GATE_UP.with_borrow_mut(|cached| *cached = None);
+    let fused = Tensor::cat(&[gate, up], 1)?;
+    FUSED_GATE_UP.with_borrow_mut(|cached| *cached = Some((key.0, key.1, fused.clone())));
+    Ok(fused)
 }
 
 /// The expert-indexed matvec over `[gate, up, down]` kernel weights, for decode-sized batches.

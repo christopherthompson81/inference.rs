@@ -913,6 +913,33 @@ pub(crate) fn write_kld_base_streamed(
     Ok(())
 }
 
+// one linear's statistics for the background writer, on the host: a stack's per-expert Hessians, a Hessian, or GPTAQ's
+// pair
+#[cfg(feature = "cuda")]
+enum SaveJob {
+    Experts(String, Tensor),
+    Single(String, Tensor),
+    Pair(String, Tensor, Tensor),
+}
+
+#[cfg(feature = "cuda")]
+impl SaveJob {
+    fn save(self, dir: &Path, each: bool) -> Result<()> {
+        match self {
+            Self::Experts(key, h) => save_expert_hessians(dir, &key, h, each),
+            Self::Single(key, h) => save_hessian(dir, &key, h),
+            Self::Pair(key, h, cross) => save_hessian_pair(dir, &key, h, cross),
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn join_writer(writer: std::thread::JoinHandle<Result<()>>) -> Result<()> {
+    writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("the Hessian writer panicked"))?
+}
+
 // what a streamed run does with the states: collect each linear's Hessian into a directory, score the final logits
 // against a KL-divergence base, or write them as a new one
 #[cfg(feature = "cuda")]
@@ -1003,6 +1030,7 @@ fn run_streamed(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut ahead: Option<std::thread::JoinHandle<()>> = None;
+    let mut writing: Option<std::thread::JoinHandle<Result<()>>> = None;
     for layer_idx in 0..layers {
         let start = std::time::Instant::now();
         if let Some(reading) = ahead.take() {
@@ -1225,19 +1253,33 @@ fn run_streamed(
                 crosses[index] = Some(cross);
             }
         }
+        let mut jobs = Vec::new();
         for (i, module) in group.iter().enumerate() {
-            let (Some(h), Some(dir)) = (&hessians[sources[i]], dir) else {
+            let (Some(h), Some(_)) = (&hessians[sources[i]], dir) else {
                 continue;
             };
-            match h.rank() {
+            let h = h.to_device(&Device::Cpu)?;
+            jobs.push(match h.rank() {
                 // a stack reading another's input (up beside gate) is found through it, not written again
-                3 if each && sources[i] != i => {}
-                3 => save_expert_hessians(dir, &module.key, h.clone(), each)?,
+                3 if each && sources[i] != i => continue,
+                3 => SaveJob::Experts(module.key.clone(), h),
                 _ => match &crosses[sources[i]] {
-                    Some(cross) => save_hessian_pair(dir, &module.key, h.clone(), cross.clone())?,
-                    None => save_hessian(dir, &module.key, h.clone())?,
+                    Some(cross) => {
+                        SaveJob::Pair(module.key.clone(), h, cross.to_device(&Device::Cpu)?)
+                    }
+                    None => SaveJob::Single(module.key.clone(), h),
                 },
-            }
+            });
+        }
+        // the files written beside the next layer's work, one layer's at a time
+        if let Some(previous) = writing.take() {
+            join_writer(previous)?;
+        }
+        if let Some(dir) = dir {
+            let dir = dir.to_path_buf();
+            writing = Some(std::thread::spawn(move || {
+                jobs.into_iter().try_for_each(|job| job.save(&dir, each))
+            }));
         }
         drop(hessians_span);
         drop(group);
@@ -1247,6 +1289,9 @@ fn run_streamed(
             layer_idx + 1,
             start.elapsed().as_secs_f32()
         );
+    }
+    if let Some(previous) = writing.take() {
+        join_writer(previous)?;
     }
     match &mut run {
         StreamedRun::Collect(dir) => {

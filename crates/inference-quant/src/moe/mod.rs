@@ -47,8 +47,8 @@ pub fn cutlass_fused_moe(
     }
 }
 
-/// [`cutlass_fused_moe`], with the down projection's inputs as the kernels grouped them: every routed row's GLU
-/// output `(tokens * topk, inter)` ordered by expert, and each expert's row count.
+/// [`cutlass_fused_moe`], with the down projection's inputs: every routed slot's GLU output `(tokens * topk, inter)`,
+/// in slot order.
 #[allow(clippy::too_many_arguments)]
 pub fn cutlass_fused_moe_routed(
     xs: &inference_tensor::Tensor,
@@ -59,11 +59,7 @@ pub fn cutlass_fused_moe_routed(
     num_experts: usize,
     act: cuda::GatedAct,
     dev: &inference_tensor::CudaDevice,
-) -> inference_tensor::Result<(
-    inference_tensor::Tensor,
-    inference_tensor::Tensor,
-    Vec<usize>,
-)> {
+) -> inference_tensor::Result<(inference_tensor::Tensor, inference_tensor::Tensor)> {
     #[cfg(has_cutlass_moe_kernels)]
     {
         cutlass::cutlass_fused_moe_routed(

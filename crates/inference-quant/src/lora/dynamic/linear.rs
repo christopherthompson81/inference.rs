@@ -261,10 +261,6 @@ impl QuantMethod for DynamicLoraLinear {
         self.base.process_routed_stats(input, ids)
     }
 
-    fn process_sorted_routed_stats(&self, input: &Tensor, counts: &[usize]) -> Result<()> {
-        self.base.process_sorted_routed_stats(input, counts)
-    }
-
     fn is_distributed(&self) -> Option<crate::DistributedKind> {
         self.base.is_distributed()
     }
