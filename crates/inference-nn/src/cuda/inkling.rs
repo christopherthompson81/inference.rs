@@ -608,3 +608,103 @@ pub fn sigmoid_gate(x: &Tensor, gate: &Tensor, out_dtype: DType) -> Result<Optio
         run!(half::bf16, BF16_CODE)
     }))
 }
+
+/// One cache slot of a verify step's convolution rollback (see [`conv_rollback`]).
+pub struct ConvRollbackSlot<'a> {
+    // `[slots, c, hist]` F32
+    pub pool: &'a Tensor,
+    // the batch rows' pool rows `[b]` U32
+    pub rows: &'a Tensor,
+    // `[b, c, hist]` and `[b, t, c]` F32
+    pub state: &'a Tensor,
+    pub inputs: &'a Tensor,
+}
+
+/// Every slot's pool rows rolled back to the window of `[state, inputs]` ending at each batch row's last kept row
+/// (`keep[row]` rows kept; negative leaves the row), one launch; `false` where a slot's layout is not the kernel's.
+pub fn conv_rollback(slots: &[ConvRollbackSlot<'_>], keep: &[i32]) -> Result<bool> {
+    let Some(first) = slots.first() else {
+        return Ok(true);
+    };
+    let Device::Cuda(dev) = first.pool.device() else {
+        return Ok(false);
+    };
+    let (b, t, c) = first.inputs.dims3()?;
+    let hist = first.state.dim(2)?;
+    let fits = |s: &ConvRollbackSlot<'_>| -> Result<bool> {
+        Ok(s.pool.dtype() == DType::F32
+            && s.pool.is_contiguous()
+            && s.pool.dims3()?.1 == c
+            && s.pool.dims3()?.2 == hist
+            && s.rows.dtype() == DType::U32
+            && s.rows.is_contiguous()
+            && s.state.dtype() == DType::F32
+            && s.state.is_contiguous()
+            && s.state.dims3()? == (b, c, hist)
+            && s.inputs.dtype() == DType::F32
+            && s.inputs.is_contiguous()
+            && s.inputs.dims3()? == (b, t, c))
+    };
+    for slot in slots {
+        if !fits(slot)? {
+            return Ok(false);
+        }
+    }
+    if keep.len() != b {
+        inference_tensor::bail!("conv rollback keeps {} rows of {b}", keep.len());
+    }
+    let stream = dev.cuda_stream();
+    let storages = slots
+        .iter()
+        .map(|s| [s.pool, s.rows, s.state, s.inputs].map(|t| t.storage_and_layout()))
+        .collect::<Vec<_>>();
+    let mut guards = Vec::with_capacity(slots.len() * 4);
+    let mut table = Vec::with_capacity(slots.len() * 4);
+
+    for parts in &storages {
+        for (storage, layout) in parts {
+            let Storage::Cuda(cuda) = &**storage else {
+                return Ok(false);
+            };
+            let (ptr, guard) = match cuda.dtype() {
+                DType::F32 => {
+                    let (p, g) = cuda.as_cuda_slice::<f32>()?.device_ptr(&stream);
+                    (p + layout.start_offset() as u64 * 4, g)
+                }
+                DType::U32 => {
+                    let (p, g) = cuda.as_cuda_slice::<u32>()?.device_ptr(&stream);
+                    (p + layout.start_offset() as u64 * 4, g)
+                }
+                _ => return Ok(false),
+            };
+            table.push(ptr);
+            guards.push(guard);
+        }
+    }
+    let table = stream
+        .clone_htod(&table)
+        .map_err(inference_tensor::Error::wrap)?;
+    let keep = stream
+        .clone_htod(keep)
+        .map_err(inference_tensor::Error::wrap)?;
+    let (tp, _t) = table.device_ptr(&stream);
+    let (kp, _k) = keep.device_ptr(&stream);
+    // SAFETY: the table holds each slot's pool, rows, state and inputs, checked above, alive until the launch is queued
+    status(
+        unsafe {
+            super::ffi::inkling_conv_rollback(
+                tp as *const core::ffi::c_void,
+                kp as *const i32,
+                i32_of(slots.len())?,
+                i32_of(b)?,
+                i32_of(t)?,
+                i32_of(c)?,
+                i32_of(hist)?,
+                stream.cu_stream() as i64,
+            )
+        },
+        "conv rollback",
+    )?;
+    drop(guards);
+    Ok(true)
+}

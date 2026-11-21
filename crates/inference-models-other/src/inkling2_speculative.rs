@@ -29,6 +29,72 @@ pub(super) struct ConvReplay {
     pub(super) inputs: Tensor,
 }
 
+/// What a verify step's forward leaves for drafting and the commit, carried across a graph replay: the taps over the
+/// logits rows and the replays (their device slots are the graph's buffer, which a replay refreshes).
+struct InklingSpecGraphState {
+    taps: Vec<Tensor>,
+    replays: Vec<ConvReplay>,
+}
+
+impl crate::speculative::SpeculativeGraphState for InklingSpecGraphState {
+    fn tensors(&self) -> Vec<Tensor> {
+        let mut out = self.taps.clone();
+        for replay in &self.replays {
+            out.extend([replay.state.clone(), replay.inputs.clone()]);
+        }
+        out
+    }
+
+    fn with_tensors(
+        &self,
+        tensors: Vec<Tensor>,
+    ) -> Result<Box<dyn crate::speculative::SpeculativeGraphState>> {
+        let expected = self.taps.len() + 2 * self.replays.len();
+        if tensors.len() != expected {
+            inference_tensor::bail!(
+                "Inkling 2's speculative graph state holds {expected} tensors, got {}",
+                tensors.len()
+            );
+        }
+        let mut tensors = tensors.into_iter();
+        let taps = tensors.by_ref().take(self.taps.len()).collect();
+        let mut replays = self.replays.clone();
+        for replay in &mut replays {
+            replay.state = tensors.next().expect("counted above");
+            replay.inputs = tensors.next().expect("counted above");
+        }
+        Ok(Box::new(Self { taps, replays }))
+    }
+
+    fn for_real_batch(
+        &self,
+        real_batch: usize,
+    ) -> Result<Box<dyn crate::speculative::SpeculativeGraphState>> {
+        let narrow = |t: &Tensor| -> Result<Tensor> {
+            let captured = t.dim(0)?;
+            if real_batch > captured {
+                inference_tensor::bail!("batch {real_batch} exceeds the captured {captured}");
+            }
+            t.narrow(0, 0, real_batch)
+        };
+        let taps = self.taps.iter().map(narrow).collect::<Result<Vec<_>>>()?;
+        let mut replays = self.replays.clone();
+        for replay in &mut replays {
+            replay.indices = narrow(&replay.indices)?;
+            replay.state = narrow(&replay.state)?;
+            replay.inputs = narrow(&replay.inputs)?;
+            if let Some(host) = replay.host_indices.as_mut() {
+                host.truncate(real_batch);
+            }
+        }
+        Ok(Box::new(Self { taps, replays }))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[derive(Default)]
 pub(super) struct SpecState {
     drafter: Mutex<Option<Arc<ExternalDrafter>>>,
@@ -163,6 +229,10 @@ impl Model {
         if replays.is_empty() || groups.is_empty() {
             return Ok(());
         }
+        #[cfg(feature = "cuda")]
+        if self.roll_back_in_one_launch(&replays, rows)? {
+            return Ok(());
+        }
         let history = self.cfg.sconv_kernel_size - 1;
         let device = replays[0].indices.device().clone();
         let group_rows = groups
@@ -195,6 +265,51 @@ impl Model {
             }
         }
         Ok(())
+    }
+}
+
+impl Model {
+    // every slot's rollback in one kernel, where the pools and stash are its layouts
+    #[cfg(feature = "cuda")]
+    fn roll_back_in_one_launch(
+        &self,
+        replays: &[ConvReplay],
+        rows: &[SpeculativeCommitRow],
+    ) -> Result<bool> {
+        let batch = replays[0].indices.dim(0)?;
+        let mut keep = vec![-1i32; batch];
+        for row in rows.iter().filter(|row| !row.accepted_all) {
+            if row.batch_idx < batch {
+                keep[row.batch_idx] =
+                    i32::try_from(row.keep_rows).map_err(inference_tensor::Error::wrap)?;
+            }
+        }
+        let pools = {
+            let mut cache = self.cache.hybrid();
+            replays
+                .iter()
+                .map(|replay| match cache.get_mut(replay.slot) {
+                    Some(HybridLayerCache::Recurrent(pool)) => Ok(pool.conv_state.clone()),
+                    _ => inference_tensor::bail!(
+                        "Inkling 2: cache layer {} has no states",
+                        replay.slot
+                    ),
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let slots = replays
+            .iter()
+            .zip(&pools)
+            .map(
+                |(replay, pool)| inference_nn::cuda::inkling::ConvRollbackSlot {
+                    pool,
+                    rows: &replay.indices,
+                    state: &replay.state,
+                    inputs: &replay.inputs,
+                },
+            )
+            .collect::<Vec<_>>();
+        inference_nn::cuda::inkling::conv_rollback(&slots, &keep)
     }
 }
 
@@ -337,6 +452,43 @@ impl crate::speculative::SpeculativeTargetMixin for Model {
             Some(drafter) => drafter.propose(self, ctx, drafter.n_predict(), &self.device),
             None => Ok(None),
         }
+    }
+
+    fn take_speculative_graph_state(
+        &self,
+    ) -> Option<Box<dyn crate::speculative::SpeculativeGraphState>> {
+        self.spec.drafter()?;
+        let taps = self.spec_taps()?;
+        let replays = self
+            .spec
+            .replays
+            .lock()
+            .expect("conv replays poisoned")
+            .clone();
+        Some(Box::new(InklingSpecGraphState { taps, replays }))
+    }
+
+    fn install_speculative_graph_state(
+        &self,
+        state: &dyn crate::speculative::SpeculativeGraphState,
+    ) -> Result<()> {
+        if self.spec.drafter().is_none() {
+            return Ok(());
+        }
+        let state = state
+            .as_any()
+            .downcast_ref::<InklingSpecGraphState>()
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("foreign speculative graph state for Inkling 2")
+            })?;
+        *self.spec.spec_taps.lock().expect("spec taps poisoned") = Some(state.taps.clone());
+        let mut replays = state.replays.clone();
+        // a capture baked in its own step's host slots; graphs run on CUDA, whose scatter reads the device slots
+        for replay in &mut replays {
+            replay.host_indices = None;
+        }
+        *self.spec.replays.lock().expect("conv replays poisoned") = replays;
+        Ok(())
     }
 
     fn speculative_commit(&mut self, rows: &[SpeculativeCommitRow]) -> Result<()> {

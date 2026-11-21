@@ -89,3 +89,35 @@ the ~23 ms verify. With all three, prose reaches about plain's speed and code ~1
 Tests: the tiny official checkpoint with a random `mtp.safetensors` drafts on CUDA (BF16, the drafter's paged
 attention reads half precision) and keeps the greedy output up to a near tie; with the rollback's window started
 before the kept rows instead of after them it fails at step 2.
+
+## Run 4 - 2026-11-21 17:30
+
+Verify graphs: Inkling hands its taps and conv replays through a `SpeculativeGraphState` (the captured forward's,
+reinstalled after each replay; the warm forward's state, taken first, keeps the tensors a captured forward's store would
+otherwise free mid-capture), so decode graphs stay on with a drafter. Greedy output is the eager run's, token for token.
+
+The commit's rollback was 48 slots x (row selects, the window, a copy, the scatter): ~300 eager launches and ~250
+small uploads a cycle. One kernel (`inkling_conv_rollback`) now cuts every slot's pool rows from its stash in one
+launch (a table of the slots' pointers and the rows' kept counts uploaded). With its window off by one the tiny drafter
+test fails.
+
+```
+inference serve, IQ4_NL GGUF, --pa-context-len 8192, greedy, 256 tokens (tok/s)   prose  code   story  explainer
+plain (decode graphs)                                                             76.5   79.0   80.9   81.0
+drafts 3, eager verify (Run 3)                                                    56.9   104.0  61.2   69.3
+drafts 3, verify graphs                                                           65.6   119.6  70.7   79.5
+drafts 3, verify graphs + one-launch rollback                                     69.3   122.9  74.7   83.4
+drafts 7, verify graphs + one-launch rollback                                     42.2   114.1  45.0   59.3
+```
+
+nsys at drafts 3 (prose): a cycle 31.8 ms, the GPU busy 26.8 ms (84%): the graphed verify ~24 ms, the eager draft
+pass 2.7 ms (200 launches: the head over the drafts 0.56 ms, the fold's matvecs, the argmaxes, the three layers), the
+host ~5 ms. The verify's experts (IQ4_NL indexed matvec) are 7.5 ms of it: 4 rows x 8 routes reach ~29 distinct of
+the 128 experts a layer, so a kernel reading each expert once for all its routes saves ~10% of their reads; the verify
+is near its weight-read floor.
+
+Memory: at the default cache sizing a speculative run fails with OOM once its graphs are captured. With the cache
+capped (8192 tokens) a run peaks at 20.8 GB against plain's 19.7 GB, ~1.1 GB more where the drafter's reservation is
+607 MB (its weights): the folded head (103 MB) and the verify graphs' wider activations, replay stash and logits are
+not reserved. The cache planner needs a verify row's runtime bytes (per row beyond a decode row, times the widest
+graph's rows) reserved when a drafter is attached.

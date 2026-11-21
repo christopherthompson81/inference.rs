@@ -296,6 +296,16 @@ inference_tensor::kernel_library! {
             n: i64,
             stream: i64,
         ) -> i32;
+        pub fn inkling_conv_rollback(
+            slots: *const c_void,
+            keep: *const i32,
+            n_slots: i32,
+            b: i32,
+            t: i32,
+            c: i32,
+            hist: i32,
+            stream: i64,
+        ) -> i32;
         pub fn inkling_short_conv(
             x: *const c_void,
             x_dtype: i32,

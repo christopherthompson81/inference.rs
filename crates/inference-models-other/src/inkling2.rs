@@ -1762,11 +1762,11 @@ impl NormalModel for Model {
         &self.meta
     }
 
-    // a decode step reads its positions and lengths from the paged metadata's device tensors; a drafter's taps and
-    // verify replays are a forward's outputs no graph state carries yet
+    // a decode step reads its positions and lengths from the paged metadata's device tensors (a drafter's taps and
+    // verify replays ride the speculative graph state)
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
-        self.paged_writer.is_some() && self.spec.drafter().is_none()
+        self.paged_writer.is_some()
     }
 }
 
