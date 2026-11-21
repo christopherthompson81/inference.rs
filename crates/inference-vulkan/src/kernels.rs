@@ -167,6 +167,9 @@ kernels! {
     matmul_f32_tiled: MATMUL_F32_TILED, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_tiled32: MATMUL_F32_TILED32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
+    short_conv_step: SHORT_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::SHORT_CONV_STEP_PUSH_BYTES;
+    row_norm: ROW_NORM, ops::ROW_NORM_BINDINGS, ops::ROW_NORM_PUSH_BYTES;
+    depth_mix: DEPTH_MIX, ops::DEPTH_MIX_BINDINGS, ops::DEPTH_MIX_PUSH_BYTES;
     ssm_scan_step: SSM_SCAN_STEP, ops::SCAN_STEP_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     gdn_recurrence: GDN_RECURRENCE, ops::GDN_BINDINGS, ops::GDN_PUSH_BYTES;
     rope: ROPE, ops::ROPE_BINDINGS, ops::ROPE_PUSH_BYTES;

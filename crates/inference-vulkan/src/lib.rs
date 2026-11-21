@@ -21,10 +21,10 @@ pub use kernels::{BlockType, Embed, GluMatVec, MATVEC_MAX_ROWS, MatVec};
 pub use map::{Half, MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{Bound, Buffer, ImportedMemory, f32_bytes};
 pub use ops::{
-    AddRmsNorm, At, BiasedDecode, CacheShape, Conv2d, ConvStep, FlashAttn, GatedRmsNorm,
+    AddRmsNorm, At, BiasedDecode, CacheShape, Conv2d, ConvStep, DepthMix, FlashAttn, GatedRmsNorm,
     GdnRecurrence, MatMul, MatOperand, MoeMatVec, PagedDecode, PagedPrefill, PagedWrite, Penalize,
-    RankedDraw, RankedTopK, RelPosAttn, Rope, RopeRows, Router, RouterFn, RowOp, Rows, ScanStep,
-    Select,
+    RankedDraw, RankedTopK, RelPosAttn, Rope, RopeRows, Router, RouterFn, RowNorm, RowNormMode,
+    RowOp, Rows, ScanStep, Select, ShortConvStep,
 };
 pub use stream::Retained;
 

@@ -296,6 +296,73 @@ pub fn ssm_conv_step(
     }
 }
 
+/// Attention over depth: each row's states, `blocks` f32 `(rows, n, width)` (none when `n` is 0) then `cur` `(rows,
+/// width)`, unit-RMS normed (`eps`), scored against each of `queries` `(queries, width)` at `1 / sqrt(width)` and
+/// softmaxed over the states; their weighted sum `(rows, queries, width)`. `None` where the kernel does not take the
+/// shapes.
+pub fn depth_mix(
+    blocks: Option<&Tensor>,
+    cur: &Tensor,
+    queries: &Tensor,
+    eps: f32,
+) -> Result<Option<Tensor>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::depth_mix(blocks, cur, queries, eps);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (blocks, cur, queries, eps);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
+/// How [`row_norm`] rescales a row by its norm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RowNormMode {
+    /// down to an L2 norm of at most `threshold` (unchanged below it), `eps` guarding a zero norm
+    Clip { threshold: f32, eps: f32 },
+    /// to a unit RMS
+    Rms { eps: f32 },
+}
+
+/// Each last-axis row of f32 `x`, after an optional `scale` (row r takes row `r % scale_rows` of a `(scale_rows,
+/// width)` table), rescaled by its norm as `mode` says; `None` where the device has no kernel for the layout.
+pub fn row_norm(x: &Tensor, scale: Option<&Tensor>, mode: RowNormMode) -> Result<Option<Tensor>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::row_norm(x, scale, mode);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (x, scale, mode);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
+/// One decode step of a short causal conv with a residual on a conv-state pool, in place.
+pub struct ShortConvStep<'a> {
+    /// f32 `(batch, channels)`
+    pub x: &'a Tensor,
+    /// f32 `(channels, hist + 1)`, the last column the current input's
+    pub weight: &'a Tensor,
+    /// f32 `(batch, heads, hist + 1)` weights by lag (lag 0 the current input), each shared by a head's channels
+    pub taps: Option<&'a Tensor>,
+    /// f32 `(rows, pool_channels, hist)`: each row's last `hist` inputs, this conv's from `channel_off`
+    pub pool: &'a Tensor,
+    pub channel_off: usize,
+    /// u32 `(batch,)`, the pool row of each batch row
+    pub slots: &'a Tensor,
+    pub scale: f32,
+}
+
+/// `(x + window . weight + taps) * scale`, `(batch, channels)`, shifting `x` into the pool.
+pub fn short_conv_step(op: &ShortConvStep<'_>) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::short_conv_step(op);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = op;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 /// Mamba-2's gated RMSNorm, as `mamba_gated_rmsnorm_cuda` computes it: `x` and `gate` f32 `(.., width)`, `weight`
 /// `(width,)` f32, groups of `group_size` along the last dimension.
 pub fn gated_rmsnorm(

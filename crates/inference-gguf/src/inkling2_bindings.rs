@@ -77,7 +77,52 @@ pub fn build_inkling2_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> 
         }
         bindings.insert(target, binding);
     }
+    bind_groups(archive, &mut bindings);
     Ok(bindings)
+}
+
+// a layer's projections of one input concatenated, so decode runs one product: where the parts share a block type
+fn bind_groups(archive: &GgufArchive, bindings: &mut GgufBindingMap) {
+    let groups = [
+        (
+            "q_group",
+            &["attn_q", "attn_gate", "attn_rel", "attn_sink_proj"][..],
+        ),
+        ("k_group", &["attn_k", "attn_k_conv_proj"][..]),
+        ("v_group", &["attn_v", "attn_v_conv_proj"][..]),
+    ];
+    for layer in 0.. {
+        if !archive
+            .tensors()
+            .contains_key(&format!("blk.{layer}.attn_q.weight"))
+        {
+            break;
+        }
+        for (group, roles) in groups {
+            let names = roles
+                .iter()
+                .map(|role| format!("blk.{layer}.{role}.weight"))
+                .filter(|name| archive.tensors().contains_key(name))
+                .collect::<Vec<_>>();
+            let types = names
+                .iter()
+                .filter_map(|name| {
+                    archive
+                        .tensor_info(name)
+                        .ok()
+                        .map(|info| info.dtype().raw())
+                })
+                .collect::<std::collections::HashSet<_>>();
+            if names.len() < 2 || types.len() != 1 {
+                continue;
+            }
+            let parts = names.into_iter().map(GgufTensorBinding::tensor).collect();
+            bindings.insert(
+                format!("model.layers.{layer}.self_attn.{group}.weight"),
+                GgufTensorBinding::concat(parts, 0),
+            );
+        }
+    }
 }
 
 // the tensors whose GGUF layout is not the model's: a transposed table, one-row queries and the fused experts

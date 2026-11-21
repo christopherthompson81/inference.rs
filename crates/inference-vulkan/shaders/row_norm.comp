@@ -1,0 +1,65 @@
+#version 450
+// Each `width`-wide row of x, after an optional scale (row r takes row r % scale_rows of a (scale_rows, width) table),
+// rescaled by its norm: in CLIP mode down to an L2 norm of at most `p0` (unchanged below it, `p1` guarding a zero
+// norm), in RMS mode to a unit RMS (`p1` the epsilon). A workgroup a row, its threads striding over the row.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer S { float scale[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint width;
+    // 0 for no scale
+    uint scale_rows;
+    uint mode;
+    float p0;
+    float p1;
+    uint x_off;
+    uint scale_off;
+} pc;
+
+const uint CLIP = 0;
+const uint THREADS = 64;
+// one sum a subgroup, for subgroups as narrow as 8
+const uint MAX_SUBGROUPS = THREADS / 8;
+
+shared float partial[MAX_SUBGROUPS];
+
+float scaled(uint row, uint c) {
+    float v = x[pc.x_off + row * pc.width + c];
+    if (pc.scale_rows != 0) {
+        v *= scale[pc.scale_off + (row % pc.scale_rows) * pc.width + c];
+    }
+    return v;
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (row >= pc.rows) {
+        return;
+    }
+    float sq = 0.0;
+    for (uint c = gl_LocalInvocationID.x; c < pc.width; c += THREADS) {
+        float v = scaled(row, c);
+        sq += v * v;
+    }
+    sq = subgroupAdd(sq);
+    if (gl_SubgroupInvocationID == 0) {
+        partial[gl_SubgroupID] = sq;
+    }
+    barrier();
+    float total = 0.0;
+    for (uint s = 0; s < gl_NumSubgroups; s++) {
+        total += partial[s];
+    }
+    float factor = pc.mode == CLIP
+        ? min(1.0, pc.p0 / (sqrt(total) + pc.p1))
+        : 1.0 / sqrt(total / float(pc.width) + pc.p1);
+    for (uint c = gl_LocalInvocationID.x; c < pc.width; c += THREADS) {
+        o[row * pc.width + c] = scaled(row, c) * factor;
+    }
+}

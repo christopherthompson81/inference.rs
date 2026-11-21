@@ -24,8 +24,11 @@ pub(crate) fn grid_x(groups: usize) -> usize {
 }
 const INDEX_THREADS: usize = 256;
 const MATMUL_THREADS: usize = 64;
-// the inner length from which an output element gets a workgroup of its own, its threads splitting the dot product
+// the inner length from which an output element gets a workgroup of its own, its threads splitting the dot product,
+// and from which it does however many outputs there are: below it, more outputs than products keep a thread an output
+// (a looped model's 64-wide controllers into 2304 outputs: 34 -> 16 us)
 const DOT_MIN_K: usize = 64;
+const DOT_ANY_OUTPUTS_K: usize = 128;
 // the tiled kernel's output tile, its smallest worthwhile rows and columns, and the batches its grid's z takes
 const TILE_M: usize = 64;
 const TILE_N: usize = 64;
@@ -719,7 +722,7 @@ impl Recorder<'_> {
                     op.batch as u32,
                 ],
             );
-        } else if op.k >= DOT_MIN_K {
+        } else if op.k >= DOT_MIN_K && (op.k >= DOT_ANY_OUTPUTS_K || count <= op.k) {
             let groups_x = grid_x(count);
             self.context.kernels.matmul_f32_dot.dispatch(
                 self,
@@ -746,6 +749,16 @@ pub type At<'a> = (&'a Arc<Buffer>, usize);
 
 pub(crate) const CONV_STEP_BINDINGS: usize = 6;
 pub(crate) const CONV_STEP_PUSH_BYTES: u32 = 10 * 4;
+pub(crate) const SHORT_CONV_STEP_PUSH_BYTES: u32 = 12 * 4;
+pub(crate) const ROW_NORM_BINDINGS: usize = 3;
+pub(crate) const ROW_NORM_PUSH_BYTES: u32 = 8 * 4;
+pub(crate) const DEPTH_MIX_BINDINGS: usize = 4;
+pub(crate) const DEPTH_MIX_PUSH_BYTES: u32 = 8 * 4;
+// depth_mix.comp's states (the blocks and the current one) and queries at most
+const DEPTH_MIX_MAX_STATES: usize = 8;
+const DEPTH_MIX_MAX_QUERIES: usize = 4;
+// short_conv_step.comp's widest window
+const SHORT_CONV_MAX_WIDTH: usize = 8;
 pub(crate) const SCAN_STEP_BINDINGS: usize = 10;
 pub(crate) const SCAN_STEP_PUSH_BYTES: u32 = 14 * 4;
 pub(crate) const ROPE_BINDINGS: usize = 5;
@@ -779,6 +792,68 @@ pub struct ConvStep<'a> {
     pub bias: Option<At<'a>>,
     pub pool: At<'a>,
     pub slots: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
+/// One decode step of a short causal conv with a residual on a conv-state pool, in place: `x` and `out` are `(batch,
+/// channels)`; the pool `(rows, pool_channels, hist)` f32 holds each row's last `hist` inputs, the conv's channels from
+/// `channel_off`; `weight` is `(channels, hist + 1)`, the last column the current input's; `taps` (with `heads`) adds
+/// `(batch, heads, hist + 1)` weights by lag, each shared by a head's channels. `out` is the sum times `scale`.
+pub struct ShortConvStep<'a> {
+    pub batch: usize,
+    pub channels: usize,
+    pub hist: usize,
+    pub pool_channels: usize,
+    pub channel_off: usize,
+    pub heads: usize,
+    pub scale: f32,
+    pub x: At<'a>,
+    pub weight: At<'a>,
+    pub taps: Option<At<'a>>,
+    pub pool: At<'a>,
+    pub slots: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
+/// Attention over depth: each row's `n` states of `blocks` `(rows, n, width)` then `cur` `(rows, width)`, unit-RMS
+/// normed, scored against each of `queries` `(queries, width)` at `1 / sqrt(width)`, softmaxed over the states; their
+/// weighted sum into `out` `(rows, queries, width)`. All f32.
+pub struct DepthMix<'a> {
+    pub rows: usize,
+    pub width: usize,
+    pub n: usize,
+    pub queries: usize,
+    pub eps: f32,
+    pub blocks: Option<At<'a>>,
+    pub cur: At<'a>,
+    pub query: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
+impl DepthMix<'_> {
+    /// Whether the kernel takes this many states and queries.
+    pub fn supports(n: usize, queries: usize) -> bool {
+        n < DEPTH_MIX_MAX_STATES && (1..=DEPTH_MIX_MAX_QUERIES).contains(&queries)
+    }
+}
+
+/// How [`RowNorm`] rescales a row by its norm.
+#[derive(Clone, Copy, Debug)]
+pub enum RowNormMode {
+    /// down to an L2 norm of at most `threshold` (unchanged below it), `eps` guarding a zero norm
+    Clip { threshold: f32, eps: f32 },
+    /// to a unit RMS
+    Rms { eps: f32 },
+}
+
+/// `rows` contiguous f32 rows of `width`, each after an optional scale (row r takes row `r % scale_rows` of a
+/// `(scale_rows, width)` table) rescaled by its norm as `mode` says, into `out`.
+pub struct RowNorm<'a> {
+    pub rows: usize,
+    pub width: usize,
+    pub mode: RowNormMode,
+    pub x: At<'a>,
+    pub scale: Option<(At<'a>, usize)>,
     pub out: &'a Arc<Buffer>,
 }
 
@@ -949,6 +1024,108 @@ impl Recorder<'_> {
             .div_ceil(INDEX_THREADS)
             .min(MAX_GROUPS) as u32;
         self.context.kernels.ssm_conv_step.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [groups.max(1), 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn depth_mix(&self, op: &DepthMix<'_>) -> Result<()> {
+        if !DepthMix::supports(op.n, op.queries) || (op.n > 0) != op.blocks.is_some() {
+            return Err(Error::Invalid(format!(
+                "depth mix of {} blocks by {} queries",
+                op.n, op.queries
+            )));
+        }
+        if op.rows == 0 {
+            return Ok(());
+        }
+        let (blocks, blocks_off) = op.blocks.unwrap_or(op.cur);
+        let mut bytes = words(&[op.rows, op.width, op.n, op.queries])?;
+        bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
+        bytes.extend(words(&[blocks_off, op.cur.1, op.query.1])?);
+        let buffers = [blocks, op.cur.0, op.query.0, op.out];
+        let x_groups = op.rows.min(MAX_DISPATCH_GROUPS);
+        self.context.kernels.depth_mix.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [x_groups as u32, op.rows.div_ceil(x_groups) as u32, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn row_norm(&self, op: &RowNorm<'_>) -> Result<()> {
+        if op.rows == 0 || op.width == 0 {
+            return Ok(());
+        }
+        let ((scale, scale_off), scale_rows) = op.scale.unwrap_or((op.x, 0));
+        let (mode, p0, p1) = match op.mode {
+            RowNormMode::Clip { threshold, eps } => (0, threshold, eps),
+            RowNormMode::Rms { eps } => (1, 0.0, eps),
+        };
+        let mut bytes = words(&[op.rows, op.width, scale_rows, mode])?;
+        bytes.extend_from_slice(&p0.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&p1.to_bits().to_le_bytes());
+        bytes.extend(words(&[op.x.1, scale_off])?);
+        let buffers = [op.x.0, scale, op.out];
+        let x_groups = op.rows.min(MAX_DISPATCH_GROUPS);
+        self.context.kernels.row_norm.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [x_groups as u32, op.rows.div_ceil(x_groups) as u32, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn short_conv_step(&self, op: &ShortConvStep<'_>) -> Result<()> {
+        let heads = op.taps.map_or(0, |_| op.heads);
+        if op.hist + 1 > SHORT_CONV_MAX_WIDTH
+            || op.channel_off + op.channels > op.pool_channels
+            || (heads != 0 && !op.channels.is_multiple_of(heads))
+        {
+            return Err(Error::Invalid(format!(
+                "short conv step of {} channels from {} of {}, window {}, {heads} tap heads",
+                op.channels,
+                op.channel_off,
+                op.pool_channels,
+                op.hist + 1
+            )));
+        }
+        let (taps, taps_off) = op.taps.unwrap_or(op.x);
+        let mut bytes = words(&[
+            op.batch,
+            op.channels,
+            op.hist,
+            op.pool_channels,
+            op.channel_off,
+            heads,
+        ])?;
+        bytes.extend_from_slice(&op.scale.to_bits().to_le_bytes());
+        bytes.extend(words(&[
+            op.x.1,
+            op.weight.1,
+            taps_off,
+            op.pool.1,
+            op.slots.1,
+        ])?);
+        let buffers = [op.x.0, op.weight.0, taps, op.pool.0, op.slots.0, op.out];
+        let groups = (op.batch * op.channels)
+            .div_ceil(INDEX_THREADS)
+            .min(MAX_GROUPS) as u32;
+        self.context.kernels.short_conv_step.dispatch(
             self,
             &buffers.map(|b| b.buffer),
             &bytes,

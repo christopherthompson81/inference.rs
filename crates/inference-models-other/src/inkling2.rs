@@ -38,6 +38,10 @@ const ROUTE_NORM_MIN: f32 = 1e-20;
 // the controllers per looped layer, in their message order
 const CONTROLLERS: [&str; 4] = ["q", "k", "v", "ffn"];
 const FFN_CONTROLLER: usize = 3;
+// the projections fused by their input where the checkpoint stores them so (as the GGUF bindings name them)
+const Q_GROUP: &str = "q_group";
+const K_GROUP: &str = "k_group";
+const V_GROUP: &str = "v_group";
 
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct LoopConfig {
@@ -140,6 +144,12 @@ fn unit_rms(x: &Tensor, eps: f64) -> Result<Tensor> {
         return Ok(out);
     }
     let x = x.to_dtype(DType::F32)?;
+    if x.device().is_vulkan() {
+        let mode = inference_tensor::vulkan::RowNormMode::Rms { eps: eps as f32 };
+        if let Some(out) = inference_tensor::vulkan::row_norm(&x.contiguous()?, None, mode)? {
+            return Ok(out);
+        }
+    }
     let norm = (x.sqr()?.mean_keepdim(D::Minus1)? + eps)?.sqrt()?;
     x.broadcast_div(&norm)
 }
@@ -153,6 +163,15 @@ fn l2_clip(x: &Tensor, scale: Option<&Tensor>, threshold: f64) -> Result<Tensor>
         return Ok(out);
     }
     let x = x.to_dtype(DType::F32)?;
+    if x.device().is_vulkan() {
+        let mode = inference_tensor::vulkan::RowNormMode::Clip {
+            threshold: threshold as f32,
+            eps: CLIP_EPS as f32,
+        };
+        if let Some(out) = inference_tensor::vulkan::row_norm(&x.contiguous()?, scale, mode)? {
+            return Ok(out);
+        }
+    }
     let x = match scale {
         Some(scale) => x.broadcast_mul(scale)?,
         None => x,
@@ -196,18 +215,55 @@ impl BlockStacks {
     }
 }
 
-/// The depth mix: softmax attention of learned queries over the unit-normed states, `[b, t, queries, hidden]`.
-fn mix(states: &[&Tensor], queries: &Tensor, out: DType, stacks: &BlockStacks) -> Result<Tensor> {
+/// The earlier blocks' outputs a layer mixes its inputs from, each `[b, t, hidden]`, with their stack (`[b * t, n,
+/// hidden]`) kept for Vulkan's fused mix until the next push.
+#[derive(Clone, Default)]
+struct Blocks {
+    states: Vec<Tensor>,
+    stacked: Option<Tensor>,
+}
+
+impl Blocks {
+    fn new(states: Vec<Tensor>) -> Self {
+        Self {
+            states,
+            stacked: None,
+        }
+    }
+
+    fn push(&mut self, state: Tensor) {
+        self.states.push(state);
+        self.stacked = None;
+    }
+
+    fn stacked(&mut self) -> Result<Option<Tensor>> {
+        if self.stacked.is_none() && !self.states.is_empty() {
+            let (b, t, hidden) = self.states[0].dims3()?;
+            let stacked = Tensor::stack(&self.states, 2)?.to_dtype(DType::F32)?;
+            self.stacked = Some(stacked.reshape((b * t, self.states.len(), hidden))?);
+        }
+        Ok(self.stacked.clone())
+    }
+}
+
+/// The depth mix: softmax attention of learned queries over the unit-normed blocks and `cur`, `[b, t, queries,
+/// hidden]`.
+fn mix(
+    blocks: &mut Blocks,
+    cur: &Tensor,
+    queries: &Tensor,
+    out: DType,
+    stacks: &BlockStacks,
+) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
-    if let Some((current, blocks)) = states.split_last()
-        && current.device().is_cuda()
-    {
-        let stacked = (!blocks.is_empty())
-            .then(|| stacks.stacked(blocks))
+    if cur.device().is_cuda() {
+        let states = blocks.states.iter().collect::<Vec<_>>();
+        let stacked = (!states.is_empty())
+            .then(|| stacks.stacked(&states))
             .transpose()?;
         if let Some(mixed) = inference_nn::cuda::inkling::depth_mix(
             stacked.as_ref(),
-            current,
+            cur,
             queries,
             UNIT_NORM_EPS as f32,
             out,
@@ -217,7 +273,28 @@ fn mix(states: &[&Tensor], queries: &Tensor, out: DType, stacks: &BlockStacks) -
     }
     #[cfg(not(feature = "cuda"))]
     let _ = stacks;
-    let (b, t, hidden) = states[0].dims3()?;
+    let (b, t, hidden) = cur.dims3()?;
+    if cur.device().is_vulkan() {
+        let flat = cur.to_dtype(DType::F32)?.reshape((b * t, hidden))?;
+        let stacked = blocks.stacked()?;
+        if let Some(mixed) = inference_tensor::vulkan::depth_mix(
+            stacked.as_ref(),
+            &flat,
+            queries,
+            UNIT_NORM_EPS as f32,
+        )? {
+            return mixed
+                .reshape((b, t, queries.dim(0)?, hidden))?
+                .to_dtype(out);
+        }
+    }
+    let owned = blocks
+        .states
+        .iter()
+        .chain(std::iter::once(cur))
+        .cloned()
+        .collect::<Vec<_>>();
+    let states = &owned.iter().collect::<Vec<_>>();
     let stacked = Tensor::stack(states, 2)?;
     let stacked = unit_rms(&stacked, UNIT_NORM_EPS)?.reshape((b * t, states.len(), hidden))?;
     let scores = stacked.broadcast_matmul(&queries.t()?)?;
@@ -232,23 +309,100 @@ fn mix(states: &[&Tensor], queries: &Tensor, out: DType, stacks: &BlockStacks) -
 }
 
 fn mixed(
-    states: &[&Tensor],
+    blocks: &mut Blocks,
+    cur: &Tensor,
     queries: &Tensor,
     i: usize,
     out: DType,
     stacks: &BlockStacks,
 ) -> Result<Tensor> {
-    mix(states, queries, out, stacks)?
+    mix(blocks, cur, queries, out, stacks)?
         .narrow(2, i, 1)?
         .squeeze(2)
 }
 
+/// Projections of one input: one product over their rows when the checkpoint stores them concatenated (a GGUF's
+/// bindings do), each its own otherwise.
+enum ProjGroup {
+    Fused(Arc<dyn QuantMethod>, Vec<usize>),
+    Separate(Vec<Arc<dyn QuantMethod>>),
+}
+
+impl ProjGroup {
+    fn load(
+        cfg: &Config,
+        vb: &ShardedVarBuilder,
+        fused: &str,
+        parts: &[(&str, usize)],
+    ) -> Result<Self> {
+        let hidden = cfg.hidden_size;
+        let rows = parts.iter().map(|(_, rows)| *rows).collect::<Vec<_>>();
+        if vb.contains_tensor(&format!("{fused}.weight")) {
+            let total = rows.iter().sum();
+            return Ok(Self::Fused(linear(hidden, total, cfg, vb.pp(fused))?, rows));
+        }
+        let parts = parts
+            .iter()
+            .map(|(name, rows)| linear(hidden, *rows, cfg, vb.pp(*name)))
+            .collect::<Result<_>>()?;
+        Ok(Self::Separate(parts))
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Vec<Tensor>> {
+        match self {
+            Self::Fused(proj, rows) => {
+                let all = proj.forward(x)?;
+                let mut start = 0;
+                rows.iter()
+                    .map(|&len| {
+                        let part = all.narrow(D::Minus1, start, len);
+                        start += len;
+                        part
+                    })
+                    .collect()
+            }
+            Self::Separate(parts) => parts.iter().map(|proj| proj.forward(x)).collect(),
+        }
+    }
+}
+
+/// A slot's convolution states: its rows gathered from the pool (`[b, channels, hist]`, a fresh copy), or the pool
+/// itself and the batch's rows of it, which a Vulkan decode step updates in place.
+#[derive(Clone, Copy)]
+enum ConvState<'a> {
+    Rows(&'a Tensor),
+    Pool { pool: &'a Tensor, slots: &'a Tensor },
+}
+
+/// One conv's channels of a slot's states.
+enum ConvPart<'a> {
+    Rows(Tensor),
+    Pool {
+        pool: &'a Tensor,
+        slots: &'a Tensor,
+        channel_off: usize,
+    },
+}
+
+impl<'a> ConvState<'a> {
+    fn part(self, channel_off: usize, channels: usize) -> Result<ConvPart<'a>> {
+        Ok(match self {
+            Self::Rows(rows) => ConvPart::Rows(rows.narrow(1, channel_off, channels)?),
+            Self::Pool { pool, slots } => ConvPart::Pool {
+                pool,
+                slots,
+                channel_off,
+            },
+        })
+    }
+}
+
 /// A causal depthwise convolution with a residual, its last `width - 1` inputs carried in `[b, c, width - 1]`
-/// states; `taps` adds input-dependent weights (a lag each) shared within a head.
+/// states; the global layers' input-dependent taps (a lag each, `heads` sets of them) are shared within a head.
 struct ShortConv {
     // `[c, width]`, the last tap on the current input
     weight: Tensor,
-    taps: Option<(Arc<dyn QuantMethod>, usize)>,
+    tap_heads: Option<usize>,
 }
 
 impl ShortConv {
@@ -256,39 +410,60 @@ impl ShortConv {
         vb.get((channels, width), "weight")?.to_dtype(DType::F32)
     }
 
-    // `out_dtype`: the output's, f32 or x's
+    // `out_dtype`: the output's, f32 or x's; the new states from gathered rows (a pool updates in place)
     fn forward(
         &self,
         x: &Tensor,
-        dyn_input: &Tensor,
-        state: &Tensor,
+        taps: Option<&Tensor>,
+        state: ConvPart<'_>,
         out_dtype: DType,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let (b, t, c) = x.dims3()?;
         let width = self.weight.dim(1)?;
+        let taps = match (self.tap_heads, taps) {
+            (Some(heads), Some(taps)) => Some((
+                taps.to_dtype(DType::F32)?.reshape((b, t, heads, width))?,
+                heads,
+            )),
+            _ => None,
+        };
+        let terms = 1 + width + taps.as_ref().map_or(0, |_| width);
+        let state = match state {
+            ConvPart::Rows(rows) => rows,
+            ConvPart::Pool {
+                pool,
+                slots,
+                channel_off,
+            } => {
+                let taps = taps
+                    .as_ref()
+                    .map(|(taps, heads)| taps.reshape((b, *heads, width))?.contiguous())
+                    .transpose()?;
+                let out = inference_tensor::vulkan::short_conv_step(
+                    &inference_tensor::vulkan::ShortConvStep {
+                        x: &x.to_dtype(DType::F32)?.reshape((b, c))?.contiguous()?,
+                        weight: &self.weight,
+                        taps: taps.as_ref(),
+                        pool,
+                        channel_off,
+                        slots,
+                        scale: (1.0 / (terms as f64).sqrt()) as f32,
+                    },
+                )?;
+                return Ok((out.reshape((b, t, c))?.to_dtype(out_dtype)?, None));
+            }
+        };
         #[cfg(feature = "cuda")]
         if x.device().is_cuda() {
-            let taps = self
-                .taps
-                .as_ref()
-                .map(|(proj, heads)| -> Result<_> {
-                    Ok((
-                        proj.forward(dyn_input)?
-                            .to_dtype(DType::F32)?
-                            .reshape((b, t, *heads, width))?,
-                        *heads,
-                    ))
-                })
-                .transpose()?;
             let taps = taps.as_ref().map(|(taps, heads)| (taps, *heads));
-            if let Some(convolved) = inference_nn::cuda::inkling::short_conv(
+            if let Some((out, new_state)) = inference_nn::cuda::inkling::short_conv(
                 x,
-                state,
+                &state,
                 &self.weight,
                 taps,
                 out_dtype != DType::F32,
             )? {
-                return Ok(convolved);
+                return Ok((out, Some(new_state)));
             }
         }
         let x = x.to_dtype(DType::F32)?;
@@ -298,12 +473,7 @@ impl ShortConv {
             let w = self.weight.narrow(1, k, 1)?.squeeze(1)?;
             out = (out + ctx.narrow(1, k, t)?.broadcast_mul(&w)?)?;
         }
-        let mut terms = 1 + width;
-        if let Some((proj, heads)) = &self.taps {
-            let taps = proj
-                .forward(dyn_input)?
-                .to_dtype(DType::F32)?
-                .reshape((b, t, *heads, width))?;
+        if let Some((taps, heads)) = &taps {
             for lag in 0..width {
                 let window =
                     ctx.narrow(1, width - 1 - lag, t)?
@@ -311,23 +481,20 @@ impl ShortConv {
                 let tap = taps.narrow(3, lag, 1)?;
                 out = (out + window.broadcast_mul(&tap)?.reshape((b, t, c))?)?;
             }
-            terms += width;
         }
         let new_state = ctx.narrow(1, t, width - 1)?.transpose(1, 2)?.contiguous()?;
         Ok((
             (out / (terms as f64).sqrt())?.to_dtype(out_dtype)?,
-            new_state,
+            Some(new_state),
         ))
     }
 }
 
 struct Attention {
-    q_proj: Arc<dyn QuantMethod>,
-    k_proj: Arc<dyn QuantMethod>,
-    v_proj: Arc<dyn QuantMethod>,
-    r_proj: Arc<dyn QuantMethod>,
-    gate_proj: Arc<dyn QuantMethod>,
-    sink_proj: Arc<dyn QuantMethod>,
+    // q, gate, r and the sinks; k and v, each with the global layers' convolution taps
+    q_group: ProjGroup,
+    k_group: ProjGroup,
+    v_group: ProjGroup,
     o_proj: Arc<dyn QuantMethod>,
     // `[heads, head_dim]` and `[heads, d_rel]`
     q_clip: Tensor,
@@ -436,27 +603,29 @@ impl Attention {
             1,
         )?;
         let conv = |name: &str| -> Result<ShortConv> {
-            let cvb = vb.pp(name);
-            let taps = if sliding {
-                None
-            } else {
-                Some((
-                    linear(hidden, hkv * width, cfg, cvb.pp("weight_proj"))?,
-                    hkv,
-                ))
-            };
             Ok(ShortConv {
-                weight: ShortConv::load(hkv * hd, width, &cvb)?,
-                taps,
+                weight: ShortConv::load(hkv * hd, width, &vb.pp(name))?,
+                tap_heads: (!sliding).then_some(hkv),
             })
         };
+        let kv_group = |group: &str, proj: &str, conv: &str| -> Result<ProjGroup> {
+            let taps = format!("{conv}.weight_proj");
+            let mut parts = vec![(proj, hkv * hd)];
+            if !sliding {
+                parts.push((taps.as_str(), hkv * width));
+            }
+            ProjGroup::load(cfg, &vb, group, &parts)
+        };
+        let q_parts = [
+            ("q_proj", h * hd),
+            ("gate_proj", h * hd),
+            ("r_proj", h * cfg.d_rel),
+            ("sink_proj", h),
+        ];
         Ok(Self {
-            q_proj: linear(hidden, h * hd, cfg, vb.pp("q_proj"))?,
-            k_proj: linear(hidden, hkv * hd, cfg, vb.pp("k_proj"))?,
-            v_proj: linear(hidden, hkv * hd, cfg, vb.pp("v_proj"))?,
-            r_proj: linear(hidden, h * cfg.d_rel, cfg, vb.pp("r_proj"))?,
-            gate_proj: linear(hidden, h * hd, cfg, vb.pp("gate_proj"))?,
-            sink_proj: linear(hidden, h, cfg, vb.pp("sink_proj"))?,
+            q_group: ProjGroup::load(cfg, &vb, Q_GROUP, &q_parts)?,
+            k_group: kv_group(K_GROUP, "k_proj", "k_sconv")?,
+            v_group: kv_group(V_GROUP, "v_proj", "v_sconv")?,
             o_proj: linear(h * hd, hidden, cfg, vb.pp("o_proj"))?,
             q_clip: vb
                 .pp("q_l2_clip")
@@ -485,34 +654,25 @@ impl Attention {
         rel: Option<&RelativeInputs>,
         kv_cache: &mut KvCache,
         paged: Option<&PagedStep<'_>>,
-        conv_state: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor)> {
+        conv_state: ConvState<'_>,
+    ) -> Result<(Tensor, Option<Tensor>, Option<Tensor>)> {
         let (b, t, _) = inputs.q.dims3()?;
         let (h, hkv, hd) = (self.heads, self.kv_heads, self.head_dim);
         let kv_dim = hkv * hd;
-        let k_state = conv_state.narrow(1, 0, kv_dim)?;
-        let v_state = conv_state.narrow(1, kv_dim, kv_dim)?;
+        let k_state = conv_state.part(0, kv_dim)?;
+        let v_state = conv_state.part(kv_dim, kv_dim)?;
 
-        let q = self.q_proj.forward(inputs.q)?.reshape((b, t, h, hd))?;
-        let (k, k_state) = self.k_conv.forward(
-            &self.k_proj.forward(inputs.k)?,
-            inputs.k,
-            &k_state,
-            DType::F32,
-        )?;
-        let (v, v_state) = self.v_conv.forward(
-            &self.v_proj.forward(inputs.v)?,
-            inputs.v,
-            &v_state,
-            DType::F32,
-        )?;
-        let r = self
-            .r_proj
-            .forward(inputs.q)?
-            .reshape((b, t, h, self.d_rel))?;
-        let raw_gate = self.gate_proj.forward(inputs.q)?;
+        let [q, raw_gate, r, sinks] = <[Tensor; 4]>::try_from(self.q_group.forward(inputs.q)?)
+            .map_err(|_| inference_tensor::Error::msg("Inkling 2: the q group has four parts"))?;
+        let q = q.reshape((b, t, h, hd))?;
+        let k = self.k_group.forward(inputs.k)?;
+        let (k, k_state) = self.k_conv.forward(&k[0], k.get(1), k_state, DType::F32)?;
+        let v = self.v_group.forward(inputs.v)?;
+        let (v, v_state) = self.v_conv.forward(&v[0], v.get(1), v_state, DType::F32)?;
+        let r = r.reshape((b, t, h, self.d_rel))?;
+        let raw_gate = raw_gate.contiguous()?;
         let gate = || raw_gate.to_dtype(DType::F32);
-        let sinks = self.sink_proj.forward(inputs.q)?.to_dtype(DType::F32)?;
+        let sinks = sinks.to_dtype(DType::F32)?;
 
         let mut q = l2_clip(&q, Some(&self.q_clip), cfg.qk_l2_clip_threshold)?;
         let k = l2_clip(&k.reshape((b, t, hkv, hd))?, None, cfg.qk_l2_clip_threshold)?;
@@ -769,21 +929,37 @@ impl Moe {
 
 /// A looped layer's controller: `(1 - forget) * x + gain * message`, both gated on the unit-normed pair.
 struct Controller {
-    down: Arc<dyn QuantMethod>,
-    gain: Arc<dyn QuantMethod>,
-    forget: Arc<dyn QuantMethod>,
+    // `[rank, 2 hidden]`, then the gain's rows over the forget's, `[2 hidden, rank]`, applied transposed: each output
+    // reads its own contiguous row; f32 as stored, on f32 unit-normed inputs whatever the model's dtype
+    down: Tensor,
+    gain_forget: Tensor,
 }
 
 impl Controller {
     fn new(cfg: &Config, vb: ShardedVarBuilder) -> Result<Self> {
         let (hidden, rank) = (cfg.hidden_size, cfg.loop_config.gate_rank);
-        // f32 as stored: the controller runs on f32 unit-normed inputs whatever the model's dtype
-        let vb = vb.set_dtype(DType::F32);
+        let weight = |name: &str, shape: (usize, usize)| -> Result<Tensor> {
+            vb.pp(name).get(shape, "weight")?.to_dtype(DType::F32)
+        };
+        let gain = weight("gain", (hidden, rank))?;
+        let forget = weight("forget", (hidden, rank))?;
         Ok(Self {
-            down: linear(2 * hidden, rank, cfg, vb.pp("down"))?,
-            gain: linear(rank, hidden, cfg, vb.pp("gain"))?,
-            forget: linear(rank, hidden, cfg, vb.pp("forget"))?,
+            down: weight("down", (rank, 2 * hidden))?,
+            gain_forget: Tensor::cat(&[&gain, &forget], 0)?,
         })
+    }
+
+    // the gain's and the forget's pre-activations, from the gate's down projection
+    fn gain_forget(&self, gate: &Tensor) -> Result<(Tensor, Tensor)> {
+        let hidden = self.gain_forget.dim(0)? / 2;
+        let both = gate
+            .to_dtype(DType::F32)?
+            .broadcast_matmul(&self.down.t()?)?
+            .broadcast_matmul(&self.gain_forget.t()?)?;
+        Ok((
+            both.narrow(D::Minus1, 0, hidden)?.contiguous()?,
+            both.narrow(D::Minus1, hidden, hidden)?.contiguous()?,
+        ))
     }
 
     fn forward(&self, x: &Tensor, message: &Tensor) -> Result<Tensor> {
@@ -792,9 +968,7 @@ impl Controller {
         if let Some(gate) =
             inference_nn::cuda::inkling::controller_in(x, message, UNIT_NORM_EPS as f32)?
         {
-            let gate = self.down.forward(&gate)?;
-            let gain = self.gain.forward(&gate)?;
-            let forget = self.forget.forward(&gate)?;
+            let (gain, forget) = self.gain_forget(&gate)?;
             if let Some(out) =
                 inference_nn::cuda::inkling::controller_out(x, message, &gain, &forget)?
             {
@@ -808,9 +982,8 @@ impl Controller {
             ],
             D::Minus1,
         )?;
-        let gate = self.down.forward(&gate)?;
-        let gain = self.gain.forward(&gate)?.to_dtype(DType::F32)?.tanh()?;
-        let forget = self.forget.forward(&gate)?.to_dtype(DType::F32)?.tanh()?;
+        let (gain, forget) = self.gain_forget(&gate)?;
+        let (gain, forget) = (gain.tanh()?, forget.tanh()?);
         let x = x.to_dtype(DType::F32)?;
         let kept = (&x - (forget * &x)?)?;
         (kept + (gain * message.to_dtype(DType::F32)?)?)?.to_dtype(dtype)
@@ -848,7 +1021,7 @@ struct DecoderLayer {
 struct LayerStep<'a> {
     kv_cache: &'a mut KvCache,
     paged: Option<PagedStep<'a>>,
-    conv_state: Tensor,
+    conv_state: ConvState<'a>,
     // `None` where the fused CUDA kernel computes the mask and the bias's columns itself
     rel: Option<&'a RelativeInputs>,
     tau: Option<&'a Tensor>,
@@ -914,13 +1087,13 @@ impl DecoderLayer {
             attn: Attention::new(cfg, layer, vb.pp("self_attn"))?,
             post_attention_conv: ShortConv {
                 weight: ShortConv::load(hidden, width, &vb.pp("post_attention_convolution"))?,
-                taps: None,
+                tap_heads: None,
             },
             ffn_norm: RmsNorm::new(hidden, eps, vb.pp("post_attention_layernorm"))?,
             moe: Moe::new(cfg, vb.pp("mlp"), layer_device, comm, loading_isq)?,
             post_mlp_conv: ShortConv {
                 weight: ShortConv::load(hidden, width, &vb.pp("post_mlp_convolution"))?,
-                taps: None,
+                tap_heads: None,
             },
             block_start: layer.is_multiple_of(cfg.n_layers_per_attn_res_block),
             loop_layer,
@@ -931,10 +1104,10 @@ impl DecoderLayer {
         &self,
         cfg: &Config,
         x: &Tensor,
-        blocks: &mut Vec<Tensor>,
+        blocks: &mut Blocks,
         messages: Option<&Tensor>,
         step: LayerStep<'_>,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let LayerStep {
             kv_cache,
             paged,
@@ -944,14 +1117,9 @@ impl DecoderLayer {
             stacks,
         } = step;
         let dtype = x.dtype();
-        let states = |x: &Tensor, blocks: &[Tensor]| -> Vec<Tensor> {
-            blocks.iter().chain(std::iter::once(x)).cloned().collect()
-        };
         let mut inputs: [Tensor; 3] = match &self.attention_query {
             Some(query) => {
-                let all = states(x, blocks);
-                let all: Vec<&Tensor> = all.iter().collect();
-                let m = mix(&all, query, dtype, stacks)?;
+                let m = mix(blocks, x, query, dtype, stacks)?;
                 let pick = |j: usize| -> Result<Tensor> {
                     let j = if query.dim(0)? == 1 { 0 } else { j };
                     m.narrow(2, j, 1)?.squeeze(2)?.to_dtype(dtype)
@@ -1003,12 +1171,12 @@ impl DecoderLayer {
             rel,
             kv_cache,
             paged.as_ref(),
-            &conv_state,
+            conv_state,
         )?;
         let (attn, attn_state) = self.post_attention_conv.forward(
             &attn,
-            &attn,
-            &conv_state.narrow(1, 2 * kv_dim, hidden)?,
+            None,
+            conv_state.part(2 * kv_dim, hidden)?,
             dtype,
         )?;
         let attn = attn.to_dtype(dtype)?;
@@ -1020,9 +1188,7 @@ impl DecoderLayer {
         } else {
             (x + attn)?
         };
-        let all = states(&ffn_in, blocks);
-        let all: Vec<&Tensor> = all.iter().collect();
-        let mut h = mixed(&all, &self.mlp_query, 0, dtype, stacks)?;
+        let mut h = mixed(blocks, &ffn_in, &self.mlp_query, 0, dtype, stacks)?;
         if let Some((messages, lp)) = controllers {
             let message = messages.narrow(2, FFN_CONTROLLER, 1)?.squeeze(2)?;
             h = lp.controllers[FFN_CONTROLLER].forward(&h, &message)?;
@@ -1030,12 +1196,17 @@ impl DecoderLayer {
         let h = self.moe.forward(&self.ffn_norm.forward(&h)?)?;
         let (h, ffn_state) = self.post_mlp_conv.forward(
             &h,
-            &h,
-            &conv_state.narrow(1, 2 * kv_dim + hidden, hidden)?,
+            None,
+            conv_state.part(2 * kv_dim + hidden, hidden)?,
             dtype,
         )?;
         let out = (ffn_in + h.to_dtype(dtype)?)?;
-        let state = Tensor::cat(&[&k_state, &v_state, &attn_state, &ffn_state], 1)?;
+        let state = match (k_state, v_state, attn_state, ffn_state) {
+            (Some(k), Some(v), Some(attn), Some(ffn)) => {
+                Some(Tensor::cat(&[&k, &v, &attn, &ffn], 1)?)
+            }
+            _ => None,
+        };
         Ok((out, state))
     }
 }
@@ -1309,12 +1480,15 @@ impl Model {
                 Tensor::from_vec(tau, (1, t, 1, 1), &device)?.broadcast_as((b, t, 1, 1))
             })
             .transpose()?;
+        // a Vulkan decode step updates the pools' rows in place rather than gathering and scattering them
+        let in_place =
+            device.is_vulkan() && t == 1 && recurrent.batch_kind() == RecurrentBatchKind::Decode;
 
         let stacks = BlockStacks::default();
         let mut run = |layer: usize,
                        slot: usize,
                        x: &Tensor,
-                       blocks: &mut Vec<Tensor>,
+                       blocks: &mut Blocks,
                        messages: Option<&Tensor>|
          -> Result<Tensor> {
             let indices = cache
@@ -1322,16 +1496,31 @@ impl Model {
                 .ok_or_else(|| {
                     inference_tensor::Error::msg("Inkling 2: missing recurrent state indices")
                 })?;
-            let conv_state = {
+            let (pool, gathered) = {
                 let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(slots + slot) else {
                     inference_tensor::bail!("Inkling 2: slot {slot} has no convolution state");
                 };
-                let state = pool.gather_conv_state(&indices)?;
-                if fresh_state {
-                    state.zeros_like()?
+                if in_place {
+                    (Some(pool.conv_state.clone()), None)
                 } else {
-                    state
+                    let state = pool.gather_conv_state(&indices)?;
+                    let state = if fresh_state {
+                        state.zeros_like()?
+                    } else {
+                        state
+                    };
+                    (None, Some(state))
                 }
+            };
+            let pool_slots = if in_place {
+                Some(indices.to_dtype(DType::U32)?)
+            } else {
+                None
+            };
+            let conv_state = match (&pool, &pool_slots, &gathered) {
+                (Some(pool), Some(slots), _) => ConvState::Pool { pool, slots },
+                (_, _, Some(rows)) => ConvState::Rows(rows),
+                _ => unreachable!("a slot's states are pooled or gathered"),
             };
             let x = self.mapper.map(x.clone(), layer)?;
             let Some(HybridLayerCache::Attention(kv_cache)) = cache.get_mut(slot) else {
@@ -1373,19 +1562,21 @@ impl Model {
                     stacks: &stacks,
                 },
             )?;
-            let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(slots + slot) else {
-                inference_tensor::bail!("Inkling 2: slot {slot} has no convolution state");
-            };
-            pool.scatter_conv_state_with_host_indices(
-                &indices,
-                recurrent.state_indices_host(),
-                &state,
-            )?;
+            if let Some(state) = state {
+                let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(slots + slot) else {
+                    inference_tensor::bail!("Inkling 2: slot {slot} has no convolution state");
+                };
+                pool.scatter_conv_state_with_host_indices(
+                    &indices,
+                    recurrent.state_indices_host(),
+                    &state,
+                )?;
+            }
             Ok(out)
         };
 
         let lc = &cfg.loop_config;
-        let mut blocks = Vec::new();
+        let mut blocks = Blocks::default();
         let mut x = x;
         for layer in 0..lc.core_start {
             x = run(layer, layer, &x, &mut blocks, None)?;
@@ -1395,10 +1586,9 @@ impl Model {
         let prelude_blocks = blocks.clone();
         for pass in 0..lc.num_passes {
             // the previous pass's bank: its blocks after the first core block (the prelude's output), and its output
-            let bank = (pass > 0).then(|| {
-                let mut bank = blocks[prelude_blocks.len() + 1..].to_vec();
-                bank.push(x.clone());
-                bank
+            let mut bank = (pass > 0).then(|| {
+                let states = blocks.states[prelude_blocks.states.len() + 1..].to_vec();
+                (Blocks::new(states), x.clone())
             });
             if pass > 0 {
                 x = prelude.clone();
@@ -1407,15 +1597,14 @@ impl Model {
             let core = &self.layers[lc.core_start..lc.core_end];
             for (layer, decoder) in (lc.core_start..).zip(core) {
                 let slot = slot_of(cfg, pass, layer);
-                let messages = match &bank {
-                    Some(bank) => {
+                let messages = match &mut bank {
+                    Some((bank, bank_out)) => {
                         let lp = decoder.loop_layer.as_ref().ok_or_else(|| {
                             inference_tensor::Error::msg(
                                 "Inkling 2: a looped layer has no loop weights",
                             )
                         })?;
-                        let bank: Vec<&Tensor> = bank.iter().collect();
-                        Some(mix(&bank, &lp.queries, DType::F32, &stacks)?)
+                        Some(mix(bank, bank_out, &lp.queries, DType::F32, &stacks)?)
                     }
                     None => None,
                 };
@@ -1428,9 +1617,7 @@ impl Model {
         drop(cache);
 
         let x = self.mapper.cast_nm_device(&x, false)?;
-        let mut states: Vec<&Tensor> = blocks.iter().collect();
-        states.push(&x);
-        let x = mixed(&states, &self.final_query, 0, self.dtype, &stacks)?;
+        let x = mixed(&mut blocks, &x, &self.final_query, 0, self.dtype, &stacks)?;
         let x = self.norm.forward(&x)?;
         let x = ctx.logits(&x)?;
         let logits = ctx.lm_head(&*self.lm_head, &x)?;
