@@ -1,7 +1,8 @@
 //! External speculative drafters, separate models that draft for a target from its tapped hidden states: DFlash,
-//! DFlash 2, DSpark and DSpine. Target-agnostic; a target model supplies the taps, its embeddings and its lm_head.
+//! DFlash 2, DSpark (Inkling 2's own among them) and DSpine. Target-agnostic; a target model supplies the taps, its embeddings and its lm_head.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 pub mod dflash;
 pub mod dspine;
 pub mod host;
+mod inkling;

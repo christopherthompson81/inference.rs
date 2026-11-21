@@ -261,6 +261,10 @@ pub struct DFlashConfig {
     pub markov_head_type: Option<String>,
     pub sample_from_anchor: Option<bool>,
     pub draft_vocab_size: Option<usize>,
+    // Inkling 2's: the target's final softcap on the draft logits, and the vocabulary they are cut to (the head's
+    // rows past it are padding)
+    pub final_logit_softcapping: Option<f64>,
+    pub logit_vocab_size: Option<usize>,
     #[serde(default)]
     pub dflash_config: DFlashSpecificConfig,
     // DSpine: the serial refinement table, beside `dflash_config.selected_prefix_last_write_refine`
@@ -288,6 +292,21 @@ impl DFlashConfig {
 
     fn is_dspine(&self) -> bool {
         self.architectures.iter().any(|a| a.contains(DSPINE))
+    }
+
+    fn is_inkling(&self) -> bool {
+        self.architectures
+            .iter()
+            .any(|a| a == crate::inkling::ARCHITECTURE)
+    }
+
+    /// Whether a safetensors file of the drafter's directory holds its weights (an Inkling 2 checkpoint keeps its
+    /// drafter apart from the target's shards).
+    pub fn reads_weight_file(&self, path: &std::path::Path) -> bool {
+        !self.is_inkling()
+            || path
+                .file_name()
+                .is_some_and(|n| n == crate::inkling::WEIGHTS)
     }
 
     /// Whether a checkpoint tensor loads at the model dtype under a drafter weight type (DSpine's code bridge).
@@ -432,7 +451,10 @@ impl DFlashConfig {
     /// DSpark's Markov head rank, or None when the drafter has no head; only the vanilla head exists.
     fn markov_rank(&self) -> Result<Option<usize>> {
         let rank = self.markov_rank.filter(|rank| *rank > 0);
+        let rnn =
+            self.is_inkling() && crate::inkling::is_rnn_head(self.markov_head_type.as_deref());
         if rank.is_some()
+            && !rnn
             && let Some(kind) = self.markov_head_type.as_deref()
             && kind != DSPARK_MARKOV_HEAD_TYPE
         {
@@ -565,6 +587,22 @@ impl MarkovHead {
         }
         Tensor::stack(&picks, 1)
     }
+}
+
+enum Markov {
+    Vanilla(MarkovHead),
+    Recurrent(crate::inkling::RnnMarkovHead),
+}
+
+// how context rows become each draft layer's keys and values
+enum ContextProjection {
+    // one `fc` over the taps side by side, normalized, then every layer's K and V in one product
+    Fused {
+        fc: Arc<dyn QuantMethod>,
+        hidden_norm: RmsNorm,
+        kv_proj: Arc<dyn QuantMethod>,
+    },
+    DFlare(crate::inkling::DFlareContext),
 }
 
 struct DynamicConv {
@@ -1051,6 +1089,8 @@ pub struct DFlashPreparedContext {
     k: Tensor,
     v: Tensor,
     rows: usize,
+    // `[rows, hidden]` each row's recurrent Markov head context
+    markov: Option<Tensor>,
 }
 
 fn contiguous_row_range(indices: &[u32]) -> Option<(usize, usize)> {
@@ -1150,6 +1190,8 @@ pub struct DFlashSamplingInputs<'a> {
 pub struct DraftHidden {
     pub rows: Tensor,
     stash: Option<BridgeStash>,
+    // `[batch, hidden]` each sequence's recurrent Markov head context
+    markov_context: Option<Tensor>,
 }
 
 pub enum DFlashProposalBatch {
@@ -1476,11 +1518,9 @@ pub struct DFlashDraftModel {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     cuda_graphs: Mutex<DFlashCudaGraphState>,
     layers: Vec<DFlashLayer>,
-    fc: Arc<dyn QuantMethod>,
-    context_kv_proj: Arc<dyn QuantMethod>,
+    context: ContextProjection,
     #[cfg(feature = "cuda")]
     context_k_norm_weights: Option<Tensor>,
-    hidden_norm: RmsNorm,
     norm: RmsNorm,
     selector: Option<CandidateSelector>,
     draft_sampling_method: MtpDraftSamplingMethod,
@@ -1491,7 +1531,11 @@ pub struct DFlashDraftModel {
     // noise rows per block; the first `draft_row_offset` of them only condition, the rest draft
     block_size: usize,
     draft_row_offset: usize,
-    markov: Option<MarkovHead>,
+    markov: Option<Markov>,
+    // each sequence's Markov head context from its last committed row (Inkling 2's recurrent head)
+    markov_contexts: Mutex<HashMap<usize, Tensor>>,
+    // local layers see the window before the block's start, whatever the row (Inkling 2's)
+    windows_from_block_start: bool,
     dspine: Option<DSpineHead>,
     // a full-attention drafter keeps its layers in the target's paged cache, from this layer index on
     full_attention: bool,
@@ -2354,9 +2398,17 @@ fn drafter_config_text(config: &MtpConfig) -> Result<Option<String>> {
     if path.is_file() {
         return Ok(None);
     }
-    fs::read_to_string(path.join("config.json"))
-        .map(Some)
-        .map_err(|e| inference_tensor::Error::Msg(format!("failed to read MTP model config: {e}")))
+    let raw = fs::read_to_string(path.join("config.json")).map_err(|e| {
+        inference_tensor::Error::Msg(format!("failed to read MTP model config: {e}"))
+    })?;
+    // an Inkling 2 checkpoint's own drafter is described by its `mtp_config`
+    let inkling = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|value| crate::inkling::drafter_config(&value));
+    Ok(Some(match inkling {
+        Some(config) => config.to_string(),
+        None => raw,
+    }))
 }
 
 pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
@@ -2504,8 +2556,8 @@ impl DFlashDraftModel {
             dtype,
         } = target;
         let path = config.resolve_path()?;
-        let raw = fs::read_to_string(path.join("config.json")).map_err(|e| {
-            inference_tensor::Error::Msg(format!("failed to read DFlash config: {e}"))
+        let raw = drafter_config_text(config)?.ok_or_else(|| {
+            inference_tensor::Error::msg("a DFlash draft model is a directory with its config")
         })?;
         let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
         if !cfg.is_dflash() {
@@ -2557,6 +2609,7 @@ impl DFlashDraftModel {
             })?
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|ext| ext == "safetensors"))
+            .filter(|p| cfg.reads_weight_file(p))
             .collect::<Vec<_>>();
         weight_paths.sort();
         if weight_paths.is_empty() {
@@ -2605,8 +2658,8 @@ impl DFlashDraftModel {
             let (is_causal, sliding_window) = cfg.layer_attention(i);
             let q_size = cfg.num_attention_heads * head_dim;
             let kv_size = cfg.num_key_value_heads * head_dim;
-            // a cached drafter reads none of these, its context projection included
-            if !cached {
+            // a cached drafter reads none of these, its context projection included (Inkling 2's projects its own)
+            if !cached || cfg.is_inkling() {
                 context_kv_weights.push(host_attn.pp("k_proj").get((kv_size, hidden), "weight")?);
                 context_kv_weights.push(host_attn.pp("v_proj").get((kv_size, hidden), "weight")?);
             }
@@ -2688,23 +2741,47 @@ impl DFlashDraftModel {
                 sliding_window,
             });
         }
-        let context_kv_proj = linears.linear("context_kv_proj", || {
-            Tensor::cat(&context_kv_weights.iter().collect::<Vec<_>>(), 0)
-        })?;
+        let context = if cfg.is_inkling() {
+            ContextProjection::DFlare(crate::inkling::DFlareContext::load(
+                &vb,
+                crate::inkling::DFlareShape {
+                    layers: cfg.num_hidden_layers,
+                    taps: target_layer_ids.len(),
+                    hidden,
+                    kv_size: cfg.num_key_value_heads * head_dim,
+                    head_dim,
+                    eps,
+                },
+                &mut |name: &str, weight: Tensor| linears.linear(name, || Ok(weight)),
+            )?)
+        } else {
+            let kv_proj = linears.linear("context_kv_proj", || {
+                Tensor::cat(&context_kv_weights.iter().collect::<Vec<_>>(), 0)
+            })?;
+            let fc_cols = target_layer_ids.len() * hidden;
+            let fc = match modelopt_nvfp4(&vb_host.pp("fc"), hidden, fc_cols)? {
+                Some(weight) => gguf_nvfp4_linear(&[weight], device)?.0,
+                None => {
+                    linears.linear("fc", || vb_host.pp("fc").get((hidden, fc_cols), "weight"))?
+                }
+            };
+            ContextProjection::Fused {
+                fc,
+                hidden_norm: RmsNorm::new(hidden, eps, vb.pp("hidden_norm"))?,
+                kv_proj,
+            }
+        };
         #[cfg(feature = "cuda")]
         let context_k_norm_weights = if device.is_cuda() {
-            let weights = layers
-                .iter()
-                .map(|layer| layer.k_norm.weight().clone())
+            let weights = (0..layers.len())
+                .map(|i| match &context {
+                    ContextProjection::DFlare(dflare) => dflare.k_norms[i].weight().clone(),
+                    ContextProjection::Fused { .. } => layers[i].k_norm.weight().clone(),
+                })
                 .collect::<Vec<_>>();
             Some(Tensor::stack(&weights, 0)?)
         } else {
             None
-        };
-        let fc_cols = target_layer_ids.len() * hidden;
-        let fc = match modelopt_nvfp4(&vb_host.pp("fc"), hidden, fc_cols)? {
-            Some(weight) => gguf_nvfp4_linear(&[weight], device)?.0,
-            None => linears.linear("fc", || vb_host.pp("fc").get((hidden, fc_cols), "weight"))?,
         };
         let dspine_spec = cfg
             .is_dspine()
@@ -2742,6 +2819,7 @@ impl DFlashDraftModel {
             })
             .transpose()?;
         linears.finish();
+        let inkling_mask = crate::inkling::mask_embedding(&vb_host, hidden, dtype, device)?;
         let mask_embedding = vb_host
             .pp("embed_tokens")
             .contains_tensor("weight")
@@ -2763,13 +2841,39 @@ impl DFlashDraftModel {
                     .to_dtype(dtype)?
                     .to_device(device)
             })
-            .transpose()?;
+            .transpose()?
+            .or(inkling_mask);
         let selector = cfg
             .is_v2()
             .then(|| CandidateSelector::load(vb.pp("candidate_selector"), &cfg))
             .transpose()?;
         let markov = markov_rank
-            .map(|rank| MarkovHead::load(vb.pp("markov_head"), cfg.vocab_size, rank, device))
+            .map(|rank| -> Result<Markov> {
+                if cfg.is_inkling() {
+                    let softcap = cfg.final_logit_softcapping.ok_or_else(|| {
+                        inference_tensor::Error::msg(
+                            "Inkling 2's drafter needs the target's softcap",
+                        )
+                    })?;
+                    return Ok(Markov::Recurrent(crate::inkling::RnnMarkovHead::load(
+                        vb.pp("markov_head"),
+                        crate::inkling::RnnShape {
+                            dtype,
+                            padded_vocab: cfg.vocab_size,
+                            vocab: cfg.logit_vocab_size.unwrap_or(cfg.vocab_size),
+                            rank,
+                            hidden,
+                            softcap,
+                        },
+                    )?));
+                }
+                Ok(Markov::Vanilla(MarkovHead::load(
+                    vb.pp("markov_head"),
+                    cfg.vocab_size,
+                    rank,
+                    device,
+                )?))
+            })
             .transpose()?;
         let dspine = dspine_spec
             .zip(dspine_codebook)
@@ -2807,11 +2911,9 @@ impl DFlashDraftModel {
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             cuda_graphs: Mutex::new(DFlashCudaGraphState::default()),
             layers,
-            fc,
-            context_kv_proj,
+            context,
             #[cfg(feature = "cuda")]
             context_k_norm_weights,
-            hidden_norm: RmsNorm::new(hidden, eps, vb.pp("hidden_norm"))?,
             norm: RmsNorm::new(hidden, eps, vb.pp("norm"))?,
             selector,
             draft_sampling_method,
@@ -2822,6 +2924,8 @@ impl DFlashDraftModel {
             block_size: cfg.block_size(),
             draft_row_offset: cfg.draft_row_offset(),
             markov,
+            markov_contexts: Mutex::new(HashMap::new()),
+            windows_from_block_start: cfg.is_inkling(),
             dspine,
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             full_attention: cfg.auxiliary_paged_layers().is_some(),
@@ -3501,9 +3605,14 @@ impl DFlashDraftModel {
             .paged_next_pos
             .lock()
             .expect("dflash paged positions poisoned");
+        let mut contexts = self
+            .markov_contexts
+            .lock()
+            .expect("dflash markov contexts poisoned");
         for seq_id in seq_ids {
             ctx_cache.remove(seq_id);
             paged.remove(seq_id);
+            contexts.remove(seq_id);
         }
     }
 
@@ -3552,6 +3661,10 @@ impl DFlashDraftModel {
         self.paged_next_pos
             .lock()
             .expect("dflash paged positions poisoned")
+            .clear();
+        self.markov_contexts
+            .lock()
+            .expect("dflash markov contexts poisoned")
             .clear();
         self.dormant_seqs
             .lock()
@@ -3621,24 +3734,38 @@ impl DFlashDraftModel {
             inference_tensor::bail!("DFlash context append row count changed");
         }
         let packed = gather_ctx_taps(taps, flat_row_indices, &self.device)?;
-        let ctx_hidden = self
-            .hidden_norm
-            .forward(&self.fc.forward(&packed.to_dtype(self.dtype)?)?)?;
-        let all_kv = self
-            .context_kv_proj
-            .forward(&ctx_hidden)?
-            .squeeze(0)?
-            .reshape((
-                total,
-                self.layers.len(),
-                2,
-                self.num_kv_heads,
-                self.head_dim,
-            ))?
-            .permute((2, 1, 3, 0, 4))?
-            .contiguous()?;
-        let raw_k = all_kv.i(0)?;
-        let v_all = all_kv.i(1)?;
+        let (raw_k, v_all, markov) = match &self.context {
+            ContextProjection::Fused {
+                fc,
+                hidden_norm,
+                kv_proj,
+            } => {
+                let ctx_hidden =
+                    hidden_norm.forward(&fc.forward(&packed.to_dtype(self.dtype)?)?)?;
+                let all_kv = kv_proj
+                    .forward(&ctx_hidden)?
+                    .squeeze(0)?
+                    .reshape((
+                        total,
+                        self.layers.len(),
+                        2,
+                        self.num_kv_heads,
+                        self.head_dim,
+                    ))?
+                    .permute((2, 1, 3, 0, 4))?
+                    .contiguous()?;
+                (all_kv.i(0)?, all_kv.i(1)?, None)
+            }
+            ContextProjection::DFlare(dflare) => {
+                let packed = packed.squeeze(0)?;
+                let (k, v) =
+                    dflare.project(&packed, self.num_kv_heads, self.head_dim, self.dtype)?;
+                let markov = matches!(self.markov, Some(Markov::Recurrent(_)))
+                    .then(|| dflare.head_context(&packed))
+                    .transpose()?;
+                (k, v, markov)
+            }
+        };
         #[cfg(feature = "cuda")]
         let fused_k = if entries.iter().all(|entry| {
             entry
@@ -3686,8 +3813,8 @@ impl DFlashDraftModel {
             }
             let (cos, sin) = (Tensor::cat(&coss, 0)?, Tensor::cat(&sins, 0)?);
             let mut ks = Vec::with_capacity(self.layers.len());
-            for (i, layer) in self.layers.iter().enumerate() {
-                let k = layer.k_norm.forward(&raw_k.narrow(0, i, 1)?)?;
+            for i in 0..self.layers.len() {
+                let k = self.context_k_norm(i).forward(&raw_k.narrow(0, i, 1)?)?;
                 let k = self.rope(&k, &cos, &sin)?;
                 ks.push(k.squeeze(0)?);
             }
@@ -3698,7 +3825,16 @@ impl DFlashDraftModel {
             k: k_all,
             v: v_all,
             rows: total,
+            markov,
         })
+    }
+
+    // layer `i`'s norm of its context keys: its own (Inkling 2's) or its block keys'
+    fn context_k_norm(&self, i: usize) -> &RmsNorm {
+        match &self.context {
+            ContextProjection::DFlare(dflare) => &dflare.k_norms[i],
+            ContextProjection::Fused { .. } => &self.layers[i].k_norm,
+        }
     }
 
     pub fn commit_prepared_ctx_batch(
@@ -3719,6 +3855,21 @@ impl DFlashDraftModel {
                 .any(|row| usize::try_from(*row).map_or(true, |row| row >= prepared.rows))
         {
             inference_tensor::bail!("DFlash prepared context row selection is invalid");
+        }
+        if let Some(markov) = &prepared.markov {
+            let mut contexts = self
+                .markov_contexts
+                .lock()
+                .expect("dflash markov contexts poisoned");
+            let mut end = 0;
+            for (entry, rows) in entries.iter().zip(&rows) {
+                end += rows;
+                if *rows > 0 {
+                    let last = usize::try_from(row_indices[end - 1])
+                        .map_err(inference_tensor::Error::wrap)?;
+                    contexts.insert(entry.seq_id, markov.i(last)?);
+                }
+            }
         }
         let (k_all, v_all) = select_ctx_kv_rows(&prepared.k, &prepared.v, &row_indices)?;
         self.append_projected_ctx_batch(entries, &rows, &k_all, &v_all, paged)
@@ -4060,6 +4211,36 @@ impl DFlashDraftModel {
         start_positions: &[usize],
         paged: Option<DFlashPagedCache<'_>>,
     ) -> Result<DraftHidden> {
+        let mut drafted =
+            self.draft_hidden_rows(seq_ids, noise_embedding, anchors, start_positions, paged)?;
+        if matches!(self.markov, Some(Markov::Recurrent(_))) {
+            let contexts = self
+                .markov_contexts
+                .lock()
+                .expect("dflash markov contexts poisoned");
+            let rows = seq_ids
+                .iter()
+                .map(|seq_id| {
+                    contexts.get(seq_id).cloned().ok_or_else(|| {
+                        inference_tensor::Error::msg(
+                            "a recurrent Markov draft for a sequence with no committed context",
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            drafted.markov_context = Some(Tensor::stack(&rows, 0)?);
+        }
+        Ok(drafted)
+    }
+
+    fn draft_hidden_rows(
+        &self,
+        seq_ids: &[usize],
+        noise_embedding: &Tensor,
+        anchors: &[u32],
+        start_positions: &[usize],
+        paged: Option<DFlashPagedCache<'_>>,
+    ) -> Result<DraftHidden> {
         let (b, block, _) = noise_embedding.dims3()?;
         let anchors = self.bridge_anchors(anchors)?;
         let anchors = anchors.as_ref();
@@ -4371,6 +4552,7 @@ impl DFlashDraftModel {
             stash: stash
                 .map(|stash| stash.narrow_rows(start, len))
                 .transpose()?,
+            markov_context: None,
         })
     }
 
@@ -4597,14 +4779,16 @@ impl DFlashDraftModel {
                 }),
             };
         }
-        let hidden = drafted.rows;
-        let mut logits = lm_head.forward(&hidden)?;
+        let mut logits = lm_head.forward(&drafted.rows)?;
         if (self.output_multiplier - 1.0).abs() > f64::EPSILON {
             logits = (logits * self.output_multiplier)?;
         }
+        let hidden = &drafted.rows;
         match key.selector_mode {
             DFlashSelectorMode::Disabled => Ok(DFlashCudaGraphOutput {
-                tokens: self.pick_greedy(&logits, &anchors)?.contiguous()?,
+                tokens: self
+                    .pick_greedy(&drafted, &logits, &anchors, &**lm_head)?
+                    .contiguous()?,
                 candidate_ids: None,
                 candidate_probs: None,
             }),
@@ -4613,7 +4797,7 @@ impl DFlashDraftModel {
                     .selector
                     .as_ref()
                     .expect("selector graph key requires a selector")
-                    .select_greedy_cuda(&hidden, &logits, &anchors)?
+                    .select_greedy_cuda(hidden, &logits, &anchors)?
                     .contiguous()?,
                 candidate_ids: None,
                 candidate_probs: None,
@@ -4624,7 +4808,7 @@ impl DFlashDraftModel {
                     .as_ref()
                     .expect("selector graph key requires a selector")
                     .select_sample_cuda(
-                        &hidden,
+                        hidden,
                         &logits,
                         &anchors,
                         &buffers
@@ -4725,7 +4909,8 @@ impl DFlashDraftModel {
             Some(selector) => selector.select_greedy_batch(hidden, &logits, anchors)?,
             None => {
                 let anchors = Tensor::from_vec(anchors.to_vec(), (batch,), logits.device())?;
-                self.pick_greedy(&logits, &anchors)?.to_vec2::<u32>()?
+                self.pick_greedy(drafted, &logits, &anchors, &**lm_head)?
+                    .to_vec2::<u32>()?
             }
         };
         Ok(DFlashProposalBatch::Tokens(tokens_per_seq))
@@ -4790,9 +4975,21 @@ impl DFlashDraftModel {
     }
 
     /// Greedy drafts `[batch, drafts]` without a selector: DSpark chains its Markov bias, DFlash takes the argmax.
-    fn pick_greedy(&self, logits: &Tensor, anchors: &Tensor) -> Result<Tensor> {
+    fn pick_greedy(
+        &self,
+        drafted: &DraftHidden,
+        logits: &Tensor,
+        anchors: &Tensor,
+        lm_head: &dyn QuantMethod,
+    ) -> Result<Tensor> {
         match &self.markov {
-            Some(markov) => markov.chain_greedy(logits, anchors),
+            Some(Markov::Vanilla(markov)) => markov.chain_greedy(logits, anchors),
+            Some(Markov::Recurrent(markov)) => {
+                let contexts = drafted.markov_context.as_ref().ok_or_else(|| {
+                    inference_tensor::Error::msg("a recurrent Markov head needs each context")
+                })?;
+                markov.chain_greedy(&drafted.rows, logits, contexts, anchors, lm_head)
+            }
             None => logits.argmax(D::Minus1),
         }
     }
@@ -4829,11 +5026,18 @@ impl DFlashDraftModel {
                 if is_causal {
                     visible &= kp <= qp;
                 }
-                if let Some(w) = sliding_window {
-                    visible &= qp.saturating_sub(kp) < w;
-                    if !is_causal {
-                        visible &= kp.saturating_sub(qp) < w;
+                match sliding_window {
+                    // the block sees itself and the window before its start
+                    Some(w) if self.windows_from_block_start => {
+                        visible &= kj >= ctx_len || ctx_len - kp <= w;
                     }
+                    Some(w) => {
+                        visible &= qp.saturating_sub(kp) < w;
+                        if !is_causal {
+                            visible &= kp.saturating_sub(qp) < w;
+                        }
+                    }
+                    None => {}
                 }
                 if !visible {
                     mask[qi * total + kj] = f32::NEG_INFINITY;
