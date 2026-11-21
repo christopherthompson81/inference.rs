@@ -359,7 +359,7 @@ impl Attention {
         &self,
         cfg: &Config,
         inputs: AttentionInputs<'_>,
-        rel: &RelativeInputs,
+        rel: Option<&RelativeInputs>,
         kv_cache: &mut KvCache,
         conv_state: &Tensor,
     ) -> Result<(Tensor, Tensor, Tensor)> {
@@ -437,6 +437,33 @@ impl Attention {
             }
         }
 
+        #[cfg(feature = "cuda")]
+        if q.device().is_cuda() {
+            let q = q.transpose(1, 2)?.contiguous()?;
+            let sinks = sinks.transpose(1, 2)?.contiguous()?;
+            let op = inference_nn::cuda::biased_attention::BiasedAttention {
+                q: &q,
+                k: &k,
+                v: &v,
+                table: &table,
+                sinks: &sinks,
+                window: if self.sliding {
+                    cfg.sliding_window_size
+                } else {
+                    0
+                },
+                scale: scale as f32,
+            };
+            if let Some(out) = inference_nn::cuda::biased_attention::biased_attention(&op)? {
+                let out = out.broadcast_mul(&inference_tensor::nn::ops::sigmoid(&gate)?)?;
+                let out = self.o_proj.forward(&out.to_dtype(inputs.q.dtype())?)?;
+                return Ok((out, k_state, v_state));
+            }
+        }
+
+        let rel = rel.ok_or_else(|| {
+            inference_tensor::Error::msg("Inkling 2: the fused attention did not take these inputs")
+        })?;
         // the bias of every (query, key) pair, `[b, h, t, s]`, gathered by distance
         let columns = rel.columns.broadcast_as((b, h, t, s))?.contiguous()?;
         let bias = table.gather(&columns, 3)?.broadcast_add(&rel.mask)?;
@@ -486,12 +513,13 @@ impl Moe {
         loading_isq: bool,
     ) -> Result<Self> {
         let gate_vb = vb.pp("gate");
+        // the router reads f32 inputs, so its weight stays f32 (as stored) whatever the model's dtype
         let gate = ReplicatedLayer::new(
             cfg.hidden_size,
             cfg.n_routed_experts,
             &None,
             false,
-            gate_vb.clone(),
+            gate_vb.clone().set_dtype(DType::F32),
         )?;
         let selection_bias = gate_vb
             .get(cfg.n_routed_experts, "e_score_correction_bias")?
@@ -557,6 +585,8 @@ struct Controller {
 impl Controller {
     fn new(cfg: &Config, vb: ShardedVarBuilder) -> Result<Self> {
         let (hidden, rank) = (cfg.hidden_size, cfg.loop_config.gate_rank);
+        // f32 as stored: the controller runs on f32 unit-normed inputs whatever the model's dtype
+        let vb = vb.set_dtype(DType::F32);
         Ok(Self {
             down: linear(2 * hidden, rank, cfg, vb.pp("down"))?,
             gain: linear(rank, hidden, cfg, vb.pp("gain"))?,
@@ -613,7 +643,8 @@ struct DecoderLayer {
 struct LayerStep<'a> {
     kv_cache: &'a mut KvCache,
     conv_state: Tensor,
-    rel: &'a RelativeInputs,
+    // `None` where the fused CUDA kernel computes the mask and the bias's columns itself
+    rel: Option<&'a RelativeInputs>,
     tau: &'a Tensor,
 }
 
@@ -946,14 +977,26 @@ impl Model {
             _ => inference_tensor::bail!("Inkling 2: slot 0 is not an attention cache"),
         };
         let device = x.device().clone();
-        let global = RelativeInputs::new(past, t, cfg.rel_extent, None, &device)?;
-        let sliding = RelativeInputs::new(
-            past,
-            t,
-            cfg.sliding_window_size,
-            Some(cfg.sliding_window_size),
-            &device,
-        )?;
+        // the fused CUDA attention computes the mask and the bias's columns itself
+        #[cfg(feature = "cuda")]
+        let fused = device.is_cuda()
+            && inference_nn::cuda::biased_attention::HEAD_DIMS.contains(&cfg.head_dim);
+        #[cfg(not(feature = "cuda"))]
+        let fused = false;
+        let rels = (!fused)
+            .then(|| -> Result<_> {
+                Ok((
+                    RelativeInputs::new(past, t, cfg.rel_extent, None, &device)?,
+                    RelativeInputs::new(
+                        past,
+                        t,
+                        cfg.sliding_window_size,
+                        Some(cfg.sliding_window_size),
+                        &device,
+                    )?,
+                ))
+            })
+            .transpose()?;
         // 1 + alpha log(max(1, (pos + 1) / floor))
         let tau = (0..t)
             .map(|i| {
@@ -989,11 +1032,13 @@ impl Model {
             let Some(HybridLayerCache::Attention(kv_cache)) = cache.get_mut(slot) else {
                 inference_tensor::bail!("Inkling 2: slot {slot} has no KV cache");
             };
-            let rel = if cfg.is_sliding(layer) {
-                &sliding
-            } else {
-                &global
-            };
+            let rel = rels.as_ref().map(|(global, sliding)| {
+                if cfg.is_sliding(layer) {
+                    sliding
+                } else {
+                    global
+                }
+            });
             let (out, state) = self.layers[layer].forward(
                 cfg,
                 &x,

@@ -1,8 +1,8 @@
 //! A tiny random-weight Inkling 2 (sliding and global layers with relative-position biases and per-query sinks, short
 //! convolutions with their state, block attention residuals, a looped core run three times under its controllers,
 //! softcapped SwiGLU experts and a padded vocabulary): decoding step by step through the KV and convolution states of
-//! every pass scores the tokens as one prefill over them does, on the CPU and on Vulkan, and a prompt past the window
-//! and the bias's extent scores on Vulkan as on the CPU.
+//! every pass scores the tokens as one prefill over them does, on the CPU, Vulkan and CUDA, and a prompt past the
+//! window and the bias's extent scores on Vulkan and CUDA as on the CPU.
 
 use std::collections::HashMap;
 
@@ -40,7 +40,8 @@ const GATE_RANK: usize = 8;
 const SLIDING: [usize; 4] = [0, 1, 3, 4];
 const HEADS: usize = 2;
 const KV_HEADS: usize = 1;
-const HEAD_DIM: usize = 16;
+// a head size the fused CUDA attention takes
+const HEAD_DIM: usize = 32;
 const D_REL: usize = 4;
 // short, so the chat prompt runs past both
 const REL_EXTENT: usize = 8;
@@ -55,6 +56,8 @@ const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
 // Vulkan's ops sum in other orders than the CPU's
 const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
+// CUDA's matmuls and the fused attention sum in other orders too
+const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 const LONG_PROMPT_REPEATS: usize = 6;
 
 fn config() -> serde_json::Value {
@@ -331,19 +334,15 @@ async fn a_vulkan_decode_scores_as_one_prefill() -> anyhow::Result<()> {
     decode_scores_as_prefill(Some("vulkan:0"), VULKAN_LOGPROB_TOLERANCE).await
 }
 
-#[tokio::test]
-async fn a_long_prompt_scores_on_vulkan_as_on_the_cpu() -> anyhow::Result<()> {
-    no_matrix_cores();
-    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
-        return Ok(());
-    }
-    // the CPU stores KV in f16 by default and Vulkan in f32
+// a prompt past the window and the bias's extent scores on `device` as on the CPU
+async fn long_prompt_scores_as_on_the_cpu(device: &str, tolerance: f32) -> anyhow::Result<()> {
+    // the CPU stores KV in f16 by default and the GPUs in f32
     // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
     unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
     let dir = checkpoint()?;
     let prompt = "say something long ".repeat(LONG_PROMPT_REPEATS);
     let mut scores = Vec::new();
-    for device in [None, Some("vulkan:0")] {
+    for device in [None, Some(device)] {
         let model = builder(&dir, device).build().await?;
         let tokens = model
             .tokenize_chat(ChatRequest::from(chat(&prompt)).request)
@@ -351,11 +350,36 @@ async fn a_long_prompt_scores_on_vulkan_as_on_the_cpu() -> anyhow::Result<()> {
             .tokens;
         scores.push(prompt_logprobs(&model, tokens).await?);
     }
-    for (position, (cpu, vulkan)) in scores[0].iter().zip(&scores[1]).enumerate().skip(1) {
+    for (position, (cpu, gpu)) in scores[0].iter().zip(&scores[1]).enumerate().skip(1) {
         anyhow::ensure!(
-            (cpu - vulkan).abs() < VULKAN_LOGPROB_TOLERANCE,
-            "position {position}: CPU {cpu}, Vulkan {vulkan}"
+            (cpu - gpu).abs() < tolerance,
+            "position {position}: CPU {cpu}, {device} {gpu}"
         );
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn a_long_prompt_scores_on_vulkan_as_on_the_cpu() -> anyhow::Result<()> {
+    no_matrix_cores();
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    long_prompt_scores_as_on_the_cpu("vulkan:0", VULKAN_LOGPROB_TOLERANCE).await
+}
+
+#[tokio::test]
+async fn a_cuda_decode_scores_as_one_prefill() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    decode_scores_as_prefill(Some("cuda:0"), CUDA_LOGPROB_TOLERANCE).await
+}
+
+#[tokio::test]
+async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    long_prompt_scores_as_on_the_cpu("cuda:0", CUDA_LOGPROB_TOLERANCE).await
 }
