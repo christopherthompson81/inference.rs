@@ -7,7 +7,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder};
+use inference_quant::{
+    QuantMethod, QuantMethodConfig, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder,
+    UnquantLinear,
+};
 use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 use serde::Serialize;
 
@@ -931,31 +934,37 @@ impl Moe {
 struct Controller {
     // `[rank, 2 hidden]`, then the gain's rows over the forget's, `[2 hidden, rank]`, applied transposed: each output
     // reads its own contiguous row; f32 as stored, on f32 unit-normed inputs whatever the model's dtype
-    down: Tensor,
-    gain_forget: Tensor,
+    down: Arc<dyn QuantMethod>,
+    gain_forget: Arc<dyn QuantMethod>,
+    hidden: usize,
 }
 
 impl Controller {
     fn new(cfg: &Config, vb: ShardedVarBuilder) -> Result<Self> {
         let (hidden, rank) = (cfg.hidden_size, cfg.loop_config.gate_rank);
-        let weight = |name: &str, shape: (usize, usize)| -> Result<Tensor> {
-            vb.pp(name).get(shape, "weight")?.to_dtype(DType::F32)
+        let vb = vb.set_dtype(DType::F32);
+        let weight = |name: &str, shape: (usize, usize)| vb.pp(name).get(shape, "weight");
+        // UnquantLinear: decode on CUDA takes its gemv, whose sums are llama.cpp's order (cuBLAS's drift greedy)
+        let proj = |w: Tensor| -> Result<Arc<dyn QuantMethod>> {
+            Ok(Arc::new(UnquantLinear::new(
+                QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(w, None)),
+            )?))
         };
         let gain = weight("gain", (hidden, rank))?;
         let forget = weight("forget", (hidden, rank))?;
         Ok(Self {
-            down: weight("down", (rank, 2 * hidden))?,
-            gain_forget: Tensor::cat(&[&gain, &forget], 0)?,
+            down: proj(weight("down", (rank, 2 * hidden))?)?,
+            gain_forget: proj(Tensor::cat(&[&gain, &forget], 0)?)?,
+            hidden,
         })
     }
 
     // the gain's and the forget's pre-activations, from the gate's down projection
     fn gain_forget(&self, gate: &Tensor) -> Result<(Tensor, Tensor)> {
-        let hidden = self.gain_forget.dim(0)? / 2;
-        let both = gate
-            .to_dtype(DType::F32)?
-            .broadcast_matmul(&self.down.t()?)?
-            .broadcast_matmul(&self.gain_forget.t()?)?;
+        let hidden = self.hidden;
+        let both = self
+            .gain_forget
+            .forward(&self.down.forward(&gate.to_dtype(DType::F32)?)?)?;
         Ok((
             both.narrow(D::Minus1, 0, hidden)?.contiguous()?,
             both.narrow(D::Minus1, hidden, hidden)?.contiguous()?,

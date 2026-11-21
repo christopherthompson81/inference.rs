@@ -109,3 +109,27 @@ Tests: paged attention cases (shuffled blocks, pasts from a device array, prefil
 and the log scale, a BF16 cache) against the materialized form; the tiny model through the paged cache (decode
 against one prefill) and its paged decode rounds replaying graphs against eager pins, with and without graphs (its
 head size 64 now, which the graphs' paged check takes; the CPU step test stores KV in f32 for it).
+
+## Run 4 - 2026-11-21 12:10
+
+After #1037 (Vulkan decode work) merged on top of the paged work: the tiny model's paged graph-replay pins moved
+(0.35 logprob at step 1, with and without graphs) and the real GGUF's greedy left llama.cpp's on the photosynthesis
+prompt at char 346.
+
+- Bisect by hunk: the old `Controller` alone restores both. The new one read its weights through a `get` at the
+  model dtype (BF16 on the tiny model, then cast to f32: the pin drift) and ran its products as `broadcast_matmul`
+  (cuBLAS), where the old `UnquantLinear` took its decode gemv. The GGUF stores the controller in F32, so only the
+  summation order differed there; llama.cpp's matches the gemv's (at the divergence the old path picks " sun" -0.62
+  over " light" -0.86, logprobs ~0.1 apart from the new path's).
+- Fix: the weights load at F32 and run through `UnquantLinear`, the gain and forget kept as one concatenated product.
+- The GGUF's grouped q/k/v projections (#1037) move the printing-press prompt at char 52: a near tie (" the" -0.946,
+  " a" -0.969); with the groups off it matches llama.cpp to the end. Kept: rounding, not an error.
+
+```
+                              Run 3 (paged + graphs)   after #1037 + controller fix   llama.cpp
+tg128                         80.8                     84.9                           61.1
+pp512                         1956                     1926                           1486
+```
+
+Greedy against llama.cpp: photosynthesis and the third prompt identical through llama.cpp's output; printing press to
+char 52 (the tie above).
