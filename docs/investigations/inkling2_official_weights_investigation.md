@@ -195,3 +195,29 @@ Not the router: V6 (V0 with `ffn_gate_inp` at BF16, as the checkpoint computes i
 tokens: the base stores them, and neither load has a BOS to put first. The checkpoint's `hf_quant_config.json` also
 asks for NVFP4 activations (per-token amax, blocks of 16, `fouroversix_mae`) into the NVFP4 experts and MXFP8 ones
 into the MXFP8 experts; both our loads quantize activations to Q8_1 there, so the base itself departs from that.
+
+## Run 8 - 2026-11-21 23:30
+
+Bottom-up: the residual stream entering each of the 48 layer visits (24 layers, the core 6-17 three times) and inside
+the layers, dumped (an uncommitted env hook) for the first scored forward, one token, from the checkpoint load and
+from V1 (layers 0-19 as the checkpoint stores them).
+
+First divergence: layer 0's MoE (relative 4e-3), with its input, expert ids, routing weights and kernel path
+identical. The per-expert NVFP4 scales differed: the GGUF loader read `<weight>.scale` at the model's dtype (BF16,
+then F32), rounding each expert's scale by up to 2^-9 (6.1190956e-5 stored, 6.1035156e-5 = 2^-14 loaded). Fixed
+(read at F32; test `a_bf16_model_keeps_its_experts_f32_scales`). Rescored:
+
+```
+                         before fix   after fix
+recipe A                 0.00374      0.00377
+V1 (dense BF16)          0.00317      0.00329
+```
+
+Not the floor. With the scales fixed, visits 0-27 match exactly; the first divergence is visit 27 (layer 15, second
+pass), and V1 against itself is exact (deterministic). Inside it every input to the attention is identical (the
+controllers' inputs and outputs, the messages), and the q group's projections already differ: q by 3.4e-6 relative at
+visit 15 (absorbed by BF16 rounding downstream), the output gate by 1.4e-4 at visit 27, which survives. Both far under
+a BF16 step (3.9e-3), so summation order: the checkpoint's BF16 linears run `UnquantLinear`'s matmul and the GGUF's
+BF16 tensors the GGUF weight source's linear. The looped, routed model amplifies that (a near-tied expert flips,
+everything after diverges) into the ~0.003 floor. Neither load is wrong; the floor is this model's sensitivity to
+kernel noise, and recipe differences under ~0.0002 are inside it.

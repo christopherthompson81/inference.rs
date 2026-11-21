@@ -612,9 +612,9 @@ impl GgufWeightSource {
         if !self.bindings.contains_key(&name) {
             return Ok(None);
         }
+        // at F32, not the model's dtype: BF16 would round each expert's scale by up to 2^-9
         let scale = self
-            .materialize_tensor(&name, &Device::Cpu)?
-            .to_dtype(DType::F32)?
+            .materialize_tensor_dtype(&name, DType::F32, &Device::Cpu)?
             .flatten_all()?;
         Ok(Some(match scale.elem_count() {
             1 => GgufScale::Tensor(scale.to_vec1::<f32>()?[0]),
@@ -2139,6 +2139,7 @@ mod tests {
     fn scaled_nvfp4(
         experts: Option<usize>,
         scales: &[f32],
+        dtype: DType,
     ) -> Result<(NamedTempFile, Arc<GgufWeightSource>, Vec<u8>)> {
         const ROWS: usize = 2;
         let nvfp4 = GgufType::Nvfp4;
@@ -2196,7 +2197,7 @@ mod tests {
                 GgufTensorBinding::tensor("blk.0.w.weight"),
             )
             .with_binding("model.w.scale", GgufTensorBinding::tensor("blk.0.w.scale"));
-        let source = Arc::new(GgufWeightSource::new(archive, &bindings, DType::F32)?);
+        let source = Arc::new(GgufWeightSource::new(archive, &bindings, dtype)?);
         Ok((file, source, data))
     }
 
@@ -2204,7 +2205,7 @@ mod tests {
     #[test]
     fn a_raw_linear_applies_its_tensor_wide_scale() -> Result<()> {
         const SCALE: f32 = 0.25;
-        let (_file, source, data) = scaled_nvfp4(None, &[SCALE])?;
+        let (_file, source, data) = scaled_nvfp4(None, &[SCALE], DType::F32)?;
         let linear = source
             .load_linear("model.w", &Device::Cpu, Shard::default())?
             .unwrap();
@@ -2225,7 +2226,7 @@ mod tests {
     #[test]
     fn stacked_experts_apply_their_own_scales() -> Result<()> {
         const SCALES: [f32; 2] = [0.25, 3.0];
-        let (_file, source, data) = scaled_nvfp4(Some(SCALES.len()), &SCALES)?;
+        let (_file, source, data) = scaled_nvfp4(Some(SCALES.len()), &SCALES, DType::F32)?;
         let experts = source
             .load_linear("model.w", &Device::Cpu, Shard::default())?
             .unwrap();
@@ -2245,6 +2246,20 @@ mod tests {
                 * f64::from(SCALES[expert]))?;
             assert_close(&routed.get(token)?.reshape((1, 2))?, &expected)?;
         }
+        Ok(())
+    }
+
+    // a BF16 model's experts keep their F32 scales: BF16 would round them by up to 2^-9
+    #[test]
+    fn a_bf16_model_keeps_its_experts_f32_scales() -> Result<()> {
+        const SCALES: [f32; 2] = [4.505_967_4e-5, 1.0 + 1.0 / 4096.0];
+        let (_file, source, _) = scaled_nvfp4(Some(SCALES.len()), &SCALES, DType::BF16)?;
+        let experts = source
+            .load_linear("model.w", &Device::Cpu, Shard::default())?
+            .unwrap();
+        let scales = experts.expert_scales().expect("a scale an expert");
+        assert_eq!(scales.dtype(), DType::F32);
+        assert_eq!(scales.to_vec1::<f32>()?, SCALES);
         Ok(())
     }
 
