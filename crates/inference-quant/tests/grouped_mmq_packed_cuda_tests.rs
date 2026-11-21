@@ -1,7 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use inference_quant::{
-    GluActivationType, grouped_moe_mmq, grouped_moe_mmq_from_glu_packed,
+    GluActivationType, GluExpertScales, grouped_moe_mmq, grouped_moe_mmq_from_glu_packed,
     grouped_moe_mmq_from_glu_pair, grouped_moe_mmq_pair_packed, moe_dispatch_build,
 };
 use inference_tensor::{
@@ -161,6 +161,7 @@ fn packed_and_split_gate_up_glu_preserve_route_order() -> Result<()> {
         NUM_TOKENS,
         NUM_EXPERTS,
         GluActivationType::Silu as i32,
+        None,
         dev,
     )?;
     let down_from_pair = grouped_moe_mmq_from_glu_pair(
@@ -174,7 +175,46 @@ fn packed_and_split_gate_up_glu_preserve_route_order() -> Result<()> {
         NUM_TOKENS,
         NUM_EXPERTS,
         GluActivationType::Silu as i32,
+        None,
         dev,
     )?;
-    assert_close(&down_from_pair, &down_from_packed)
+    assert_close(&down_from_pair, &down_from_packed)?;
+
+    // each route's expert scales its gate and up rows before the activation, as rows scaled beforehand
+    let gate_scales = Tensor::new(&[0.5f32, 2.0, 1.5], &cuda)?;
+    let up_scales = Tensor::new(&[3.0f32, 0.25, 0.75], &cuda)?;
+    let scaled = grouped_moe_mmq_from_glu_packed(
+        &down,
+        &packed,
+        &sorted_token_ids,
+        &sorted_token_ids,
+        &expert_bounds,
+        TOTAL_ASSIGNMENTS,
+        NUM_TOKENS,
+        NUM_EXPERTS,
+        GluActivationType::Silu as i32,
+        Some(GluExpertScales {
+            row_experts: &topk_ids,
+            gate: &gate_scales,
+            up: &up_scales,
+        }),
+        dev,
+    )?;
+    let per_route =
+        |scales: &Tensor| -> Result<Tensor> { scales.index_select(&topk_ids, 0)?.unsqueeze(1) };
+    let prescaled = grouped_moe_mmq_from_glu_pair(
+        &down,
+        &gate_flat.broadcast_mul(&per_route(&gate_scales)?)?,
+        &up_flat.broadcast_mul(&per_route(&up_scales)?)?,
+        &sorted_token_ids,
+        &sorted_token_ids,
+        &expert_bounds,
+        TOTAL_ASSIGNMENTS,
+        NUM_TOKENS,
+        NUM_EXPERTS,
+        GluActivationType::Silu as i32,
+        None,
+        dev,
+    )?;
+    assert_close(&scaled, &prescaled)
 }

@@ -250,14 +250,15 @@ pub use gguf::cuda::{
 pub use gguf::expert_stack::{BounceRing, DeviceExpertStack, HostExpertStack};
 #[cfg(feature = "cuda")]
 pub use gguf::fast_mmq::{
-    grouped as grouped_moe_mmq, grouped_from_glu_packed as grouped_moe_mmq_from_glu_packed,
+    GluExpertScales, grouped as grouped_moe_mmq,
+    grouped_from_glu_packed as grouped_moe_mmq_from_glu_packed,
     grouped_from_glu_pair as grouped_moe_mmq_from_glu_pair, grouped_pair as grouped_moe_mmq_pair,
     grouped_pair_packed as grouped_moe_mmq_pair_packed, supports as supports_mmq,
     supports_weight as supports_mmq_weight,
 };
 #[cfg(feature = "cuda")]
 pub use gguf::fast_mmvq::{
-    moe_decode as indexed_moe_mmvq, moe_decode_gated as indexed_moe_mmvq_gated,
+    ExpertScales, moe_decode as indexed_moe_mmvq, moe_decode_gated as indexed_moe_mmvq_gated,
     moe_decode_ungated as indexed_moe_mmvq_ungated, supports_moe as supports_indexed_moe_mmvq,
     supports_moe_ungated as supports_indexed_moe_mmvq_ungated, with_shared_input,
 };

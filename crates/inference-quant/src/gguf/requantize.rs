@@ -21,6 +21,9 @@ use super::archive::{GgufDType, OVERLAY_GGUF_TYPE};
 use super::iq_quantize;
 use super::kernel::GgufType;
 
+// ggml's F32 tensor type
+const GGML_F32: u32 = 0;
+
 // rows a parallel task quantizes through `QTensor`
 const ROWS_PER_TASK: usize = 64;
 // the source bytes read at once: one expert of an expert stack, else rows up to this
@@ -176,6 +179,21 @@ impl HessianSource for HessianFile {
     }
 }
 
+/// A checkpoint the GGUF was made from, read in place of the GGUF's tensors where it holds them: its NVFP4 stacks
+/// written as stored, in llama.cpp's NVFP4 blocks with their experts' second-level scales beside them as
+/// `<weight>.scale` (`[experts]` F32) whatever the rules say, and tensors it stores in other formats (MXFP8) quantized
+/// by the rules from its values instead of from the GGUF's.
+pub trait CheckpointSource: Send + Sync {
+    /// Whether the checkpoint stores the GGUF tensor `tensor` as NVFP4.
+    fn holds_nvfp4(&self, tensor: &str) -> bool;
+    /// `tensor`'s NVFP4 blocks and its experts' scales.
+    fn read_nvfp4(&self, tensor: &str) -> Result<(Vec<u8>, Vec<f32>)>;
+    /// Whether the checkpoint holds `tensor`'s values in a format with no GGUF counterpart.
+    fn holds_values(&self, tensor: &str) -> bool;
+    /// `tensor`'s values, in the GGUF's layout.
+    fn values(&self, tensor: &str) -> Result<Vec<f32>>;
+}
+
 /// The rules for which tensors become which type, in order: the first pattern matching a name wins, and a tensor
 /// no pattern matches is copied as it is.
 pub struct RequantizePlan {
@@ -199,6 +217,8 @@ pub struct RequantizePlan {
     pub gptq_damp: f64,
     /// Hessians GPTQ's diagnostic report measures the encodings' error over in place of `hessians` (out of sample).
     pub report_hessians: Option<Box<dyn HessianSource>>,
+    /// The checkpoint the source was made from, read in place of its tensors where it holds them.
+    pub checkpoint: Option<Box<dyn CheckpointSource>>,
 }
 
 #[derive(Debug, Default)]
@@ -239,8 +259,14 @@ struct Planned<'a> {
     dims: Vec<usize>,
     source_type: u32,
     source_bytes: usize,
+    // the source GGUF's bytes, where the checkpoint's values stand in for them
+    input_bytes: usize,
     target: Option<GgufType>,
     size: usize,
+    // the checkpoint's NVFP4 blocks in place of the source's, its scales the entry after it
+    from_nvfp4: bool,
+    // quantized from the checkpoint's values (F32 in memory) in place of the source's
+    from_values: bool,
 }
 
 fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Result<Planned<'a>> {
@@ -248,7 +274,24 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
     let dims = info.shape.dims().to_vec();
     let cols = *dims.last().unwrap_or(&1);
     let rows = info.shape.elem_count() / cols.max(1);
-    let source = GgufDType::new(info.ggml_dtype);
+    let checkpoint = plan.checkpoint.as_ref();
+    let from_nvfp4 = checkpoint.is_some_and(|c| c.holds_nvfp4(name));
+    let rule = plan
+        .rules
+        .iter()
+        .find(|(re, _)| re.is_match(name))
+        .map(|(_, ty)| *ty);
+    // the checkpoint's values stand in for the source's only where a rule quantizes them
+    let from_values = !from_nvfp4
+        && dims.len() >= 2
+        && rule.is_some()
+        && checkpoint.is_some_and(|c| c.holds_values(name));
+    let source_type = if from_values {
+        GGML_F32
+    } else {
+        info.ggml_dtype
+    };
+    let source = GgufDType::new(source_type);
     let source_bytes = rows
         * source.row_size(cols).ok_or_else(|| {
             inference_tensor::Error::Msg(format!(
@@ -256,15 +299,19 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
                 source.name()
             ))
         })?;
-    let target = if dims.len() < 2 {
+    let target = if from_nvfp4 {
+        Some(GgufType::Nvfp4)
+    } else if from_values {
+        rule
+    } else if dims.len() < 2 {
         None
     } else {
-        plan.rules
-            .iter()
-            .find(|(re, _)| re.is_match(name))
-            .map(|(_, ty)| *ty)
-            .filter(|ty| ty.id() != info.ggml_dtype)
+        rule.filter(|ty| ty.id() != info.ggml_dtype)
     };
+    let input_bytes = rows
+        * GgufDType::new(info.ggml_dtype)
+            .row_size(cols)
+            .expect("the source's rows are whole blocks");
     let size = match target {
         Some(ty) => {
             rows * ty.row_bytes(cols).ok_or_else(|| {
@@ -276,11 +323,19 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
     Ok(Planned {
         name,
         dims,
-        source_type: info.ggml_dtype,
+        source_type,
         source_bytes,
+        input_bytes,
         target,
         size,
+        from_nvfp4,
+        from_values,
     })
+}
+
+// the `<weight>.scale` entry an NVFP4 source's stack carries
+fn scale_name(weight: &str) -> String {
+    format!("{}.scale", weight.strip_suffix(".weight").unwrap_or(weight))
 }
 
 // what GPTQ reads for a tensor before its GPU pass: its Hessians and its values, uploaded as stored and widened to
@@ -680,19 +735,35 @@ pub fn requantize_gguf(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut writer = BufWriter::new(File::create(dst)?);
-    let entries = tensors
+    // an NVFP4 source's stack is followed by its experts' scales
+    let scales = tensors
         .iter()
-        .map(|t| TensorEntry {
+        .filter(|t| t.from_nvfp4)
+        .map(|t| (scale_name(t.name), vec![t.dims[0]]))
+        .collect::<Vec<_>>();
+    let mut scale_entries = scales.iter();
+    let mut entries = Vec::with_capacity(tensors.len() + scales.len());
+    for t in &tensors {
+        entries.push(TensorEntry {
             name: t.name,
             dims: &t.dims,
             ggml_dtype: t.target.map_or(t.source_type, |ty| ty.id()),
             size_in_bytes: t.size,
-        })
-        .collect::<Vec<_>>();
+        });
+        if t.from_nvfp4 {
+            let (name, dims) = scale_entries.next().expect("one a stack");
+            entries.push(TensorEntry {
+                name,
+                dims,
+                ggml_dtype: GGML_F32,
+                size_in_bytes: dims[0] * std::mem::size_of::<f32>(),
+            });
+        }
+    }
     write_header(&mut writer, kv_count, &kv_bytes, &entries)?;
 
     let mut summary = RequantizeSummary {
-        tensors: tensors.len(),
+        tensors: entries.len(),
         ..Default::default()
     };
     let mut by_type = HashMap::<u32, (usize, u64)>::new();
@@ -706,6 +777,7 @@ pub fn requantize_gguf(
             plan.hessians.is_some()
                 && matches!(plan.gpu, Some(Device::Cuda(_)))
                 && t.target.is_some_and(super::gptq::supports)
+                && !t.from_values
                 && !t.target.is_some_and(|ty| {
                     reuse.iter().any(|(_, h)| {
                         h.tensor_infos.get(t.name).is_some_and(|info| {
@@ -762,12 +834,14 @@ pub fn requantize_gguf(
             let cols = *t.dims.last().unwrap_or(&1);
             let rows = t.dims.iter().product::<usize>() / cols.max(1);
             let source_row = t.source_bytes / rows.max(1);
+            // an NVFP4 source's stack is written as stored, which no imatrix weighs
             let imatrix = t
                 .target
+                .filter(|_| !t.from_nvfp4)
                 .and(plan.imatrix.as_ref())
                 .and_then(|m| m.get(t.name));
             if t.target.is_some() {
-                if plan.imatrix.is_some() && imatrix.is_none() {
+                if plan.imatrix.is_some() && imatrix.is_none() && !t.from_nvfp4 {
                     summary.without_imatrix.push(t.name.to_string());
                 }
                 summary.quantized += 1;
@@ -778,6 +852,36 @@ pub fn requantize_gguf(
                 && w.len() != cols * (rows / expert_rows.unwrap_or(rows))
             {
                 inference_tensor::bail!("{}: an imatrix of {} for rows of {cols}", t.name, w.len());
+            }
+            if t.from_nvfp4 {
+                let source = plan.checkpoint.as_ref().expect("planned from it");
+                let (blocks, scales) = source
+                    .read_nvfp4(t.name)
+                    .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
+                if blocks.len() != t.size || scales.len() != t.dims[0] {
+                    inference_tensor::bail!(
+                        "{}: the NVFP4 source holds {} bytes and {} scales, planned {} and {}",
+                        t.name,
+                        blocks.len(),
+                        scales.len(),
+                        t.size,
+                        t.dims[0]
+                    );
+                }
+                writer.write_all(&blocks)?;
+                write_tensor_padding(&mut writer, t.size)?;
+                let scale_bytes = scales
+                    .iter()
+                    .flat_map(|s| s.to_le_bytes())
+                    .collect::<Vec<_>>();
+                writer.write_all(&scale_bytes)?;
+                write_tensor_padding(&mut writer, scale_bytes.len())?;
+                summary.bytes_in += t.input_bytes as u64;
+                summary.bytes_out += (t.size + scale_bytes.len()) as u64;
+                let entry = by_type.entry(GgufType::Nvfp4.id()).or_default();
+                entry.0 += 1;
+                entry.1 += t.size as u64;
+                continue;
             }
             let reused = t.target.and_then(|ty| {
                 reuse.iter_mut().find(|(_, h)| {
@@ -800,7 +904,7 @@ pub fn requantize_gguf(
                 }
                 write_tensor_padding(&mut writer, t.size)?;
                 summary.reused += 1;
-                summary.bytes_in += t.source_bytes as u64;
+                summary.bytes_in += t.input_bytes as u64;
                 summary.bytes_out += t.size as u64;
                 let entry = by_type
                     .entry(t.target.map_or(t.source_type, |ty| ty.id()))
@@ -839,7 +943,7 @@ pub fn requantize_gguf(
                 write_tensor_padding(&mut writer, t.size)?;
                 drop(span);
                 summary.gptq += 1;
-                summary.bytes_in += t.source_bytes as u64;
+                summary.bytes_in += t.input_bytes as u64;
                 summary.bytes_out += t.size as u64;
                 let entry = by_type.entry(ty.id()).or_default();
                 entry.0 += 1;
@@ -856,10 +960,36 @@ pub fn requantize_gguf(
             };
             let mut written = 0usize;
             let mut bytes = Vec::new();
+            let mut values = match t.from_values {
+                true => {
+                    let source = plan.checkpoint.as_ref().expect("planned from it");
+                    let values = source
+                        .values(t.name)
+                        .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
+                    if values.len() * std::mem::size_of::<f32>() != t.source_bytes {
+                        inference_tensor::bail!(
+                            "{}: the checkpoint holds {} values, planned {}",
+                            t.name,
+                            values.len(),
+                            rows * cols
+                        );
+                    }
+                    Some(std::io::Cursor::new(
+                        values
+                            .iter()
+                            .flat_map(|v| v.to_le_bytes())
+                            .collect::<Vec<_>>(),
+                    ))
+                }
+                false => None,
+            };
             for first in (0..rows).step_by(slice_rows) {
                 let n = slice_rows.min(rows - first);
                 bytes.resize(n * source_row, 0);
-                reader.read_exact(&mut bytes)?;
+                match &mut values {
+                    Some(values) => values.read_exact(&mut bytes)?,
+                    None => reader.read_exact(&mut bytes)?,
+                }
                 let Some(ty) = t.target else {
                     writer.write_all(&bytes)?;
                     written += bytes.len();
@@ -903,7 +1033,7 @@ pub fn requantize_gguf(
                 inference_tensor::bail!("{}: wrote {written} bytes, planned {}", t.name, t.size);
             }
             write_tensor_padding(&mut writer, t.size)?;
-            summary.bytes_in += t.source_bytes as u64;
+            summary.bytes_in += t.input_bytes as u64;
             summary.bytes_out += t.size as u64;
             let entry = by_type
                 .entry(t.target.map_or(t.source_type, |ty| ty.id()))
@@ -1212,6 +1342,7 @@ mod tests {
             hessian_weights_only: false,
             gptq_damp: 0.0,
             report_hessians: None,
+            checkpoint: None,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -1238,6 +1369,7 @@ mod tests {
             hessian_weights_only: false,
             gptq_damp: 0.0,
             report_hessians: None,
+            checkpoint: None,
         };
         let overlaid = requantize_gguf(&src, &overlay, &overlaying, |_, _, _| {})?;
         assert_eq!(overlaid.tensors, 1);
@@ -1290,6 +1422,146 @@ mod tests {
         let dat = dir.path().join("imatrix.dat");
         save_legacy_imatrix(&imatrix, "synthetic", &dat)?;
         assert_eq!(load_imatrix(&dat)?, imatrix);
+        Ok(())
+    }
+
+    // an NVFP4 source's fixed blocks and scales for one expert stack
+    struct FixedNvfp4 {
+        tensor: &'static str,
+        blocks: Vec<u8>,
+        scales: Vec<f32>,
+        values_of: &'static str,
+        values: Vec<f32>,
+    }
+
+    impl CheckpointSource for FixedNvfp4 {
+        fn holds_nvfp4(&self, tensor: &str) -> bool {
+            tensor == self.tensor
+        }
+
+        fn read_nvfp4(&self, _tensor: &str) -> Result<(Vec<u8>, Vec<f32>)> {
+            Ok((self.blocks.clone(), self.scales.clone()))
+        }
+
+        fn holds_values(&self, tensor: &str) -> bool {
+            tensor == self.values_of
+        }
+
+        fn values(&self, _tensor: &str) -> Result<Vec<f32>> {
+            Ok(self.values.clone())
+        }
+    }
+
+    // a stack the checkpoint holds as NVFP4 is written as its blocks whatever the rules say, its scales the next
+    // tensor; a tensor it holds as values is quantized from them
+    #[test]
+    fn an_nvfp4_source_writes_its_stacks_and_their_scales() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (src, dst) = (dir.path().join("src.gguf"), dir.path().join("dst.gguf"));
+        let (experts, rows, cols) = (2, 2, 128);
+        let values = (0..experts * rows * cols)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 64.0)
+            .collect::<Vec<_>>();
+        let stack = Tensor::from_slice(&values, (experts, rows, cols), &Device::Cpu)?;
+        let other = Tensor::from_slice(&values[..rows * cols], (rows, cols), &Device::Cpu)?;
+        let tensors = [
+            (
+                "blk.0.ffn_down_exps.weight",
+                QTensor::quantize(&stack, GgmlDType::BF16)?,
+            ),
+            (
+                "blk.0.attn_q.weight",
+                QTensor::quantize(&other, GgmlDType::BF16)?,
+            ),
+        ];
+        let arch = Value::String("tiny".into());
+        let mut file = File::create(&src)?;
+        gguf_file::write(
+            &mut file,
+            &[("general.architecture", &arch)],
+            &tensors.iter().map(|(n, t)| (*n, t)).collect::<Vec<_>>(),
+        )?;
+        drop(file);
+        let size = experts * rows * GgufType::Nvfp4.row_bytes(cols).unwrap();
+        let blocks = (0..size).map(|i| (i * 13) as u8).collect::<Vec<_>>();
+        let scales = vec![0.5f32, 2.0];
+        // the checkpoint's own values of `attn_q`, which its quantization reads in place of the GGUF's
+        let checkpoint_values = values[..rows * cols]
+            .iter()
+            .map(|v| -v * 0.75)
+            .collect::<Vec<_>>();
+        let plan = RequantizePlan {
+            rules: vec![(Regex::new(r".*").unwrap(), writable_type("q8_0")?)],
+            imatrix: None,
+            quantizer: Quantizer::LlamaCpp,
+            reuse: Vec::new(),
+            only: None,
+            gpu: None,
+            hessians: None,
+            hessian_weights_only: false,
+            gptq_damp: 0.0,
+            report_hessians: None,
+            checkpoint: Some(Box::new(FixedNvfp4 {
+                tensor: "blk.0.ffn_down_exps.weight",
+                blocks: blocks.clone(),
+                scales: scales.clone(),
+                values_of: "blk.0.attn_q.weight",
+                values: checkpoint_values.clone(),
+            })),
+        };
+        let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
+        assert_eq!(summary.tensors, 3);
+        let mut reader = BufReader::new(File::open(&dst)?);
+        let header = Header::read(&mut reader)?;
+        assert_eq!(
+            header.tensor_order,
+            [
+                "blk.0.ffn_down_exps.weight",
+                "blk.0.ffn_down_exps.scale",
+                "blk.0.attn_q.weight"
+            ]
+        );
+        let read = |reader: &mut BufReader<File>, name: &str, len: usize| -> Result<Vec<u8>> {
+            let mut bytes = vec![0u8; len];
+            reader.seek(SeekFrom::Start(
+                header.tensor_data_offset + header.tensor_infos[name].offset,
+            ))?;
+            reader.read_exact(&mut bytes)?;
+            Ok(bytes)
+        };
+        let stack = &header.tensor_infos["blk.0.ffn_down_exps.weight"];
+        assert_eq!(stack.ggml_dtype, GgufType::Nvfp4.id());
+        assert_eq!(
+            read(&mut reader, "blk.0.ffn_down_exps.weight", size)?,
+            blocks
+        );
+        let scale = &header.tensor_infos["blk.0.ffn_down_exps.scale"];
+        assert_eq!(
+            (scale.ggml_dtype, scale.shape.dims()),
+            (GGML_F32, &[experts][..])
+        );
+        let stored = read(&mut reader, "blk.0.ffn_down_exps.scale", 4 * experts)?;
+        assert_eq!(
+            stored,
+            scales
+                .iter()
+                .flat_map(|s| s.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            header.tensor_infos["blk.0.attn_q.weight"].ggml_dtype,
+            GgufType::Q8_0.id()
+        );
+        let q8 = GgufType::Q8_0.row_bytes(cols).unwrap() * rows;
+        let expected = quantize_matrix(
+            GgufType::Q8_0,
+            cols,
+            &checkpoint_values,
+            None,
+            1,
+            Quantizer::LlamaCpp,
+        )?;
+        assert_eq!(read(&mut reader, "blk.0.attn_q.weight", q8)?, expected);
         Ok(())
     }
 }

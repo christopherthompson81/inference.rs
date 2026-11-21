@@ -226,14 +226,15 @@ inference quantize worldgen [OPTIONS] --models <MODELS> --output <OUTPUT_PATH>
 A float GGUF to a quantized GGUF: per-tensor types by name pattern, weighed by an imatrix
 
 ```
-inference quantize gguf [OPTIONS] --model <MODEL> --output <OUTPUT_PATH> --tensor-type <TENSOR_TYPES>
+inference quantize gguf [OPTIONS] --model <MODEL> --output <OUTPUT_PATH>
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `-m, --model <MODEL>` | required | The source `.gguf` (F32, F16 or BF16 tensors) |
 | `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path |
-| `--tensor-type <TENSOR_TYPES>` | required | `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`, `iq4_ks`, ...); tensors none matches are copied as they are |
+| `--tensor-type <TENSOR_TYPES>` |  | `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`, `iq4_ks`, ...); tensors none matches are copied as they are |
+| `--checkpoint <CHECKPOINT>` |  | The checkpoint the GGUF was made from (Inkling 2's own), read in place of its expert stacks: NVFP4 ones written as stored, in llama.cpp's NVFP4 blocks with their per-expert `<weight>.scale`, whatever the rules say; MXFP8 ones quantized by the rules from their values |
 | `--imatrix <IMATRIX>` |  | llama.cpp's imatrix (`.dat` or `.gguf`), keyed by the source's tensor names |
 | `--quantizer <QUANTIZER>` | `ik-llama` | Whose quantizer the bytes match: ik_llama.cpp's (the default) searches scales further for most types, for lower error at the same size; llama.cpp's writes its bytes exactly. Possible values: `llama-cpp`, `ik-llama`. |
 | `--reuse <REUSE>` |  | An earlier output from the same source, imatrix and quantizer, repeatable: tensors it holds at their planned type are copied from it rather than quantized again |

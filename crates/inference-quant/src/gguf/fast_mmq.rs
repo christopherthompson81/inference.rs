@@ -229,6 +229,9 @@ type QuantizeGluF32Launcher = unsafe extern "C" fn(
     ne1: i64,
     activation: i32,
     stream: *mut std::ffi::c_void,
+    row_experts: *const u32,
+    gate_scales: *const f32,
+    up_scales: *const f32,
 );
 
 type QuantizeGluLauncher = unsafe extern "C" fn(
@@ -1100,7 +1103,17 @@ struct GroupedGluRun<'a> {
     ncols_max: usize,
     num_experts: usize,
     activation: i32,
+    scales: Option<GluExpertScales<'a>>,
     dev: &'a CudaDevice,
+}
+
+/// The gate's and up's scale per expert (F32 `[experts]`), applied before the activation, with each assignment's expert
+/// (the flat `topk_ids`, U32) to look them up.
+#[derive(Clone, Copy)]
+pub struct GluExpertScales<'a> {
+    pub row_experts: &'a Tensor,
+    pub gate: &'a Tensor,
+    pub up: &'a Tensor,
 }
 
 fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
@@ -1116,6 +1129,7 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
         ncols_max,
         num_experts,
         activation,
+        scales,
         dev,
     } = run;
     let dtype = weight.gguf_type();
@@ -1206,6 +1220,42 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
     let (ids_dst_ptr, _ids_dst_guard) = slice_ptr(ids_dst, 0);
     let (bounds_ptr, _bounds_guard) = slice_ptr(expert_bounds, 0);
     let (out_ptr, _out_guard) = slice_ptr(&out, 0);
+    let scale_tensors = scales
+        .map(|s| -> Result<_> {
+            if s.row_experts.dtype() != DType::U32
+                || s.row_experts.elem_count() != total_assignments
+            {
+                inference_tensor::bail!(
+                    "fast_mmq grouped_from_glu: one u32 expert an assignment expected"
+                );
+            }
+            Ok([
+                s.row_experts.flatten_all()?.contiguous()?,
+                s.gate.to_dtype(DType::F32)?.contiguous()?,
+                s.up.to_dtype(DType::F32)?.contiguous()?,
+            ])
+        })
+        .transpose()?;
+    let scale_storages = scale_tensors
+        .iter()
+        .flatten()
+        .map(Tensor::storage_and_layout)
+        .collect::<Vec<_>>();
+    let mut scale_ptrs = [0u64; 3];
+    let mut _scale_guards = Vec::new();
+    // the row experts (u32), then the gate's and up's scales (f32)
+    for (i, (ptr, (storage, layout))) in scale_ptrs.iter_mut().zip(&scale_storages).enumerate() {
+        let Storage::Cuda(cuda) = &**storage else {
+            inference_tensor::bail!("fast_mmq grouped_from_glu: expert scales must live on CUDA");
+        };
+        let (p, guard) = match i {
+            0 => slice_ptr(cuda.as_cuda_slice::<u32>()?, layout.start_offset()),
+            _ => slice_ptr(cuda.as_cuda_slice::<f32>()?, layout.start_offset()),
+        };
+        *ptr = p;
+        _scale_guards.push(guard);
+    }
+    let [row_experts_ptr, gate_scales_ptr, up_scales_ptr] = scale_ptrs;
 
     unsafe {
         quantize(
@@ -1219,6 +1269,9 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
             total_assignments as i64,
             activation,
             stream_ptr,
+            row_experts_ptr as *const u32,
+            gate_scales_ptr as *const f32,
+            up_scales_ptr as *const f32,
         );
 
         launcher(
@@ -1271,6 +1324,7 @@ pub fn grouped_from_glu_pair(
     ncols_max: usize,
     num_experts: usize,
     activation: i32,
+    scales: Option<GluExpertScales<'_>>,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
     let gate = gate.contiguous()?;
@@ -1288,6 +1342,7 @@ pub fn grouped_from_glu_pair(
         ncols_max,
         num_experts,
         activation,
+        scales,
         dev,
     })
 }
@@ -1303,6 +1358,7 @@ pub fn grouped_from_glu_packed(
     ncols_max: usize,
     num_experts: usize,
     activation: i32,
+    scales: Option<GluExpertScales<'_>>,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
     let gate_up = gate_up.contiguous()?;
@@ -1324,6 +1380,7 @@ pub fn grouped_from_glu_packed(
         ncols_max,
         num_experts,
         activation,
+        scales,
         dev,
     })
 }

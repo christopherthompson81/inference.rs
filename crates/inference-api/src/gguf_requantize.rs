@@ -2,11 +2,12 @@
 
 pub use inference_core::{
     HessianDir, ImatrixMapping, MmprojSummary, cimatrix_for_gguf, hessians_for_gguf,
-    mmproj_architectures, write_mmproj, write_nemotron_transcribe_audio_gguf,
+    mmproj_architectures, official_checkpoint_experts, write_mmproj,
+    write_nemotron_transcribe_audio_gguf,
 };
 pub use inference_quant::requantize::{
-    DEFAULT_GPTQ_DAMP, HessianFile, HessianSource, Quantizer, RequantizePlan, RequantizeSummary,
-    load_imatrix, save_legacy_imatrix, writable_type,
+    CheckpointSource, DEFAULT_GPTQ_DAMP, HessianFile, HessianSource, Quantizer, RequantizePlan,
+    RequantizeSummary, load_imatrix, save_legacy_imatrix, writable_type,
 };
 
 /// `src` rewritten to `dst` as `plan` says ([`inference_quant::requantize::requantize_gguf`]), its GPU's memory pool
