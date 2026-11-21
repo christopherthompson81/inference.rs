@@ -152,7 +152,13 @@ pub fn split_mul_and_act_order(
 }
 
 /// `gate tanh(a / gate) sigmoid(a) * up tanh(b / up)`, in f32.
+// the caps are small constants, exact in f32
+#[allow(clippy::cast_possible_truncation)]
 pub fn softcap_silu_mul(a: &Tensor, b: &Tensor, gate: f64, up: f64) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(out) = crate::cuda::inkling::softcap_silu_mul(a, b, gate as f32, up as f32)? {
+        return Ok(out);
+    }
     let dtype = a.dtype();
     let (a, b) = (a.to_dtype(DType::F32)?, b.to_dtype(DType::F32)?);
     if a.device().is_vulkan() {

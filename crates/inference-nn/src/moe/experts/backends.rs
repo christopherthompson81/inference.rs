@@ -479,7 +479,8 @@ mod tests {
             quantized_grouped_prefill_lora_f16_matches_gather_pipeline,
             quantized_grouped_prefill_lora_f32_matches_gather_pipeline,
             ungated_grouped_prefill_matches_gather,
-            ungated_indexed_decode_matches_gather
+            ungated_indexed_decode_matches_gather,
+            unfused_activation_indexed_decode_matches_gather
         ]
     );
 
@@ -949,6 +950,38 @@ mod tests {
                 &actual,
                 &expected,
                 &format!("ungated indexed decode {up:?} {down:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    // an activation the matvec does not fuse (Inkling 2's softcapped SwiGLU) through the indexed decode, its gate and up
+    // rows apart, against the gather path
+    fn unfused_activation_indexed_decode_matches_gather() -> Result<()> {
+        const DECODE_TOKENS: usize = 3;
+        let device = Device::new_cuda(0)?;
+        let (hidden, inter) = (PREFILL_HIDDEN, PREFILL_INTERMEDIATE);
+        for [gate_up, down] in [
+            [GgmlDType::Q4_0, GgmlDType::Q5_0],
+            [GgmlDType::Q4K, GgmlDType::Q8_0],
+        ] {
+            let fast = FastExpertsWeights {
+                fused_gate_proj: prefill_projection(inter, hidden, 0.1, gate_up, &device)?,
+                fused_up_proj: prefill_projection(inter, hidden, 0.7, gate_up, &device)?,
+                fused_down_proj: prefill_projection(hidden, inter, 1.3, down, &device)?,
+                sharded: false,
+            };
+            let case = PrefillCase::with_tokens(&device, DECODE_TOKENS)?;
+            let act = Activation::SoftcapSilu(4.0, 25.0);
+            let (forward, config) = (case.forward(), PrefillCase::config(act));
+            let actual = fast
+                .forward_indexed_mmvq(&forward, config)?
+                .expect("these types take the indexed decode path");
+            let expected = fast.forward_gather(&forward, config)?;
+            assert_close(
+                &actual,
+                &expected,
+                &format!("indexed decode {gate_up:?} {down:?} {act:?}"),
             )?;
         }
         Ok(())
@@ -1976,24 +2009,33 @@ pub(super) fn indexed_mmvq_with(
     config: MoEForwardConfig,
 ) -> Result<Option<Tensor>> {
     {
-        let Some(activation) = glu_activation(config.act) else {
-            return Ok(None);
-        };
         if forward.lora.is_some()
             || forward.shape.num_tokens > INDEXED_MMVQ_MAX_TOKENS
             || !inference_quant::supports_indexed_moe_mmvq(gate, up, down)
         {
             return Ok(None);
         }
-        let routed = inference_quant::indexed_moe_mmvq(
-            gate,
-            up,
-            down,
-            forward.xs_flat,
-            forward.topk_ids,
-            config.num_experts_per_tok,
-            activation,
-        )?;
+        let routed = match glu_activation(config.act) {
+            Some(activation) => inference_quant::indexed_moe_mmvq(
+                gate,
+                up,
+                down,
+                forward.xs_flat,
+                forward.topk_ids,
+                config.num_experts_per_tok,
+                activation,
+            )?,
+            // an activation the matvec does not fuse runs over the gate's and up's rows between the launches
+            None => inference_quant::indexed_moe_mmvq_gated(
+                gate,
+                up,
+                down,
+                forward.xs_flat,
+                forward.topk_ids,
+                config.num_experts_per_tok,
+                &|g, u| crate::ops::mul_and_act(g, u, config.act),
+            )?,
+        };
         let out = weighted_reduce_f32(forward, &routed, config.num_experts_per_tok)?;
         Ok(Some(out.to_dtype(forward.original_dtype)?))
     }

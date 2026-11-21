@@ -127,6 +127,10 @@ impl Config {
 }
 
 fn unit_rms(x: &Tensor, eps: f64) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(out) = inference_nn::cuda::inkling::unit_rms(x, eps as f32)? {
+        return Ok(out);
+    }
     let x = x.to_dtype(DType::F32)?;
     let norm = (x.sqr()?.mean_keepdim(D::Minus1)? + eps)?.sqrt()?;
     x.broadcast_div(&norm)
@@ -134,6 +138,12 @@ fn unit_rms(x: &Tensor, eps: f64) -> Result<Tensor> {
 
 // each last-axis row (after the optional per-row scale) down to an L2 norm of at most `threshold`
 fn l2_clip(x: &Tensor, scale: Option<&Tensor>, threshold: f64) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(out) =
+        inference_nn::cuda::inkling::l2_clip(x, scale, threshold as f32, CLIP_EPS as f32)?
+    {
+        return Ok(out);
+    }
     let x = x.to_dtype(DType::F32)?;
     let x = match scale {
         Some(scale) => x.broadcast_mul(scale)?,
@@ -157,7 +167,13 @@ fn linear(
 }
 
 /// The depth mix: softmax attention of learned queries over the unit-normed states, `[b, t, queries, hidden]`.
-fn mix(states: &[&Tensor], queries: &Tensor) -> Result<Tensor> {
+fn mix(states: &[&Tensor], queries: &Tensor, out: DType) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(mixed) =
+        inference_nn::cuda::inkling::depth_mix(states, queries, UNIT_NORM_EPS as f32, out)?
+    {
+        return Ok(mixed);
+    }
     let (b, t, hidden) = states[0].dims3()?;
     let stacked = Tensor::stack(states, 2)?;
     let stacked = unit_rms(&stacked, UNIT_NORM_EPS)?.reshape((b * t, states.len(), hidden))?;
@@ -168,11 +184,12 @@ fn mix(states: &[&Tensor], queries: &Tensor) -> Result<Tensor> {
         .transpose(1, 2)?
         .contiguous()?
         .matmul(&stacked)?
-        .reshape((b, t, queries.dim(0)?, hidden))
+        .reshape((b, t, queries.dim(0)?, hidden))?
+        .to_dtype(out)
 }
 
-fn mixed(states: &[&Tensor], queries: &Tensor, i: usize) -> Result<Tensor> {
-    mix(states, queries)?.narrow(2, i, 1)?.squeeze(2)
+fn mixed(states: &[&Tensor], queries: &Tensor, i: usize, out: DType) -> Result<Tensor> {
+    mix(states, queries, out)?.narrow(2, i, 1)?.squeeze(2)
 }
 
 /// A causal depthwise convolution with a residual, its last `width - 1` inputs carried in `[b, c, width - 1]`
@@ -188,9 +205,41 @@ impl ShortConv {
         vb.get((channels, width), "weight")?.to_dtype(DType::F32)
     }
 
-    fn forward(&self, x: &Tensor, dyn_input: &Tensor, state: &Tensor) -> Result<(Tensor, Tensor)> {
+    // `out_dtype`: the output's, f32 or x's
+    fn forward(
+        &self,
+        x: &Tensor,
+        dyn_input: &Tensor,
+        state: &Tensor,
+        out_dtype: DType,
+    ) -> Result<(Tensor, Tensor)> {
         let (b, t, c) = x.dims3()?;
         let width = self.weight.dim(1)?;
+        #[cfg(feature = "cuda")]
+        if x.device().is_cuda() {
+            let taps = self
+                .taps
+                .as_ref()
+                .map(|(proj, heads)| -> Result<_> {
+                    Ok((
+                        proj.forward(dyn_input)?
+                            .to_dtype(DType::F32)?
+                            .reshape((b, t, *heads, width))?,
+                        *heads,
+                    ))
+                })
+                .transpose()?;
+            let taps = taps.as_ref().map(|(taps, heads)| (taps, *heads));
+            if let Some(convolved) = inference_nn::cuda::inkling::short_conv(
+                x,
+                state,
+                &self.weight,
+                taps,
+                out_dtype != DType::F32,
+            )? {
+                return Ok(convolved);
+            }
+        }
         let x = x.to_dtype(DType::F32)?;
         let ctx = Tensor::cat(&[&state.to_dtype(DType::F32)?.transpose(1, 2)?, &x], 1)?;
         let mut out = x.clone();
@@ -214,7 +263,10 @@ impl ShortConv {
             terms += width;
         }
         let new_state = ctx.narrow(1, t, width - 1)?.transpose(1, 2)?.contiguous()?;
-        Ok(((out / (terms as f64).sqrt())?, new_state))
+        Ok((
+            (out / (terms as f64).sqrt())?.to_dtype(out_dtype)?,
+            new_state,
+        ))
     }
 }
 
@@ -359,7 +411,7 @@ impl Attention {
         &self,
         cfg: &Config,
         inputs: AttentionInputs<'_>,
-        rel: &RelativeInputs,
+        rel: Option<&RelativeInputs>,
         kv_cache: &mut KvCache,
         conv_state: &Tensor,
     ) -> Result<(Tensor, Tensor, Tensor)> {
@@ -370,17 +422,24 @@ impl Attention {
         let v_state = conv_state.narrow(1, kv_dim, kv_dim)?;
 
         let q = self.q_proj.forward(inputs.q)?.reshape((b, t, h, hd))?;
-        let (k, k_state) =
-            self.k_conv
-                .forward(&self.k_proj.forward(inputs.k)?, inputs.k, &k_state)?;
-        let (v, v_state) =
-            self.v_conv
-                .forward(&self.v_proj.forward(inputs.v)?, inputs.v, &v_state)?;
+        let (k, k_state) = self.k_conv.forward(
+            &self.k_proj.forward(inputs.k)?,
+            inputs.k,
+            &k_state,
+            DType::F32,
+        )?;
+        let (v, v_state) = self.v_conv.forward(
+            &self.v_proj.forward(inputs.v)?,
+            inputs.v,
+            &v_state,
+            DType::F32,
+        )?;
         let r = self
             .r_proj
             .forward(inputs.q)?
             .reshape((b, t, h, self.d_rel))?;
-        let gate = self.gate_proj.forward(inputs.q)?.to_dtype(DType::F32)?;
+        let raw_gate = self.gate_proj.forward(inputs.q)?;
+        let gate = || raw_gate.to_dtype(DType::F32);
         let sinks = self.sink_proj.forward(inputs.q)?.to_dtype(DType::F32)?;
 
         let mut q = l2_clip(&q, Some(&self.q_clip), cfg.qk_l2_clip_threshold)?;
@@ -392,26 +451,31 @@ impl Attention {
             r = r.broadcast_mul(inputs.tau)?;
         }
 
-        let (k, v) = kv_cache.append(
-            &k.transpose(1, 2)?.contiguous()?,
-            &v.transpose(1, 2)?.contiguous()?,
-        )?;
+        // heads first for the cache; one position is that layout already
+        let heads_first = |x: Tensor| -> Result<Tensor> {
+            if t == 1 {
+                x.reshape((b, hkv, 1, hd))
+            } else {
+                x.transpose(1, 2)?.contiguous()
+            }
+        };
+        let (k, v) = kv_cache.append(&heads_first(k)?, &heads_first(v)?)?;
         let s = k.dim(2)?;
 
-        // each query's bias over the distances, `[b, h, t, extent + 1]`, the last column zero (past the extent)
-        let table = r
+        // each query's bias over the distances, `[b, t, h, extent + 1]`, the last column zero (past the extent)
+        let token_table = r
             .reshape((b * t * h, self.d_rel))?
             .matmul(&self.rel_bias)?
-            .reshape((b, t, h, self.extent + 1))?
-            .transpose(1, 2)?
-            .contiguous()?;
+            .reshape((b, t, h, self.extent + 1))?;
+        // `[b, h, t, extent + 1]` for the paths that take heads first
+        let table = || token_table.transpose(1, 2)?.contiguous();
         let scale = 1.0 / (hd as f64).sqrt();
 
         // one position on Vulkan: the fused kernel over the cache in place, the sink in the zero column's place
         if t == 1 && q.device().is_vulkan() {
             let bias = Tensor::cat(
                 &[
-                    &table.squeeze(2)?.narrow(2, 0, self.extent)?,
+                    &table()?.squeeze(2)?.narrow(2, 0, self.extent)?,
                     &sinks.transpose(1, 2)?,
                 ],
                 2,
@@ -431,15 +495,49 @@ impl Attention {
             };
             if let Some(out) = inference_tensor::vulkan::biased_decode(&op)? {
                 let out = out.reshape((b, t, h * hd))?;
-                let out = out.broadcast_mul(&inference_tensor::nn::ops::sigmoid(&gate)?)?;
+                let out = out.broadcast_mul(&inference_tensor::nn::ops::sigmoid(&gate()?)?)?;
                 let out = self.o_proj.forward(&out.to_dtype(inputs.q.dtype())?)?;
                 return Ok((out, k_state, v_state));
             }
         }
 
+        #[cfg(feature = "cuda")]
+        if q.device().is_cuda() {
+            let op = inference_nn::cuda::biased_attention::BiasedAttention {
+                q: &q,
+                k: &k,
+                v: &v,
+                table: &token_table,
+                sinks: &sinks,
+                window: if self.sliding {
+                    cfg.sliding_window_size
+                } else {
+                    0
+                },
+                scale: scale as f32,
+            };
+            if let Some(out) = inference_nn::cuda::biased_attention::biased_attention(&op)? {
+                let gated = match inference_nn::cuda::inkling::sigmoid_gate(
+                    &out,
+                    &raw_gate,
+                    inputs.q.dtype(),
+                )? {
+                    Some(gated) => gated,
+                    None => out
+                        .broadcast_mul(&inference_tensor::nn::ops::sigmoid(&gate()?)?)?
+                        .to_dtype(inputs.q.dtype())?,
+                };
+                let out = self.o_proj.forward(&gated)?;
+                return Ok((out, k_state, v_state));
+            }
+        }
+
+        let rel = rel.ok_or_else(|| {
+            inference_tensor::Error::msg("Inkling 2: the fused attention did not take these inputs")
+        })?;
         // the bias of every (query, key) pair, `[b, h, t, s]`, gathered by distance
         let columns = rel.columns.broadcast_as((b, h, t, s))?.contiguous()?;
-        let bias = table.gather(&columns, 3)?.broadcast_add(&rel.mask)?;
+        let bias = table()?.gather(&columns, 3)?.broadcast_add(&rel.mask)?;
 
         // the query heads of a kv head together, so K and V are read once
         let group = h / hkv;
@@ -463,7 +561,7 @@ impl Attention {
             .reshape((b, h, t, hd))?
             .transpose(1, 2)?
             .reshape((b, t, h * hd))?;
-        let out = out.broadcast_mul(&inference_tensor::nn::ops::sigmoid(&gate)?)?;
+        let out = out.broadcast_mul(&inference_tensor::nn::ops::sigmoid(&gate()?)?)?;
         let out = self.o_proj.forward(&out.to_dtype(inputs.q.dtype())?)?;
         Ok((out, k_state, v_state))
     }
@@ -486,12 +584,13 @@ impl Moe {
         loading_isq: bool,
     ) -> Result<Self> {
         let gate_vb = vb.pp("gate");
+        // the router reads f32 inputs, so its weight stays f32 (as stored) whatever the model's dtype
         let gate = ReplicatedLayer::new(
             cfg.hidden_size,
             cfg.n_routed_experts,
             &None,
             false,
-            gate_vb.clone(),
+            gate_vb.clone().set_dtype(DType::F32),
         )?;
         let selection_bias = gate_vb
             .get(cfg.n_routed_experts, "e_score_correction_bias")?
@@ -557,6 +656,8 @@ struct Controller {
 impl Controller {
     fn new(cfg: &Config, vb: ShardedVarBuilder) -> Result<Self> {
         let (hidden, rank) = (cfg.hidden_size, cfg.loop_config.gate_rank);
+        // f32 as stored: the controller runs on f32 unit-normed inputs whatever the model's dtype
+        let vb = vb.set_dtype(DType::F32);
         Ok(Self {
             down: linear(2 * hidden, rank, cfg, vb.pp("down"))?,
             gain: linear(rank, hidden, cfg, vb.pp("gain"))?,
@@ -566,6 +667,19 @@ impl Controller {
 
     fn forward(&self, x: &Tensor, message: &Tensor) -> Result<Tensor> {
         let dtype = x.dtype();
+        #[cfg(feature = "cuda")]
+        if let Some(gate) =
+            inference_nn::cuda::inkling::controller_in(x, message, UNIT_NORM_EPS as f32)?
+        {
+            let gate = self.down.forward(&gate)?;
+            let gain = self.gain.forward(&gate)?;
+            let forget = self.forget.forward(&gate)?;
+            if let Some(out) =
+                inference_nn::cuda::inkling::controller_out(x, message, &gain, &forget)?
+            {
+                return Ok(out);
+            }
+        }
         let gate = Tensor::cat(
             &[
                 &unit_rms(x, UNIT_NORM_EPS)?,
@@ -613,7 +727,8 @@ struct DecoderLayer {
 struct LayerStep<'a> {
     kv_cache: &'a mut KvCache,
     conv_state: Tensor,
-    rel: &'a RelativeInputs,
+    // `None` where the fused CUDA kernel computes the mask and the bias's columns itself
+    rel: Option<&'a RelativeInputs>,
     tau: &'a Tensor,
 }
 
@@ -711,7 +826,7 @@ impl DecoderLayer {
             Some(query) => {
                 let all = states(x, blocks);
                 let all: Vec<&Tensor> = all.iter().collect();
-                let m = mix(&all, query)?;
+                let m = mix(&all, query, dtype)?;
                 let pick = |j: usize| -> Result<Tensor> {
                     let j = if query.dim(0)? == 1 { 0 } else { j };
                     m.narrow(2, j, 1)?.squeeze(2)?.to_dtype(dtype)
@@ -768,6 +883,7 @@ impl DecoderLayer {
             &attn,
             &attn,
             &conv_state.narrow(1, 2 * kv_dim, hidden)?,
+            dtype,
         )?;
         let attn = attn.to_dtype(dtype)?;
 
@@ -780,7 +896,7 @@ impl DecoderLayer {
         };
         let all = states(&ffn_in, blocks);
         let all: Vec<&Tensor> = all.iter().collect();
-        let mut h = mixed(&all, &self.mlp_query, 0)?.to_dtype(dtype)?;
+        let mut h = mixed(&all, &self.mlp_query, 0, dtype)?;
         if let Some((messages, lp)) = controllers {
             let message = messages.narrow(2, FFN_CONTROLLER, 1)?.squeeze(2)?;
             h = lp.controllers[FFN_CONTROLLER].forward(&h, &message)?;
@@ -790,6 +906,7 @@ impl DecoderLayer {
             &h,
             &h,
             &conv_state.narrow(1, 2 * kv_dim + hidden, hidden)?,
+            dtype,
         )?;
         let out = (ffn_in + h.to_dtype(dtype)?)?;
         let state = Tensor::cat(&[&k_state, &v_state, &attn_state, &ffn_state], 1)?;
@@ -946,14 +1063,26 @@ impl Model {
             _ => inference_tensor::bail!("Inkling 2: slot 0 is not an attention cache"),
         };
         let device = x.device().clone();
-        let global = RelativeInputs::new(past, t, cfg.rel_extent, None, &device)?;
-        let sliding = RelativeInputs::new(
-            past,
-            t,
-            cfg.sliding_window_size,
-            Some(cfg.sliding_window_size),
-            &device,
-        )?;
+        // the fused CUDA attention computes the mask and the bias's columns itself
+        #[cfg(feature = "cuda")]
+        let fused = device.is_cuda()
+            && inference_nn::cuda::biased_attention::HEAD_DIMS.contains(&cfg.head_dim);
+        #[cfg(not(feature = "cuda"))]
+        let fused = false;
+        let rels = (!fused)
+            .then(|| -> Result<_> {
+                Ok((
+                    RelativeInputs::new(past, t, cfg.rel_extent, None, &device)?,
+                    RelativeInputs::new(
+                        past,
+                        t,
+                        cfg.sliding_window_size,
+                        Some(cfg.sliding_window_size),
+                        &device,
+                    )?,
+                ))
+            })
+            .transpose()?;
         // 1 + alpha log(max(1, (pos + 1) / floor))
         let tau = (0..t)
             .map(|i| {
@@ -989,11 +1118,13 @@ impl Model {
             let Some(HybridLayerCache::Attention(kv_cache)) = cache.get_mut(slot) else {
                 inference_tensor::bail!("Inkling 2: slot {slot} has no KV cache");
             };
-            let rel = if cfg.is_sliding(layer) {
-                &sliding
-            } else {
-                &global
-            };
+            let rel = rels.as_ref().map(|(global, sliding)| {
+                if cfg.is_sliding(layer) {
+                    sliding
+                } else {
+                    global
+                }
+            });
             let (out, state) = self.layers[layer].forward(
                 cfg,
                 &x,
@@ -1048,7 +1179,7 @@ impl Model {
                             )
                         })?;
                         let bank: Vec<&Tensor> = bank.iter().collect();
-                        Some(mix(&bank, &lp.queries)?)
+                        Some(mix(&bank, &lp.queries, DType::F32)?)
                     }
                     None => None,
                 };
@@ -1063,7 +1194,7 @@ impl Model {
         let x = self.mapper.cast_nm_device(&x, false)?;
         let mut states: Vec<&Tensor> = blocks.iter().collect();
         states.push(&x);
-        let x = mixed(&states, &self.final_query, 0)?.to_dtype(self.dtype)?;
+        let x = mixed(&states, &self.final_query, 0, self.dtype)?;
         let x = self.norm.forward(&x)?;
         let x = ctx.logits(&x)?;
         let logits = ctx.lm_head(&*self.lm_head, &x)?;
