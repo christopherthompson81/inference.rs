@@ -80,7 +80,15 @@ pub fn external_weight_size_in_bytes(
         paths.sort();
         paths
     };
-    let weight_paths = with_extension(&["safetensors"]);
+    #[cfg_attr(not(feature = "drafters"), allow(unused_mut))]
+    let mut weight_paths = with_extension(&["safetensors"]);
+    #[cfg(feature = "drafters")]
+    if let Some(dflash) = super::dflash::peek_config(&MtpConfig {
+        model: Some(path.to_string_lossy().into_owned()),
+        ..config.clone()
+    })? {
+        weight_paths.retain(|path| dflash.reads_weight_file(path));
+    }
     // a pickled drafter (some EAGLE-3 checkpoints) reserves its size on disk
     let pickled = || -> Option<usize> {
         let bytes = with_extension(PICKLE_EXTENSIONS)

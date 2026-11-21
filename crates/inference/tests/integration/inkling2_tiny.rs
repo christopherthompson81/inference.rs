@@ -901,3 +901,150 @@ async fn official_experts_scales_apply_on_cuda_as_folded_into_their_blocks() -> 
     let scored = chat_logprobs(&official_checkpoint(&scaled)?, Some("cuda:0")).await?;
     ensure_close(&scored, &expected, CUDA_LOGPROB_TOLERANCE)
 }
+
+// the checkpoint's own drafter (`mtp.safetensors`, random): two layers over the taps before visits 1 and 5 and the
+// normed output (the tiny model's 10 visits), blocks of 4
+const DRAFT_LAYERS: usize = 2;
+const DRAFT_BLOCK: usize = 4;
+const DRAFT_RANK: usize = 8;
+const DRAFT_TAPS: [usize; 3] = [1, 5, 10];
+const DRAFT_SEED: u64 = 0x6d74_7000;
+// past the bias's extent and the drafter's window, through many rejected and partly accepted blocks
+const DRAFT_DECODE_LEN: usize = 24;
+const DRAFT_LOGPROB_TOLERANCE: f32 = 0.06;
+
+fn drafter_config() -> serde_json::Value {
+    serde_json::json!({
+        "hidden_size": OFFICIAL.hidden,
+        "num_hidden_layers": DRAFT_LAYERS,
+        "num_attention_heads": HEADS,
+        "num_key_value_heads": KV_HEADS,
+        "head_dim": HEAD_DIM,
+        "intermediate_size": OFFICIAL.expert_width,
+        "max_position_embeddings": 4096,
+        "rms_norm_eps": 1e-6,
+        "rope_theta": 10000.0,
+        "local_layer_ids": [0],
+        "sliding_window_size": WINDOW,
+        "block_size": DRAFT_BLOCK,
+        "markov_rank": DRAFT_RANK,
+        "markov_head_type": "rnn_hidden",
+        "target_layer_ids": DRAFT_TAPS,
+    })
+}
+
+fn drafter_weights() -> anyhow::Result<HashMap<String, Tensor>> {
+    let rng = &mut StdRng::seed_from_u64(DRAFT_SEED);
+    let (h, r) = (OFFICIAL.hidden, DRAFT_RANK);
+    let (q_dim, kv_dim) = (HEADS * HEAD_DIM, KV_HEADS * HEAD_DIM);
+    let mut w = HashMap::new();
+    w.insert(
+        "fuse_weight".to_string(),
+        random(rng, &[DRAFT_LAYERS + 1, DRAFT_TAPS.len()])?,
+    );
+    w.insert("mask_embed".to_string(), random(rng, &[h])?);
+    w.insert("norm.weight".to_string(), near_one(rng, &[h])?);
+    for i in 0..DRAFT_LAYERS {
+        let p = format!("layers.{i}");
+        for norm in ["dflare_norm", "input_layernorm", "post_attention_layernorm"] {
+            w.insert(format!("{p}.{norm}.weight"), near_one(rng, &[h])?);
+        }
+        for norm in ["q_norm", "k_norm", "k_norm_ctx"] {
+            w.insert(
+                format!("{p}.self_attn.{norm}.weight"),
+                near_one(rng, &[HEAD_DIM])?,
+            );
+        }
+        for (name, rows, cols) in [
+            ("q_proj", q_dim, h),
+            ("k_proj", kv_dim, h),
+            ("v_proj", kv_dim, h),
+            ("k_proj_ctx", kv_dim, h),
+            ("v_proj_ctx", kv_dim, h),
+            ("o_proj", h, q_dim),
+        ] {
+            w.insert(
+                format!("{p}.self_attn.{name}.weight"),
+                random(rng, &[rows, cols])?,
+            );
+        }
+        let width = OFFICIAL.expert_width;
+        for (name, rows, cols) in [
+            ("gate_proj", width, h),
+            ("up_proj", width, h),
+            ("down_proj", h, width),
+        ] {
+            w.insert(
+                format!("{p}.mlp.{name}.weight"),
+                random(rng, &[rows, cols])?,
+            );
+        }
+    }
+    let m = "markov_head";
+    w.insert(format!("{m}.dflare_norm.weight"), near_one(rng, &[h])?);
+    w.insert(
+        format!("{m}.markov_w1.weight"),
+        random(rng, &[PADDED_VOCAB, r])?,
+    );
+    w.insert(
+        format!("{m}.rnn_proj.weight"),
+        random(rng, &[3 * r, 2 * r + 2 * h])?,
+    );
+    w.insert(format!("{m}.rnn_proj.bias"), random(rng, &[3 * r])?);
+    w.insert(format!("{m}.hidden_out.weight"), random(rng, &[h, r])?);
+    w.insert(format!("{m}.hidden_out.bias"), random(rng, &[h])?);
+    Ok(w)
+}
+
+async fn paged_trace(dir: &tempfile::TempDir, drafter: bool) -> anyhow::Result<traces::Trace> {
+    // BF16: the drafter's paged attention reads half-precision caches
+    let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_prefix_cache_n(None)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+    if drafter {
+        builder = builder.with_mtp_model(dir.path().to_string_lossy(), Some(DRAFT_BLOCK - 1));
+    }
+    let model = builder.build().await?;
+    Ok(
+        traces::greedy(&model, chat("say something long"), DRAFT_DECODE_LEN)
+            .await?
+            .0,
+    )
+}
+
+// drafting from the checkpoint's own drafter keeps the greedy output: each verify step's rejected rows are cut from
+// every slot's convolution states
+#[tokio::test]
+async fn the_checkpoint_drafter_keeps_greedy_output_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let (official, _) = official_weights(false)?;
+    let config = serde_json::json!({
+        "architectures": ["Inkling2LoopForConditionalGeneration"],
+        "model_type": "inkling2_loop",
+        "text_config": config(&OFFICIAL),
+        "mtp_config": drafter_config(),
+        "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+    });
+    let dir = write_checkpoint(config, &official)?;
+    inference_tensor::safetensors::save(&drafter_weights()?, dir.path().join("mtp.safetensors"))?;
+    let plain = paged_trace(&dir, false).await?;
+    let drafted = paged_trace(&dir, true).await?;
+    // a verify step's rows sum in other orders than a decode step's: equal up to a near tie, which may flip
+    for (step, (d, p)) in drafted.iter().zip(&plain).enumerate() {
+        anyhow::ensure!(
+            (d.1 - p.1).abs() < DRAFT_LOGPROB_TOLERANCE,
+            "step {step}: drafted {drafted:?}, plain {plain:?}"
+        );
+        if d.0 != p.0 {
+            return Ok(());
+        }
+    }
+    anyhow::ensure!(
+        drafted.len() == plain.len(),
+        "drafted {drafted:?}, plain {plain:?}"
+    );
+    Ok(())
+}
