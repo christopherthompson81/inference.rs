@@ -942,6 +942,44 @@ fn join_writer(writer: std::thread::JoinHandle<Result<()>>) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("the Hessian writer panicked"))?
 }
 
+// `states` run through `layer`, chunks of one length up to `STREAM_BATCH_CHUNKS` to a call, left on the GPU when
+// `resident` (else brought back to the host)
+#[cfg(feature = "cuda")]
+fn forward_batched(
+    layer: &dyn inference_nn::model::StreamedLayer,
+    states: &[Tensor],
+    gpu: &Device,
+    resident: bool,
+) -> Result<Vec<Tensor>> {
+    let mut out = Vec::with_capacity(states.len());
+    let mut i = 0;
+    while i < states.len() {
+        let dims = states[i].dims();
+        let mut j = i + 1;
+        while j < states.len() && j - i < STREAM_BATCH_CHUNKS && states[j].dims() == dims {
+            j += 1;
+        }
+        let xs = Tensor::cat(
+            &states[i..j]
+                .iter()
+                .map(|s| s.to_device(gpu))
+                .collect::<inference_tensor::Result<Vec<_>>>()?,
+            0,
+        )?;
+        let ys = layer.forward(&xs)?;
+        for k in 0..j - i {
+            let y = ys.narrow(0, k, 1)?;
+            out.push(if resident {
+                y
+            } else {
+                y.to_device(&Device::Cpu)?
+            });
+        }
+        i = j;
+    }
+    Ok(out)
+}
+
 // what a streamed run does with the states: collect each linear's Hessian into a directory, score the final logits
 // against a KL-divergence base, or write them as a new one
 #[cfg(feature = "cuda")]
@@ -1162,38 +1200,11 @@ fn run_streamed(
             let forward_span = profile::span("stream.forward", Some(&gpu));
             let before = (!candidates.is_empty()).then(|| states.clone());
             // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed);
-            // a plain pass batches chunks of one length, which the MoE's per-call costs (a launch per expert) dominate
-            let batched =
-                !score_only && twin_layer.is_none() && pairs.is_empty() && router_dump.is_none();
+            // a plain pass batches chunks of one length, which the MoE's per-call costs (a launch per expert)
+            // dominate. Batching moves the BF16 sums, so a base is written and scored batched alike
+            let batched = twin_layer.is_none() && pairs.is_empty() && router_dump.is_none();
             if batched {
-                let mut i = 0;
-                while i < states.len() {
-                    let len = states[i].dims().to_vec();
-                    let mut j = i + 1;
-                    while j < states.len()
-                        && j - i < STREAM_BATCH_CHUNKS
-                        && states[j].dims() == len.as_slice()
-                    {
-                        j += 1;
-                    }
-                    let xs = Tensor::cat(
-                        &states[i..j]
-                            .iter()
-                            .map(|s| s.to_device(&gpu))
-                            .collect::<inference_tensor::Result<Vec<_>>>()?,
-                        0,
-                    )?;
-                    let ys = layer.forward(&xs)?;
-                    for (k, state) in states[i..j].iter_mut().enumerate() {
-                        let y = ys.narrow(0, k, 1)?;
-                        *state = if resident {
-                            y
-                        } else {
-                            y.to_device(&Device::Cpu)?
-                        };
-                    }
-                    i = j;
-                }
+                states = forward_batched(&*layer, &states, &gpu, resident)?;
             }
             for (i, state) in states.iter_mut().enumerate().filter(|_| !batched) {
                 if twin_layer.is_some() && !free_routes {
@@ -1258,16 +1269,7 @@ fn run_streamed(
                     .then(|| stream.build_layer_from(layer_idx, &gpu, &candidate.weights))
                     .transpose()?;
                 let run_layer = own_layer.as_deref().unwrap_or(&*layer);
-                let mut next = Vec::with_capacity(input.len());
-                for state in &input {
-                    let out = run_layer.forward(&state.to_device(&gpu)?)?;
-                    next.push(if resident {
-                        out
-                    } else {
-                        out.to_device(&Device::Cpu)?
-                    });
-                }
-                *own_states = Some(next);
+                *own_states = Some(forward_batched(run_layer, &input, &gpu, resident)?);
             }
             drop(forward_span);
             let hessians_span = profile::span("stream.hessians", Some(&gpu));
