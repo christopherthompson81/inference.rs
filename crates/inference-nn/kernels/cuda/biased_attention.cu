@@ -1,6 +1,6 @@
-// Causal attention with a relative bias by distance and a sink (Inkling 2): each (batch, head, query) row of `table`
+// Causal attention with a relative bias by distance and a sink (Inkling 2): each (batch, query, head) row of `table`
 // holds the bias at distances 0..extent (none past them), `sinks` a logit of its own with a zero value per (batch,
-// head, query). Keys `window` or more back are hidden (0 for none); query i sits at position past + i. f32 throughout;
+// query, head); q is (batch, t, heads, head_dim). Keys `window` or more back are hidden (0 for none); query i sits at position past + i. f32 throughout;
 // K and V rows are contiguous, their heads and batches strided (a cache's narrowed view). The output is (batch, t,
 // heads, head_dim).
 #include <cuda_runtime.h>
@@ -11,8 +11,10 @@ namespace {
 
 constexpr int WARP = 32;
 constexpr int PREFILL_WARPS = 8;
-constexpr int DECODE_WARPS = 8;
+constexpr int DECODE_WARPS = 32;
 constexpr int KEY_TILE = WARP;
+// keys a decode warp loads before it folds them
+constexpr int DECODE_KEYS = 4;
 
 struct Args {
   const float* q;
@@ -85,7 +87,7 @@ __global__ void prefill_kernel(Args a) {
   const int i = i0 + warp;
   const bool valid = i < a.t;
   const int pos = a.past + i;
-  const int64_t row = (int64_t(batch) * a.heads + head) * a.t + i;
+  const int64_t row = (int64_t(batch) * a.t + i) * a.heads + head;
   if (valid) {
 #pragma unroll
     for (int r = 0; r < R; r++) qs[warp][lane + r * WARP] = a.q[row * HD + lane + r * WARP] * a.scale;
@@ -130,11 +132,11 @@ __global__ void prefill_kernel(Args a) {
   for (int r = 0; r < R; r++) o[lane + r * WARP] = acc[r] * inv;
 }
 
-// a block a query of one head, its warps splitting the keys (read from the cache directly), merged at the end
+// a block a query of one head, its warps splitting the keys, a lane R of the head's dims (so a key's K and V rows load
+// coalesced), DECODE_KEYS keys a step to keep loads in flight; the warps merged in shared memory at the end
 template <int R>
 __global__ void decode_kernel(Args a) {
   constexpr int HD = R * WARP;
-  __shared__ float qs[HD];
   __shared__ float sm[DECODE_WARPS];
   __shared__ float sl[DECODE_WARPS];
   __shared__ float sacc[DECODE_WARPS][HD];
@@ -145,11 +147,12 @@ __global__ void decode_kernel(Args a) {
   const int batch = blockIdx.z;
   const int kvh = head / (a.heads / a.kv_heads);
   const int pos = a.past + i;
-  const int64_t row = (int64_t(batch) * a.heads + head) * a.t + i;
-  for (int d = threadIdx.x; d < HD; d += blockDim.x) qs[d] = a.q[row * HD + d] * a.scale;
-  __syncthreads();
-  const float* kb = a.k + batch * a.k_batch + kvh * a.k_head;
-  const float* vb = a.v + batch * a.v_batch + kvh * a.v_head;
+  const int64_t row = (int64_t(batch) * a.t + i) * a.heads + head;
+  float qr[R];
+#pragma unroll
+  for (int r = 0; r < R; r++) qr[r] = a.q[row * HD + lane * R + r] * a.scale;
+  const float* kb = a.k + batch * a.k_batch + kvh * a.k_head + lane * R;
+  const float* vb = a.v + batch * a.v_batch + kvh * a.v_head + lane * R;
   const float* bias = a.table + row * (a.extent + 1);
   // the sink starts the first warp's softmax: its weight and no value
   float m = warp == 0 ? a.sinks[row] : -INFINITY;
@@ -158,34 +161,43 @@ __global__ void decode_kernel(Args a) {
 #pragma unroll
   for (int r = 0; r < R; r++) acc[r] = 0.0f;
   const int first = first_key(a, pos);
-  for (int base = first + warp * KEY_TILE; base <= pos; base += DECODE_WARPS * KEY_TILE) {
-    const int key = base + lane;
-    const bool visible = key <= pos && key < a.keys;
-    float s = 0.0f;
-    if (visible) {
-      const float4* kr = reinterpret_cast<const float4*>(kb + int64_t(key) * HD);
+  for (int base = first + warp * DECODE_KEYS; base <= pos; base += DECODE_WARPS * DECODE_KEYS) {
+    float s[DECODE_KEYS];
+    float vr[DECODE_KEYS][R];
 #pragma unroll
-      for (int d = 0; d < HD / 4; d++) {
-        const float4 kv = kr[d];
-        s += qs[4 * d] * kv.x + qs[4 * d + 1] * kv.y + qs[4 * d + 2] * kv.z + qs[4 * d + 3] * kv.w;
+    for (int j = 0; j < DECODE_KEYS; j++) {
+      const int key = min(base + j, pos);
+      float part = 0.0f;
+#pragma unroll
+      for (int r = 0; r < R; r++) {
+        part += qr[r] * kb[int64_t(key) * HD + r];
+        vr[j][r] = vb[int64_t(key) * HD + r];
       }
+      s[j] = part;
+    }
+#pragma unroll
+    for (int j = 0; j < DECODE_KEYS; j++) s[j] = warp_sum(s[j]);
+#pragma unroll
+    for (int j = 0; j < DECODE_KEYS; j++) {
+      const int key = base + j;
+      if (key > pos) break;
       const int dist = pos - key;
-      s += dist < a.extent ? bias[dist] : 0.0f;
+      const float score = s[j] + (dist < a.extent ? bias[dist] : 0.0f);
+      const float m_new = fmaxf(m, score);
+      const float alpha = __expf(m - m_new);
+      const float p = __expf(score - m_new);
+      l = l * alpha + p;
+#pragma unroll
+      for (int r = 0; r < R; r++) acc[r] = acc[r] * alpha + p * vr[j][r];
+      m = m_new;
     }
-    // a warp with nothing seen yet starts from its first visible key
-    if (m == -INFINITY) {
-      const float mt = warp_max(visible ? s : -INFINITY);
-      if (mt == -INFINITY) continue;
-      m = mt;
-    }
-    fold<R>(s, visible, m, l, acc, [&](int j) { return vb + int64_t(base + j) * HD; });
   }
   if (lane == 0) {
     sm[warp] = m;
     sl[warp] = l;
   }
 #pragma unroll
-  for (int r = 0; r < R; r++) sacc[warp][lane + r * WARP] = acc[r];
+  for (int r = 0; r < R; r++) sacc[warp][lane * R + r] = acc[r];
   __syncthreads();
   if (warp != 0) return;
   float mt = -INFINITY;
@@ -199,12 +211,12 @@ __global__ void decode_kernel(Args a) {
     const float wt = __expf(sm[w] - mt);
     lt += sl[w] * wt;
 #pragma unroll
-    for (int r = 0; r < R; r++) out[r] += sacc[w][lane + r * WARP] * wt;
+    for (int r = 0; r < R; r++) out[r] += sacc[w][lane * R + r] * wt;
   }
   float* o = a.out + ((int64_t(batch) * a.t + i) * a.heads + head) * HD;
   const float inv = 1.0f / lt;
 #pragma unroll
-  for (int r = 0; r < R; r++) o[lane + r * WARP] = out[r] * inv;
+  for (int r = 0; r < R; r++) o[lane * R + r] = out[r] * inv;
 }
 
 template <int R>

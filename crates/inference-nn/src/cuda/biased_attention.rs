@@ -12,14 +12,14 @@ const DECODE_ROWS: i32 = 4;
 
 /// The attention inputs, all f32 on one CUDA device.
 pub struct BiasedAttention<'a> {
-    /// `(b, heads, t, head_dim)`, query `i` at position `past + i`
+    /// `(b, t, heads, head_dim)`, query `i` at position `past + i`
     pub q: &'a Tensor,
     /// `(b, kv_heads, past + t, head_dim)`, rows contiguous (a cache's narrowed view)
     pub k: &'a Tensor,
     pub v: &'a Tensor,
-    /// `(b, heads, t, extent + 1)`: each query's bias at distances `0..extent` (none past them; the last column unread)
+    /// `(b, t, heads, extent + 1)`: each query's bias at distances `0..extent` (none past them; the last column unread)
     pub table: &'a Tensor,
-    /// `(b, heads, t)`: each query's sink logit, a weight with a zero value
+    /// `(b, t, heads)`: each query's sink logit, a weight with a zero value
     pub sinks: &'a Tensor,
     /// keys this many or more back are hidden; 0 for none
     pub window: usize,
@@ -49,13 +49,13 @@ fn kv_strides(layout: &Layout, head_dim: usize) -> Option<(usize, usize)> {
 /// `(b, t, heads * head_dim)` f32, the layout the output gate and projection take; `None` where the kernel does not
 /// take the head size or the K/V layouts.
 pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
-    let (b, heads, t, d) = op.q.dims4()?;
+    let (b, t, heads, d) = op.q.dims4()?;
     let (kb, kv_heads, keys, kd) = op.k.dims4()?;
     let extent = op.table.dim(3)? - 1;
     if (kb, kd) != (b, d)
         || op.v.dims4()? != (b, kv_heads, keys, d)
-        || op.table.dims4()? != (b, heads, t, extent + 1)
-        || op.sinks.dims3()? != (b, heads, t)
+        || op.table.dims4()? != (b, t, heads, extent + 1)
+        || op.sinks.dims3()? != (b, t, heads)
         || keys < t
         || kv_heads == 0
         || !heads.is_multiple_of(kv_heads)
@@ -168,13 +168,15 @@ mod tests {
 
     // the materialized form: scores plus the bias gathered by distance, masked, a sink column, softmax, values
     fn reference(op: &BiasedAttention<'_>) -> Result<Tensor> {
-        let (b, h, t, d) = op.q.dims4()?;
+        let (b, t, h, d) = op.q.dims4()?;
+        let q = op.q.transpose(1, 2)?.contiguous()?;
+        let table = op.table.transpose(1, 2)?.contiguous()?;
+        let sinks = op.sinks.transpose(1, 2)?.contiguous()?;
         let (_, hkv, s, _) = op.k.dims4()?;
         let extent = op.table.dim(3)? - 1;
         let past = s - t;
         let mut bias = vec![0f32; b * h * t * s];
-        let rows = op
-            .table
+        let rows = table
             .to_device(&Device::Cpu)?
             .flatten_all()?
             .to_vec1::<f32>()?;
@@ -199,8 +201,8 @@ mod tests {
         let group = h / hkv;
         let k = op.k.repeat_interleave_for_test(group)?;
         let v = op.v.repeat_interleave_for_test(group)?;
-        let scores = ((op.q.matmul(&k.t()?)? * f64::from(op.scale))? + bias)?;
-        let sinks = op.sinks.unsqueeze(3)?;
+        let scores = ((q.matmul(&k.t()?)? * f64::from(op.scale))? + bias)?;
+        let sinks = sinks.unsqueeze(3)?;
         let probs =
             inference_tensor::nn::ops::softmax_last_dim(&Tensor::cat(&[&scores, &sinks], 3)?)?;
         probs
@@ -235,11 +237,11 @@ mod tests {
         let s = past + t;
         let capacity = s + 16;
         let rand = |dims: &[usize]| Tensor::randn(0f32, 1.0, dims, &device);
-        let q = rand(&[b, h, t, d])?;
+        let q = rand(&[b, t, h, d])?;
         let k = rand(&[b, hkv, capacity, d])?.narrow(2, 0, s)?;
         let v = rand(&[b, hkv, capacity, d])?.narrow(2, 0, s)?;
-        let table = rand(&[b, h, t, extent + 1])?;
-        let sinks = rand(&[b, h, t])?;
+        let table = rand(&[b, t, h, extent + 1])?;
+        let sinks = rand(&[b, t, h])?;
         let op = BiasedAttention {
             q: &q,
             k: &k,

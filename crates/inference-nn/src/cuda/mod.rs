@@ -14,6 +14,8 @@ pub mod gsplat;
 #[cfg(feature = "cuda")]
 pub mod hyper;
 #[cfg(feature = "cuda")]
+pub mod inkling;
+#[cfg(feature = "cuda")]
 pub mod int8_attention;
 #[cfg(feature = "cuda")]
 pub mod lstm;

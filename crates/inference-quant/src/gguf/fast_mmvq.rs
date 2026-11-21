@@ -1336,7 +1336,32 @@ pub fn moe_decode_ungated(
     moe_decode_with(MoeFirst::Plain { up, act }, down, xs, ids, topk)
 }
 
-// how an expert's hidden rows come from its input: a GLU the kernel fuses, or one projection then `act`
+/// [`moe_decode`] for a gated activation the kernel does not fuse: the gate's and up's rows (F32, `[pairs, inter]`)
+/// each from their own matvec, then `act(gate_rows, up_rows)`.
+pub fn moe_decode_gated(
+    gate: &dyn KernelWeight,
+    up: &dyn KernelWeight,
+    down: &dyn KernelWeight,
+    xs: &Tensor,
+    ids: &Tensor,
+    topk: usize,
+    act: &dyn Fn(&Tensor, &Tensor) -> Result<Tensor>,
+) -> Result<Tensor> {
+    if !supports_moe(gate, up, down) || up.kernel_shape().dims3()? != gate.kernel_shape().dims3()? {
+        inference_tensor::bail!(
+            "fast_mmvq: no expert-indexed matvec for {:?}/{:?}/{:?} of shapes {:?}/{:?}",
+            gate.gguf_type(),
+            up.gguf_type(),
+            down.gguf_type(),
+            gate.kernel_shape(),
+            up.kernel_shape()
+        );
+    }
+    moe_decode_with(MoeFirst::Pair { gate, up, act }, down, xs, ids, topk)
+}
+
+// how an expert's hidden rows come from its input: a GLU the kernel fuses, one projection then `act`, or the gate's
+// and up's rows apart then `act` over both
 enum MoeFirst<'a> {
     Glu {
         gate: &'a dyn KernelWeight,
@@ -1346,6 +1371,11 @@ enum MoeFirst<'a> {
     Plain {
         up: &'a dyn KernelWeight,
         act: &'a dyn Fn(&Tensor) -> Result<Tensor>,
+    },
+    Pair {
+        gate: &'a dyn KernelWeight,
+        up: &'a dyn KernelWeight,
+        act: &'a dyn Fn(&Tensor, &Tensor) -> Result<Tensor>,
     },
 }
 
@@ -1357,7 +1387,7 @@ fn moe_decode_with(
     topk: usize,
 ) -> Result<Tensor> {
     let lead = match first {
-        MoeFirst::Glu { gate, .. } => gate,
+        MoeFirst::Glu { gate, .. } | MoeFirst::Pair { gate, .. } => gate,
         MoeFirst::Plain { up, .. } => up,
     };
     let Device::Cuda(dev) = lead.kernel_device() else {
@@ -1446,7 +1476,9 @@ fn moe_decode_with(
                     activation as i32,
                 )
             }
-            MoeFirst::Plain { .. } => (std::ptr::null(), None, MOE_NO_ACTIVATION),
+            MoeFirst::Plain { .. } | MoeFirst::Pair { .. } => {
+                (std::ptr::null(), None, MOE_NO_ACTIVATION)
+            }
         };
         unsafe {
             launch(
@@ -1475,6 +1507,37 @@ fn moe_decode_with(
     let activated = match first {
         MoeFirst::Glu { .. } => rows,
         MoeFirst::Plain { act, .. } => act(&rows)?.to_dtype(DType::F32)?.contiguous()?,
+        MoeFirst::Pair { up, act, .. } => {
+            let mut up_rows = unsafe { dev.alloc::<f32>(pairs * intermediate)? };
+            {
+                let (up_ptr, _up_guard) = up.kernel_ptr(&stream)?;
+                let (rows_ptr, _rows_guard) = slice_ptr_mut_on_stream(&mut up_rows, 0, &stream);
+                let launch = moe_launcher(up.gguf_type()).expect("supports_moe checked");
+                unsafe {
+                    launch(
+                        up_ptr as *const _,
+                        std::ptr::null(),
+                        lead_stride,
+                        x_q8,
+                        ids_ptr,
+                        rows_ptr as *mut f32,
+                        hidden as i32,
+                        intermediate as i32,
+                        (x_padded / Q8_1_BLOCK_SIZE) as i32,
+                        topk as i32,
+                        pairs as i32,
+                        MOE_NO_ACTIVATION,
+                        grouped,
+                        stream_ptr,
+                    );
+                }
+            }
+            let up_rows = Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(up_rows, dev.clone())),
+                Shape::from((pairs, intermediate)),
+            ));
+            act(&rows, &up_rows)?.to_dtype(DType::F32)?.contiguous()?
+        }
     };
     {
         let (storage, layout) = activated.storage_and_layout();
