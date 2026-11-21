@@ -35,28 +35,6 @@ pub fn supports(ty: GgufType) -> bool {
         )
 }
 
-// the inverse of an upper triangular `n x n` matrix, in f64: back substitution a row at a time (row r from the rows
-// below it), so the inner loop runs along contiguous rows
-fn upper_inverse(u: &[f32], n: usize) -> Vec<f32> {
-    let mut inv = vec![0f64; n * n];
-    let mut acc = vec![0f64; n];
-    for r in (0..n).rev() {
-        acc[r..].fill(0.0);
-        for k in r + 1..n {
-            let urk = f64::from(u[r * n + k]);
-            for (a, &v) in acc[k..].iter_mut().zip(&inv[k * n + k..(k + 1) * n]) {
-                *a += urk * v;
-            }
-        }
-        let d = 1.0 / f64::from(u[r * n + r]);
-        inv[r * n + r] = d;
-        for c in r + 1..n {
-            inv[r * n + c] = -acc[c] * d;
-        }
-    }
-    inv.into_iter().map(|v| v as f32).collect()
-}
-
 /// A Hessian made ready for the feedback, shareable by matrices with the same input (a stack's experts): the
 /// quantizer's importances (its diagonal), the columns no token reached, and `U` when feeding back.
 pub struct Prepared {
@@ -201,18 +179,7 @@ fn carry_groups(
 ) -> Result<Tensor> {
     let (rows, width) = rest.dims2()?;
     let groups = u.dim(0)?;
-    let ubb = u
-        .narrow(1, b * block, block)?
-        .narrow(2, b * block, block)?
-        .contiguous()?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
-    let inverses = ubb
-        .par_chunks(block * block)
-        .map(|m| upper_inverse(m, block))
-        .collect::<Vec<_>>()
-        .concat();
-    let ubb_inv = Tensor::from_vec(inverses, (groups, block, block), rest.device())?;
+    let ubb_inv = super::super::exl3::linalg::upper_block_inverses(u, b * block, block)?;
     let u_rest = u
         .narrow(1, b * block, block)?
         .narrow(2, (b + 1) * block, width - block)?
@@ -235,12 +202,9 @@ fn carry(
     asym: Option<(&Tensor, &Tensor)>,
 ) -> Result<Tensor> {
     let width = rest.dim(1)?;
-    let ubb = u
-        .narrow(0, b * block, block)?
-        .narrow(1, b * block, block)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
-    let ubb_inv = Tensor::from_slice(&upper_inverse(&ubb, block), (block, block), rest.device())?;
+    let ubb_inv =
+        super::super::exl3::linalg::upper_block_inverses(&u.unsqueeze(0)?, b * block, block)?
+            .squeeze(0)?;
     let u_rest = u
         .narrow(0, b * block, block)?
         .narrow(1, (b + 1) * block, width - block)?
@@ -588,34 +552,6 @@ fn quantize_on(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // U^-1 U is the identity
-    #[test]
-    fn upper_inverse_inverts() {
-        let n = 5;
-        let u: Vec<f32> = (0..n * n)
-            .map(|i| {
-                let (r, c) = (i / n, i % n);
-                if c < r {
-                    0.0
-                } else if c == r {
-                    2.0 + r as f32
-                } else {
-                    0.3 * (r + c) as f32
-                }
-            })
-            .collect();
-        let inv = upper_inverse(&u, n);
-        for r in 0..n {
-            for c in 0..n {
-                let v: f32 = (0..n).map(|k| inv[r * n + k] * u[k * n + c]).sum();
-                assert!(
-                    (v - if r == c { 1.0 } else { 0.0 }).abs() < 1e-5,
-                    "{r},{c}: {v}"
-                );
-            }
-        }
-    }
 
     // the GPU loop writes the CPU loop's bytes for each row-scaled type (random rows with outliers, a dead column,
     // a random positive definite Hessian, two super-blocks so the feedback runs)

@@ -43,3 +43,15 @@ experts' Hessians factored in one batched pass                      64 s   54%  
 
 Where it stands: the quantizer is the bound (~50 s: experts' GPU loops 40 s), the loader ~37 s beside it. Left: the
 per-block importance uploads and byte read-backs in `gpu_row_scaled` (thousands of small copies a stack).
+
+## Run 2 - 2026-11-21 00:30
+
+The error carry inverted each block's diagonal of `U` on the host (`upper_inverse`, f64 back substitution): per
+super-block of a down stack, 256 experts' 256x256 blocks read back (64 MB) and inverted on the CPU, then uploaded.
+Now one `cublasDtrsmBatched` against the identity on the device, still in f64 (`linalg::upper_block_inverses`).
+
+```
+v2 recipe quantize           total        GPU busy   KLD wiki B / chat (ours)
+batched factors (Run 1)      64 / 65 s    54%        0.01560 / 0.01196
++ block inverses on the GPU  64 / 60 s    57%        0.01560 / 0.01196
+```

@@ -280,11 +280,78 @@ pub(crate) fn inverse_upper_factors(h: &Tensor) -> Result<(Tensor, Tensor)> {
     Ok((u, infos))
 }
 
+/// The inverses of the diagonal blocks `u[i][start..start + block, start..start + block]` of upper triangular `u`
+/// (`(g, n, n)` f32), `(g, block, block)` f32, in f64 by one batched triangular solve against the identity.
+pub(crate) fn upper_block_inverses(u: &Tensor, start: usize, block: usize) -> Result<Tensor> {
+    use inference_tensor::cuda_backend::cudarc::cublas::sys as cb;
+    let device = u.device().clone();
+    let Device::Cuda(dev) = &device else {
+        inference_tensor::bail!("the block inverses are computed on CUDA");
+    };
+    let g = u.dim(0)?;
+    let a = u
+        .narrow(1, start, block)?
+        .narrow(2, start, block)?
+        .to_dtype(DType::F64)?
+        .contiguous()?;
+    let x = Tensor::eye(block, DType::F64, &device)?
+        .unsqueeze(0)?
+        .broadcast_as((g, block, block))?
+        .contiguous()?
+        .copy()?;
+    {
+        let (a_s, a_l) = a.storage_and_layout();
+        let (x_s, x_l) = x.storage_and_layout();
+        let (Storage::Cuda(a_c), Storage::Cuda(x_c)) = (&*a_s, &*x_s) else {
+            inference_tensor::bail!("the block inverses' tensors live on CUDA");
+        };
+        let (a_ptr, _a) = slice_ptr(a_c.as_cuda_slice::<f64>()?, a_l.start_offset());
+        let (x_ptr, _x) = slice_ptr(x_c.as_cuda_slice::<f64>()?, x_l.start_offset());
+        let stride = (block * block * std::mem::size_of::<f64>()) as u64;
+        let a_ptrs = dev.clone_htod(
+            &(0..g as u64)
+                .map(|i| a_ptr + i * stride)
+                .collect::<Vec<_>>(),
+        )?;
+        let x_ptrs = dev.clone_htod(
+            &(0..g as u64)
+                .map(|i| x_ptr + i * stride)
+                .collect::<Vec<_>>(),
+        )?;
+        let (ap, _ap) = slice_ptr(&a_ptrs, 0);
+        let (xp, _xp) = slice_ptr(&x_ptrs, 0);
+        let one = 1.0f64;
+        // a row-major upper block reads column-major as its lower transpose: U^T X = I there is X = U^-1 row-major
+        // SAFETY: `a` and `x` are this call's own g blocks, `x` solved in place, on the device's stream
+        let status = unsafe {
+            cb::cublasDtrsmBatched(
+                *dev.cublas_handle().handle(),
+                cb::cublasSideMode_t::CUBLAS_SIDE_LEFT,
+                cb::cublasFillMode_t::CUBLAS_FILL_MODE_LOWER,
+                cb::cublasOperation_t::CUBLAS_OP_N,
+                cb::cublasDiagType_t::CUBLAS_DIAG_NON_UNIT,
+                block as i32,
+                block as i32,
+                &raw const one,
+                ap as *const *const f64,
+                block as i32,
+                xp as *const *mut f64,
+                block as i32,
+                g as i32,
+            )
+        };
+        if status != cb::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+            inference_tensor::bail!("cuBLAS could not invert the blocks: {status:?}");
+        }
+    }
+    x.to_dtype(DType::F32)
+}
+
 #[cfg(test)]
 mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};
 
-    use super::{cholesky, inverse_upper_factors, solve_spd};
+    use super::{cholesky, inverse_upper_factors, solve_spd, upper_block_inverses};
 
     // L L^T rebuilds the matrix from the lower triangle cholesky leaves, and solve_spd's x satisfies a x = b
     #[test]
@@ -350,6 +417,33 @@ mod tests {
             let id = h.get(e)?.matmul(&factor.t()?.matmul(&factor)?)?;
             let err = (&id - &eye)?.abs()?.max_all()?.to_scalar::<f32>()?;
             assert!(err < 1e-4, "factor {e}: H U^T U is {err} from the identity");
+        }
+        Ok(())
+    }
+
+    // each diagonal block's inverse times the block is the identity
+    #[test]
+    fn block_inverses_invert_the_diagonal_blocks() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let (g, n, block, start) = (2, 24, 8, 8);
+        let mask = Tensor::triu2(n, DType::F32, &Device::Cpu)?;
+        let r = (Tensor::rand(0.5f32, 1.5f32, (g, n, n), &Device::Cpu)?.broadcast_mul(&mask))?;
+        let inv =
+            upper_block_inverses(&r.to_device(&device)?, start, block)?.to_device(&Device::Cpu)?;
+        let eye = Tensor::eye(block, DType::F32, &Device::Cpu)?;
+        for e in 0..g {
+            let ubb = r.get(e)?.narrow(0, start, block)?.narrow(1, start, block)?;
+            let err = (ubb.matmul(&inv.get(e)?)? - &eye)?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            assert!(
+                err < 1e-4,
+                "block {e}: U_bb U_bb^-1 is {err} from the identity"
+            );
         }
         Ok(())
     }
