@@ -200,3 +200,30 @@ pageable, then decoded by elementwise ops).
   new 52, 52 s; old 57, 52 s). `gptq.encode` is 12.9 s over 14,088 calls (0.92 ms each with the span's sync), so the
   Q8_0 tensors' 32-column steps are bound by the per-step launches (narrow, encode, error, carry), not the read-back;
   fewer, wider steps would change GPTQ's error feedback and so the bytes.
+
+## Run 8 - 2026-11-21 07:00
+
+Scoring and base writing ran each chunk through a layer alone (collection already batched chunks of one length,
+`STREAM_BATCH_CHUNKS` = 8, since the MoE's per-call costs dominate at 1K tokens). Batched scoring, the base as before:
+
+```
+                                   layer loop   mean KLD    p99      same top
+recipe-v2, per chunk (old base)    9.0 s        0.01208     0.1194   96.54%
+recipe-v2, batched (old base)      6.2 s        0.01205     0.1169   96.57%
+BF16, per chunk (old base)         48.2 s       0.00000     0.0000   100%
+BF16, batched (old base)           22.7 s       0.00365     0.0297   98.11%
+```
+
+Batching moves the BF16 sums (GEMM shapes, the MoE's grouping): the model against its own per-chunk base reads
+0.00365, about the cross-engine floor. So a base has to be written and scored the same way. Both now batch
+(`forward_batched`, also for scoring candidates, whose states would otherwise carry that floor). The chat base was
+rewritten batched (`ours-chat-c1024-ch40-b.kld`, 35.8 s; tokens identical to the old one):
+
+```
+BF16 against it                    0.00000 (100% same top)      27.0 s a score (was 56 s)
+recipe-v2 against it               0.01156, p99 0.1164, 96.46%  12.0-12.5 s a score (was 15.5-16.8 s)
+```
+
+The quant's reading moved 0.01208 -> 0.01156 with the base: the same size as route-flip noise, but systematic, so
+scores against bases written before this change are not comparable with scores against new ones. Collection is
+unchanged (the same batching, now through the shared helper): 0 of 10,571 Hessian files differ, 30 s.
