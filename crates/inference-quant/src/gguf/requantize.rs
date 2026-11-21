@@ -13,7 +13,7 @@ use inference_tensor::quantized::gguf_file::{
     self, Header, TensorEntry, write_header, write_tensor_padding,
 };
 use inference_tensor::quantized::{GgmlDType, QTensor, quantize_blocks};
-use inference_tensor::{Device, Result, Tensor};
+use inference_tensor::{Device, Result, Tensor, profile};
 use rayon::prelude::*;
 use regex::Regex;
 
@@ -33,9 +33,11 @@ const GPTQ_REPORT_ENV: &str = "INFERENCE_GPTQ_REPORT";
 // the stacked factors and rows one batched GPTQ pass over a stack's experts takes at most
 #[cfg(feature = "cuda")]
 const GPTQ_BATCH_BYTES: usize = 2 << 30;
-// GPTQ inputs read ahead of the GPU (each a tensor's values and Hessians, up to a few GB)
+// GPTQ inputs read ahead of the GPU (each a tensor's bytes and Hessians, an expert stack ~0.8 GB)
 #[cfg(feature = "cuda")]
-const GPTQ_PREFETCH_DEPTH: usize = 1;
+const GPTQ_PREFETCH_DEPTH: usize = 3;
+#[cfg(feature = "cuda")]
+const GPTQ_LOADER_THREAD: &str = "gptq-loader";
 pub const DEFAULT_GPTQ_DAMP: f64 = 0.1;
 // f32 bytes of rows the GPU quantizes in one call (its scratch takes about three times this)
 const GPU_CHUNK_BYTES: usize = 1 << 30;
@@ -281,13 +283,14 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
     })
 }
 
-// what GPTQ reads for a tensor before its GPU pass: its Hessians and its values widened to f32
+// what GPTQ reads for a tensor before its GPU pass: its Hessians and its values, uploaded as stored and widened to
+// f32 on the GPU (rows of the last dimension)
 #[cfg(feature = "cuda")]
 struct GptqInput {
     shared: Option<Vec<f32>>,
     cross: Option<Vec<f32>>,
     per_expert: Vec<Option<Vec<f32>>>,
-    values: Vec<f32>,
+    values: Tensor,
 }
 
 // `t`'s GPTQ input from the source at `offset`, or None when no Hessian covers it
@@ -297,6 +300,7 @@ fn load_gptq(
     hessians: &dyn HessianSource,
     reader: &mut BufReader<File>,
     offset: u64,
+    device: &Device,
 ) -> Result<Option<GptqInput>> {
     let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
     let shared = hessians.hessian(t.name, None)?;
@@ -315,11 +319,28 @@ fn load_gptq(
     let mut bytes = vec![0u8; t.source_bytes];
     reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut bytes)?;
+    let dtype = match t.source_type {
+        0 => inference_tensor::DType::F32,
+        1 => inference_tensor::DType::F16,
+        30 => inference_tensor::DType::BF16,
+        other => inference_tensor::bail!(
+            "only float tensors are requantized, not {}",
+            GgufDType::new(other).name()
+        ),
+    };
+    let cols = *t.dims.last().unwrap_or(&1);
+    let rows = bytes.len() / dtype.size_in_bytes() / cols;
+    let span = profile::span("gptq.upload", Some(device));
+    let values = Tensor::from_raw_buffer(&bytes, dtype, &[rows, cols], device)?
+        .to_dtype(inference_tensor::DType::F32)?;
+    // the quantizer's thread reads it: this thread's stream (the per-thread default) done first
+    device.synchronize()?;
+    drop(span);
     Ok(Some(GptqInput {
         cross: hessians.cross(t.name)?,
         shared,
         per_expert,
-        values: to_f32(t.source_type, &bytes)?,
+        values,
     }))
 }
 
@@ -341,12 +362,16 @@ fn gptq_tensor(
     } = input;
     let cols = *t.dims.last().unwrap_or(&1);
     let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
-    let per = values.len() / experts;
+    let rows = values.dim(0)?;
+    let per = rows * cols / experts;
+    let expert_rows = rows / experts;
+    // the diagnostic reads the values on the host
+    let host = || values.flatten_all()?.to_vec1::<f32>();
     let prepare = |h: &[f32]| {
         super::gptq::prepare(h, cols, !plan.hessian_weights_only, plan.gptq_damp, device)
             .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))
     };
-    let quantize = |values: &[f32], prepared: &super::gptq::Prepared| {
+    let quantize = |values: &Tensor, prepared: &super::gptq::Prepared| {
         super::gptq::quantize(
             ty,
             cols,
@@ -373,7 +398,7 @@ fn gptq_tensor(
                 t,
                 ty,
                 cols,
-                &values,
+                &host()?,
                 &out,
                 shared.as_deref(),
                 &per_expert,
@@ -384,10 +409,25 @@ fn gptq_tensor(
         return Ok(out);
     }
     let shared_prepared = shared.as_deref().map(prepare).transpose()?;
+    // the experts' own Hessians factored together
+    let owned = per_expert
+        .iter()
+        .flatten()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let mut factored = super::gptq::prepare_all(
+        &owned,
+        cols,
+        !plan.hessian_weights_only,
+        plan.gptq_damp,
+        device,
+    )
+    .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))?
+    .into_iter();
     let own = per_expert
-        .par_iter()
-        .map(|h| h.as_deref().map(prepare).transpose())
-        .collect::<Result<Vec<_>>>()?;
+        .iter()
+        .map(|h| h.as_ref().and_then(|_| factored.next()))
+        .collect::<Vec<_>>();
     let prepared = own
         .iter()
         .enumerate()
@@ -406,7 +446,7 @@ fn gptq_tensor(
         let Some(part) = super::gptq::quantize_experts(
             ty,
             cols,
-            &values[e0 * per..e1 * per],
+            &values.narrow(0, e0 * expert_rows, (e1 - e0) * expert_rows)?,
             &prepared[e0..e1],
             device,
         )
@@ -414,7 +454,12 @@ fn gptq_tensor(
         else {
             parts = (0..experts)
                 .into_par_iter()
-                .map(|e| quantize(&values[e * per..(e + 1) * per], prepared[e]))
+                .map(|e| {
+                    quantize(
+                        &values.narrow(0, e * expert_rows, expert_rows)?,
+                        prepared[e],
+                    )
+                })
                 .collect::<Result<Vec<_>>>()?;
             break;
         };
@@ -426,7 +471,7 @@ fn gptq_tensor(
             t,
             ty,
             cols,
-            &values,
+            &host()?,
             &out,
             shared.as_deref(),
             &per_expert,
@@ -681,7 +726,15 @@ pub fn requantize_gguf(
             order.sort_unstable();
             let tensors = &tensors;
             let header = &header;
-            scope.spawn(move || {
+            let loader = std::thread::Builder::new().name(GPTQ_LOADER_THREAD.into());
+            let device = plan.gpu.clone();
+            let spawned = loader.spawn_scoped(scope, move || {
+                let Some(device) = device else {
+                    return drop(tx.send((
+                        usize::MAX,
+                        Err(inference_tensor::Error::msg("GPTQ runs on a GPU")),
+                    )));
+                };
                 let mut reader = match File::open(src) {
                     Ok(file) => BufReader::new(file),
                     Err(e) => return drop(tx.send((usize::MAX, Err(e.into())))),
@@ -689,17 +742,19 @@ pub fn requantize_gguf(
                 for i in order {
                     let t = &tensors[i];
                     let offset = header.tensor_data_offset + header.tensor_infos[t.name].offset;
+                    let span = profile::span("gptq.load", None);
+                    let loaded = load_gptq(t, hessians, &mut reader, offset, &device);
+                    drop(span);
                     // a send fails only once the loop has stopped, which ends this thread too
-                    if tx
-                        .send((i, load_gptq(t, hessians, &mut reader, offset)))
-                        .is_err()
-                    {
+                    if tx.send((i, loaded)).is_err() {
                         return;
                     }
                 }
             });
-            rx
+            spawned.map(|_| rx)
         });
+        #[cfg(feature = "cuda")]
+        let prefetched = prefetched.transpose()?;
         for (i, t) in tensors.iter().enumerate() {
             progress(i, tensors.len(), t.name);
             let info = &header.tensor_infos[t.name];
@@ -759,14 +814,18 @@ pub fn requantize_gguf(
             if let (Some(ty), Some(device), Some(rx)) = (t.target, &plan.gpu, &prefetched)
                 && gptq_targets.contains(&i)
                 && let Some(input) = {
-                    let (j, input) = rx
-                        .recv()
+                    let span = profile::span("gptq.wait", None);
+                    let received = rx.recv();
+                    drop(span);
+                    let (j, input) = received
                         .map_err(|_| inference_tensor::Error::msg("the GPTQ prefetcher stopped"))?;
                     debug_assert_eq!(i, j);
                     input?
                 }
             {
+                let span = profile::span("gptq.tensor", Some(device));
                 let out = gptq_tensor(t, ty, input, plan, device)?;
+                drop(span);
                 if out.len() != t.size {
                     inference_tensor::bail!(
                         "{}: wrote {} bytes, planned {}",
@@ -775,8 +834,10 @@ pub fn requantize_gguf(
                         t.size
                     );
                 }
+                let span = profile::span("write", None);
                 writer.write_all(&out)?;
                 write_tensor_padding(&mut writer, t.size)?;
+                drop(span);
                 summary.gptq += 1;
                 summary.bytes_in += t.source_bytes as u64;
                 summary.bytes_out += t.size as u64;
@@ -804,6 +865,14 @@ pub fn requantize_gguf(
                     written += bytes.len();
                     continue;
                 };
+                let span = profile::span(
+                    if gpu.is_some() {
+                        "quantize.gpu"
+                    } else {
+                        "quantize.cpu"
+                    },
+                    None,
+                );
                 let out = match gpu {
                     Some(dev) => {
                         let (w, per) = match expert_rows {
@@ -824,7 +893,10 @@ pub fn requantize_gguf(
                     }
                 }
                 .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
+                drop(span);
+                let span = profile::span("write", None);
                 writer.write_all(&out)?;
+                drop(span);
                 written += out.len();
             }
             if written != t.size {

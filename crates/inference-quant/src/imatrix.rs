@@ -234,6 +234,7 @@ impl ImatrixLayerStats {
             let x = inp.reshape(((), inp.dim(D::Minus1)?))?;
             *ncalls += 1;
             *rows += x.dim(0)?;
+            let _span = inference_tensor::profile::span("hessian.dense", Some(x.device()));
             *h = add_gram(Some(h.clone()), &x)?;
             return Ok(());
         }
@@ -421,6 +422,7 @@ fn flush_routed(
     if pending.is_empty() {
         return Ok(());
     }
+    let _span = inference_tensor::profile::span("hessian.routed", Some(pending[0].0.device()));
     let mut slots = vec![Vec::new(); counts.len()];
     let mut base = 0u32;
     let xs = pending.iter().map(|(x, ..)| x.clone()).collect::<Vec<_>>();

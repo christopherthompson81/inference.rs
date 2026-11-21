@@ -164,21 +164,25 @@ async fn main() -> Result<()> {
         Command::Quantize {
             model_type,
             default_quantize,
-        } => match resolve_quantize_command(model_type, default_quantize)? {
-            QuantizeCommand::Uqff(model_type) => run_quantize(*model_type, cli.global).await?,
-            QuantizeCommand::Asr(options) => run_asr_quantize(options, cli.global)?,
-            QuantizeCommand::HiDreamO1(options) => run_hidream_quantize(options, cli.global)?,
-            QuantizeCommand::Worldgen(options) => run_worldgen_quantize(options)?,
-            QuantizeCommand::Gguf(options) => run_gguf_quantize(options)?,
-            QuantizeCommand::Imatrix(options) => run_imatrix_convert(options)?,
-            QuantizeCommand::NemotronTranscribeAudio(options) => {
-                run_nemotron_transcribe_audio(options)?
+        } => {
+            match resolve_quantize_command(model_type, default_quantize)? {
+                QuantizeCommand::Uqff(model_type) => run_quantize(*model_type, cli.global).await?,
+                QuantizeCommand::Asr(options) => run_asr_quantize(options, cli.global)?,
+                QuantizeCommand::HiDreamO1(options) => run_hidream_quantize(options, cli.global)?,
+                QuantizeCommand::Worldgen(options) => run_worldgen_quantize(options)?,
+                QuantizeCommand::Gguf(options) => run_gguf_quantize(options)?,
+                QuantizeCommand::Imatrix(options) => run_imatrix_convert(options)?,
+                QuantizeCommand::NemotronTranscribeAudio(options) => {
+                    run_nemotron_transcribe_audio(options)?
+                }
+                QuantizeCommand::Mmproj(options) => run_mmproj_quantize(options)?,
+                QuantizeCommand::Exl3(options) => run_exl3_quantize(options, cli.global).await?,
+                QuantizeCommand::Hessians(options) => run_hessians(options, cli.global).await?,
+                QuantizeCommand::Kld(options) => run_kld(options, cli.global).await?,
             }
-            QuantizeCommand::Mmproj(options) => run_mmproj_quantize(options)?,
-            QuantizeCommand::Exl3(options) => run_exl3_quantize(options, cli.global).await?,
-            QuantizeCommand::Hessians(options) => run_hessians(options, cli.global).await?,
-            QuantizeCommand::Kld(options) => run_kld(options, cli.global).await?,
-        },
+            // INFERENCE_PROFILE's per-op totals, once the tool is done
+            eprint!("{}", inference_tensor::profile::report());
+        }
 
         Command::Uqff { command } => {
             run_uqff(command, cli.global).await?;

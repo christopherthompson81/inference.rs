@@ -58,6 +58,7 @@ pub mod nn;
 pub mod npy;
 pub mod op;
 pub mod pickle;
+pub mod profile;
 pub mod quantized;
 pub mod safetensors;
 pub mod scalar;

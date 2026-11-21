@@ -1558,6 +1558,13 @@ struct StreamedQwenLayer {
 impl crate::model::StreamedLayer for StreamedQwenLayer {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (batch, tokens) = (xs.dim(0)?, xs.dim(1)?);
+        let _span = inference_tensor::profile::span(
+            match &self.layer.layer_impl {
+                LayerImpl::FullAttention(_) => "layer.attention",
+                LayerImpl::LinearAttention(_) => "layer.gdn",
+            },
+            Some(xs.device()),
+        );
         match &self.layer.layer_impl {
             LayerImpl::FullAttention(attn) => {
                 let positions = Tensor::arange(0u32, tokens as u32, xs.device())?

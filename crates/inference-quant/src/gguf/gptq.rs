@@ -5,7 +5,7 @@
 //! least in the Hessian's metric. The bytes stay the type's.
 
 use inference_tensor::quantized::Quantizer;
-use inference_tensor::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor, profile};
 use rayon::prelude::*;
 
 use super::kernel::GgufType;
@@ -35,34 +35,14 @@ pub fn supports(ty: GgufType) -> bool {
         )
 }
 
-// the inverse of an upper triangular `n x n` matrix, in f64: back substitution a row at a time (row r from the rows
-// below it), so the inner loop runs along contiguous rows
-fn upper_inverse(u: &[f32], n: usize) -> Vec<f32> {
-    let mut inv = vec![0f64; n * n];
-    let mut acc = vec![0f64; n];
-    for r in (0..n).rev() {
-        acc[r..].fill(0.0);
-        for k in r + 1..n {
-            let urk = f64::from(u[r * n + k]);
-            for (a, &v) in acc[k..].iter_mut().zip(&inv[k * n + k..(k + 1) * n]) {
-                *a += urk * v;
-            }
-        }
-        let d = 1.0 / f64::from(u[r * n + r]);
-        inv[r * n + r] = d;
-        for c in r + 1..n {
-            inv[r * n + c] = -acc[c] * d;
-        }
-    }
-    inv.into_iter().map(|v| v as f32).collect()
-}
-
 /// A Hessian made ready for the feedback, shareable by matrices with the same input (a stack's experts): the
 /// quantizer's importances (its diagonal), the columns no token reached, and `U` when feeding back.
 pub struct Prepared {
     importance: Vec<f32>,
     dead: Vec<usize>,
     u: Option<Tensor>,
+    // the factorizations' info words, read with the others of a pass in one go ([`ensure_factored`])
+    infos: Vec<Tensor>,
     // GPTAQ's residual term `P = (dX X^T U^T) o M_U U`: each quantized column's input drift carried onto the
     // columns after it, `W_rest += W_b P_b,rest`
     p: Option<Tensor>,
@@ -106,86 +86,90 @@ pub fn prepare(
     damp: f64,
     device: &Device,
 ) -> Result<Prepared> {
-    if hessian.len() != cols * cols {
-        inference_tensor::bail!("a Hessian of {} for rows of {cols}", hessian.len());
-    }
-    let mut h = hessian.to_vec();
-    let diag: Vec<f32> = (0..cols).map(|i| h[i * cols + i]).collect();
-    let dead: Vec<usize> = (0..cols).filter(|&i| diag[i] <= 0.0).collect();
-    for &i in &dead {
-        h[i * cols + i] = 1.0;
-    }
-    let damp = damp * diag.iter().map(|&d| f64::from(d)).sum::<f64>() / cols as f64;
-    for i in 0..cols {
-        h[i * cols + i] += damp as f32;
-    }
-    Ok(Prepared {
-        importance: diag
-            .iter()
-            .map(|&d| if d > 0.0 { d } else { DEAD_IMPORTANCE })
-            .collect(),
-        dead,
-        u: feedback
-            .then(|| inverse_factor(&h, cols, device))
-            .transpose()?,
-        p: None,
-    })
+    Ok(prepare_all(&[hessian], cols, feedback, damp, device)?
+        .pop()
+        .expect("one prepared"))
 }
 
-// `U`, the upper Cholesky factor of the damped Hessian's inverse (`H^-1 = U^T U`)
-fn inverse_factor(h: &[f32], cols: usize, device: &Device) -> Result<Tensor> {
-    let hinv =
-        super::super::exl3::linalg::inverse_spd(Tensor::from_slice(h, (cols, cols), device)?)?
-            .ok_or_else(|| {
-                inference_tensor::Error::Msg("the damped Hessian is not positive definite".into())
-            })?;
-    let lower = super::super::exl3::linalg::cholesky(hinv)?.ok_or_else(|| {
-        inference_tensor::Error::Msg("the inverse Hessian is not positive definite".into())
-    })?;
-    // cholesky leaves its input in the other triangle
-    let index = Tensor::arange(0u32, cols as u32, device)?;
-    let mask = index
-        .unsqueeze(1)?
-        .broadcast_ge(&index.unsqueeze(0)?)?
-        .to_dtype(DType::F32)?;
-    lower.mul(&mask)?.t()?.contiguous()
+/// [`prepare`] for each of `hessians`, the factors computed in one batched pass.
+pub fn prepare_all(
+    hessians: &[&[f32]],
+    cols: usize,
+    feedback: bool,
+    damp: f64,
+    device: &Device,
+) -> Result<Vec<Prepared>> {
+    if let Some(h) = hessians.iter().find(|h| h.len() != cols * cols) {
+        inference_tensor::bail!("a Hessian of {} for rows of {cols}", h.len());
+    }
+    // each Hessian damped straight into its slot of the stack the factors read
+    let mut stacked = vec![0f32; hessians.len() * cols * cols];
+    let columns = stacked
+        .par_chunks_mut(cols * cols)
+        .zip(hessians.par_iter())
+        .map(|(h, hessian)| {
+            h.copy_from_slice(hessian);
+            let diag: Vec<f32> = (0..cols).map(|i| h[i * cols + i]).collect();
+            let dead: Vec<usize> = (0..cols).filter(|&i| diag[i] <= 0.0).collect();
+            for &i in &dead {
+                h[i * cols + i] = 1.0;
+            }
+            let damp = damp * diag.iter().map(|&d| f64::from(d)).sum::<f64>() / cols as f64;
+            for i in 0..cols {
+                h[i * cols + i] += damp as f32;
+            }
+            (diag, dead)
+        })
+        .collect::<Vec<_>>();
+    let _span = profile::span("gptq.factor", Some(device));
+    let factors = match feedback {
+        true => {
+            let stacked = Tensor::from_vec(stacked, (hessians.len(), cols, cols), device)?;
+            Some(super::super::exl3::linalg::inverse_upper_factors(&stacked)?)
+        }
+        false => None,
+    };
+    columns
+        .into_iter()
+        .enumerate()
+        .map(|(e, (diag, dead))| {
+            let (u, infos) = match &factors {
+                Some((u, infos)) => (Some(u.get(e)?), vec![infos.narrow(0, e, 1)?]),
+                None => (None, Vec::new()),
+            };
+            Ok(Prepared {
+                importance: diag
+                    .iter()
+                    .map(|&d| if d > 0.0 { d } else { DEAD_IMPORTANCE })
+                    .collect(),
+                dead,
+                u,
+                infos,
+                p: None,
+            })
+        })
+        .collect()
+}
+
+// every factorization of `prepared` succeeded: their info words read back together, once
+fn ensure_factored(prepared: &[&Prepared]) -> Result<()> {
+    let infos = prepared
+        .iter()
+        .flat_map(|p| p.infos.iter())
+        .collect::<Vec<_>>();
+    if infos.is_empty() {
+        return Ok(());
+    }
+    let words = Tensor::cat(&infos, 0)?
+        .to_device(&Device::Cpu)?
+        .to_vec1::<i32>()?;
+    if words.iter().any(|&w| w != 0) {
+        inference_tensor::bail!("a damped Hessian is not positive definite");
+    }
+    Ok(())
 }
 
 // the columns after block `b` (of `block`) moved by its error: `rest - E U_bb^-1 U_b,rest`
-// `carry` for equal groups of rows each with its own factor (`u`: `[groups, cols, cols]`)
-fn carry_groups(
-    rest: &Tensor,
-    error: &Tensor,
-    u: &Tensor,
-    b: usize,
-    block: usize,
-) -> Result<Tensor> {
-    let (rows, width) = rest.dims2()?;
-    let groups = u.dim(0)?;
-    let ubb = u
-        .narrow(1, b * block, block)?
-        .narrow(2, b * block, block)?
-        .contiguous()?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
-    let inverses = ubb
-        .par_chunks(block * block)
-        .map(|m| upper_inverse(m, block))
-        .collect::<Vec<_>>()
-        .concat();
-    let ubb_inv = Tensor::from_vec(inverses, (groups, block, block), rest.device())?;
-    let u_rest = u
-        .narrow(1, b * block, block)?
-        .narrow(2, (b + 1) * block, width - block)?
-        .contiguous()?;
-    let moved = error
-        .reshape((groups, rows / groups, block))?
-        .matmul(&ubb_inv)?
-        .matmul(&u_rest)?
-        .reshape((rows, width - block))?;
-    rest.narrow(1, block, width - block)? - moved
-}
-
 // with GPTAQ's `p`, also the block's pre-quantization values `current` times its rows of `p`
 fn carry(
     rest: &Tensor,
@@ -196,12 +180,9 @@ fn carry(
     asym: Option<(&Tensor, &Tensor)>,
 ) -> Result<Tensor> {
     let width = rest.dim(1)?;
-    let ubb = u
-        .narrow(0, b * block, block)?
-        .narrow(1, b * block, block)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
-    let ubb_inv = Tensor::from_slice(&upper_inverse(&ubb, block), (block, block), rest.device())?;
+    let ubb_inv =
+        super::super::exl3::linalg::upper_block_inverses(&u.unsqueeze(0)?, b * block, block)?
+            .squeeze(0)?;
     let u_rest = u
         .narrow(0, b * block, block)?
         .narrow(1, (b + 1) * block, width - block)?
@@ -225,13 +206,14 @@ fn carry(
 pub fn quantize_experts(
     ty: GgufType,
     cols: usize,
-    values: &[f32],
+    values: &Tensor,
     prepared: &[&Prepared],
     device: &Device,
 ) -> Result<Option<Vec<u8>>> {
     let Device::Cuda(dev) = device else {
         return Ok(None);
     };
+    ensure_factored(prepared)?;
     if super::iq_quantize::row_scaled(ty).is_none() || !super::quantize_cuda::fixed_supported(ty) {
         return Ok(None);
     }
@@ -241,20 +223,158 @@ pub fn quantize_experts(
     {
         inference_tensor::bail!("{ty:?}: experts' Hessians differ in width or feedback");
     }
-    let per = values.len() / prepared.len();
-    let mut w = std::borrow::Cow::Borrowed(values);
-    if prepared.iter().any(|p| !p.dead.is_empty()) {
-        let w = w.to_mut();
-        for (e, p) in prepared.iter().enumerate() {
-            for &i in &p.dead {
-                for r in 0..per / cols {
-                    w[e * per + r * cols + i] = 0.0;
-                }
-            }
+    let dead = prepared
+        .iter()
+        .map(|p| p.dead.as_slice())
+        .collect::<Vec<_>>();
+    let rest = zero_dead(
+        &values.to_device(device)?.to_dtype(DType::F32)?,
+        &dead,
+        cols,
+    )?;
+    gpu_row_scaled(ty, cols, rest, prepared, dev).map(Some)
+}
+
+// `x` (rows of `cols`, in `dead.len()` equal groups) with each group's dead columns zeroed, on its device: a column
+// no token reached does nothing, so its weights go
+fn zero_dead(x: &Tensor, dead: &[&[usize]], cols: usize) -> Result<Tensor> {
+    if dead.iter().all(|d| d.is_empty()) {
+        return x.contiguous();
+    }
+    let groups = dead.len();
+    let mut mask = vec![1f32; groups * cols];
+    for (g, d) in dead.iter().enumerate() {
+        for &i in d.iter() {
+            mask[g * cols + i] = 0.0;
         }
     }
-    let rest = Tensor::from_slice(&w, (values.len() / cols, cols), device)?;
-    gpu_row_scaled(ty, cols, rest, prepared, dev).map(Some)
+    let rows = x.dim(0)?;
+    let mask = Tensor::from_vec(mask, (groups, 1, cols), x.device())?;
+    // + 0 turns the -0 of a negative weight times 0 into the 0 the host wrote
+    (x.reshape((groups, rows / groups, cols))?
+        .broadcast_mul(&mask)?
+        + 0.0)?
+        .reshape((rows, cols))
+}
+
+// `w`'s columns after block `b` (of `block`) moved by the block's error in place, `w[:, after] -= E U_bb^-1 U_b,after`:
+// `M = U_bb^-1 U_b,after` first, then one GEMM (alpha -1, beta 1) writing into `w` itself, a group of rows each
+// against its own factor (`u` `[groups, cols, cols]`) as one strided batch
+fn carry_in_place(w: &Tensor, error: &Tensor, u: &Tensor, b: usize, block: usize) -> Result<()> {
+    use inference_tensor::Storage;
+    use inference_tensor::cuda_backend::cudarc::cublas::{result, sys};
+    let (rows, cols) = w.dims2()?;
+    let groups = u.dim(0)?;
+    let per = rows / groups;
+    let start = (b + 1) * block;
+    let width = cols - start;
+    let ubb_inv = super::super::exl3::linalg::upper_block_inverses(u, b * block, block)?;
+    let u_rest = u
+        .narrow(1, b * block, block)?
+        .narrow(2, start, width)?
+        .contiguous()?;
+    let m = ubb_inv.matmul(&u_rest)?.contiguous()?;
+    let error = error.contiguous()?;
+    let Device::Cuda(dev) = w.device() else {
+        inference_tensor::bail!("the carry runs on CUDA");
+    };
+    let (w_s, w_l) = w.storage_and_layout();
+    let (e_s, e_l) = error.storage_and_layout();
+    let (m_s, m_l) = m.storage_and_layout();
+    let (Storage::Cuda(w_c), Storage::Cuda(e_c), Storage::Cuda(m_c)) = (&*w_s, &*e_s, &*m_s) else {
+        inference_tensor::bail!("the carry's tensors live on CUDA");
+    };
+    if !w_l.is_contiguous() {
+        inference_tensor::bail!("the carry writes into a contiguous matrix");
+    }
+    let (w_ptr, _w) =
+        crate::utils::slice_ptr(w_c.as_cuda_slice::<f32>()?, w_l.start_offset() + start);
+    let (e_ptr, _e) = crate::utils::slice_ptr(e_c.as_cuda_slice::<f32>()?, e_l.start_offset());
+    let (m_ptr, _m) = crate::utils::slice_ptr(m_c.as_cuda_slice::<f32>()?, m_l.start_offset());
+    let (alpha, beta) = (-1.0f32, 1.0f32);
+    let as_int = |v: usize| i32::try_from(v).map_err(inference_tensor::Error::wrap);
+    let as_long = |v: usize| i64::try_from(v).map_err(inference_tensor::Error::wrap);
+    // column-major: w's rows are columns, so C^T (width x per) = M^T (width x block) E^T (block x per)
+    // SAFETY: the pointers span their tensors (w from `start` with its row stride), written on the blas stream
+    unsafe {
+        result::gemm_strided_batched_ex(
+            *dev.cublas_handle().handle(),
+            sys::cublasOperation_t::CUBLAS_OP_N,
+            sys::cublasOperation_t::CUBLAS_OP_N,
+            as_int(width)?,
+            as_int(per)?,
+            as_int(block)?,
+            (&raw const alpha).cast(),
+            m_ptr as *const _,
+            sys::cudaDataType_t::CUDA_R_32F,
+            as_int(width)?,
+            as_long(block * width)?,
+            e_ptr as *const _,
+            sys::cudaDataType_t::CUDA_R_32F,
+            as_int(block)?,
+            as_long(per * block)?,
+            (&raw const beta).cast(),
+            w_ptr as *mut _,
+            sys::cudaDataType_t::CUDA_R_32F,
+            as_int(cols)?,
+            as_long(per * cols)?,
+            as_int(groups)?,
+            sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+        )
+    }
+    .map_err(|e| inference_tensor::Error::Cuda(Box::new(e)))
+}
+
+// the matrix a GPTQ pass encodes a block at a time: its columns moved in place by each block's error, or (GPTAQ's
+// residual term, which reads each block's values before quantization, or no feedback at all) narrowed past each block
+enum Columns {
+    InPlace(Tensor),
+    Narrowing(Tensor),
+}
+
+impl Columns {
+    fn new(rest: &Tensor, in_place: bool) -> Result<Self> {
+        Ok(match in_place {
+            // its own buffer: the carry writes into it, and `rest` may be the caller's
+            true => Self::InPlace(rest.contiguous()?.copy()?),
+            false => Self::Narrowing(rest.clone()),
+        })
+    }
+
+    fn block(&self, b: usize, block: usize) -> Result<Tensor> {
+        match self {
+            Self::InPlace(w) => w.narrow(1, b * block, block)?.contiguous(),
+            Self::Narrowing(rest) => rest.narrow(1, 0, block)?.contiguous(),
+        }
+    }
+
+    // past block `b`: its `error` carried onto the columns after it through `u` (`[groups, cols, cols]`), with
+    // GPTAQ's `asym` term where given (one group)
+    fn advance(
+        &mut self,
+        b: usize,
+        block: usize,
+        error: Option<&Tensor>,
+        u: Option<&Tensor>,
+        asym: Option<(&Tensor, &Tensor)>,
+    ) -> Result<()> {
+        match self {
+            Self::InPlace(w) => {
+                if let (Some(error), Some(u)) = (error, u) {
+                    carry_in_place(w, error, u, b, block)?;
+                }
+            }
+            Self::Narrowing(rest) => {
+                let width = rest.dim(1)?;
+                *rest = match (error, u) {
+                    (Some(error), Some(u)) => carry(rest, error, &u.squeeze(0)?, b, block, asym)?,
+                    _ => rest.narrow(1, block, width - block)?,
+                };
+            }
+        }
+        Ok(())
+    }
 }
 
 // the row-scaled loop on the GPU over `rest` (dead columns zeroed), `prepared.len()` equal groups of its rows each
@@ -263,7 +383,7 @@ pub fn quantize_experts(
 fn gpu_row_scaled(
     ty: GgufType,
     cols: usize,
-    mut rest: Tensor,
+    rest: Tensor,
     prepared: &[&Prepared],
     dev: &inference_tensor::CudaDevice,
 ) -> Result<Vec<u8>> {
@@ -292,17 +412,27 @@ fn gpu_row_scaled(
         None => None,
     };
     let mut out = vec![0u8; rows * row_bytes];
+    let span = profile::span("gptq.row_scales", Some(&rest.device().clone()));
     let row_d = super::quantize_cuda::row_scales(dev, ty, &rest, &importance, per)?;
+    drop(span);
     let mut sums = dev.alloc_zeros::<f32>(2 * rows)?;
+    let u = match &u {
+        Some(u) if groups == 1 => Some(u.unsqueeze(0)?),
+        other => other.clone(),
+    };
+    let residual = prepared.iter().any(|p| p.p.is_some());
+    let mut columns = Columns::new(&rest, u.is_some() && !residual)?;
     for b in 0..blocks {
-        let current = rest.narrow(1, 0, QK_K)?.contiguous()?;
+        let current = columns.block(b, QK_K)?;
         let imp: Vec<f32> = prepared
             .iter()
             .flat_map(|p| p.importance[b * QK_K..(b + 1) * QK_K].iter().copied())
             .collect();
+        let span = profile::span("gptq.encode", Some(current.device()));
         let (bytes, levels) = super::quantize_cuda::super_block_fixed(
             dev, ty, &current, &imp, per, &row_d, &mut sums,
         )?;
+        drop(span);
         out.par_chunks_exact_mut(row_bytes)
             .zip(bytes.par_chunks_exact(header + super_bytes))
             .for_each(|(o, sb)| {
@@ -311,18 +441,13 @@ fn gpu_row_scaled(
         if b + 1 == blocks {
             break;
         }
-        rest = match &u {
-            Some(u) => {
-                let error = (&current - levels.broadcast_mul(&row_d.unsqueeze(1)?)?)?;
-                if groups == 1 {
-                    let asym = prepared[0].p.as_ref().map(|p| (p, &current));
-                    carry(&rest, &error, u, b, QK_K, asym)?
-                } else {
-                    carry_groups(&rest, &error, u, b, QK_K)?
-                }
-            }
-            None => rest.narrow(1, QK_K, cols - (b + 1) * QK_K)?,
-        };
+        let _span = profile::span("gptq.carry", Some(current.device()));
+        let error = u
+            .as_ref()
+            .map(|_| &current - levels.broadcast_mul(&row_d.unsqueeze(1)?)?)
+            .transpose()?;
+        let asym = prepared[0].p.as_ref().map(|p| (p, &current));
+        columns.advance(b, QK_K, error.as_ref(), u.as_ref(), asym)?;
     }
     let d = row_d.to_vec1::<f32>()?;
     let s = dev.clone_dtoh(&sums)?;
@@ -346,7 +471,7 @@ fn gpu_row_scaled(
 pub fn quantize(
     ty: GgufType,
     cols: usize,
-    values: &[f32],
+    values: &Tensor,
     prepared: &Prepared,
     quantizer: Quantizer,
     device: &Device,
@@ -363,7 +488,7 @@ pub fn quantize(
 fn quantize_on(
     ty: GgufType,
     cols: usize,
-    values: &[f32],
+    values: &Tensor,
     prepared: &Prepared,
     quantizer: Quantizer,
     device: &Device,
@@ -371,7 +496,8 @@ fn quantize_on(
     decode: impl Fn(GgufType, usize, &[u8]) -> Result<Vec<f32>>,
     gpu_encode: bool,
 ) -> Result<Vec<u8>> {
-    let rows = values.len() / cols;
+    ensure_factored(&[prepared])?;
+    let rows = values.dim(0)?;
     let row_scaled = super::iq_quantize::row_scaled(ty);
     let block = if row_scaled.is_some() {
         QK_K
@@ -384,35 +510,32 @@ fn quantize_on(
             prepared.importance.len()
         );
     }
-    // a column no token reached does nothing, so its weights are zeroed
-    let mut w = std::borrow::Cow::Borrowed(values);
-    if !prepared.dead.is_empty() {
-        let w = w.to_mut();
-        for &i in &prepared.dead {
-            for r in 0..rows {
-                w[r * cols + i] = 0.0;
-            }
-        }
-    }
     let importance = &prepared.importance;
     let u = &prepared.u;
     let blocks = cols / block;
-    let mut rest = Tensor::from_slice(&w, (rows, cols), device)?;
+    let rest = zero_dead(
+        &values.to_device(device)?.to_dtype(DType::F32)?,
+        &[&prepared.dead],
+        cols,
+    )?;
     if let (Some(_), Device::Cuda(dev), true) = (row_scaled, device, gpu_encode)
         && super::quantize_cuda::fixed_supported(ty)
     {
         return gpu_row_scaled(ty, cols, rest, &[prepared], dev);
     }
+    let u3 = u.as_ref().map(|u| u.unsqueeze(0)).transpose()?;
+    let mut columns = Columns::new(&rest, u.is_some() && prepared.p.is_none())?;
     if let Some((header, super_bytes)) = row_scaled {
         let row_bytes = header + blocks * super_bytes;
         let mut out = vec![0u8; rows * row_bytes];
+        let w = rest.flatten_all()?.to_vec1::<f32>()?;
         let scales: Vec<f32> = w
             .par_chunks(cols)
             .map(|row| super::iq_quantize::row_scale(ty, row, Some(importance)))
             .collect();
         let mut sums = vec![(0f32, 0f32); rows];
         for b in 0..blocks {
-            let current = rest.narrow(1, 0, block)?.contiguous()?;
+            let current = columns.block(b, block)?;
             let wb = current.flatten_all()?.to_vec1::<f32>()?;
             let mut decoded = vec![0f32; rows * block];
             out.par_chunks_mut(row_bytes)
@@ -428,14 +551,13 @@ fn quantize_on(
                         *v *= d;
                     }
                 });
-            if let Some(u) = &u
-                && b + 1 < blocks
-            {
-                let error = (&current - Tensor::from_slice(&decoded, (rows, block), device)?)?;
+            if b + 1 < blocks {
+                let error = u3
+                    .as_ref()
+                    .map(|_| &current - Tensor::from_slice(&decoded, (rows, block), device)?)
+                    .transpose()?;
                 let asym = prepared.p.as_ref().map(|p| (p, &current));
-                rest = carry(&rest, &error, u, b, block, asym)?;
-            } else if b + 1 < blocks {
-                rest = rest.narrow(1, block, cols - (b + 1) * block)?;
+                columns.advance(b, block, error.as_ref(), u3.as_ref(), asym)?;
             }
         }
         out.par_chunks_mut(row_bytes)
@@ -446,17 +568,61 @@ fn quantize_on(
             });
         return Ok(out);
     }
+    // the GPU encodes the blocks in place where it writes the CPU's bytes (ik_llama.cpp's rounding; Q8_0 rounds alike)
+    let gpu_blocks = match device {
+        Device::Cuda(dev)
+            if gpu_encode
+                && super::quantize_cuda::blocks_supported(ty)
+                && (quantizer == Quantizer::IkLlama || ty == GgufType::Q8_0) =>
+        {
+            Some(dev)
+        }
+        _ => None,
+    };
+    if let Some(dev) = gpu_blocks {
+        let mut out = Vec::new();
+        for b in 0..blocks {
+            let current = columns.block(b, block)?;
+            let span = profile::span("gptq.encode", Some(current.device()));
+            let encoded = super::quantize_cuda::encode_blocks(
+                dev,
+                ty,
+                &current,
+                Some(&importance[b * block..(b + 1) * block]),
+                rows,
+            )?;
+            drop(span);
+            let (bytes, decoded) = encoded;
+            let row_block_bytes = bytes.len() / rows;
+            if b == 0 {
+                out = vec![0u8; rows * blocks * row_block_bytes];
+            }
+            for r in 0..rows {
+                out[(r * blocks + b) * row_block_bytes..][..row_block_bytes]
+                    .copy_from_slice(&bytes[r * row_block_bytes..][..row_block_bytes]);
+            }
+            if b + 1 == blocks {
+                break;
+            }
+            let error = u3.as_ref().map(|_| &current - decoded).transpose()?;
+            let asym = prepared.p.as_ref().map(|p| (p, &current));
+            columns.advance(b, block, error.as_ref(), u3.as_ref(), asym)?;
+        }
+        return Ok(out);
+    }
+    let first = columns.block(0, block)?;
+    let first = first.flatten_all()?.to_vec1::<f32>()?;
     let row_block_bytes = encode(
         ty,
         block,
-        &w[..block],
+        &first[..block],
         Some(&importance[..block]),
         quantizer,
     )?
     .len();
     let mut out = vec![0u8; rows * blocks * row_block_bytes];
     for b in 0..blocks {
-        let current = rest.narrow(1, 0, block)?.contiguous()?;
+        let current = columns.block(b, block)?;
         let wb = current.flatten_all()?.to_vec1::<f32>()?;
         let bytes = encode(
             ty,
@@ -472,15 +638,15 @@ fn quantize_on(
         if b + 1 == blocks {
             break;
         }
-        match &u {
-            Some(u) => {
+        let error = match &u3 {
+            Some(_) => {
                 let q = decode(ty, block, &bytes)?;
-                let error = (&current - Tensor::from_slice(&q, (rows, block), device)?)?;
-                let asym = prepared.p.as_ref().map(|p| (p, &current));
-                rest = carry(&rest, &error, u, b, block, asym)?;
+                Some((&current - Tensor::from_slice(&q, (rows, block), device)?)?)
             }
-            None => rest = rest.narrow(1, block, cols - (b + 1) * block)?,
-        }
+            None => None,
+        };
+        let asym = prepared.p.as_ref().map(|p| (p, &current));
+        columns.advance(b, block, error.as_ref(), u3.as_ref(), asym)?;
     }
     Ok(out)
 }
@@ -489,33 +655,8 @@ fn quantize_on(
 mod tests {
     use super::*;
 
-    // U^-1 U is the identity
-    #[test]
-    fn upper_inverse_inverts() {
-        let n = 5;
-        let u: Vec<f32> = (0..n * n)
-            .map(|i| {
-                let (r, c) = (i / n, i % n);
-                if c < r {
-                    0.0
-                } else if c == r {
-                    2.0 + r as f32
-                } else {
-                    0.3 * (r + c) as f32
-                }
-            })
-            .collect();
-        let inv = upper_inverse(&u, n);
-        for r in 0..n {
-            for c in 0..n {
-                let v: f32 = (0..n).map(|k| inv[r * n + k] * u[k * n + c]).sum();
-                assert!(
-                    (v - if r == c { 1.0 } else { 0.0 }).abs() < 1e-5,
-                    "{r},{c}: {v}"
-                );
-            }
-        }
-    }
+    // at most one byte in this many may differ between a batched pass and the experts run alone
+    const BATCHED_TIE_SHARE: usize = 1000;
 
     // the GPU loop writes the CPU loop's bytes for each row-scaled type (random rows with outliers, a dead column,
     // a random positive definite Hessian, two super-blocks so the feedback runs)
@@ -538,6 +679,7 @@ mod tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
         let prepared = prepare(&h, cols, true, 0.1, &device)?;
+        let values = Tensor::from_slice(&values, (rows, cols), &device)?;
         let unused_encode =
             |_: GgufType, _: usize, _: &[f32], _: Option<&[f32]>, _: Quantizer| Ok(Vec::new());
         let unused_decode = |_: GgufType, _: usize, _: &[u8]| Ok(Vec::new());
@@ -559,11 +701,46 @@ mod tests {
             let differing = gpu.iter().zip(&cpu).filter(|(a, b)| a != b).count();
             assert_eq!((gpu.len(), differing), (cpu.len(), 0), "{ty:?}");
         }
+        // the block types, against the CPU's block quantizer and decoder
+        let encode = |ty: GgufType, cols: usize, v: &[f32], w: Option<&[f32]>, q: Quantizer| {
+            let dtype = ty.candle().expect("a block type");
+            inference_tensor::quantized::quantize_blocks(dtype, v, w, cols, q)
+        };
+        let decode = |ty: GgufType, cols: usize, bytes: &[u8]| {
+            use inference_tensor::quantized::{QStorage, QTensor};
+            let dtype = ty.candle().expect("a block type");
+            let rows = bytes.len() / ty.row_bytes(cols).expect("a block type");
+            let storage =
+                QStorage::from_data(std::borrow::Cow::Borrowed(bytes), &Device::Cpu, dtype)?;
+            QTensor::new(storage, (rows, cols))?
+                .dequantize(&Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()
+        };
+        for ty in [GgufType::Q6K, GgufType::Q8_0] {
+            let run = |gpu| {
+                quantize_on(
+                    ty,
+                    cols,
+                    &values,
+                    &prepared,
+                    Quantizer::IkLlama,
+                    &device,
+                    encode,
+                    decode,
+                    gpu,
+                )
+            };
+            let (gpu, cpu) = (run(true)?, run(false)?);
+            let differing = gpu.iter().zip(&cpu).filter(|(a, b)| a != b).count();
+            assert_eq!((gpu.len(), differing), (cpu.len(), 0), "{ty:?}");
+        }
         Ok(())
     }
 
     // a stack's experts in one batched pass write what each written alone does (three experts, each its own random
-    // Hessian, one with a dead column, so the batched carry runs)
+    // Hessian, one with a dead column, so the batched carry runs), but for the odd value at a rounding tie: cuBLAS
+    // picks its kernels by batch size, while an expert reading another's rows or factor would change most bytes
     fn experts_batched_match_alone() -> Result<()> {
         let device = Device::new_cuda(0)?;
         let (experts, rows, cols, samples) = (3, 16, 512, 96);
@@ -587,10 +764,10 @@ mod tests {
             prepared.push(prepare(&h, cols, true, 0.1, &device)?);
         }
         let refs = prepared.iter().collect::<Vec<_>>();
+        let values = Tensor::from_slice(&values, (experts * rows, cols), &device)?;
         let unused_encode =
             |_: GgufType, _: usize, _: &[f32], _: Option<&[f32]>, _: Quantizer| Ok(Vec::new());
         let unused_decode = |_: GgufType, _: usize, _: &[u8]| Ok(Vec::new());
-        let per = rows * cols;
         for ty in [GgufType::Iq4Ks, GgufType::Iq4Kss, GgufType::Iq3Ks] {
             let batched = quantize_experts(ty, cols, &values, &refs, &device)?.expect("a GPU pass");
             let mut alone = Vec::new();
@@ -598,7 +775,7 @@ mod tests {
                 alone.extend(quantize(
                     ty,
                     cols,
-                    &values[e * per..(e + 1) * per],
+                    &values.narrow(0, e * rows, rows)?,
                     p,
                     Quantizer::IkLlama,
                     &device,
@@ -607,7 +784,12 @@ mod tests {
                 )?);
             }
             let differing = batched.iter().zip(&alone).filter(|(a, b)| a != b).count();
-            assert_eq!((batched.len(), differing), (alone.len(), 0), "{ty:?}");
+            assert_eq!(batched.len(), alone.len(), "{ty:?}");
+            assert!(
+                differing * BATCHED_TIE_SHARE <= batched.len(),
+                "{ty:?}: {differing} of {} bytes differ",
+                batched.len()
+            );
         }
         Ok(())
     }
@@ -642,7 +824,7 @@ mod tests {
             |_: GgufType, _: usize, _: &[f32], _: Option<&[f32]>, _: Quantizer| Ok(Vec::new());
         let unused_decode = |_: GgufType, _: usize, _: &[u8]| Ok(Vec::new());
         let ty = GgufType::Iq4Ks;
-        let values = w.flatten_all()?.to_vec1::<f32>()?;
+        let values = w.clone();
         let error = |prepared: &Prepared| -> Result<f32> {
             let bytes = quantize(
                 ty,

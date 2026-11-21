@@ -1555,7 +1555,12 @@ impl FastExpertsWeights {
         forward: &MoEForward,
         config: MoEForwardConfig,
     ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if let Some(out) = self.forward_tracked_grouped(forward, config)? {
+            return Ok(out);
+        }
         // Routed stats are fed here: only the block knows the token-to-expert pairing.
+        let _span = inference_tensor::profile::span("moe.gather", Some(forward.xs.device()));
         let ids = forward.topk_ids;
         self.fused_gate_proj
             .process_routed_stats(forward.xs_flat, ids)?;
@@ -1605,6 +1610,68 @@ impl FastExpertsWeights {
             .broadcast_mul(&forward.topk_weights.unsqueeze(D::Minus1)?)?
             .sum(D::Minus2)?
             .to_dtype(forward.original_dtype)
+    }
+
+    // BF16 experts collecting their down projection's per-expert Hessians, through the grouped GEMMs instead of a
+    // pass per expert: the kernels' GLU outputs, back in slot order, feed the statistics
+    #[cfg(feature = "cuda")]
+    fn forward_tracked_grouped(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        let Device::Cuda(dev) = forward.xs.device() else {
+            return Ok(None);
+        };
+        if forward.lora.is_some()
+            || self.sharded
+            || self.fused_down_proj.stats_snapshot().is_none()
+            || forward.shape.num_tokens < CUTLASS_MOE_MIN_TOKENS
+            || !inference_quant::moe::cutlass_moe_available(dev)
+        {
+            return Ok(None);
+        }
+        let Ok(act) = gated_act(config.act) else {
+            return Ok(None);
+        };
+        let weight = |p: &Arc<dyn QuantMethod>| {
+            p.unquant_weight_bias()
+                .filter(|(w, bias)| bias.is_none() && w.dtype() == DType::BF16 && w.rank() == 3)
+                .map(|(w, _)| w)
+        };
+        let (Some(gate), Some(up), Some(down)) = (
+            weight(&self.fused_gate_proj),
+            weight(&self.fused_up_proj),
+            weight(&self.fused_down_proj),
+        ) else {
+            return Ok(None);
+        };
+        if forward.xs_flat.dtype() != DType::BF16 {
+            return Ok(None);
+        }
+        let _span = inference_tensor::profile::span("moe.grouped", Some(forward.xs.device()));
+        let ids = forward.topk_ids;
+        self.fused_gate_proj
+            .process_routed_stats(forward.xs_flat, ids)?;
+        self.fused_up_proj
+            .process_routed_stats(forward.xs_flat, ids)?;
+        let gate_up = fused_gate_up(&gate, &up)?;
+        let (out, down_in) = inference_quant::moe::cutlass_fused_moe_routed(
+            forward.xs_flat,
+            &gate_up,
+            &down,
+            &ids.to_dtype(DType::U32)?.contiguous()?,
+            forward.topk_weights,
+            config.num_experts,
+            act,
+            dev,
+        )?;
+        let inter = down_in.dim(D::Minus1)?;
+        self.fused_down_proj.process_routed_stats(
+            &down_in.reshape((forward.shape.num_tokens, config.num_experts_per_tok, inter))?,
+            ids,
+        )?;
+        Ok(Some(out.to_dtype(forward.original_dtype)?))
     }
 
     fn forward_gather_lora(
@@ -1871,6 +1938,33 @@ impl FastExpertsWeights {
         };
         grouped_with([gate, up, down], forward, config)
     }
+}
+
+#[cfg(feature = "cuda")]
+thread_local! {
+    // the last stack's gate and up as the grouped kernels take them, by the two tensors' ids: a streamed layer's every
+    // call after its first reuses it, and the next layer's replaces it
+    static FUSED_GATE_UP: std::cell::RefCell<Option<(inference_tensor::TensorId, inference_tensor::TensorId, Tensor)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// `[gate; up]` along the intermediate dim (the grouped kernels' `[E, 2I, H]`), made once a stack
+#[cfg(feature = "cuda")]
+fn fused_gate_up(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    let key = (gate.id(), up.id());
+    let found = FUSED_GATE_UP.with_borrow(|cached| {
+        cached
+            .as_ref()
+            .filter(|(g, u, _)| (*g, *u) == key)
+            .map(|(.., fused)| fused.clone())
+    });
+    if let Some(fused) = found {
+        return Ok(fused);
+    }
+    FUSED_GATE_UP.with_borrow_mut(|cached| *cached = None);
+    let fused = Tensor::cat(&[gate, up], 1)?;
+    FUSED_GATE_UP.with_borrow_mut(|cached| *cached = Some((key.0, key.1, fused.clone())));
+    Ok(fused)
 }
 
 /// The expert-indexed matvec over `[gate, up, down]` kernel weights, for decode-sized batches.

@@ -467,6 +467,7 @@ impl GgufWeightSource {
                         if self.archive.shards()[info.shard_index()].endian()
                             == GgufEndian::Little =>
                     {
+                        let _span = inference_tensor::profile::span("build.upload", Some(device));
                         let bytes = self.archive.tensor_data(name)?.into_bytes();
                         Tensor::from_raw_buffer(&bytes, dtype, info.shape(), device)
                     }

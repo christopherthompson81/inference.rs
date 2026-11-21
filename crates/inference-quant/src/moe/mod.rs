@@ -47,6 +47,50 @@ pub fn cutlass_fused_moe(
     }
 }
 
+/// [`cutlass_fused_moe`], with the down projection's inputs: every routed slot's GLU output `(tokens * topk, inter)`,
+/// in slot order.
+#[allow(clippy::too_many_arguments)]
+pub fn cutlass_fused_moe_routed(
+    xs: &inference_tensor::Tensor,
+    gate_up: &inference_tensor::Tensor,
+    down: &inference_tensor::Tensor,
+    topk_ids: &inference_tensor::Tensor,
+    topk_weights: &inference_tensor::Tensor,
+    num_experts: usize,
+    act: cuda::GatedAct,
+    dev: &inference_tensor::CudaDevice,
+) -> inference_tensor::Result<(inference_tensor::Tensor, inference_tensor::Tensor)> {
+    #[cfg(has_cutlass_moe_kernels)]
+    {
+        cutlass::cutlass_fused_moe_routed(
+            xs,
+            gate_up,
+            down,
+            topk_ids,
+            topk_weights,
+            num_experts,
+            act,
+            dev,
+        )
+    }
+    #[cfg(not(has_cutlass_moe_kernels))]
+    {
+        let _ = (
+            xs,
+            gate_up,
+            down,
+            topk_ids,
+            topk_weights,
+            num_experts,
+            act,
+            dev,
+        );
+        inference_tensor::bail!(
+            "CUTLASS MoE kernels were not compiled in (requires sm_80+ at build)"
+        )
+    }
+}
+
 /// Whether the CUTLASS grouped-GEMM MoE kernels were compiled in and the device can run them.
 pub fn cutlass_moe_available(dev: &inference_tensor::CudaDevice) -> bool {
     #[cfg(has_cutlass_moe_kernels)]

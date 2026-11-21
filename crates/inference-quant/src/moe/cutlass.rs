@@ -125,6 +125,59 @@ pub fn cutlass_fused_moe(
     act: super::cuda::GatedAct,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
+    Ok(fused_moe(
+        xs,
+        gate_up,
+        down,
+        topk_ids,
+        topk_weights,
+        num_experts,
+        act,
+        dev,
+        false,
+    )?
+    .0)
+}
+
+/// As [`cutlass_fused_moe`], with the down projection's inputs: every routed slot's GLU output
+/// `(num_tokens * topk, inter)`, in slot order (token by token, its `topk` slots in turn).
+#[allow(clippy::too_many_arguments)]
+pub fn cutlass_fused_moe_routed(
+    xs: &Tensor,
+    gate_up: &Tensor,
+    down: &Tensor,
+    topk_ids: &Tensor,
+    topk_weights: &Tensor,
+    num_experts: usize,
+    act: super::cuda::GatedAct,
+    dev: &CudaDevice,
+) -> Result<(Tensor, Tensor)> {
+    let (out, routed) = fused_moe(
+        xs,
+        gate_up,
+        down,
+        topk_ids,
+        topk_weights,
+        num_experts,
+        act,
+        dev,
+        true,
+    )?;
+    Ok((out, routed.expect("kept routes")))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fused_moe(
+    xs: &Tensor,
+    gate_up: &Tensor,
+    down: &Tensor,
+    topk_ids: &Tensor,
+    topk_weights: &Tensor,
+    num_experts: usize,
+    act: super::cuda::GatedAct,
+    dev: &CudaDevice,
+    keep_routes: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
     let (num_tokens, hidden) = xs.dims2()?;
     let (_, two_inter, k1) = gate_up.dims3()?;
     let inter = two_inter / 2;
@@ -182,7 +235,8 @@ pub fn cutlass_fused_moe(
     let mut atomic = unsafe { dev.alloc::<i32>(num_experts)? };
     let mut offsets = unsafe { dev.alloc::<i32>(num_experts + 1)? };
     let mut in_perm = unsafe { dev.alloc::<i32>(num_valid)? };
-    let mut out_perm = unsafe { dev.alloc::<i32>(num_valid)? };
+    // u32 for the index_select the routed variant gathers with; the kernels read its (non-negative) i32 bits
+    let mut out_perm = unsafe { dev.alloc::<u32>(num_valid)? };
     let mut a_perm = unsafe { dev.alloc::<bf16>(num_valid * hidden)? };
     let mut c1 = unsafe { dev.alloc::<bf16>(num_valid * two_inter)? };
     let mut c2 = unsafe { dev.alloc::<bf16>(num_valid * hidden)? };
@@ -350,5 +404,21 @@ pub fn cutlass_fused_moe(
 
     let out_storage = inference_tensor::CudaStorage::wrap_cuda_slice(out, dev.clone());
     let out_tensor = Tensor::from((Storage::Cuda(out_storage), (num_valid, hidden)));
-    super::cuda::moe_sum_bf16(&out_tensor, num_tokens, topk, dev)
+    let summed = super::cuda::moe_sum_bf16(&out_tensor, num_tokens, topk, dev)?;
+    let routes = match keep_routes {
+        // each slot's row of the expert-ordered `act` (the order the weighted gather reads them in): back in slot
+        // order, which does not depend on the sort's atomics
+        true => {
+            let out_perm = Tensor::from((
+                Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+                    out_perm,
+                    dev.clone(),
+                )),
+                num_valid,
+            ));
+            Some(act.index_select(&out_perm, 0)?)
+        }
+        false => None,
+    };
+    Ok((summed, routes))
 }
