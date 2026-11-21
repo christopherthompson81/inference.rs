@@ -1,0 +1,65 @@
+#version 450
+// One decode step of a short causal conv with a residual on a conv-state pool, in place: batch row b's channel ch reads
+// its last `hist` inputs from the pool row slots[b] (pool f32 (rows, pool_channels, hist), the conv's channels from
+// `channel_off`), writes (x + window . weight + taps) * scale, and shifts x in. `taps` (when present) are input-
+// dependent weights per (b, head, lag), lag 0 the current input, a head `channels / heads` channels wide.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer W { float weight[]; };
+layout(std430, binding = 2) readonly buffer T { float taps[]; };
+layout(std430, binding = 3) buffer Pool { float pool[]; };
+layout(std430, binding = 4) readonly buffer Slots { uint slots[]; };
+layout(std430, binding = 5) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels;
+    uint hist;
+    uint pool_channels;
+    uint channel_off;
+    // 0 for none
+    uint heads;
+    float scale;
+    uint x_off;
+    uint weight_off;
+    uint taps_off;
+    uint pool_off;
+    uint slots_off;
+} pc;
+
+// the widest conv this takes, its window `hist + 1`
+const uint MAX_WIDTH = 8;
+
+void main() {
+    uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint width = pc.hist + 1;
+    for (uint e = gl_GlobalInvocationID.x; e < pc.batch * pc.channels; e += total) {
+        uint b = e / pc.channels;
+        uint ch = e % pc.channels;
+        uint base = pc.pool_off + (slots[pc.slots_off + b] * pc.pool_channels + pc.channel_off + ch) * pc.hist;
+        float window[MAX_WIDTH];
+        for (uint j = 0; j < pc.hist; j++) {
+            window[j] = pool[base + j];
+        }
+        float xv = x[pc.x_off + e];
+        window[pc.hist] = xv;
+        float sum = xv;
+        uint wt = pc.weight_off + ch * width;
+        for (uint j = 0; j < width; j++) {
+            sum += window[j] * weight[wt + j];
+        }
+        if (pc.heads != 0) {
+            uint head = ch / (pc.channels / pc.heads);
+            uint tt = pc.taps_off + (b * pc.heads + head) * width;
+            for (uint lag = 0; lag < width; lag++) {
+                sum += window[pc.hist - lag] * taps[tt + lag];
+            }
+        }
+        for (uint j = 0; j < pc.hist; j++) {
+            pool[base + j] = window[j + 1];
+        }
+        o[e] = sum * pc.scale;
+    }
+}

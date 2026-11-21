@@ -1,0 +1,128 @@
+#version 450
+// Attention over depth: for each row (a token), the states `blocks` (rows, n, width) then `cur` (rows, width), each
+// unit-RMS normed (`eps`), scored against each of `queries` (queries, width) at 1 / sqrt(width), softmaxed over the
+// states, and their weighted sum written to (rows, queries, width). A workgroup a row.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer B { float blocks[]; };
+layout(std430, binding = 1) readonly buffer C { float cur[]; };
+layout(std430, binding = 2) readonly buffer Q { float queries[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint width;
+    // the blocks a row, the current state not among them
+    uint n;
+    uint nq;
+    float eps;
+    uint blocks_off;
+    uint cur_off;
+    uint q_off;
+} pc;
+
+const uint THREADS = 256;
+// the states (blocks and the current one) and queries this takes: fixed bounds keep the sums in registers
+const uint MAX_STATES = 8;
+const uint MAX_QUERIES = 4;
+// a sum of squares a state, then a dot a (query, state)
+const uint SUMS = MAX_STATES * (1 + MAX_QUERIES);
+// subgroups a workgroup at most, for subgroups as narrow as 8
+const uint MAX_SUBGROUPS = THREADS / 8;
+
+shared float partial[MAX_SUBGROUPS * SUMS];
+shared float weights[MAX_QUERIES * MAX_STATES];
+
+float state(uint row, uint s, uint c) {
+    return s < pc.n ? blocks[pc.blocks_off + (row * pc.n + s) * pc.width + c] : cur[pc.cur_off + row * pc.width + c];
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (row >= pc.rows) {
+        return;
+    }
+    uint states = pc.n + 1;
+    float sums[SUMS];
+    [[unroll]] for (uint i = 0; i < SUMS; i++) {
+        sums[i] = 0.0;
+    }
+    for (uint c = gl_LocalInvocationID.x; c < pc.width; c += THREADS) {
+        float qv[MAX_QUERIES];
+        [[unroll]] for (uint q = 0; q < MAX_QUERIES; q++) {
+            qv[q] = q < pc.nq ? queries[pc.q_off + q * pc.width + c] : 0.0;
+        }
+        [[unroll]] for (uint s = 0; s < MAX_STATES; s++) {
+            if (s < states) {
+                float v = state(row, s, c);
+                sums[s] += v * v;
+                [[unroll]] for (uint q = 0; q < MAX_QUERIES; q++) {
+                    sums[MAX_STATES + q * MAX_STATES + s] += v * qv[q];
+                }
+            }
+        }
+    }
+    [[unroll]] for (uint i = 0; i < SUMS; i++) {
+        uint s = i % MAX_STATES;
+        uint q = i / MAX_STATES;
+        // a state's square sum, then the queries' dots: only the ones in use
+        if (s < states && (q == 0 || q - 1 < pc.nq)) {
+            float total = subgroupAdd(sums[i]);
+            if (gl_SubgroupInvocationID == 0) {
+                partial[gl_SubgroupID * SUMS + i] = total;
+            }
+        }
+    }
+    barrier();
+    // a thread a query: its scores, max and softmax over the states
+    uint t = gl_LocalInvocationID.x;
+    if (t < pc.nq) {
+        float score[MAX_STATES];
+        float m = -1.0 / 0.0;
+        for (uint s = 0; s < states; s++) {
+            float sq = 0.0;
+            float dq = 0.0;
+            for (uint g = 0; g < gl_NumSubgroups; g++) {
+                sq += partial[g * SUMS + s];
+                dq += partial[g * SUMS + MAX_STATES + t * MAX_STATES + s];
+            }
+            float inv = 1.0 / sqrt(sq / float(pc.width) + pc.eps);
+            score[s] = dq * inv / sqrt(float(pc.width));
+            m = max(m, score[s]);
+            // the state's norm folds into its weight
+            weights[t * MAX_STATES + s] = inv;
+        }
+        float l = 0.0;
+        for (uint s = 0; s < states; s++) {
+            score[s] = exp(score[s] - m);
+            l += score[s];
+        }
+        for (uint s = 0; s < states; s++) {
+            weights[t * MAX_STATES + s] *= score[s] / l;
+        }
+    }
+    barrier();
+    for (uint c = gl_LocalInvocationID.x; c < pc.width; c += THREADS) {
+        float acc[MAX_QUERIES];
+        [[unroll]] for (uint q = 0; q < MAX_QUERIES; q++) {
+            acc[q] = 0.0;
+        }
+        [[unroll]] for (uint s = 0; s < MAX_STATES; s++) {
+            if (s < states) {
+                float v = state(row, s, c);
+                [[unroll]] for (uint q = 0; q < MAX_QUERIES; q++) {
+                    acc[q] += weights[q * MAX_STATES + s] * v;
+                }
+            }
+        }
+        [[unroll]] for (uint q = 0; q < MAX_QUERIES; q++) {
+            if (q < pc.nq) {
+                o[(row * pc.nq + q) * pc.width + c] = acc[q];
+            }
+        }
+    }
+}

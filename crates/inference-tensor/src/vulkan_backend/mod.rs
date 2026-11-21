@@ -846,6 +846,158 @@ pub(crate) fn ssm_conv_step(
     Ok(tensor_of(out, (batch, seq, channels)))
 }
 
+pub(crate) fn depth_mix(
+    blocks: Option<&Tensor>,
+    cur: &Tensor,
+    queries: &Tensor,
+    eps: f32,
+) -> Result<Option<Tensor>> {
+    let f32 = DType::F32;
+    let (rows, width) = cur.dims2()?;
+    let (nq, q_width) = queries.dims2()?;
+    let n = match blocks {
+        Some(b) => {
+            let (b_rows, n, b_width) = b.dims3()?;
+            if (b_rows, b_width) != (rows, width) {
+                return Ok(None);
+            }
+            n
+        }
+        None => 0,
+    };
+    let all_f32 = [Some(cur), Some(queries), blocks]
+        .into_iter()
+        .flatten()
+        .all(|t| t.dtype() == f32);
+    if q_width != width || !all_f32 || !inference_vulkan::DepthMix::supports(n, nq) {
+        return Ok(None);
+    }
+    let blocks = blocks.map(|b| b.contiguous()).transpose()?;
+    let (cur, queries) = (cur.contiguous()?, queries.contiguous()?);
+    let bb = blocks.as_ref().map(|b| bound(b, f32)).transpose()?;
+    let (cb, qb) = (bound(&cur, f32)?, bound(&queries, f32)?);
+    let device = cur.device().as_vulkan_device()?.clone();
+    let count = rows * nq * width;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.depth_mix(&inference_vulkan::DepthMix {
+                rows,
+                width,
+                n,
+                queries: nq,
+                eps,
+                blocks: bb.as_ref().map(|b| (&b.0, b.1)),
+                cur: (&cb.0, cb.1),
+                query: (&qb.0, qb.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some(tensor_of(out, (rows, nq, width))))
+}
+
+pub(crate) fn row_norm(
+    x: &Tensor,
+    scale: Option<&Tensor>,
+    mode: crate::vulkan::RowNormMode,
+) -> Result<Option<Tensor>> {
+    use crate::vulkan::RowNormMode as M;
+    let f32 = DType::F32;
+    let width = x.dim(crate::D::Minus1)?;
+    let rows = x.elem_count() / width.max(1);
+    if x.dtype() != f32 || !x.is_contiguous() || scale.is_some_and(|s| s.dtype() != f32) {
+        return Ok(None);
+    }
+    let scale = scale.map(|s| s.contiguous()).transpose()?;
+    let scale_rows = match &scale {
+        Some(s) if s.dim(crate::D::Minus1)? != width => return Ok(None),
+        Some(s) => s.elem_count() / width,
+        None => 0,
+    };
+    let xb = bound(x, f32)?;
+    let sb = scale.as_ref().map(|s| bound(s, f32)).transpose()?;
+    let device = x.device().as_vulkan_device()?.clone();
+    let count = rows * width;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    let mode = match mode {
+        M::Clip { threshold, eps } => inference_vulkan::RowNormMode::Clip { threshold, eps },
+        M::Rms { eps } => inference_vulkan::RowNormMode::Rms { eps },
+    };
+    device
+        .context
+        .record(|r| {
+            r.row_norm(&inference_vulkan::RowNorm {
+                rows,
+                width,
+                mode,
+                x: (&xb.0, xb.1),
+                scale: sb.as_ref().map(|s| ((&s.0, s.1), scale_rows)),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some(tensor_of(out, x.dims())))
+}
+
+pub(crate) fn short_conv_step(op: &crate::vulkan::ShortConvStep<'_>) -> Result<Tensor> {
+    let (batch, channels) = op.x.dims2()?;
+    let (_, pool_channels, hist) = op.pool.dims3()?;
+    let f32 = DType::F32;
+    let (xb, wb, pb, sb) = (
+        bound(op.x, f32)?,
+        bound(op.weight, f32)?,
+        bound(op.pool, f32)?,
+        bound(op.slots, DType::U32)?,
+    );
+    let heads = op
+        .taps
+        .map(|t| t.dims3())
+        .transpose()?
+        .map_or(0, |(_, h, _)| h);
+    let taps = op.taps.map(|t| bound(t, f32)).transpose()?;
+    let device = op.x.device().as_vulkan_device()?.clone();
+    let count = batch * channels;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.short_conv_step(&inference_vulkan::ShortConvStep {
+                batch,
+                channels,
+                hist,
+                pool_channels,
+                channel_off: op.channel_off,
+                heads,
+                scale: op.scale,
+                x: (&xb.0, xb.1),
+                weight: (&wb.0, wb.1),
+                taps: taps.as_ref().map(|t| (&t.0, t.1)),
+                pool: (&pb.0, pb.1),
+                slots: (&sb.0, sb.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(tensor_of(out, (batch, channels)))
+}
+
 // max(x, 0)^2 in one map, where `x`'s storage is an f32 Vulkan buffer the map reads
 pub(crate) fn relu_sqr(x: &Tensor) -> Result<Option<Tensor>> {
     let out = match &*x.storage() {
@@ -3918,6 +4070,77 @@ mod tests {
                 "seq {seq} chunked {chunked}: {:.3} ms a scan",
                 start.elapsed().as_secs_f64() * 1e3 / f64::from(RUNS)
             );
+        }
+        Ok(())
+    }
+
+    // the biased decode against attention spelled out on the CPU: Inkling 2's shapes (24 heads over 8, head 128), the
+    // cache a view of a longer one, keys past the bias's extent and past the window
+    #[test]
+    fn biased_decode_matches_its_reference() -> Result<()> {
+        let Some(device) = device() else {
+            return Ok(());
+        };
+        const HEADS: usize = 24;
+        const KV_HEADS: usize = 8;
+        const HEAD: usize = 128;
+        const CAPACITY: usize = 2560;
+        const EXTENT: usize = 1024;
+        for (keys, window) in [(2185, 0), (2185, 1024), (700, 1024), (37, 0)] {
+            let cpu = Device::Cpu;
+            let q = Tensor::randn(0f32, 1., (1, HEADS, 1, HEAD), &cpu)?;
+            let k_full = Tensor::randn(0f32, 1., (1, KV_HEADS, CAPACITY, HEAD), &cpu)?;
+            let v_full = Tensor::randn(0f32, 1., (1, KV_HEADS, CAPACITY, HEAD), &cpu)?;
+            let bias = Tensor::randn(0f32, 1., (1, HEADS, EXTENT + 1), &cpu)?;
+            let scale = 1.0 / (HEAD as f32).sqrt();
+            // reference: every key's bias by distance, hidden past the window, the sink a zero-valued logit
+            let (b, k, v) = (
+                bias.to_vec3::<f32>()?,
+                k_full.narrow(2, 0, keys)?,
+                v_full.narrow(2, 0, keys)?,
+            );
+            let mut want = Vec::new();
+            for (h, row) in b[0].iter().enumerate() {
+                let qh = q.i((0, h, 0))?;
+                let kh = k.i((0, h / (HEADS / KV_HEADS)))?;
+                let vh = v.i((0, h / (HEADS / KV_HEADS)))?;
+                let scores = (kh.matmul(&qh.unsqueeze(1)?)?.squeeze(1)? * f64::from(scale))?
+                    .to_vec1::<f32>()?;
+                let mut logits = Vec::with_capacity(keys + 1);
+                for (key, score) in scores.iter().enumerate() {
+                    let distance = keys - 1 - key;
+                    let hidden = window != 0 && distance >= window;
+                    let rel = if distance < EXTENT {
+                        b[0][h][distance]
+                    } else {
+                        0.0
+                    };
+                    logits.push(if hidden {
+                        f32::NEG_INFINITY
+                    } else {
+                        score + rel
+                    });
+                }
+                logits.push(row[EXTENT]);
+                let probs =
+                    crate::nn::ops::softmax_last_dim(&Tensor::new(logits.as_slice(), &cpu)?)?;
+                let probs = probs.narrow(0, 0, keys)?.unsqueeze(0)?;
+                want.push(probs.matmul(&vh)?.squeeze(0)?);
+            }
+            let want = Tensor::stack(&want, 0)?.reshape((1, HEADS, 1, HEAD))?;
+            let on = |t: &Tensor| t.to_device(&device);
+            let k_dev = on(&k_full)?.narrow(2, 0, keys)?;
+            let v_dev = on(&v_full)?.narrow(2, 0, keys)?;
+            let got = super::biased_decode(&crate::vulkan::BiasedDecode {
+                q: &on(&q)?,
+                k: &k_dev,
+                v: &v_dev,
+                bias: &on(&bias)?,
+                window,
+                scale,
+            })?
+            .expect("the kernel takes these shapes");
+            assert_close(&got, &want.to_device(&device)?, DOT_TOLERANCE)?;
         }
         Ok(())
     }
