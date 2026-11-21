@@ -70,3 +70,33 @@ IQ4_NL GGUF (ggml-org)      0.00995    0.00437   0.0877    96.04%    6.7877
 The base's PPL reads its quantized records (u16 codes), ours the logits; the streamed scoring reports both the same
 way. The GGUF's 0.00995 is the requant's cost (IQ4_NL experts from NVFP4, Q8_0 dense from BF16): the number a custom
 recipe from these weights is measured against.
+
+## Run 3 - 2026-11-21 19:30
+
+Recipe A: the GGUF with the official checkpoint's NVFP4 experts as stored. llama.cpp's GGUFs carry NVFP4 expert
+stacks with a per-expert `<weight>.scale` (`[experts]` F32, its converter's `_write_scales_tensor`); its Inkling
+converter dequantizes the experts instead. A gguf-py graft (scratchpad `recipe/graft_nvfp4.py`) copied ggml-org's
+IQ4_NL GGUF with layers 0-19's `ffn_gate_up_exps` / `ffn_down_exps` replaced by the official bytes (ggml NVFP4 blocks,
+the checkpoint's interleaved gate/up rows stacked gate then up) and their scales; layers 20-23 (MXFP8 in the
+checkpoint) keep the base's Q8_0, the dense weights its Q8_0. 17,627,963,584 bytes against the base's 17,627,940,768.
+gguf-py's NVFP4 dequantization of a grafted row is the official row (the block values exact, the scale 4.5e-5).
+
+Loading needed llama.cpp's per-expert scale: `GgufWeightSource::load_scale` now reads a `.scale` of one value per
+stacked expert as the expert scales of #1040, and Inkling's bindings bind `ffn_*_exps.scale` (`parse_block_tensor`
+splits off only `.weight` / `.bias`, so a scale arrives as the role `ffn_down_exps.scale`; unbound, the first score
+was KLD 13.5).
+
+```
+quantize kld --resident against the official base     mean KLD   median    p99      same top   PPL
+ggml-org IQ4_NL                                         0.00995    0.00437   0.0877   96.04%     6.7877
+recipe A (official NVFP4 experts, rest as ggml-org's)   0.00374    0.00133   0.0379   97.46%     6.7706
+
+inference bench --pa-context-len 8192        pp512   tg128
+ggml-org IQ4_NL                              1926    84.5
+recipe A                                     1557    78.6
+```
+
+Same size, 2.7x lower KLD; what remains is the Q8_0 dense weights and the MXFP8 layers requantized to Q8_0. The
+NVFP4 experts run slower than IQ4_NL's: the per-expert scales are applied in separate ops around the raw kernels (the
+gated activation path at decode, the explicit activation path at prefill instead of the fused GLU), and the NVFP4
+matvec itself.

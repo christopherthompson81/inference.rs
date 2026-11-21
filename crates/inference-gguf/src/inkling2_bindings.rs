@@ -58,6 +58,18 @@ pub fn build_inkling2_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> 
             "exp_probs_b" => format!("{p}.mlp.gate.e_score_correction_bias"),
             "ffn_down_exps" => format!("{p}.mlp.experts.down_proj.{suffix}"),
             "loop_msg_query" => format!("{p}.loop.msg_query"),
+            // each NVFP4 expert's second-level scale (llama.cpp's `<weight>.scale`), the gate's and up's halves sharing
+            // the fused stack's
+            "ffn_down_exps.scale" => format!("{p}.mlp.experts.down_proj.scale"),
+            "ffn_gate_up_exps.scale" => {
+                for half in ["gate_proj", "up_proj"] {
+                    bindings.insert(
+                        format!("{p}.mlp.experts.{half}.scale"),
+                        GgufTensorBinding::tensor(name),
+                    );
+                }
+                continue;
+            }
             "attn_rel_bias" | "attn_res_query" | "ffn_res_query" | "ffn_gate_up_exps" => {
                 bind_reshaped(archive, &p, role, name, &mut bindings)?;
                 continue;

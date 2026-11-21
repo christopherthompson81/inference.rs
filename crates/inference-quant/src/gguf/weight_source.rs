@@ -606,22 +606,20 @@ impl GgufWeightSource {
         }
     }
 
-    // llama.cpp's `<weight>.scale`: one F32 the matmul's output is multiplied by
-    fn load_scale(&self, key: &str) -> Result<Option<f32>> {
+    // llama.cpp's `<weight>.scale`: one F32 the matmul's output is multiplied by, or one an expert of a stack
+    fn load_scale(&self, key: &str) -> Result<Option<GgufScale>> {
         let name = format!("{key}.scale");
         if !self.bindings.contains_key(&name) {
             return Ok(None);
         }
         let scale = self
             .materialize_tensor(&name, &Device::Cpu)?
-            .to_dtype(DType::F32)?;
-        if scale.elem_count() != 1 {
-            inference_tensor::bail!(
-                "GGUF `{name}` holds {} values; only a tensor-wide scale is supported",
-                scale.elem_count()
-            );
-        }
-        Ok(Some(scale.flatten_all()?.to_vec1::<f32>()?[0]))
+            .to_dtype(DType::F32)?
+            .flatten_all()?;
+        Ok(Some(match scale.elem_count() {
+            1 => GgufScale::Tensor(scale.to_vec1::<f32>()?[0]),
+            _ => GgufScale::Experts(scale),
+        }))
     }
 
     fn load_direct_linear(
@@ -1230,7 +1228,14 @@ fn quant_type(dtype: GgufDType, name: &str) -> Result<GgufType> {
 }
 
 // Candle's types run as GgufMatMul, which takes no output scale; no GGUF writer pairs one with them yet
-fn unscaled(key: &str, scale: Option<f32>) -> Result<()> {
+/// llama.cpp's `<weight>.scale`: the whole tensor's, or each stacked expert's (NVFP4 experts with a second level apiece).
+enum GgufScale {
+    Tensor(f32),
+    // `[experts]` F32, on the host
+    Experts(Tensor),
+}
+
+fn unscaled(key: &str, scale: Option<GgufScale>) -> Result<()> {
     if scale.is_some() {
         inference_tensor::bail!(
             "GGUF `{key}` has a tensor-wide scale, read only for raw-block types such as NVFP4"
@@ -1242,17 +1247,17 @@ fn unscaled(key: &str, scale: Option<f32>) -> Result<()> {
 fn quant_linear(
     weight: PackedBinding<'_>,
     bias: Option<Tensor>,
-    scale: Option<f32>,
+    scale: Option<GgufScale>,
     device: &Device,
     multi_row_decode: bool,
 ) -> Result<Arc<dyn QuantMethod>> {
-    Ok(match weight.dtype.candle() {
+    let layer = match weight.dtype.candle() {
         Some(dtype) => {
             unscaled("a linear", scale)?;
-            Arc::new(GgufMatMul::from_qtensor(
+            return Ok(Arc::new(GgufMatMul::from_qtensor(
                 qtensor_from_gguf_data(dtype, &weight.data, weight.dims, device)?,
                 bias,
-            )?)
+            )?));
         }
         None => {
             #[cfg(feature = "cuda")]
@@ -1268,9 +1273,25 @@ fn quant_linear(
                 let _ = multi_row_decode;
                 RawGgufTensor::from_bytes(weight.dtype, &weight.dims, weight.data, device)?
             };
-            Arc::new(GgufRawMatMul::new(raw, bias).with_output_scale(scale))
+            let layer = GgufRawMatMul::new(raw, bias);
+            match scale {
+                None => layer,
+                Some(GgufScale::Tensor(scale)) => layer.with_output_scale(Some(scale)),
+                Some(GgufScale::Experts(scales)) => {
+                    let experts = weight.dims.first().copied().unwrap_or(0);
+                    if weight.dims.len() != 3 || scales.elem_count() != experts {
+                        inference_tensor::bail!(
+                            "a GGUF scale of {} values for a weight of shape {:?}",
+                            scales.elem_count(),
+                            weight.dims
+                        );
+                    }
+                    layer.with_expert_scales(Some(scales.to_device(device)?))
+                }
+            }
         }
-    })
+    };
+    Ok(Arc::new(layer))
 }
 
 // A row-scaled row keeps one scale for its whole length, so no column split lines up with it
@@ -2114,13 +2135,15 @@ mod tests {
         Ok(())
     }
 
-    // an NVFP4 weight with llama.cpp's `<weight>.scale`: the linear's output and its dequantized weight carry the scale
-    #[test]
-    fn a_raw_linear_applies_its_tensor_wide_scale() -> Result<()> {
+    // an NVFP4 weight `[experts.., ROWS, IN_DIM]` with llama.cpp's `<weight>.scale` of `scales`, and its blocks
+    fn scaled_nvfp4(
+        experts: Option<usize>,
+        scales: &[f32],
+    ) -> Result<(NamedTempFile, Arc<GgufWeightSource>, Vec<u8>)> {
         const ROWS: usize = 2;
-        const SCALE: f32 = 0.25;
         let nvfp4 = GgufType::Nvfp4;
-        let blocks = ROWS * IN_DIM / nvfp4.block_size();
+        let stacked = experts.unwrap_or(1);
+        let blocks = stacked * ROWS * IN_DIM / nvfp4.block_size();
         let data = (0..blocks * nvfp4.type_size())
             .map(|i| {
                 if i % nvfp4.type_size() < 4 {
@@ -2130,6 +2153,8 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
+        let mut dims = vec![IN_DIM as u64, ROWS as u64];
+        dims.extend(experts.map(|e| e as u64));
         let scale_offset = align(data.len(), 32);
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"GGUF");
@@ -2137,13 +2162,13 @@ mod tests {
         bytes.extend_from_slice(&2u64.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         for (name, dims, ty, offset) in [
+            ("blk.0.w.weight", dims, nvfp4.id(), 0),
             (
-                "blk.0.w.weight",
-                vec![IN_DIM as u64, ROWS as u64],
-                nvfp4.id(),
+                "blk.0.w.scale",
+                vec![scales.len() as u64],
                 0,
+                scale_offset as u64,
             ),
-            ("blk.0.w.scale", vec![1], 0, scale_offset as u64),
         ] {
             bytes.extend_from_slice(&(name.len() as u64).to_le_bytes());
             bytes.extend_from_slice(name.as_bytes());
@@ -2157,7 +2182,9 @@ mod tests {
         bytes.resize(align(bytes.len(), 32), 0);
         bytes.extend_from_slice(&data);
         bytes.resize(align(bytes.len(), 32), 0);
-        bytes.extend_from_slice(&SCALE.to_le_bytes());
+        for scale in scales {
+            bytes.extend_from_slice(&scale.to_le_bytes());
+        }
         bytes.resize(align(bytes.len(), 32), 0);
         let mut file = NamedTempFile::new().map_err(Error::wrap)?;
         file.as_file_mut().write_all(&bytes).map_err(Error::wrap)?;
@@ -2170,18 +2197,54 @@ mod tests {
             )
             .with_binding("model.w.scale", GgufTensorBinding::tensor("blk.0.w.scale"));
         let source = Arc::new(GgufWeightSource::new(archive, &bindings, DType::F32)?);
+        Ok((file, source, data))
+    }
+
+    // the linear's output and its dequantized weight carry the tensor-wide scale
+    #[test]
+    fn a_raw_linear_applies_its_tensor_wide_scale() -> Result<()> {
+        const SCALE: f32 = 0.25;
+        let (_file, source, data) = scaled_nvfp4(None, &[SCALE])?;
         let linear = source
             .load_linear("model.w", &Device::Cpu, Shard::default())?
             .unwrap();
         let weight = Tensor::from_vec(
-            super::super::raw::dequantize_rows(nvfp4, IN_DIM, &data)?,
-            (ROWS, IN_DIM),
+            super::super::raw::dequantize_rows(GgufType::Nvfp4, IN_DIM, &data)?,
+            (2, IN_DIM),
             &Device::Cpu,
         )?;
         let xs = Tensor::randn(0f32, 1f32, (3, IN_DIM), &Device::Cpu)?;
         let expected = (xs.matmul(&weight.t()?)? * f64::from(SCALE))?;
         assert_close(&linear.forward(&xs)?, &expected)?;
         assert_close(&linear.dequantize_w()?, &(weight * f64::from(SCALE))?)?;
+        Ok(())
+    }
+
+    // a stack of NVFP4 experts with a scale each (llama.cpp's per-expert `<weight>.scale`): each expert's routed
+    // outputs and its dequantized weight carry its own
+    #[test]
+    fn stacked_experts_apply_their_own_scales() -> Result<()> {
+        const SCALES: [f32; 2] = [0.25, 3.0];
+        let (_file, source, data) = scaled_nvfp4(Some(SCALES.len()), &SCALES)?;
+        let experts = source
+            .load_linear("model.w", &Device::Cpu, Shard::default())?
+            .unwrap();
+        let weight = Tensor::from_vec(
+            super::super::raw::dequantize_rows(GgufType::Nvfp4, IN_DIM, &data)?,
+            (SCALES.len(), 2, IN_DIM),
+            &Device::Cpu,
+        )?;
+        let scales = Tensor::new(&SCALES, &Device::Cpu)?.reshape((SCALES.len(), 1, 1))?;
+        assert_close(&experts.dequantize_w()?, &weight.broadcast_mul(&scales)?)?;
+        let xs = Tensor::randn(0f32, 1f32, (2, IN_DIM), &Device::Cpu)?;
+        // token 0 to expert 1, token 1 to expert 0
+        let ids = Tensor::new(&[[1u32], [0u32]], &Device::Cpu)?;
+        let routed = experts.gather_forward(&xs, &ids)?;
+        for (token, expert) in [(0usize, 1usize), (1, 0)] {
+            let expected = (xs.narrow(0, token, 1)?.matmul(&weight.get(expert)?.t()?)?
+                * f64::from(SCALES[expert]))?;
+            assert_close(&routed.get(token)?.reshape((1, 2))?, &expected)?;
+        }
         Ok(())
     }
 
