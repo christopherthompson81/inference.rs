@@ -150,3 +150,19 @@ mul_mat_q<IQ4_NL (20), 128>  528 launches   355.3 ms
 
 llama.cpp's NVFP4 is 6% behind its IQ4_NL in prefill; ours is 20% behind, with our IQ4_NL 29% ahead of llama.cpp's
 and our NVFP4 only 10% ahead. Next: what our IQ4_NL mmq path has that NVFP4's lacks.
+
+## Run 6 - 2026-11-21 22:20
+
+Whether the NVFP4 mmq gap is the format or our kernel: nsys kernel sums of a pp512 bench, ours against llama.cpp
+44c20b1c0 (`llama-bench -p 512 -n 0 -fa 1 -r 3`), per launch:
+
+```
+                      NVFP4 (40)          IQ4_NL (20)        NVFP4 / IQ4_NL
+ours (mmq_x 128)      1.031 ms (528)      0.673 ms (528)     1.53
+llama.cpp (J 32)      0.989 ms (352)      0.739 ms (352)     1.34
+```
+
+Upstream's mmq is rewritten since ours was vendored (config per type, J and `ggml_prec` template parameters), and
+its NVFP4 launch is 4% faster than ours; its IQ4_NL is 9% slower than ours. Most of the gap is NVFP4's scale per 16
+values (the `q8_0_16` MMA path Q3_K takes, twice the scale work of IQ4_NL's one per 32), not a fix we lack. Porting
+upstream's mmq rewrite for 4% of one kernel is not worth it; prefill stays ~20% behind IQ4_NL with NVFP4 experts.
