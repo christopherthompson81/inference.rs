@@ -118,6 +118,10 @@ impl Config {
     }
 
     /// A slot's convolution channels: K, V, the attention output and the FFN output.
+    pub fn conv_state_channels(&self) -> usize {
+        self.conv_channels()
+    }
+
     fn conv_channels(&self) -> usize {
         2 * self.kv_dim() + 2 * self.hidden_size
     }

@@ -121,3 +121,32 @@ capped (8192 tokens) a run peaks at 20.8 GB against plain's 19.7 GB, ~1.1 GB mor
 607 MB (its weights): the folded head (103 MB) and the verify graphs' wider activations, replay stash and logits are
 not reserved. The cache planner needs a verify row's runtime bytes (per row beyond a decode row, times the widest
 graph's rows) reserved when a drafter is attached.
+
+## Run 5 - 2026-11-21 18:30
+
+Memory at the default cache sizing. Peaks at a capped cache (8192 tokens), `nvidia-smi` sampled:
+
+```
+plain, one sequence               19517 MB  (1 graph)
+drafts 3, one sequence            20503 MB  (2 graphs): +986, the drafter's weights 640
+drafts 3, four sequences          20701 MB  (8 graphs): +198 more
+drafts 7, four sequences          20835 MB
+```
+
+A drafting run's fixed cost past its weights (~346 MB) was the first draft's fold: the head's forward over all 256 of
+`hidden_out`'s columns at once, a 206 MB f32 output beside the 103 MB fold it keeps. It folds 32 columns at a time
+now, and the fold is reserved with the drafter's weights (`DFlashConfig::runtime_bytes`). The rows a verify step runs
+past a decode step's hold their logits, taps and conv stash in each captured graph: the speculative config records
+the verify width (`PagedAttentionConfig::speculative_query_rows`) and the load reserves a loader's
+`speculative_row_bytes` times the extra rows of every graph bucket up to the serving capacity (Inkling: ~5.4 MB a row,
+144 MB at drafts 3 and 335 MB at drafts 7 over buckets 1-4).
+
+At the default sizing both now serve (the cache 4854 / 4663 MB against 5094 before); drafts 7 peaks at 23841 of
+24576 MB.
+
+```
+default sizing, greedy, 256 tokens (tok/s)   prose  code   story  explainer
+plain                                         76.5   79.0   80.9   81.0
+drafts 3                                      67.7   120.4  73.7   82.3
+drafts 7                                      41.1   111.1  44.6   58.6
+```

@@ -300,6 +300,19 @@ impl DFlashConfig {
             .any(|a| a == crate::inkling::ARCHITECTURE)
     }
 
+    /// What the drafter makes on the device beside its weights once serving (Inkling 2's folded head), in bytes.
+    pub fn runtime_bytes(&self, dtype: DType) -> usize {
+        match self.markov_rank {
+            Some(rank)
+                if self.is_inkling()
+                    && crate::inkling::is_rnn_head(self.markov_head_type.as_deref()) =>
+            {
+                crate::inkling::fold_bytes(self.vocab_size, rank, dtype)
+            }
+            _ => 0,
+        }
+    }
+
     /// Whether a safetensors file of the drafter's directory holds its weights (an Inkling 2 checkpoint keeps its
     /// drafter apart from the target's shards).
     pub fn reads_weight_file(&self, path: &std::path::Path) -> bool {

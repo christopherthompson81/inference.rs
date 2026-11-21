@@ -178,6 +178,11 @@ pub trait DeviceMappedModelLoader {
     fn checkpoint_layer_index(&self, _config: &str, tensor_name: &str) -> Option<usize> {
         standard_layer_index(tensor_name)
     }
+    /// What a speculative verify step's row past a decode step's holds in a captured graph (the logits, a proposer's
+    /// taps, a recurrent rollback's stash), in bytes; `None` when the loader does not size it.
+    fn speculative_row_bytes(&self, _config: &str) -> Result<Option<usize>> {
+        Ok(None)
+    }
     /// A checkpoint tensor's bytes once loaded (`dtype` the safetensors name), where the loader keeps it otherwise
     /// than the inventory assumes (a float tensor at the model's dtype, any other as stored); `None` for that.
     fn checkpoint_tensor_bytes(

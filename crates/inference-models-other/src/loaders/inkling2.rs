@@ -1,5 +1,10 @@
 use super::*;
 
+// a verify row's logits as the head, the softcap and the cut to the vocabulary each copy them
+const VERIFY_LOGIT_COPIES: usize = 3;
+// the drafter's taps: three layer visits and the normed output
+const VERIFY_TAPS: usize = 4;
+
 /// `NormalLoader` for Inkling 2's looped text model.
 pub struct Inkling2Loader;
 
@@ -92,6 +97,17 @@ impl DeviceMappedModelLoader for Inkling2Loader {
     // the weight layers; the cache's slots (each pass of the looped core its own) are `model_config`'s
     fn num_layers(&self, config: &str) -> Result<usize> {
         Ok(parse(config)?.num_hidden_layers)
+    }
+
+    // a verify row's logits (f32, the softcap's copies), the four taps and each slot's conv stash (its state and
+    // inputs, f32)
+    fn speculative_row_bytes(&self, config: &str) -> Result<Option<usize>> {
+        let cfg = parse(config)?;
+        let f32 = DType::F32.size_in_bytes();
+        let logits = VERIFY_LOGIT_COPIES * cfg.vocab_size * f32;
+        let taps = VERIFY_TAPS * cfg.hidden_size * f32;
+        let stash = 2 * cfg.cache_slots() * cfg.conv_state_channels() * f32;
+        Ok(Some(logits + taps + stash))
     }
 
     // the routed experts load as stored (NVFP4 bytes, MXFP8 values), MXFP8's E8M0 scales widened to f32

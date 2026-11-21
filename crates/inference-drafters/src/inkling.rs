@@ -14,6 +14,8 @@ pub(crate) const WEIGHTS: &str = "mtp.safetensors";
 const RNN_HEAD: &str = "rnn_hidden";
 const LOCAL: &str = "sliding_attention";
 const GLOBAL: &str = "full_attention";
+// `hidden_out`'s columns folded through the head at a time
+const FOLD_COLUMNS: usize = 32;
 // a projection built from its weight (in the drafter's weight type)
 pub(crate) type MakeLinear<'a> = dyn FnMut(&str, Tensor) -> Result<Arc<dyn QuantMethod>> + 'a;
 
@@ -63,6 +65,12 @@ pub(crate) fn drafter_config(value: &serde_json::Value) -> Option<serde_json::Va
     config["final_logit_softcapping"] = text["final_logit_softcapping"].clone();
     config["logit_vocab_size"] = text["unpadded_vocab_size"].clone();
     Some(config)
+}
+
+/// The recurrent head's fold of `hidden_out` into the head, `[padded vocab, rank]` at `dtype` and `[padded vocab]`
+/// F32, in bytes: made on the first draft, after the paged cache is sized.
+pub(crate) fn fold_bytes(padded_vocab: usize, rank: usize, dtype: DType) -> usize {
+    padded_vocab * (rank * dtype.size_in_bytes() + DType::F32.size_in_bytes())
 }
 
 /// Whether a `markov_head_type` is the recurrent head this module runs.
@@ -251,13 +259,20 @@ impl RnnMarkovHead {
         if let Some(fold) = fold.as_ref() {
             return Ok(fold.clone());
         }
-        // `head . hidden_out` is the head over `hidden_out`'s columns, so the head never leaves its weight type
+        // `head . hidden_out` is the head over `hidden_out`'s columns, so the head never leaves its weight type; a few
+        // columns at a time keep its f32 output small beside the paged cache
         let dtype = self.dtype;
-        let weight = lm_head
-            .forward(&self.hidden_out_w.t()?.contiguous()?.to_dtype(dtype)?)?
-            .to_dtype(dtype)?
-            .t()?
-            .contiguous()?;
+        let columns = self.hidden_out_w.t()?.contiguous()?.to_dtype(dtype)?;
+        let rank = columns.dim(0)?;
+        let parts = (0..rank)
+            .step_by(FOLD_COLUMNS)
+            .map(|start| {
+                lm_head
+                    .forward(&columns.narrow(0, start, FOLD_COLUMNS.min(rank - start))?)?
+                    .to_dtype(dtype)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let weight = Tensor::cat(&parts, 0)?.t()?.contiguous()?;
         let bias = lm_head
             .forward(&self.hidden_out_b.unsqueeze(0)?.to_dtype(dtype)?)?
             .to_dtype(DType::F32)?

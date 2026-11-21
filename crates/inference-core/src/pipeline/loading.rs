@@ -1087,6 +1087,7 @@ pub(crate) fn resolve_map_setting(
         moe_expert_cache: planned_moe_expert_cache.or(sizing.moe_expert_cache),
         ..sizing
     };
+    reserve_speculative_rows(paged_attn_config, sizing.loader, sizing.config)?;
     let (loader, config) = (sizing.loader, sizing.config);
     let super::isq_flow::AutoDeviceMapSizes {
         layer_sizes_in_bytes,
@@ -1913,4 +1914,48 @@ mod expert_slot_plan_tests {
         assert_eq!(shrink(160, Some(0)), Some(0));
         assert_eq!(shrink(160, None), None);
     }
+}
+
+// a verify step's rows past the first, in every graph the decode step captures (one a batch bucket up to the serving
+// capacity), which hold them after the paged cache is sized
+fn reserve_speculative_rows(
+    paged_attn_config: &mut Option<crate::paged_attention::PagedAttentionConfig>,
+    loader: &dyn crate::pipeline::loaders::DeviceMappedModelLoader,
+    config: &str,
+) -> anyhow::Result<()> {
+    let Some(cfg) = paged_attn_config.as_mut() else {
+        return Ok(());
+    };
+    let rows = cfg.speculative_query_rows;
+    if rows <= 1 {
+        return Ok(());
+    }
+    let Some(row_bytes) = loader.speculative_row_bytes(config)? else {
+        return Ok(());
+    };
+    let serving = cfg.serving_capacity.unwrap_or(1);
+    #[cfg(feature = "cuda")]
+    let graph_rows = (1..=serving)
+        .filter_map(|batch| {
+            inference_nn::cuda::graph_capture::cuda_graph_batch_bucket(
+                inference_nn::cuda::graph_capture::CudaGraphComponent::Target,
+                rows,
+                batch,
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .sum::<usize>();
+    #[cfg(not(feature = "cuda"))]
+    let graph_rows = serving;
+    let bytes = row_bytes
+        .checked_mul(rows - 1)
+        .and_then(|bytes| bytes.checked_mul(graph_rows))
+        .ok_or_else(|| anyhow::anyhow!("speculative row reservation overflow"))?;
+    info!(
+        mb = bytes.div_ceil(1024 * 1024),
+        "Reserving speculative verify rows in the captured graphs"
+    );
+    *cfg = cfg.with_base_device_memory_reservation(bytes)?;
+    Ok(())
 }
