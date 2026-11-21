@@ -24,8 +24,9 @@ impl NormalModelLoader for Inkling2Loader {
         Ok(Box::new(crate::inkling2::Config::from_json(config)?))
     }
 
+    // the paged cache is read by the fused CUDA attention only
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
-        Ok(false)
+        Ok(cfg!(feature = "cuda"))
     }
 }
 
@@ -90,9 +91,10 @@ impl DeviceMappedModelLoader for Inkling2Loader {
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = crate::inkling2::Config::from_json(config)?;
-        Ok(Box::new(ModelConfigMetadata {
+        let slots = cfg.cache_slots();
+        let base = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.cache_slots(),
+            num_layers: slots,
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
@@ -100,6 +102,11 @@ impl DeviceMappedModelLoader for Inkling2Loader {
             k_head_dim: cfg.head_dim,
             v_head_dim: cfg.head_dim,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        }))
+        };
+        // every slot attends through the paged cache; each keeps an f32 convolution state beside it
+        Ok(Box::new(
+            inference_nn::paged_attention::HybridPagedKvCacheConfig::new(base, vec![true; slots])
+                .with_recurrent_state_bytes(cfg.conv_state_bytes()),
+        ))
     }
 }

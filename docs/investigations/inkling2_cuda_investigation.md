@@ -76,3 +76,36 @@ token-major inputs, the tiny model on CUDA.
 Left: the projections each quantize their input to Q8_1 (q, r, gate and sink read the same input: ~3 extra
 quantizes a slot), the conv state rebuilt by a 4-way concat a slot, the f32 router/controller gemvs on cuBLAS, and
 CUDA graphs (the engine's ride the paged cache, which Inkling does not take).
+
+## Run 3 - 2026-11-21 10:30
+
+Paged attention and CUDA decode graphs (`inference bench`, the paged cache by default, `--pa-context-len 8192`):
+
+- The paged cache on CUDA is FlashInfer's HND layout, `[blocks, kv_heads, block_size, head_dim]` in the activation
+  dtype (BF16). The loader reports all 48 cache slots as paged (`HybridPagedKvCacheConfig`, every layer paged) with the
+  slots' f32 convolution states as recurrent bytes; it offers paged attention only in CUDA builds (a Vulkan or CPU
+  build's default stays the contiguous cache, since nothing else reads the paged one).
+- Each step's K/V goes in through `PagedAttention::write_rows`; the fused attention reads it through the block
+  tables (`Keys::Paged`, f32/f16/bf16 caches). A decode step's pasts come from the metadata's `context_lens` on the
+  device (`Past::Lens`, the length minus the step's queries), so a captured graph reads them; a prompt chunk's from
+  the host's offsets.
+- The global layers' log scale of q and r is the score's (bar the sink's): the kernel now applies it from each
+  query's position, so the forward builds no host tensor for it.
+- Graph capture first failed (`CUDA_ERROR_INVALID_VALUE`, logged from a drop): the depth mix's block-stack cache was
+  thread-local, so a capture evicted, and freed, a stack the eager step before had allocated. The stacks are now kept
+  for one forward (`BlockStacks`).
+
+```
+                              ours, contiguous cache (Run 2)   ours, paged + graphs   llama.cpp
+tg128                         65.5                             80.8                   61.1
+tg128 at 4,096 positions      59.4                             67.4                   59.2
+pp512                         2200                             1956                   1486
+```
+
+Greedy against `llama-completion` with the paged cache and graphs: all three prompts identical (388, 269 and 524
+chars), the printing-press prompt's earlier near-tie included (the BF16 cache's rounding is llama.cpp's F16's).
+
+Tests: paged attention cases (shuffled blocks, pasts from a device array, prefill after a past, decode with a window
+and the log scale, a BF16 cache) against the materialized form; the tiny model through the paged cache (decode
+against one prefill) and its paged decode rounds replaying graphs against eager pins, with and without graphs (its
+head size 64 now, which the graphs' paged check takes; the CPU step test stores KV in f32 for it).

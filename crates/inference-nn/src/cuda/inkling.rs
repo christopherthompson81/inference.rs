@@ -15,8 +15,6 @@ const BF16_CODE: i32 = 1;
 // the kernel's bounds: states and queries a mix takes
 const MAX_STATES: usize = 16;
 const MAX_QUERIES: usize = 4;
-// block stacks kept for reuse: a layer's attention and FFN mixes read two
-const BLOCK_STACK_CACHE: usize = 2;
 
 fn status(code: i32, what: &str) -> Result<()> {
     if code != 0 {
@@ -167,68 +165,37 @@ pub fn unit_rms(x: &Tensor, eps: f32) -> Result<Option<Tensor>> {
     Ok(Some(wrap(out, dev, x.shape().clone())))
 }
 
-thread_local! {
-    // the last few block stacks a mix read, by their tensors' ids: the blocks stay put for a block's layers
-    static BLOCK_STACKS: std::cell::RefCell<Vec<(Vec<inference_tensor::TensorId>, Tensor)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-// `blocks` stacked on a new first axis, reused while the same tensors come back
-fn stacked_blocks(blocks: &[&Tensor]) -> Result<Tensor> {
-    let ids = blocks.iter().map(|b| b.id()).collect::<Vec<_>>();
-    if let Some(hit) = BLOCK_STACKS.with(|c| {
-        c.borrow()
-            .iter()
-            .find(|(k, _)| *k == ids)
-            .map(|(_, t)| t.clone())
-    }) {
-        return Ok(hit);
-    }
-    let stacked = Tensor::stack(blocks, 0)?;
-    BLOCK_STACKS.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() >= BLOCK_STACK_CACHE {
-            c.remove(0);
-        }
-        c.push((ids, stacked.clone()));
-    });
-    Ok(stacked)
-}
-
-/// The states (each `(b, t, hidden)`, one dtype; the last the current input, the others the blocks before it)
+/// The states (the blocks stacked `(s - 1, b, t, hidden)`, when any, then `current` `(b, t, hidden)`, one dtype)
 /// unit-normed (`eps`), and each of `queries` (f32 `(q, hidden)`) softmax-attending over them (scores over
 /// `sqrt(hidden)`): `(b, t, q, hidden)` in `out_dtype` (f32 or bf16), summed in f32.
 pub fn depth_mix(
-    states: &[&Tensor],
+    blocks: Option<&Tensor>,
+    current: &Tensor,
     queries: &Tensor,
     eps: f32,
     out_dtype: DType,
 ) -> Result<Option<Tensor>> {
-    let Some((current, blocks)) = states.split_last() else {
-        return Ok(None);
-    };
     let Device::Cuda(dev) = current.device() else {
         return Ok(None);
     };
     let (b, t, hidden) = current.dims3()?;
     let q_count = queries.dim(0)?;
+    let n_blocks = blocks.map_or(Ok(0), |blocks| blocks.dim(0))?;
+    let n_states = n_blocks + 1;
     if !takes(current)
         || queries.dtype() != DType::F32
         || queries.dim(1)? != hidden
-        || states.len() > MAX_STATES
+        || n_states > MAX_STATES
         || q_count > MAX_QUERIES
         || !matches!(out_dtype, DType::F32 | DType::BF16)
-        || states
-            .iter()
-            .any(|s| s.dtype() != current.dtype() || s.shape() != current.shape())
+        || blocks.is_some_and(|blocks| {
+            blocks.dtype() != current.dtype()
+                || blocks.dims() != [n_blocks, b, t, hidden]
+                || !blocks.is_contiguous()
+        })
     {
         return Ok(None);
     }
-    let blocks = if blocks.is_empty() {
-        None
-    } else {
-        Some(stacked_blocks(blocks)?)
-    };
     let current = current.contiguous()?;
     let queries = queries.contiguous()?;
     let rows = b * t;
@@ -261,7 +228,7 @@ pub fn depth_mix(
                             qp as *const f32,
                             op as *mut core::ffi::c_void,
                             $code,
-                            i32_of(states.len())?,
+                            i32_of(n_states)?,
                             i64_of(rows)?,
                             i32_of(q_count)?,
                             i32_of(hidden)?,

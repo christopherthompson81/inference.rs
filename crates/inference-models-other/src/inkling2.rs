@@ -22,7 +22,7 @@ use crate::{
     device_map::DeviceMapper,
     layers::{Activation, RmsNorm, embedding_with_legacy_tied_uqff},
     moe::{MoEExperts, MoEExpertsConfig},
-    paged_attention::{AttentionImplementation, ModelConfigMetadata},
+    paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -93,6 +93,14 @@ impl Config {
     /// The cache slots: a layer's first pass in its own, each later pass of the looped core in one after them.
     pub fn cache_slots(&self) -> usize {
         self.num_hidden_layers + (self.loop_config.num_passes - 1) * self.core_len()
+    }
+
+    /// A sequence's convolution states over every slot, in bytes (f32).
+    pub fn conv_state_bytes(&self) -> usize {
+        self.cache_slots()
+            * self.conv_channels()
+            * (self.sconv_kernel_size - 1)
+            * DType::F32.size_in_bytes()
     }
 
     fn kv_dim(&self) -> usize {
@@ -166,14 +174,49 @@ fn linear(
     ReplicatedLayer::new(in_dim, out_dim, &cfg.quantization_config, false, vb)
 }
 
-/// The depth mix: softmax attention of learned queries over the unit-normed states, `[b, t, queries, hidden]`.
-fn mix(states: &[&Tensor], queries: &Tensor, out: DType) -> Result<Tensor> {
-    #[cfg(feature = "cuda")]
-    if let Some(mixed) =
-        inference_nn::cuda::inkling::depth_mix(states, queries, UNIT_NORM_EPS as f32, out)?
-    {
-        return Ok(mixed);
+/// One forward's block stacks for the depth mixes, by the stacked tensors' ids: a block's layers read the same
+/// blocks, so they are stacked once. Kept for the forward only (a captured graph frees nothing it did not allocate).
+// read by the CUDA mix only
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+#[derive(Default)]
+struct BlockStacks {
+    stacks: std::cell::RefCell<Vec<(Vec<inference_tensor::TensorId>, Tensor)>>,
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+impl BlockStacks {
+    fn stacked(&self, blocks: &[&Tensor]) -> Result<Tensor> {
+        let ids = blocks.iter().map(|b| b.id()).collect::<Vec<_>>();
+        if let Some((_, hit)) = self.stacks.borrow().iter().find(|(k, _)| *k == ids) {
+            return Ok(hit.clone());
+        }
+        let stacked = Tensor::stack(blocks, 0)?;
+        self.stacks.borrow_mut().push((ids, stacked.clone()));
+        Ok(stacked)
     }
+}
+
+/// The depth mix: softmax attention of learned queries over the unit-normed states, `[b, t, queries, hidden]`.
+fn mix(states: &[&Tensor], queries: &Tensor, out: DType, stacks: &BlockStacks) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some((current, blocks)) = states.split_last()
+        && current.device().is_cuda()
+    {
+        let stacked = (!blocks.is_empty())
+            .then(|| stacks.stacked(blocks))
+            .transpose()?;
+        if let Some(mixed) = inference_nn::cuda::inkling::depth_mix(
+            stacked.as_ref(),
+            current,
+            queries,
+            UNIT_NORM_EPS as f32,
+            out,
+        )? {
+            return Ok(mixed);
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    let _ = stacks;
     let (b, t, hidden) = states[0].dims3()?;
     let stacked = Tensor::stack(states, 2)?;
     let stacked = unit_rms(&stacked, UNIT_NORM_EPS)?.reshape((b * t, states.len(), hidden))?;
@@ -188,8 +231,16 @@ fn mix(states: &[&Tensor], queries: &Tensor, out: DType) -> Result<Tensor> {
         .to_dtype(out)
 }
 
-fn mixed(states: &[&Tensor], queries: &Tensor, i: usize, out: DType) -> Result<Tensor> {
-    mix(states, queries, out)?.narrow(2, i, 1)?.squeeze(2)
+fn mixed(
+    states: &[&Tensor],
+    queries: &Tensor,
+    i: usize,
+    out: DType,
+    stacks: &BlockStacks,
+) -> Result<Tensor> {
+    mix(states, queries, out, stacks)?
+        .narrow(2, i, 1)?
+        .squeeze(2)
 }
 
 /// A causal depthwise convolution with a residual, its last `width - 1` inputs carried in `[b, c, width - 1]`
@@ -334,8 +385,28 @@ struct AttentionInputs<'a> {
     q: &'a Tensor,
     k: &'a Tensor,
     v: &'a Tensor,
-    // `[b, t, 1, 1]`, the global layers' log scale of q and r
-    tau: &'a Tensor,
+    // `[b, t, 1, 1]`, the global layers' log scale of q and r; `None` where the fused CUDA attention scales itself
+    tau: Option<&'a Tensor>,
+}
+
+/// Where a paged step's rows go and what its queries see: the slot mapping, each sequence's block table row, and
+/// its past (`lens - minus`, u32 on the device, so a captured decode graph reads them).
+// read by the CUDA attention only; a build without it never runs paged
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+struct PagedPositions {
+    slots: Tensor,
+    tables: Tensor,
+    lens: Tensor,
+    minus: usize,
+}
+
+/// A slot's paged cache for one step (CUDA, the fused attention).
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+struct PagedStep<'a> {
+    k_cache: &'a Tensor,
+    v_cache: &'a Tensor,
+    positions: &'a PagedPositions,
+    writer: &'a PagedAttention,
 }
 
 impl Attention {
@@ -413,6 +484,7 @@ impl Attention {
         inputs: AttentionInputs<'_>,
         rel: Option<&RelativeInputs>,
         kv_cache: &mut KvCache,
+        paged: Option<&PagedStep<'_>>,
         conv_state: &Tensor,
     ) -> Result<(Tensor, Tensor, Tensor)> {
         let (b, t, _) = inputs.q.dims3()?;
@@ -446,9 +518,82 @@ impl Attention {
         let k = l2_clip(&k.reshape((b, t, hkv, hd))?, None, cfg.qk_l2_clip_threshold)?;
         let v = unit_rms(&v.reshape((b, t, hkv, hd))?, cfg.rms_norm_eps)?;
         let mut r = l2_clip(&r, Some(&self.rel_clip), cfg.rel_l2_clip_threshold)?;
-        if !self.sliding {
-            q = q.broadcast_mul(inputs.tau)?;
-            r = r.broadcast_mul(inputs.tau)?;
+        // the log scale of q and r is the score's (bar the sink's), which the fused CUDA attention applies itself
+        if !self.sliding
+            && let Some(tau) = inputs.tau
+        {
+            q = q.broadcast_mul(tau)?;
+            r = r.broadcast_mul(tau)?;
+        }
+        #[cfg(feature = "cuda")]
+        let log_scale = (!self.sliding)
+            .then_some((cfg.log_scaling_alpha as f32, cfg.log_scaling_n_floor as f32));
+        let window = if self.sliding {
+            cfg.sliding_window_size
+        } else {
+            0
+        };
+        let scale = 1.0 / (hd as f64).sqrt();
+        // each query's bias over the distances, `[b, t, h, extent + 1]`, the last column zero (past the extent)
+        let token_table = r
+            .reshape((b * t * h, self.d_rel))?
+            .matmul(&self.rel_bias)?
+            .reshape((b, t, h, self.extent + 1))?;
+        #[cfg(feature = "cuda")]
+        let output_gate = |out: Tensor| -> Result<Tensor> {
+            if let Some(gated) =
+                inference_nn::cuda::inkling::sigmoid_gate(&out, &raw_gate, inputs.q.dtype())?
+            {
+                return self.o_proj.forward(&gated);
+            }
+            let out = out.broadcast_mul(&inference_tensor::nn::ops::sigmoid(&gate()?)?)?;
+            self.o_proj.forward(&out.to_dtype(inputs.q.dtype())?)
+        };
+
+        // paged: this step's rows into the cache, the queries over it through the block tables
+        if let Some(step) = paged {
+            #[cfg(feature = "cuda")]
+            {
+                use inference_nn::cuda::biased_attention::{Keys, Past};
+                let dtype = step.k_cache.dtype();
+                step.writer.write_rows(
+                    &k.to_dtype(dtype)?.transpose(1, 2)?,
+                    &v.to_dtype(dtype)?.transpose(1, 2)?,
+                    step.k_cache,
+                    step.v_cache,
+                    &step.positions.slots,
+                )?;
+                let op = inference_nn::cuda::biased_attention::BiasedAttention {
+                    q: &q,
+                    keys: Keys::Paged {
+                        k_cache: step.k_cache,
+                        v_cache: step.v_cache,
+                        block_tables: &step.positions.tables,
+                    },
+                    past: Past::Lens {
+                        lens: &step.positions.lens,
+                        minus: step.positions.minus,
+                    },
+                    table: &token_table,
+                    sinks: &sinks,
+                    window,
+                    scale: scale as f32,
+                    log_scale,
+                };
+                let out = inference_nn::cuda::biased_attention::biased_attention(&op)?.ok_or_else(
+                    || {
+                        inference_tensor::Error::msg(format!(
+                            "Inkling 2: the paged attention does not take a {dtype:?} cache"
+                        ))
+                    },
+                )?;
+                return Ok((output_gate(out)?, k_state, v_state));
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = step;
+                inference_tensor::bail!("Inkling 2 runs paged attention on CUDA only");
+            }
         }
 
         // heads first for the cache; one position is that layout already
@@ -461,15 +606,8 @@ impl Attention {
         };
         let (k, v) = kv_cache.append(&heads_first(k)?, &heads_first(v)?)?;
         let s = k.dim(2)?;
-
-        // each query's bias over the distances, `[b, t, h, extent + 1]`, the last column zero (past the extent)
-        let token_table = r
-            .reshape((b * t * h, self.d_rel))?
-            .matmul(&self.rel_bias)?
-            .reshape((b, t, h, self.extent + 1))?;
         // `[b, h, t, extent + 1]` for the paths that take heads first
         let table = || token_table.transpose(1, 2)?.contiguous();
-        let scale = 1.0 / (hd as f64).sqrt();
 
         // one position on Vulkan: the fused kernel over the cache in place, the sink in the zero column's place
         if t == 1 && q.device().is_vulkan() {
@@ -486,11 +624,7 @@ impl Attention {
                 k: &k,
                 v: &v,
                 bias: &bias,
-                window: if self.sliding {
-                    cfg.sliding_window_size
-                } else {
-                    0
-                },
+                window,
                 scale: scale as f32,
             };
             if let Some(out) = inference_tensor::vulkan::biased_decode(&op)? {
@@ -502,33 +636,20 @@ impl Attention {
         }
 
         #[cfg(feature = "cuda")]
-        if q.device().is_cuda() {
+        if q.device().is_cuda() && inputs.tau.is_none() {
+            use inference_nn::cuda::biased_attention::{Keys, Past};
             let op = inference_nn::cuda::biased_attention::BiasedAttention {
                 q: &q,
-                k: &k,
-                v: &v,
+                keys: Keys::View { k: &k, v: &v },
+                past: Past::Fixed(s - t),
                 table: &token_table,
                 sinks: &sinks,
-                window: if self.sliding {
-                    cfg.sliding_window_size
-                } else {
-                    0
-                },
+                window,
                 scale: scale as f32,
+                log_scale,
             };
             if let Some(out) = inference_nn::cuda::biased_attention::biased_attention(&op)? {
-                let gated = match inference_nn::cuda::inkling::sigmoid_gate(
-                    &out,
-                    &raw_gate,
-                    inputs.q.dtype(),
-                )? {
-                    Some(gated) => gated,
-                    None => out
-                        .broadcast_mul(&inference_tensor::nn::ops::sigmoid(&gate()?)?)?
-                        .to_dtype(inputs.q.dtype())?,
-                };
-                let out = self.o_proj.forward(&gated)?;
-                return Ok((out, k_state, v_state));
+                return Ok((output_gate(out)?, k_state, v_state));
             }
         }
 
@@ -726,10 +847,12 @@ struct DecoderLayer {
 /// Where one pass of one layer reads and writes: its cache slot's KV and convolution state.
 struct LayerStep<'a> {
     kv_cache: &'a mut KvCache,
+    paged: Option<PagedStep<'a>>,
     conv_state: Tensor,
     // `None` where the fused CUDA kernel computes the mask and the bias's columns itself
     rel: Option<&'a RelativeInputs>,
-    tau: &'a Tensor,
+    tau: Option<&'a Tensor>,
+    stacks: &'a BlockStacks,
 }
 
 impl DecoderLayer {
@@ -814,9 +937,11 @@ impl DecoderLayer {
     ) -> Result<(Tensor, Tensor)> {
         let LayerStep {
             kv_cache,
+            paged,
             conv_state,
             rel,
             tau,
+            stacks,
         } = step;
         let dtype = x.dtype();
         let states = |x: &Tensor, blocks: &[Tensor]| -> Vec<Tensor> {
@@ -826,7 +951,7 @@ impl DecoderLayer {
             Some(query) => {
                 let all = states(x, blocks);
                 let all: Vec<&Tensor> = all.iter().collect();
-                let m = mix(&all, query, dtype)?;
+                let m = mix(&all, query, dtype, stacks)?;
                 let pick = |j: usize| -> Result<Tensor> {
                     let j = if query.dim(0)? == 1 { 0 } else { j };
                     m.narrow(2, j, 1)?.squeeze(2)?.to_dtype(dtype)
@@ -877,6 +1002,7 @@ impl DecoderLayer {
             },
             rel,
             kv_cache,
+            paged.as_ref(),
             &conv_state,
         )?;
         let (attn, attn_state) = self.post_attention_conv.forward(
@@ -896,7 +1022,7 @@ impl DecoderLayer {
         };
         let all = states(&ffn_in, blocks);
         let all: Vec<&Tensor> = all.iter().collect();
-        let mut h = mixed(&all, &self.mlp_query, 0, dtype)?;
+        let mut h = mixed(&all, &self.mlp_query, 0, dtype, stacks)?;
         if let Some((messages, lp)) = controllers {
             let message = messages.narrow(2, FFN_CONTROLLER, 1)?.squeeze(2)?;
             h = lp.controllers[FFN_CONTROLLER].forward(&h, &message)?;
@@ -927,6 +1053,8 @@ pub struct Model {
     device: Device,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     meta: ModelConfigMetadata,
+    // under paged attention: what writes each step's K/V rows into the paged cache
+    paged_writer: Option<PagedAttention>,
 }
 
 impl Model {
@@ -937,9 +1065,27 @@ impl Model {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
         cfg.validate()?;
-        if matches!(attention_mechanism, AttentionImplementation::PagedAttention) {
-            inference_tensor::bail!("Inkling 2 does not run under paged attention yet");
-        }
+        // the paged cache is read by the fused CUDA attention, which nothing else stands in for
+        let paged_writer = match attention_mechanism {
+            AttentionImplementation::PagedAttention => {
+                #[cfg(feature = "cuda")]
+                let fused = normal_loading_metadata.real_device.is_cuda()
+                    && inference_nn::cuda::biased_attention::HEAD_DIMS.contains(&cfg.head_dim);
+                #[cfg(not(feature = "cuda"))]
+                let fused = false;
+                if !fused {
+                    inference_tensor::bail!(
+                        "Inkling 2 runs paged attention on CUDA only; pass --paged-attn off"
+                    );
+                }
+                Some(PagedAttention::new(
+                    cfg.head_dim,
+                    &normal_loading_metadata.real_device,
+                    None,
+                )?)
+            }
+            AttentionImplementation::Eager => None,
+        };
         let vb_m = vb.pp("model");
         let mapper = normal_loading_metadata.mapper;
         let loading_isq = normal_loading_metadata.loading_isq;
@@ -1042,7 +1188,69 @@ impl Model {
             },
             cfg: cfg.clone(),
             mapper,
+            paged_writer,
         })
+    }
+
+    // a paged step's slot mapping, block tables and pasts, or `None` off paged attention
+    fn paged_positions(
+        &self,
+        ctx: &ModelForwardContext<'_>,
+        b: usize,
+        t: usize,
+    ) -> Result<Option<PagedPositions>> {
+        let Some((_, metadata)) = ctx.paged_metadata() else {
+            return Ok(None);
+        };
+        let loc = self.device.location();
+        let on_device = |map: Option<&std::collections::HashMap<_, Tensor>>, what: &str| {
+            map.and_then(|m| m.get(&loc)).cloned().ok_or_else(|| {
+                inference_tensor::Error::msg(format!("Inkling 2: paged metadata has no {what}"))
+            })
+        };
+        let slots = on_device(Some(&metadata.slot_mappings), "slot mapping")?;
+        if metadata.is_decode_step() {
+            // a row a query: each sequence's first row's table, its last row's length (past + t)
+            let tables = on_device(metadata.block_tables.as_ref(), "block tables")?;
+            let lens = on_device(metadata.context_lens.as_ref(), "context lengths")?;
+            let (tables, lens) = if t > 1 {
+                let width = tables.dim(1)?;
+                (
+                    tables.reshape((b, t, width))?.narrow(1, 0, 1)?.squeeze(1)?,
+                    lens.reshape((b, t))?.narrow(1, t - 1, 1)?.squeeze(1)?,
+                )
+            } else {
+                (tables, lens.flatten_all()?)
+            };
+            return Ok(Some(PagedPositions {
+                slots,
+                tables,
+                lens,
+                minus: t,
+            }));
+        }
+        // a prompt chunk: its sequences' whole tables, their pasts from the host
+        let tables = on_device(
+            metadata
+                .full_block_tables
+                .as_ref()
+                .or(metadata.block_tables.as_ref()),
+            "block tables",
+        )?;
+        let pasts = ctx
+            .seqlen_offsets()
+            .iter()
+            .map(|&p| u32::try_from(p).map_err(inference_tensor::Error::wrap))
+            .collect::<Result<Vec<_>>>()?;
+        if pasts.len() != b {
+            inference_tensor::bail!("Inkling 2: {} offsets for {b} sequences", pasts.len());
+        }
+        Ok(Some(PagedPositions {
+            slots,
+            tables,
+            lens: Tensor::from_vec(pasts, b, &self.device)?,
+            minus: 0,
+        }))
     }
 
     pub fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
@@ -1056,6 +1264,12 @@ impl Model {
             .ok_or_else(|| inference_tensor::Error::msg("Inkling 2 needs recurrent metadata"))?;
         let fresh_state =
             recurrent.batch_kind() == RecurrentBatchKind::Prefill && ctx.is_first_prompt_chunk();
+        let paged = match &self.paged_writer {
+            Some(writer) => self
+                .paged_positions(ctx, b, t)?
+                .map(|positions| (writer, positions, ctx.paged_metadata().map(|(c, _)| c))),
+            None => None,
+        };
         let mut cache = self.cache.hybrid();
         let slots = cfg.cache_slots();
         let past = match cache.get_mut(0) {
@@ -1083,15 +1297,20 @@ impl Model {
                 ))
             })
             .transpose()?;
-        // 1 + alpha log(max(1, (pos + 1) / floor))
-        let tau = (0..t)
-            .map(|i| {
-                let ratio = (past + i + 1) as f64 / cfg.log_scaling_n_floor;
-                (1.0 + cfg.log_scaling_alpha * ratio.max(1.0).ln()) as f32
+        // 1 + alpha log(max(1, (pos + 1) / floor)), which the fused CUDA attention computes itself
+        let tau = (!fused)
+            .then(|| -> Result<Tensor> {
+                let tau = (0..t)
+                    .map(|i| {
+                        let ratio = (past + i + 1) as f64 / cfg.log_scaling_n_floor;
+                        (1.0 + cfg.log_scaling_alpha * ratio.max(1.0).ln()) as f32
+                    })
+                    .collect::<Vec<_>>();
+                Tensor::from_vec(tau, (1, t, 1, 1), &device)?.broadcast_as((b, t, 1, 1))
             })
-            .collect::<Vec<_>>();
-        let tau = Tensor::from_vec(tau, (1, t, 1, 1), &device)?.broadcast_as((b, t, 1, 1))?;
+            .transpose()?;
 
+        let stacks = BlockStacks::default();
         let mut run = |layer: usize,
                        slot: usize,
                        x: &Tensor,
@@ -1125,6 +1344,21 @@ impl Model {
                     global
                 }
             });
+            let paged_step = match &paged {
+                Some((writer, positions, Some(caches))) => {
+                    let (k_cache, v_cache) = &caches[slot];
+                    Some(PagedStep {
+                        k_cache,
+                        v_cache,
+                        positions,
+                        writer,
+                    })
+                }
+                Some((_, _, None)) => {
+                    inference_tensor::bail!("Inkling 2: paged metadata without its caches")
+                }
+                None => None,
+            };
             let (out, state) = self.layers[layer].forward(
                 cfg,
                 &x,
@@ -1132,9 +1366,11 @@ impl Model {
                 messages,
                 LayerStep {
                     kv_cache,
+                    paged: paged_step,
                     conv_state,
                     rel,
-                    tau: &tau,
+                    tau: tau.as_ref(),
+                    stacks: &stacks,
                 },
             )?;
             let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(slots + slot) else {
@@ -1179,7 +1415,7 @@ impl Model {
                             )
                         })?;
                         let bank: Vec<&Tensor> = bank.iter().collect();
-                        Some(mix(&bank, &lp.queries, DType::F32)?)
+                        Some(mix(&bank, &lp.queries, DType::F32, &stacks)?)
                     }
                     None => None,
                 };
@@ -1194,7 +1430,7 @@ impl Model {
         let x = self.mapper.cast_nm_device(&x, false)?;
         let mut states: Vec<&Tensor> = blocks.iter().collect();
         states.push(&x);
-        let x = mixed(&states, &self.final_query, 0, self.dtype)?;
+        let x = mixed(&states, &self.final_query, 0, self.dtype, &stacks)?;
         let x = self.norm.forward(&x)?;
         let x = ctx.logits(&x)?;
         let logits = ctx.lm_head(&*self.lm_head, &x)?;
@@ -1259,6 +1495,12 @@ impl NormalModel for Model {
 
     fn config(&self) -> &ModelConfigMetadata {
         &self.meta
+    }
+
+    // a decode step reads its positions and lengths from the paged metadata's device tensors
+    #[cfg(feature = "cuda")]
+    fn supports_cuda_decode_graphs(&self) -> bool {
+        self.paged_writer.is_some()
     }
 }
 
