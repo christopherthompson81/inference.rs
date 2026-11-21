@@ -710,6 +710,9 @@ inference_tensor::kernel_library! {
             ne1: i64,
             activation: i32,
             stream: *mut c_void,
+            row_experts: *const u32,
+            gate_scales: *const f32,
+            up_scales: *const f32,
         );
         pub fn launch_mmq_quantize_glu_q8_1_DS4_f32(
             gate: *const f32,
@@ -722,6 +725,9 @@ inference_tensor::kernel_library! {
             ne1: i64,
             activation: i32,
             stream: *mut c_void,
+            row_experts: *const u32,
+            gate_scales: *const f32,
+            up_scales: *const f32,
         );
         pub fn launch_mmq_quantize_glu_q8_1_D2S6_f32(
             gate: *const f32,
@@ -734,6 +740,9 @@ inference_tensor::kernel_library! {
             ne1: i64,
             activation: i32,
             stream: *mut c_void,
+            row_experts: *const u32,
+            gate_scales: *const f32,
+            up_scales: *const f32,
         );
         pub fn launch_mmq_quantize_glu_q8_1_D4(
             gate: *const c_void,
@@ -882,6 +891,8 @@ macro_rules! gguf_type_library {
                             expert_stride: i64,
                             vy: *const c_void,
                             ids: *const c_void,
+                            scales: *const f32,
+                            scales_up: *const f32,
                             dst: *mut f32,
                             ncols_x: i32,
                             nrows_x: i32,

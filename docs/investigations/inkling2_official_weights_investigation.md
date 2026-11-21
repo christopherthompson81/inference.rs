@@ -119,3 +119,34 @@ Against the gguf-py graft of Run 3: the same 744 tensors, every one byte-identic
 Decode profile of recipe A against IQ4_NL (nsys, ms a token under the profiler): the NVFP4 expert matvec 2.82 against
 IQ4_NL's 2.43 (same bytes, 16% slower), and the per-expert scales' separate ops 0.6 (`bmul_f32` 136 a token,
 `index_select` 132 more), which a scale applied where the matvec writes its outputs would remove.
+
+## Run 5 - 2026-11-21 22:05
+
+Per-expert scales applied in the kernels instead of separate ops: the expert matvec (both `mmvq_gguf.cuh`'s and
+`mmvq_rows.cuh`'s MoE entries) multiplies an output by `scales[ids[pair]]`, the gate's and up's before the GLU, the
+down's on its rows; the grouped GLU quantize (`quantize_mmq_q8_1_glu`) scales a row by its assignment's expert before
+the activation. Decode no longer builds `ExpertScaled`'s per-route tensors at all.
+
+```
+recipe A (NVFP4 experts)                 KLD       pp512    tg128
+before (Run 3)                           0.00374   1557     78.6
+in-kernel scales                         0.00374   1540     81.7    (two runs: 1544/1540, 81.7/81.7)
+ggml-org IQ4_NL (same session)           0.00995   1913     83.6
+
+llama.cpp 44c20b1c0 llama-bench -fa 1    pp512    tg128
+recipe A                                 1398     59.0
+ggml-org IQ4_NL                          1487     61.1
+```
+
+Decode +3.1 tok/s, 1.9 short of IQ4_NL. Prefill is unchanged: Inkling's softcap SiLU is no GLU the fused kernels
+take, so its prefill keeps the explicit path (`scaled_act`: 44 ms of `bmul_f32` and ~32 ms more `ucopy_f32` in a
+pp512 profile, ~6%); the fused-GLU scales serve NVFP4 MoE models whose activation the kernels fuse. The prefill gap
+is the NVFP4 mmq itself (nsys, pp512 + 1 token):
+
+```
+mul_mat_q<NVFP4 (40), 128>   528 launches   544.5 ms
+mul_mat_q<IQ4_NL (20), 128>  528 launches   355.3 ms
+```
+
+llama.cpp's NVFP4 is 6% behind its IQ4_NL in prefill; ours is 20% behind, with our IQ4_NL 29% ahead of llama.cpp's
+and our NVFP4 only 10% ahead. Next: what our IQ4_NL mmq path has that NVFP4's lacks.

@@ -964,7 +964,8 @@ static __device__ void mmvq_core_fused_qkv_impl(
 template <int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda, bool glu, bool pairs_fast>
 static __device__ void mmvq_moe_impl(const void *__restrict__ vx_gate, const void *__restrict__ vx_up,
                                      const int64_t expert_stride, const block_q8_1 *__restrict__ y,
-                                     const uint32_t *__restrict__ ids, float *__restrict__ dst, const int ncols_x,
+                                     const uint32_t *__restrict__ ids, const float *__restrict__ scales,
+                                     const float *__restrict__ scales_up, float *__restrict__ dst, const int ncols_x,
                                      const int nrows_x, const int stride_col_y, const int y_div,
                                      const int activation) {
   constexpr int nwarps = MMVQ_NWARPS_MOE;
@@ -1029,9 +1030,11 @@ static __device__ void mmvq_moe_impl(const void *__restrict__ vx_gate, const voi
     }
   }
   if (threadIdx.x < rows_per_cuda_block && row0 + threadIdx.x < nrows_x) {
-    float out = tmp[0][threadIdx.x];
+    // each expert's own scale (an NVFP4 stack's second level), before the activation
+    float out = tmp[0][threadIdx.x] * (scales ? scales[ids[pair]] : 1.0f);
     if constexpr (glu) {
-      out = apply_glu_activation(out, activation) * tmp[nsums - 1][threadIdx.x];
+      const float up = tmp[nsums - 1][threadIdx.x] * (scales_up ? scales_up[ids[pair]] : 1.0f);
+      out = apply_glu_activation(out, activation) * up;
     }
     dst[row0 + threadIdx.x] = out;
   }
@@ -1603,14 +1606,16 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
   template <bool glu, bool pairs_fast>                                                                         \
   static __global__ void __launch_bounds__(MMVQ_NWARPS_MOE *WARP_SIZE, 1) mmvq_gguf_##tag##_moe_cuda(         \
       const void *__restrict__ vx_gate, const void *__restrict__ vx_up, const int64_t expert_stride,            \
-      const void *__restrict__ vy, const uint32_t *__restrict__ ids, float *__restrict__ dst, const int ncols_x, \
+      const void *__restrict__ vy, const uint32_t *__restrict__ ids, const float *__restrict__ scales, \
+                                     const float *__restrict__ scales_up, float *__restrict__ dst, const int ncols_x, \
       const int nrows_x, const int stride_col_y, const int y_div, const int activation) {                      \
     mmvq_moe_impl<qk_val, qi_val, block_q_t, vdr_val, vec_dot, glu, pairs_fast>(                              \
-        vx_gate, vx_up, expert_stride, (const block_q8_1 *)vy, ids, dst, ncols_x, nrows_x, stride_col_y, y_div, \
+        vx_gate, vx_up, expert_stride, (const block_q8_1 *)vy, ids, scales, scales_up, dst, ncols_x, nrows_x, stride_col_y, y_div, \
         activation);                                                                                           \
   }                                                                                                            \
   extern "C" void launch_mmvq_gguf_##tag##_moe(const void *vx_gate, const void *vx_up, int64_t expert_stride,  \
-                                               const void *vy, const void *ids, float *dst, int ncols_x,       \
+                                               const void *vy, const void *ids, const float *scales,       \
+                                               const float *scales_up, float *dst, int ncols_x,       \
                                                int nrows_x, int stride_col_y, int y_div, int n_pairs,          \
                                                int activation, int grouped, void *stream) {                    \
     const int row_blocks = (nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE;                  \
@@ -1620,22 +1625,22 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
     if (grouped) {                                                                                             \
       const dim3 grid(n_pairs, row_blocks, 1);                                                                 \
       if (vx_up) {                                                                                             \
-        mmvq_gguf_##tag##_moe_cuda<true, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,    \
+        mmvq_gguf_##tag##_moe_cuda<true, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up,    \
                                                                      dst, ncols_x, nrows_x, stride_col_y,     \
                                                                      y_div, activation);                      \
       } else {                                                                                                 \
-        mmvq_gguf_##tag##_moe_cuda<false, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,   \
+        mmvq_gguf_##tag##_moe_cuda<false, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up,   \
                                                                       dst, ncols_x, nrows_x, stride_col_y,    \
                                                                       y_div, activation);                     \
       }                                                                                                        \
     } else {                                                                                                   \
       const dim3 grid(row_blocks, n_pairs, 1);                                                                 \
       if (vx_up) {                                                                                             \
-        mmvq_gguf_##tag##_moe_cuda<true, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,   \
+        mmvq_gguf_##tag##_moe_cuda<true, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up,   \
                                                                       dst, ncols_x, nrows_x, stride_col_y,    \
                                                                       y_div, activation);                     \
       } else {                                                                                                 \
-        mmvq_gguf_##tag##_moe_cuda<false, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,  \
+        mmvq_gguf_##tag##_moe_cuda<false, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up,  \
                                                                        dst, ncols_x, nrows_x, stride_col_y,   \
                                                                        y_div, activation);                    \
       }                                                                                                        \

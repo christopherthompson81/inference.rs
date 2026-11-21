@@ -1323,6 +1323,7 @@ mod tests {
             cuda_kernels_match_the_dequantized_weight,
             grouped_mmq_reads_raw_expert_stacks,
             indexed_mmvq_matches_the_dequantized_experts,
+            indexed_mmvq_applies_each_experts_scales,
             a_tall_q6k_weight_past_eight_rows_takes_mmq,
             row_major_tensor_core_matvecs_match_a_dense_matmul,
             tiled_iq4_ks_matches_the_row_major_weight,
@@ -1780,6 +1781,7 @@ mod tests {
                     &indices,
                     k,
                     crate::GluActivationType::Silu,
+                    super::super::fast_mmvq::ExpertScales::default(),
                 )?
                 .to_device(&Device::Cpu)?;
                 let xs = xs.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
@@ -1858,6 +1860,99 @@ mod tests {
             let dense = [0, 1, 2].map(|i| w[i].dequantize(&Device::Cpu));
             let [g, u, d] = dense;
             check(format!("{dtype:?}"), [&w[0], &w[1], &w[2]], [g?, u?, d?])?;
+        }
+        Ok(())
+    }
+
+    // an NVFP4 stack's per-expert scales, applied in the matvec: the gate's and up's before the activation, fused or not
+    #[cfg(feature = "cuda")]
+    fn indexed_mmvq_applies_each_experts_scales() -> Result<()> {
+        use super::super::fast_mmvq::{ExpertScales, moe_decode, moe_decode_gated};
+        const EXPERTS: usize = 4;
+        const HIDDEN: usize = 512;
+        const INTERMEDIATE: usize = 256;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let ty = GgufType::Nvfp4;
+        let stack = |rows, cols, seed| {
+            RawGgufTensor::new(
+                ty,
+                &[EXPERTS, rows, cols],
+                random_rows(ty, EXPERTS * rows, cols, seed),
+                &cuda,
+            )
+        };
+        let w = [
+            stack(INTERMEDIATE, HIDDEN, 23)?,
+            stack(INTERMEDIATE, HIDDEN, 29)?,
+            stack(HIDDEN, INTERMEDIATE, 31)?,
+        ];
+        let factors = [
+            [0.5f32, 2.0, 0.25, 1.5],
+            [3.0, 0.75, 1.25, 0.125],
+            [0.2, 4.0, 1.0, 0.6],
+        ];
+        let [sg, su, sd] = [0, 1, 2].map(|i| Tensor::new(&factors[i], &cuda));
+        let (sg, su, sd) = (sg?, su?, sd?);
+        let scales = ExpertScales {
+            gate: Some(&sg),
+            up: Some(&su),
+            down: Some(&sd),
+        };
+        let dense = [0, 1, 2].map(|i| w[i].dequantize(&Device::Cpu));
+        let [g, u, d] = dense;
+        let (g, u, d) = (g?, u?, d?);
+        let ids: &[[u32; 2]] = &[[3, 1], [0, 3], [2, 2]];
+        let (tokens, k) = (ids.len(), ids[0].len());
+        let indices =
+            Tensor::from_iter(ids.iter().flatten().copied(), &cuda)?.reshape((tokens, k))?;
+        let xs = Tensor::randn(0f32, 1f32, (tokens, HIDDEN), &cuda)?.to_dtype(DType::BF16)?;
+        let x_cpu = xs.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+        let mut expected = Vec::new();
+        for (t, row) in ids.iter().enumerate() {
+            let x = x_cpu.get(t)?.unsqueeze(1)?;
+            for &e in row {
+                let e = e as usize;
+                let project = |m: &Tensor, v: &Tensor, f: &[f32; 4]| -> Result<Tensor> {
+                    m.get(e)?.matmul(v)?.affine(f64::from(f[e]), 0.)
+                };
+                let activated =
+                    (project(&g, &x, &factors[0])?.silu()? * project(&u, &x, &factors[1])?)?;
+                expected.push(project(&d, &activated, &factors[2])?.squeeze(1)?);
+            }
+        }
+        let expected = Tensor::stack(&expected, 0)?;
+        let fused = moe_decode(
+            &w[0],
+            &w[1],
+            &w[2],
+            &xs,
+            &indices,
+            k,
+            crate::GluActivationType::Silu,
+            scales,
+        )?
+        .to_device(&Device::Cpu)?;
+        let apart = moe_decode_gated(
+            &w[0],
+            &w[1],
+            &w[2],
+            &xs,
+            &indices,
+            k,
+            &|g, u| g.silu()? * u,
+            scales,
+        )?
+        .to_device(&Device::Cpu)?;
+        for (label, actual) in [("fused", fused), ("apart", apart)] {
+            let similarity = cosine(&actual, &expected)?;
+            assert!(similarity > 0.999, "{label}: cosine {similarity}");
+            let ratio = (actual.sqr()?.sum_all()?.to_scalar::<f32>()?
+                / expected.sqr()?.sum_all()?.to_scalar::<f32>()?)
+            .sqrt();
+            assert!((ratio - 1.0).abs() < 0.02, "{label}: norm ratio {ratio}");
         }
         Ok(())
     }

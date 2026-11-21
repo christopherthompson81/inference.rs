@@ -238,7 +238,10 @@ template <typename input_t, mmq_q8_1_ds_layout ds_layout>
 static __global__ void quantize_mmq_q8_1_glu(
     const input_t *__restrict__ gate, const input_t *__restrict__ up,
     const int32_t *__restrict__ ids, void *__restrict__ vy, const int64_t ne00,
-    const int64_t s01, const int64_t ne0, const int ne1, const int activation) {
+    const int64_t s01, const int64_t ne0, const int ne1, const int activation,
+    const uint32_t *__restrict__ row_experts,
+    const float *__restrict__ gate_scales,
+    const float *__restrict__ up_scales) {
 
   constexpr int vals_per_scale = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 64 : 32;
   constexpr int vals_per_sum = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 16 : 32;
@@ -259,8 +262,17 @@ static __global__ void quantize_mmq_q8_1_glu(
   const int64_t iqs = i0 % (4 * QK8_1);
 
   const int64_t base = i01 * s01 + i00;
-  const float4 gate4 = load_mmq4(gate, base, i0, ne00);
-  const float4 up4 = load_mmq4(up, base, i0, ne00);
+  float4 gate4 = load_mmq4(gate, base, i0, ne00);
+  float4 up4 = load_mmq4(up, base, i0, ne00);
+  // a row's expert's own scales (an NVFP4 stack's second level), before the
+  // activation
+  if (gate_scales) {
+    const uint32_t expert = row_experts[i01];
+    const float sg = gate_scales[expert];
+    const float su = up_scales[expert];
+    gate4 = make_float4(gate4.x * sg, gate4.y * sg, gate4.z * sg, gate4.w * sg);
+    up4 = make_float4(up4.x * su, up4.y * su, up4.z * su, up4.w * su);
+  }
   const float4 xi =
       make_float4(mmq_glu_product<input_t>(gate4.x, up4.x, activation),
                   mmq_glu_product<input_t>(gate4.y, up4.y, activation),
@@ -357,11 +369,11 @@ static void launch_mmq_quantize_q8_1_typed(const void *x, const int32_t *ids,
 }
 
 template <mmq_q8_1_ds_layout ds_layout>
-static void
-launch_mmq_quantize_glu_q8_1_typed(const void *gate, const void *up,
-                                   const int32_t *ids, void *vy, int type_x,
-                                   int64_t ne00, int64_t s01, int64_t ne0,
-                                   int64_t ne1, int activation, void *stream) {
+static void launch_mmq_quantize_glu_q8_1_typed(
+    const void *gate, const void *up, const int32_t *ids, void *vy, int type_x,
+    int64_t ne00, int64_t s01, int64_t ne0, int64_t ne1, int activation,
+    void *stream, const uint32_t *row_experts = nullptr,
+    const float *gate_scales = nullptr, const float *up_scales = nullptr) {
   const int64_t block_num_y = (ne0 + 4 * CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) /
                               (4 * CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
   const dim3 num_blocks(ne1, block_num_y, 1);
@@ -372,18 +384,19 @@ launch_mmq_quantize_glu_q8_1_typed(const void *gate, const void *up,
   case GGML_TYPE_F32:
     quantize_mmq_q8_1_glu<float, ds_layout><<<num_blocks, block_size, 0, s>>>(
         (const float *)gate, (const float *)up, ids, vy, ne00, s01, ne0, ne1,
-        activation);
+        activation, row_experts, gate_scales, up_scales);
     break;
   case GGML_TYPE_F16:
     quantize_mmq_q8_1_glu<half, ds_layout><<<num_blocks, block_size, 0, s>>>(
         (const half *)gate, (const half *)up, ids, vy, ne00, s01, ne0, ne1,
-        activation);
+        activation, row_experts, gate_scales, up_scales);
     break;
   case GGML_TYPE_BF16:
     quantize_mmq_q8_1_glu<__nv_bfloat16, ds_layout>
         <<<num_blocks, block_size, 0, s>>>((const __nv_bfloat16 *)gate,
                                            (const __nv_bfloat16 *)up, ids, vy,
-                                           ne00, s01, ne0, ne1, activation);
+                                           ne00, s01, ne0, ne1, activation,
+                                           row_experts, gate_scales, up_scales);
     break;
   default:
     break;
@@ -420,33 +433,34 @@ extern "C" void launch_mmq_quantize_q8_1_D2S6(
       x, ids, vy, type_x, ne00, s01, s02, s03, ne0, ne1, ne2, ne3, stream);
 }
 
-extern "C" void
-launch_mmq_quantize_glu_q8_1_D4_f32(const float *gate, const float *up,
-                                    const int32_t *ids, void *vy, int64_t ne00,
-                                    int64_t s01, int64_t ne0, int64_t ne1,
-                                    int activation, void *stream) {
+extern "C" void launch_mmq_quantize_glu_q8_1_D4_f32(
+    const float *gate, const float *up, const int32_t *ids, void *vy,
+    int64_t ne00, int64_t s01, int64_t ne0, int64_t ne1, int activation,
+    void *stream, const uint32_t *row_experts, const float *gate_scales,
+    const float *up_scales) {
   launch_mmq_quantize_glu_q8_1_typed<MMQ_Q8_1_DS_LAYOUT_D4>(
-      gate, up, ids, vy, GGML_TYPE_F32, ne00, s01, ne0, ne1, activation,
-      stream);
+      gate, up, ids, vy, GGML_TYPE_F32, ne00, s01, ne0, ne1, activation, stream,
+      row_experts, gate_scales, up_scales);
 }
 
-extern "C" void
-launch_mmq_quantize_glu_q8_1_DS4_f32(const float *gate, const float *up,
-                                     const int32_t *ids, void *vy, int64_t ne00,
-                                     int64_t s01, int64_t ne0, int64_t ne1,
-                                     int activation, void *stream) {
+extern "C" void launch_mmq_quantize_glu_q8_1_DS4_f32(
+    const float *gate, const float *up, const int32_t *ids, void *vy,
+    int64_t ne00, int64_t s01, int64_t ne0, int64_t ne1, int activation,
+    void *stream, const uint32_t *row_experts, const float *gate_scales,
+    const float *up_scales) {
   launch_mmq_quantize_glu_q8_1_typed<MMQ_Q8_1_DS_LAYOUT_DS4>(
-      gate, up, ids, vy, GGML_TYPE_F32, ne00, s01, ne0, ne1, activation,
-      stream);
+      gate, up, ids, vy, GGML_TYPE_F32, ne00, s01, ne0, ne1, activation, stream,
+      row_experts, gate_scales, up_scales);
 }
 
 extern "C" void launch_mmq_quantize_glu_q8_1_D2S6_f32(
     const float *gate, const float *up, const int32_t *ids, void *vy,
     int64_t ne00, int64_t s01, int64_t ne0, int64_t ne1, int activation,
-    void *stream) {
+    void *stream, const uint32_t *row_experts, const float *gate_scales,
+    const float *up_scales) {
   launch_mmq_quantize_glu_q8_1_typed<MMQ_Q8_1_DS_LAYOUT_D2S6>(
-      gate, up, ids, vy, GGML_TYPE_F32, ne00, s01, ne0, ne1, activation,
-      stream);
+      gate, up, ids, vy, GGML_TYPE_F32, ne00, s01, ne0, ne1, activation, stream,
+      row_experts, gate_scales, up_scales);
 }
 
 extern "C" void

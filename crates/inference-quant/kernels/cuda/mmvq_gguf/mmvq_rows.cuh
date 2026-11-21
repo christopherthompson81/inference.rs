@@ -163,7 +163,8 @@ static void launch_mmvq_rows(const void *vx, const void *vy, void *dst, int ncol
 template <typename kt, bool glu, bool pairs_fast>
 static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
     mmvq_rows_moe_kernel(const void *__restrict__ vx_gate, const void *__restrict__ vx_up, const int64_t expert_stride,
-                         const void *__restrict__ vy, const uint32_t *__restrict__ ids, float *__restrict__ dst,
+                         const void *__restrict__ vy, const uint32_t *__restrict__ ids, const float *__restrict__ scales,
+                         const float *__restrict__ scales_up, float *__restrict__ dst,
                          const int ncols_x, const int nrows_x, const int stride_col_y, const int y_div,
                          const int activation) {
   constexpr int qk = QK_K;
@@ -248,9 +249,11 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
     }
   }
   if (threadIdx.x < rows_per_cuda_block && row0 + threadIdx.x < nrows_x) {
-    float out = tmp[0][threadIdx.x];
+    // each expert's own scale (an NVFP4 stack's second level), before the activation
+    float out = tmp[0][threadIdx.x] * (scales ? scales[ids[pair]] : 1.0f);
     if constexpr (glu) {
-      out = apply_glu_activation(out, activation) * tmp[nsums - 1][threadIdx.x];
+      const float up = tmp[nsums - 1][threadIdx.x] * (scales_up ? scales_up[ids[pair]] : 1.0f);
+      out = apply_glu_activation(out, activation) * up;
     }
     dst[row0 + threadIdx.x] = out;
   }
@@ -259,7 +262,8 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
 // A null vx_up runs the plain projection; otherwise gate and up fuse with the activation. `grouped` as mmvq_gguf.cuh's.
 #define MMVQ_ROWS_MOE_LAUNCHER(tag, traits)                                                                      \
   extern "C" void launch_mmvq_gguf_##tag##_moe(const void *vx_gate, const void *vx_up, int64_t expert_stride,  \
-                                               const void *vy, const void *ids, float *dst, int ncols_x,       \
+                                               const void *vy, const void *ids, const float *scales,       \
+                                               const float *scales_up, float *dst, int ncols_x,       \
                                                int nrows_x, int stride_col_y, int y_div, int n_pairs,          \
                                                int activation, int grouped, void *stream) {                    \
     const int row_blocks = (nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE;                  \
@@ -269,23 +273,23 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
     if (grouped) {                                                                                             \
       const dim3 grid(n_pairs, row_blocks, 1);                                                                 \
       if (vx_up) {                                                                                             \
-        mmvq_rows_moe_kernel<traits, true, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,  \
+        mmvq_rows_moe_kernel<traits, true, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up,  \
                                                                        dst, ncols_x, nrows_x, stride_col_y,   \
                                                                        y_div, activation);                    \
       } else {                                                                                                 \
-        mmvq_rows_moe_kernel<traits, false, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, \
+        mmvq_rows_moe_kernel<traits, false, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up, \
                                                                         dst, ncols_x, nrows_x, stride_col_y,  \
                                                                         y_div, activation);                   \
       }                                                                                                        \
     } else {                                                                                                   \
       const dim3 grid(row_blocks, n_pairs, 1);                                                                 \
       if (vx_up) {                                                                                             \
-        mmvq_rows_moe_kernel<traits, true, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, \
+        mmvq_rows_moe_kernel<traits, true, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up, \
                                                                         dst, ncols_x, nrows_x, stride_col_y,  \
                                                                         y_div, activation);                   \
       } else {                                                                                                 \
         mmvq_rows_moe_kernel<traits, false, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,    \
-                                                                         id, dst, ncols_x, nrows_x,           \
+                                                                         id, scales, scales_up, dst, ncols_x, nrows_x, \
                                                                          stride_col_y, y_div, activation);    \
       }                                                                                                        \
     }                                                                                                          \

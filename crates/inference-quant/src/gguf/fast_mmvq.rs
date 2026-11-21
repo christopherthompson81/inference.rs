@@ -1142,6 +1142,8 @@ type MoeLauncher = unsafe extern "C" fn(
     expert_stride: i64,
     vy: *const std::ffi::c_void,
     ids: *const std::ffi::c_void,
+    scales: *const f32,
+    scales_up: *const f32,
     dst: *mut f32,
     ncols_x: i32,
     nrows_x: i32,
@@ -1272,7 +1274,17 @@ fn quantize_rows_q8_1(
     Ok(())
 }
 
+/// Stacked experts' scale each (F32 `[experts]` on the experts' device), applied by the matvec to the expert's outputs:
+/// the gate's and up's before the activation.
+#[derive(Clone, Copy, Default)]
+pub struct ExpertScales<'a> {
+    pub gate: Option<&'a Tensor>,
+    pub up: Option<&'a Tensor>,
+    pub down: Option<&'a Tensor>,
+}
+
 /// Matvec MoE over stacked `[E, out, in]` experts, `topk` ids per row of `xs`: `[tokens * topk, hidden]` F32 outputs.
+#[allow(clippy::too_many_arguments)]
 pub fn moe_decode(
     gate: &dyn KernelWeight,
     up: &dyn KernelWeight,
@@ -1281,6 +1293,7 @@ pub fn moe_decode(
     ids: &Tensor,
     topk: usize,
     activation: GluActivationType,
+    scales: ExpertScales<'_>,
 ) -> Result<Tensor> {
     if !supports_moe(gate, up, down) {
         inference_tensor::bail!(
@@ -1307,6 +1320,7 @@ pub fn moe_decode(
         xs,
         ids,
         topk,
+        scales,
     )
 }
 
@@ -1333,11 +1347,19 @@ pub fn moe_decode_ungated(
             down.gguf_type()
         );
     }
-    moe_decode_with(MoeFirst::Plain { up, act }, down, xs, ids, topk)
+    moe_decode_with(
+        MoeFirst::Plain { up, act },
+        down,
+        xs,
+        ids,
+        topk,
+        ExpertScales::default(),
+    )
 }
 
 /// [`moe_decode`] for a gated activation the kernel does not fuse: the gate's and up's rows (F32, `[pairs, inter]`)
 /// each from their own matvec, then `act(gate_rows, up_rows)`.
+#[allow(clippy::too_many_arguments)]
 pub fn moe_decode_gated(
     gate: &dyn KernelWeight,
     up: &dyn KernelWeight,
@@ -1346,6 +1368,7 @@ pub fn moe_decode_gated(
     ids: &Tensor,
     topk: usize,
     act: &dyn Fn(&Tensor, &Tensor) -> Result<Tensor>,
+    scales: ExpertScales<'_>,
 ) -> Result<Tensor> {
     if !supports_moe(gate, up, down) || up.kernel_shape().dims3()? != gate.kernel_shape().dims3()? {
         inference_tensor::bail!(
@@ -1357,7 +1380,14 @@ pub fn moe_decode_gated(
             up.kernel_shape()
         );
     }
-    moe_decode_with(MoeFirst::Pair { gate, up, act }, down, xs, ids, topk)
+    moe_decode_with(
+        MoeFirst::Pair { gate, up, act },
+        down,
+        xs,
+        ids,
+        topk,
+        scales,
+    )
 }
 
 // how an expert's hidden rows come from its input: a GLU the kernel fuses, one projection then `act`, or the gate's
@@ -1385,6 +1415,7 @@ fn moe_decode_with(
     xs: &Tensor,
     ids: &Tensor,
     topk: usize,
+    scales: ExpertScales<'_>,
 ) -> Result<Tensor> {
     let lead = match first {
         MoeFirst::Glu { gate, .. } | MoeFirst::Pair { gate, .. } => gate,
@@ -1460,6 +1491,41 @@ fn moe_decode_with(
         &stream,
     );
     let ids_ptr = ids_ptr as *const std::ffi::c_void;
+    let experts = lead.kernel_shape().dims3()?.0;
+    let scale_tensors = [scales.gate, scales.up, scales.down]
+        .into_iter()
+        .map(|scale| {
+            scale
+                .map(|t| {
+                    if t.elem_count() != experts || !t.device().same_device(&lead.kernel_device()) {
+                        inference_tensor::bail!(
+                            "fast_mmvq: {experts} expert scales expected, got {:?}",
+                            t.shape()
+                        );
+                    }
+                    t.to_dtype(DType::F32)?.contiguous()
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let scale_storages = scale_tensors
+        .iter()
+        .map(|t| t.as_ref().map(Tensor::storage_and_layout))
+        .collect::<Vec<_>>();
+    let mut scale_ptrs = [std::ptr::null::<f32>(); 3];
+    let mut _scale_guards = Vec::new();
+    for (ptr, storage) in scale_ptrs.iter_mut().zip(&scale_storages) {
+        if let Some((storage, layout)) = storage {
+            let Storage::Cuda(cuda) = &**storage else {
+                inference_tensor::bail!("fast_mmvq: expert scales must live on CUDA");
+            };
+            let (p, guard) =
+                slice_ptr_on_stream(cuda.as_cuda_slice::<f32>()?, layout.start_offset(), &stream);
+            *ptr = p as *const f32;
+            _scale_guards.push(guard);
+        }
+    }
+    let [gate_scales, up_scales, down_scales] = scale_ptrs;
 
     let mut hidden_rows = unsafe { dev.alloc::<f32>(pairs * intermediate)? };
     let mut out = unsafe { dev.alloc::<f32>(pairs * hidden)? };
@@ -1487,6 +1553,8 @@ fn moe_decode_with(
                 lead_stride,
                 x_q8,
                 ids_ptr,
+                gate_scales,
+                up_scales,
                 mid_ptr as *mut f32,
                 hidden as i32,
                 intermediate as i32,
@@ -1520,6 +1588,8 @@ fn moe_decode_with(
                         lead_stride,
                         x_q8,
                         ids_ptr,
+                        up_scales,
+                        std::ptr::null(),
                         rows_ptr as *mut f32,
                         hidden as i32,
                         intermediate as i32,
@@ -1568,6 +1638,8 @@ fn moe_decode_with(
                 down_stride,
                 mid_q8,
                 ids_ptr,
+                down_scales,
+                std::ptr::null(),
                 out_ptr as *mut f32,
                 intermediate as i32,
                 hidden as i32,

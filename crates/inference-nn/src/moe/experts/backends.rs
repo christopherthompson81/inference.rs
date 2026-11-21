@@ -1953,12 +1953,12 @@ impl FastExpertsWeights {
         ) else {
             return Ok(None);
         };
-        let Some(scaled) = ExpertScaled::new(self, forward)? else {
-            return Ok(None);
+        let scales = inference_quant::ExpertScales {
+            gate: self.fused_gate_proj.expert_scales(),
+            up: self.fused_up_proj.expert_scales(),
+            down: self.fused_down_proj.expert_scales(),
         };
-        let rescaled = scaled.rescaled(forward);
-        let forward = rescaled.as_ref().unwrap_or(forward);
-        indexed_mmvq_scaled([gate, up, down], forward, config, scaled.gate_up())
+        indexed_mmvq_scaled([gate, up, down], forward, config, scales)
     }
 
     /// Grouped MoE forward for CUDA prefill. Returns Ok(Some) on success, Ok(None) to fall back.
@@ -1984,18 +1984,18 @@ impl FastExpertsWeights {
     }
 }
 
-/// Experts with a scale each, which the raw kernels leave out: the down's folded into the routing weights, the
-/// gate's and up's applied to their rows (`[routes]`, F32) before the activation.
+/// Experts with a scale each, which grouped mmq leaves out: the down's folded into the routing weights, the gate's and
+/// up's (`[experts]`, F32) applied to their rows before the activation.
 #[cfg(feature = "cuda")]
-struct ExpertScaled {
+struct ExpertScaled<'a> {
     topk_weights: Option<Tensor>,
-    gate_up: Option<[Tensor; 2]>,
+    gate_up: Option<[&'a Tensor; 2]>,
 }
 
 #[cfg(feature = "cuda")]
-impl ExpertScaled {
+impl<'a> ExpertScaled<'a> {
     // `None` where the scales cannot apply (LoRA deltas read the unscaled rows)
-    fn new(weights: &FastExpertsWeights, forward: &MoEForward) -> Result<Option<Self>> {
+    fn new(weights: &'a FastExpertsWeights, forward: &MoEForward) -> Result<Option<Self>> {
         let scales = [
             weights.fused_gate_proj.expert_scales(),
             weights.fused_up_proj.expert_scales(),
@@ -2021,7 +2021,7 @@ impl ExpertScaled {
             })
             .transpose()?;
         let gate_up = match (scales[0], scales[1]) {
-            (Some(gate), Some(up)) => Some([per_route(gate)?, per_route(up)?]),
+            (Some(gate), Some(up)) => Some([gate, up]),
             _ => None,
         };
         Ok(Some(Self {
@@ -2031,7 +2031,7 @@ impl ExpertScaled {
     }
 
     // `forward` with the scaled routing weights, where the down projection has scales (never beside LoRA: `new`)
-    fn rescaled<'a>(&'a self, forward: &MoEForward<'a>) -> Option<MoEForward<'a>> {
+    fn rescaled<'f>(&'f self, forward: &MoEForward<'f>) -> Option<MoEForward<'f>> {
         let topk_weights = self.topk_weights.as_ref()?;
         Some(MoEForward {
             xs: forward.xs,
@@ -2044,23 +2044,30 @@ impl ExpertScaled {
         })
     }
 
-    fn gate_up(&self) -> Option<&[Tensor; 2]> {
-        self.gate_up.as_ref()
+    fn gate_up(&self) -> Option<[&'a Tensor; 2]> {
+        self.gate_up
     }
 }
 
-// the gate's and up's rows each times their route's scale, then the activation over both
+// the gate's and up's rows each times their route's expert's scale, then the activation over both
 #[cfg(feature = "cuda")]
-fn scaled_act(gate: &Tensor, up: &Tensor, scales: &[Tensor; 2], act: Activation) -> Result<Tensor> {
-    let scale = |rows: &Tensor, scale: &Tensor| -> Result<Tensor> {
-        let routes = scale.dim(0)?;
-        let rows = rows.reshape((routes, ()))?;
-        rows.broadcast_mul(&scale.to_dtype(rows.dtype())?.unsqueeze(1)?)
+fn scaled_act(
+    gate: &Tensor,
+    up: &Tensor,
+    [gate_scales, up_scales]: [&Tensor; 2],
+    topk_ids: &Tensor,
+    act: Activation,
+) -> Result<Tensor> {
+    let ids = topk_ids.flatten_all()?;
+    let scale = |rows: &Tensor, scales: &Tensor| -> Result<Tensor> {
+        let per_route = scales.index_select(&ids, 0)?;
+        let rows = rows.reshape((ids.dim(0)?, ()))?;
+        rows.broadcast_mul(&per_route.to_dtype(rows.dtype())?.unsqueeze(1)?)
     };
     let shape = gate.shape().clone();
     crate::ops::mul_and_act(
-        &scale(gate, &scales[0])?.reshape(&shape)?,
-        &scale(up, &scales[1])?.reshape(&shape)?,
+        &scale(gate, gate_scales)?.reshape(&shape)?,
+        &scale(up, up_scales)?.reshape(&shape)?,
         act,
     )
 }
@@ -2099,7 +2106,12 @@ pub(super) fn indexed_mmvq_with(
     forward: &MoEForward,
     config: MoEForwardConfig,
 ) -> Result<Option<Tensor>> {
-    indexed_mmvq_scaled(weights, forward, config, None)
+    indexed_mmvq_scaled(
+        weights,
+        forward,
+        config,
+        inference_quant::ExpertScales::default(),
+    )
 }
 
 #[cfg(feature = "cuda")]
@@ -2107,7 +2119,7 @@ fn indexed_mmvq_scaled(
     [gate, up, down]: [&dyn inference_quant::KernelWeight; 3],
     forward: &MoEForward,
     config: MoEForwardConfig,
-    gate_up_scales: Option<&[Tensor; 2]>,
+    scales: inference_quant::ExpertScales<'_>,
 ) -> Result<Option<Tensor>> {
     {
         if forward.lora.is_some()
@@ -2116,17 +2128,8 @@ fn indexed_mmvq_scaled(
         {
             return Ok(None);
         }
-        let routed = match (glu_activation(config.act), gate_up_scales) {
-            (_, Some(scales)) => inference_quant::indexed_moe_mmvq_gated(
-                gate,
-                up,
-                down,
-                forward.xs_flat,
-                forward.topk_ids,
-                config.num_experts_per_tok,
-                &|g, u| scaled_act(g, u, scales, config.act),
-            )?,
-            (Some(activation), None) => inference_quant::indexed_moe_mmvq(
+        let routed = match glu_activation(config.act) {
+            Some(activation) => inference_quant::indexed_moe_mmvq(
                 gate,
                 up,
                 down,
@@ -2134,9 +2137,10 @@ fn indexed_mmvq_scaled(
                 forward.topk_ids,
                 config.num_experts_per_tok,
                 activation,
+                scales,
             )?,
             // an activation the matvec does not fuse runs over the gate's and up's rows between the launches
-            (None, None) => inference_quant::indexed_moe_mmvq_gated(
+            None => inference_quant::indexed_moe_mmvq_gated(
                 gate,
                 up,
                 down,
@@ -2144,6 +2148,7 @@ fn indexed_mmvq_scaled(
                 forward.topk_ids,
                 config.num_experts_per_tok,
                 &|g, u| crate::ops::mul_and_act(g, u, config.act),
+                scales,
             )?,
         };
         let out = weighted_reduce_f32(forward, &routed, config.num_experts_per_tok)?;
@@ -2218,7 +2223,7 @@ fn grouped_routes_with(
     forward: &MoEForward,
     config: MoEForwardConfig,
     parked: bool,
-    gate_up_scales: Option<&[Tensor; 2]>,
+    gate_up_scales: Option<[&Tensor; 2]>,
 ) -> Result<Option<Tensor>> {
     {
         let topk = config.num_experts_per_tok;
@@ -2299,8 +2304,20 @@ fn grouped_routes_with(
             None
         };
 
-        // scaled rows take the explicit activation
-        let glu_activation = glu_activation(config.act).filter(|_| gate_up_scales.is_none());
+        let glu_activation = glu_activation(config.act);
+        let row_experts = gate_up_scales
+            .map(|_| forward.topk_ids.flatten_all())
+            .transpose()?;
+        let glu_scales =
+            gate_up_scales
+                .zip(row_experts.as_ref())
+                .map(
+                    |([gate, up], row_experts)| inference_quant::GluExpertScales {
+                        row_experts,
+                        gate,
+                        up,
+                    },
+                );
 
         let down = if let (Some(glu_activation), None) = (glu_activation, &lora_activated) {
             let down_assignments = match &gate_up {
@@ -2314,6 +2331,7 @@ fn grouped_routes_with(
                     forward.shape.num_tokens,
                     num_experts,
                     glu_activation as i32,
+                    glu_scales,
                     dev,
                 )?,
                 GroupedGateUp::Pair { gate, up } => inference_quant::grouped_moe_mmq_from_glu_pair(
@@ -2327,6 +2345,7 @@ fn grouped_routes_with(
                     forward.shape.num_tokens,
                     num_experts,
                     glu_activation as i32,
+                    glu_scales,
                     dev,
                 )?,
             };
@@ -2342,11 +2361,12 @@ fn grouped_routes_with(
                             &gate_up.narrow(D::Minus1, 0, inter)?,
                             &gate_up.narrow(D::Minus1, inter, inter)?,
                             scales,
+                            forward.topk_ids,
                             config.act,
                         )?
                     }
                     (GroupedGateUp::Pair { gate, up }, Some(scales)) => {
-                        scaled_act(gate, up, scales, config.act)?
+                        scaled_act(gate, up, scales, forward.topk_ids, config.act)?
                     }
                     (GroupedGateUp::Packed(gate_up), None) => crate::ops::split_mul_and_act(
                         gate_up,
