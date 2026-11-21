@@ -221,3 +221,32 @@ a BF16 step (3.9e-3), so summation order: the checkpoint's BF16 linears run `Unq
 BF16 tensors the GGUF weight source's linear. The looped, routed model amplifies that (a near-tied expert flips,
 everything after diverges) into the ~0.003 floor. Neither load is wrong; the floor is this model's sensitivity to
 kernel noise, and recipe differences under ~0.0002 are inside it.
+
+## Run 9 - 2026-11-22 00:00
+
+Recipe B, built in one step from the ggml-org GGUF and the checkpoint: `--nvfp4-from` became `--checkpoint`, whose
+source (`CheckpointSource`) also reads MXFP8 stacks as their values (E4M3 times the block's power of two, w13's
+interleaved rows stacked gate then up) for the rules to quantize in place of the GGUF's tensor. No lossless BF16
+intermediate needed.
+
+```
+inference quantize gguf -m Inkling-2-Mini-IQ4_NL.gguf -o Inkling-2-Mini-NVFP4-B.gguf \
+    --checkpoint /mnt/data/models/inkling2-mini-official \
+    --tensor-type 'blk\.2[0-3]\.ffn_gate_up_exps\.weight$=q6_k' \
+    --tensor-type 'blk\.2[0-3]\.ffn_down_exps\.weight$=q8_0'
+Wrote ... (15.79 GiB): 40 NVFP4 (10935.0 MiB), 182 Q8_0 (2970.2 MiB), 4 Q6_K (2126.2 MiB), 478 F32   (69 s)
+```
+
+Layers 20-23's eight stacks from the checkpoint's values are byte-identical to the same rules over the lossless
+BF16 GGUF of Run 7 (`--only` overlays from both).
+
+```
+                      size        mean KLD   p99      same top   pp512   tg128
+ggml-org IQ4_NL       16.41 GiB   0.00995    0.0877   96.04%     1913    83.6
+recipe A              16.41 GiB   0.00377    0.0370   97.56%     1540    81.7
+recipe B              15.79 GiB   0.00381    0.0377   97.53%     1531    81.7
+(floor, Run 8)                    ~0.0031
+```
+
+Recipe B: 0.62 GiB under IQ4_NL at 2.6x lower KLD, within 0.0007 of the floor; the dense Q8_0 is most of what is
+left (0.0006, 1.37 GiB to remove).

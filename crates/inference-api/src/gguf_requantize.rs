@@ -2,11 +2,11 @@
 
 pub use inference_core::{
     HessianDir, ImatrixMapping, MmprojSummary, cimatrix_for_gguf, hessians_for_gguf,
-    mmproj_architectures, official_nvfp4_experts, write_mmproj,
+    mmproj_architectures, official_checkpoint_experts, write_mmproj,
     write_nemotron_transcribe_audio_gguf,
 };
 pub use inference_quant::requantize::{
-    DEFAULT_GPTQ_DAMP, HessianFile, HessianSource, Nvfp4Source, Quantizer, RequantizePlan,
+    CheckpointSource, DEFAULT_GPTQ_DAMP, HessianFile, HessianSource, Quantizer, RequantizePlan,
     RequantizeSummary, load_imatrix, save_legacy_imatrix, writable_type,
 };
 

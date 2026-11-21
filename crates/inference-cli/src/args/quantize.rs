@@ -183,13 +183,14 @@ pub struct GgufQuantizeOptions {
 
     /// `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`,
     /// `iq4_ks`, ...); tensors none matches are copied as they are
-    #[arg(long = "tensor-type", required_unless_present = "nvfp4_from")]
+    #[arg(long = "tensor-type", required_unless_present = "checkpoint")]
     pub tensor_types: Vec<String>,
 
-    /// A checkpoint whose NVFP4 experts are written as stored (Inkling 2's own): each expert stack it holds replaces
-    /// the source's, in llama.cpp's NVFP4 blocks with its per-expert `<weight>.scale`, whatever the rules say of it
+    /// The checkpoint the GGUF was made from (Inkling 2's own), read in place of its expert stacks: NVFP4 ones written
+    /// as stored, in llama.cpp's NVFP4 blocks with their per-expert `<weight>.scale`, whatever the rules say; MXFP8
+    /// ones quantized by the rules from their values
     #[arg(long)]
-    pub nvfp4_from: Option<PathBuf>,
+    pub checkpoint: Option<PathBuf>,
 
     /// llama.cpp's imatrix (`.dat` or `.gguf`), keyed by the source's tensor names
     #[arg(long)]

@@ -202,18 +202,21 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
                 )?))
             })
             .transpose()?,
-        nvfp4: options
-            .nvfp4_from
+        checkpoint: options
+            .checkpoint
             .as_deref()
-            .map(|dir| -> Result<Box<dyn gguf_requantize::Nvfp4Source>> {
-                let experts = gguf_requantize::official_nvfp4_experts(dir)?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "`{}` is no checkpoint whose NVFP4 experts are known",
-                        dir.display()
-                    )
-                })?;
-                Ok(Box::new(experts))
-            })
+            .map(
+                |dir| -> Result<Box<dyn gguf_requantize::CheckpointSource>> {
+                    let experts =
+                        gguf_requantize::official_checkpoint_experts(dir)?.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "`{}` is no checkpoint whose expert stacks are known",
+                                dir.display()
+                            )
+                        })?;
+                    Ok(Box::new(experts))
+                },
+            )
             .transpose()?,
     };
     let requantize = || {

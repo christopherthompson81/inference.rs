@@ -204,9 +204,9 @@ fn official_stack(tensor: &str) -> Option<inference_quant::nvfp4::gguf_blocks::M
     })
 }
 
-/// An Inkling 2 checkpoint's NVFP4 experts (thinkingmachines' releases), for a GGUF quantizer to write as stored; `None`
-/// for another checkpoint.
-pub fn official_nvfp4_experts(
+/// An Inkling 2 checkpoint's expert stacks (thinkingmachines' releases), for a GGUF quantizer to read in place of a
+/// GGUF's: NVFP4 ones as stored, MXFP8 ones as values; `None` for another checkpoint.
+pub fn official_checkpoint_experts(
     dir: &std::path::Path,
 ) -> Result<Option<inference_quant::nvfp4::gguf_blocks::ModeloptExperts>> {
     let config: serde_json::Value =
