@@ -328,5 +328,8 @@ inference quantize kld [OPTIONS] --model-id <MODEL_ID> --kld-base <KLD_BASE>
 | Option | Default | Description |
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID, local model directory or GGUF file |
-| `--kld-base <KLD_BASE>` | required | The llama-perplexity KL divergence base to score against |
+| `--kld-base <KLD_BASE>` | required | The llama-perplexity KL divergence base to score against, or with `--text` the base to write |
+| `--text <TEXT>` |  | Write `--kld-base` from this model over this text (special tokens parsed, as a chat template writes them), in llama-perplexity's format, instead of scoring against it |
+| `--ctx <CTX>` | `512` | With `--text`, the tokens a chunk (each chunk's second half is recorded) |
+| `--chunks <CHUNKS>` | `40` | With `--text`, the most chunks written (fewer when the text runs out) |
 

@@ -70,9 +70,22 @@ pub struct KldOptions {
     #[arg(short = 'm', long)]
     pub model_id: String,
 
-    /// The llama-perplexity KL divergence base to score against
+    /// The llama-perplexity KL divergence base to score against, or with `--text` the base to write
     #[arg(long)]
     pub kld_base: PathBuf,
+
+    /// Write `--kld-base` from this model over this text (special tokens parsed, as a chat template writes them),
+    /// in llama-perplexity's format, instead of scoring against it
+    #[arg(long)]
+    pub text: Option<PathBuf>,
+
+    /// With `--text`, the tokens a chunk (each chunk's second half is recorded)
+    #[arg(long, default_value_t = 512, requires = "text")]
+    pub ctx: usize,
+
+    /// With `--text`, the most chunks written (fewer when the text runs out)
+    #[arg(long, default_value_t = 40, requires = "text")]
+    pub chunks: usize,
 }
 
 #[derive(Args, Clone)]

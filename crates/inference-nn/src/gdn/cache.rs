@@ -24,10 +24,21 @@ pub struct GdnLayerCache {
 
 impl GdnLayerCache {
     pub fn new(cfg: &dyn GdnConfig, dtype: DType, device: &Device) -> Result<Self> {
+        Self::with_batch(cfg, 1, dtype, device)
+    }
+
+    /// Zeroed states for `batch` sequences run side by side.
+    pub fn with_batch(
+        cfg: &dyn GdnConfig,
+        batch: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
         let dims = GdnDims::new(cfg);
-        let conv_state = Tensor::zeros((1, dims.conv_dim, dims.conv_kernel_size), dtype, device)?;
+        let conv_state =
+            Tensor::zeros((batch, dims.conv_dim, dims.conv_kernel_size), dtype, device)?;
         let recurrent_state = Tensor::zeros(
-            (1, dims.num_v_heads, dims.head_k_dim, dims.head_v_dim),
+            (batch, dims.num_v_heads, dims.head_k_dim, dims.head_v_dim),
             DType::F32,
             device,
         )?;

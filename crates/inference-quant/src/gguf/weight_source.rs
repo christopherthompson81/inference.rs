@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use inference_tensor::nn::{Linear, var_builder::SimpleBackend};
+use inference_tensor::quantized::GgmlDType;
 use inference_tensor::{DType, Device, Error, Result, Shape, Tensor};
 
 use super::{
@@ -453,8 +454,24 @@ impl GgufWeightSource {
                 Tensor::from_vec(values, raw.dims, &Device::Cpu)?.to_device(device)
             }
             GgufTensorBinding::Tensor(name) => {
-                let tensor = self.archive.load_qtensor(name, device)?;
-                tensor.dequantize(device)
+                let info = self.archive.tensor_info(name)?;
+                // a float tensor's bytes are its values: they go to the device as stored, not through f32
+                let float = match info.dtype().candle_dtype()? {
+                    GgmlDType::F32 => Some(DType::F32),
+                    GgmlDType::F16 => Some(DType::F16),
+                    GgmlDType::BF16 => Some(DType::BF16),
+                    _ => None,
+                };
+                match float {
+                    Some(dtype)
+                        if self.archive.shards()[info.shard_index()].endian()
+                            == GgufEndian::Little =>
+                    {
+                        let bytes = self.archive.tensor_data(name)?.into_bytes();
+                        Tensor::from_raw_buffer(&bytes, dtype, info.shape(), device)
+                    }
+                    _ => self.archive.load_qtensor(name, device)?.dequantize(device),
+                }
             }
             GgufTensorBinding::Mxfp4Blocks(name) => {
                 self.materialize_mxfp4_component(name, false, device)
@@ -506,12 +523,18 @@ impl GgufWeightSource {
             GgufTensorBinding::Reshape { input, dims } => self
                 .materialize_binding(input, device)?
                 .reshape(Shape::from(dims.clone())),
-            GgufTensorBinding::Affine { input, mul, add } => {
-                self.materialize_binding(input, device)?.affine(*mul, *add)
-            }
-            GgufTensorBinding::Log { input } => self.materialize_binding(input, device)?.log(),
+            // value transforms run in f32, as when every tensor dequantized to it
+            GgufTensorBinding::Affine { input, mul, add } => self
+                .materialize_binding(input, device)?
+                .to_dtype(DType::F32)?
+                .affine(*mul, *add),
+            GgufTensorBinding::Log { input } => self
+                .materialize_binding(input, device)?
+                .to_dtype(DType::F32)?
+                .log(),
             GgufTensorBinding::InverseSoftplus { input } => self
                 .materialize_binding(input, device)?
+                .to_dtype(DType::F32)?
                 .exp()?
                 .affine(1.0, -1.0)?
                 .log(),

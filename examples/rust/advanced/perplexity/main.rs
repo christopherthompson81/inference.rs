@@ -25,9 +25,6 @@ const PROMPT_CHUNKSIZE: usize = 1024;
 const MIN_LLAMA_CPP_CTX: usize = 4;
 // llama-perplexity's `--kl-divergence-base` file opens with this
 const KLD_BASE_MAGIC: &[u8; 8] = b"_logits_";
-// a base row keeps log-probs this far below its top as u16 steps between them (llama-perplexity's encoding)
-const KLD_BASE_RANGE: f32 = 16.0;
-const KLD_BASE_STEPS: f32 = 65535.0;
 // chunks of the base read ahead of the one being scored
 const KLD_READ_AHEAD: usize = 2;
 // llama-perplexity's chunking for a base written here: `-c 512 --chunks 40`, as the recipe investigations use
@@ -367,34 +364,6 @@ fn read_i32(reader: &mut impl Read) -> Result<i32> {
     Ok(i32::from_le_bytes(bytes))
 }
 
-// `logits` as a base record of `n_vocab` codes, as llama-perplexity writes one: scale and floor as two f32, then a u16
-// per token (the ones past our vocab and those over the range below the top at 0)
-fn base_record(logits: &[f32], n_vocab: usize) -> Vec<u8> {
-    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let min_logit = logits
-        .iter()
-        .copied()
-        .fold(f32::INFINITY, f32::min)
-        .max(max_logit - KLD_BASE_RANGE);
-    let log_sum_exp = logits
-        .iter()
-        .map(|v| f64::from((v - max_logit).exp()))
-        .sum::<f64>()
-        .ln() as f32;
-    let scale = (max_logit - min_logit) / KLD_BASE_STEPS;
-    let mut record = Vec::with_capacity(2 * n_vocab.div_ceil(2) * 2 + 8);
-    record.extend_from_slice(&scale.to_le_bytes());
-    record.extend_from_slice(&(min_logit - max_logit - log_sum_exp).to_le_bytes());
-    for i in 0..2 * n_vocab.div_ceil(2) {
-        let code = match logits.get(i) {
-            Some(&v) if scale > 0.0 && v > min_logit => ((v - min_logit) / scale).round() as u16,
-            _ => 0,
-        };
-        record.extend_from_slice(&code.to_le_bytes());
-    }
-    record
-}
-
 // a new base over `text` as llama-perplexity writes one: the text tokenized with its special tokens, cut into
 // `n_ctx`-token chunks, each chunk's second half recorded
 async fn write_kld_base(
@@ -444,7 +413,7 @@ async fn write_kld_base(
         }
         let w = writer.as_mut().expect("opened on the first chunk");
         let records = parallel_rows(first..n_ctx - 1, |row| {
-            base_record(&logits[row * vocab..][..vocab], vocab)
+            inference::base_record(&logits[row * vocab..][..vocab], vocab)
         });
         for record in records {
             w.write_all(&record)?;
@@ -563,7 +532,7 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
                 .as_ref()
                 .context("the engine returned no logits")?;
             let out = parallel_rows(rows.clone(), |row| {
-                base_record(&logits[row * vocab..][..vocab], n_vocab)
+                inference::base_record(&logits[row * vocab..][..vocab], n_vocab)
             });
             for out in out {
                 writer.write_all(&out)?;

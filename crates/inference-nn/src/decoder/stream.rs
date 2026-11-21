@@ -81,8 +81,8 @@ struct Layer {
 
 impl StreamedLayer for Layer {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let tokens = xs.dim(1)?;
-        let ids = Tensor::zeros((1, tokens), DType::U32, xs.device())?;
+        let (batch, tokens) = (xs.dim(0)?, xs.dim(1)?);
+        let ids = Tensor::zeros((batch, tokens), DType::U32, xs.device())?;
         let mask = CausalMasker.make_causal_mask(
             &ids,
             &NotACache,
@@ -93,7 +93,11 @@ impl StreamedLayer for Layer {
             },
         )?;
         let mask = DeviceMappedMask::from_single(mask).get(xs.device());
-        let (offsets, context_lens, position_ids) = ([0], [(0, tokens)], [tokens]);
+        let (offsets, context_lens, position_ids) = (
+            vec![0; batch],
+            vec![(0, tokens); batch],
+            vec![tokens; batch],
+        );
         let flash = FlashParams::empty(true);
         let mut ctx =
             ModelForwardContext::new(&offsets, &context_lens, &position_ids, None, &flash);
