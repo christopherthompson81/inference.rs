@@ -479,6 +479,11 @@ pub fn get_immediate_isq() -> Option<ImmediateIsqParams> {
     ENGINE_IMMEDIATE_ISQ.with(|cell| cell.borrow().clone())
 }
 
+/// Installs `params` (from [`get_immediate_isq`] on another thread) as this thread's load-time ISQ.
+pub fn set_immediate_isq_params(params: Option<ImmediateIsqParams>) {
+    ENGINE_IMMEDIATE_ISQ.with(|cell| *cell.borrow_mut() = params);
+}
+
 pub fn clear_immediate_isq() {
     ENGINE_IMMEDIATE_ISQ.with(|cell| {
         *cell.borrow_mut() = None;

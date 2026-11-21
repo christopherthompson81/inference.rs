@@ -33,6 +33,8 @@ const INDEX_FILE: &str = "model.safetensors.index.json";
 const CONFIG_FILE: &str = "config.json";
 // exllamav3's version the layout follows
 const LAYOUT_VERSION: &str = "1.6.6";
+// chunks of base records read ahead of the GPU in a scoring run (254 MB each at a 248K vocab, 1K context)
+const BASE_READ_AHEAD: usize = 2;
 // the markers' stored multipliers (only their presence is read)
 const MCG_MULT: u32 = 0xCBAC1FED;
 const MUL1_MULT: u32 = 0x83DCD12D;
@@ -900,7 +902,7 @@ pub(crate) fn write_kld_base_streamed(
             chunk
         })
         .collect();
-    let vocab = stream.head().dequantize_w()?.dim(0)?;
+    let vocab = dense_head(&stream.head(), &Device::new_cuda(0)?)?.dim(0)?;
     let mut writer =
         inference_nn::logits_reference::KldBaseWriter::create(out, job.n_ctx, vocab, tokens)?;
     run_streamed(stream, chunks, StreamedRun::WriteBase(&mut writer), weights)?;
@@ -1031,265 +1033,299 @@ fn run_streamed(
         .collect::<Result<Vec<_>>>()?;
     let mut ahead: Option<std::thread::JoinHandle<()>> = None;
     let mut writing: Option<std::thread::JoinHandle<Result<()>>> = None;
-    for layer_idx in 0..layers {
-        let start = std::time::Instant::now();
-        if let Some(reading) = ahead.take() {
-            let _span = profile::span("stream.read_wait", None);
-            let _ = reading.join();
-        }
-        ahead = ranges.remove(&(layer_idx + 1)).map(prefetch);
-        let span = profile::span("stream.build", Some(&gpu));
-        let layer = stream.build_layer(layer_idx, &gpu)?;
-        drop(span);
-        let twin_layer = twin
-            .as_ref()
-            .map(|weights| stream.build_layer_from(layer_idx, &gpu, weights))
-            .transpose()?;
-        let group = layer
-            .modules()
-            .iter()
-            .filter(|m| encoded(m))
-            .collect::<Vec<_>>();
-        let ranks = group
-            .iter()
-            .map(|m| weight_rank(m))
-            .collect::<Result<Vec<_>>>()?;
-        let proj = |m: &TrackedModule| m.key.rsplit_once('.').map_or("", |(_, p)| p).to_string();
-        let shared = group
-            .iter()
-            .zip(&ranks)
-            .position(|(m, &r)| {
-                r == 2 && m.key.contains(SHARED_EXPERT) && GATE_UP_PROJS.contains(&proj(m).as_str())
-            })
-            .filter(|_| !each);
-        // each module's Hessian source: itself, the first reading the same input, or (stacked gate/up) the shared expert
-        let mut first = HashMap::new();
-        let sources = group
-            .iter()
-            .zip(&ranks)
-            .enumerate()
-            .map(|(i, (m, &rank))| match (rank, shared) {
-                (3, Some(s)) if GATE_UP_PROJS.contains(&proj(m).as_str()) => s,
-                _ => match shared_input(&m.key) {
-                    Some(input) => *first.entry(input).or_insert(i),
-                    None => i,
-                },
-            })
-            .collect::<Vec<_>>();
-        // with a twin a collection pairs each dense input of the two (GPTAQ's statistics): the twin's own Hessian,
-        // and its inputs' cross moment with the drift from the model's
-        let dump_dir = std::env::var_os(STREAM_ROUTER_DUMP_ENV);
-        let gptaq = twin_layer.is_some() && dir.is_some() && dump_dir.is_none();
-        let mut pairs = Vec::new();
-        if let (true, Some(twin_layer)) = (gptaq, &twin_layer) {
-            for (i, module) in group.iter().enumerate() {
-                if sources[i] != i || ranks[i] != 2 {
-                    continue;
+    // the next layer builds on a thread while this one runs; a twin or candidates build beside it on the same trackers
+    let build_ahead = twin.is_none() && candidates.is_empty();
+    let read_offset = if build_ahead { 2 } else { 1 };
+    std::thread::scope(|scope| -> Result<()> {
+        let mut next: Option<
+            std::thread::ScopedJoinHandle<
+                '_,
+                inference_tensor::Result<Box<dyn inference_nn::model::StreamedLayer>>,
+            >,
+        > = None;
+        for layer_idx in 0..layers {
+            let start = std::time::Instant::now();
+            if let Some(reading) = ahead.take() {
+                let _span = profile::span("stream.read_wait", None);
+                let _ = reading.join();
+            }
+            ahead = ranges.remove(&(layer_idx + read_offset)).map(prefetch);
+            let span = profile::span("stream.build", Some(&gpu));
+            let layer = match next.take() {
+                Some(building) => building
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("the layer builder panicked"))??,
+                None => stream.build_layer(layer_idx, &gpu)?,
+            };
+            drop(span);
+            if build_ahead && layer_idx + 1 < layers {
+                let gpu = &gpu;
+                // the load's capture settings are thread-local
+                let isq = inference_quant::get_immediate_isq();
+                next = Some(scope.spawn(move || {
+                    inference_quant::set_immediate_isq_params(isq);
+                    let layer = stream.build_layer(layer_idx + 1, gpu)?;
+                    // its uploads ran on this thread's stream
+                    gpu.synchronize()?;
+                    Ok(layer)
+                }));
+            }
+            let twin_layer = twin
+                .as_ref()
+                .map(|weights| stream.build_layer_from(layer_idx, &gpu, weights))
+                .transpose()?;
+            let group = layer
+                .modules()
+                .iter()
+                .filter(|m| encoded(m))
+                .collect::<Vec<_>>();
+            let ranks = group
+                .iter()
+                .map(|m| weight_rank(m))
+                .collect::<Result<Vec<_>>>()?;
+            let proj =
+                |m: &TrackedModule| m.key.rsplit_once('.').map_or("", |(_, p)| p).to_string();
+            let shared = group
+                .iter()
+                .zip(&ranks)
+                .position(|(m, &r)| {
+                    r == 2
+                        && m.key.contains(SHARED_EXPERT)
+                        && GATE_UP_PROJS.contains(&proj(m).as_str())
+                })
+                .filter(|_| !each);
+            // each module's Hessian source: itself, the first reading the same input, or (stacked gate/up) the shared expert
+            let mut first = HashMap::new();
+            let sources = group
+                .iter()
+                .zip(&ranks)
+                .enumerate()
+                .map(|(i, (m, &rank))| match (rank, shared) {
+                    (3, Some(s)) if GATE_UP_PROJS.contains(&proj(m).as_str()) => s,
+                    _ => match shared_input(&m.key) {
+                        Some(input) => *first.entry(input).or_insert(i),
+                        None => i,
+                    },
+                })
+                .collect::<Vec<_>>();
+            // with a twin a collection pairs each dense input of the two (GPTAQ's statistics): the twin's own Hessian,
+            // and its inputs' cross moment with the drift from the model's
+            let dump_dir = std::env::var_os(STREAM_ROUTER_DUMP_ENV);
+            let gptaq = twin_layer.is_some() && dir.is_some() && dump_dir.is_none();
+            let mut pairs = Vec::new();
+            if let (true, Some(twin_layer)) = (gptaq, &twin_layer) {
+                for (i, module) in group.iter().enumerate() {
+                    if sources[i] != i || ranks[i] != 2 {
+                        continue;
+                    }
+                    let Some(twin) = twin_layer.modules().iter().find(|m| m.key == module.key)
+                    else {
+                        continue;
+                    };
+                    module.ct.begin_capture_inputs()?;
+                    twin.ct.begin_capture_inputs()?;
+                    pairs.push(Gptaq {
+                        index: i,
+                        model: (*module).clone(),
+                        twin: twin.clone(),
+                        h: None,
+                        cross: None,
+                        rows: 0,
+                    });
                 }
-                let Some(twin) = twin_layer.modules().iter().find(|m| m.key == module.key) else {
-                    continue;
-                };
-                module.ct.begin_capture_inputs()?;
+            }
+            let mut router_dump =
+                dump_dir
+                    .zip(twin_layer.as_ref())
+                    .and_then(|(dir, twin_layer)| {
+                        let model = group
+                            .iter()
+                            .find(|m| m.key.ends_with(ROUTER_INPUT_MODULE))?;
+                        let twin = twin_layer.modules().iter().find(|m| m.key == model.key)?;
+                        Some((
+                            PathBuf::from(dir),
+                            (*model).clone(),
+                            twin.clone(),
+                            Vec::new(),
+                            Vec::new(),
+                        ))
+                    });
+            if let Some((_, model, twin, _, _)) = &router_dump {
+                model.ct.begin_capture_inputs()?;
                 twin.ct.begin_capture_inputs()?;
-                pairs.push(Gptaq {
-                    index: i,
-                    model: (*module).clone(),
-                    twin: twin.clone(),
-                    h: None,
-                    cross: None,
-                    rows: 0,
-                });
             }
-        }
-        let mut router_dump = dump_dir
-            .zip(twin_layer.as_ref())
-            .and_then(|(dir, twin_layer)| {
-                let model = group
-                    .iter()
-                    .find(|m| m.key.ends_with(ROUTER_INPUT_MODULE))?;
-                let twin = twin_layer.modules().iter().find(|m| m.key == model.key)?;
-                Some((
-                    PathBuf::from(dir),
-                    (*model).clone(),
-                    twin.clone(),
-                    Vec::new(),
-                    Vec::new(),
-                ))
-            });
-        if let Some((_, model, twin, _, _)) = &router_dump {
-            model.ct.begin_capture_inputs()?;
-            twin.ct.begin_capture_inputs()?;
-        }
-        for (i, module) in group.iter().enumerate() {
-            if sources[i] == i && !score_only && !gptaq && router_dump.is_none() {
-                module.ct.begin_track_hessian()?;
-            }
-        }
-        let forward_span = profile::span("stream.forward", Some(&gpu));
-        let before = (!candidates.is_empty()).then(|| states.clone());
-        // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed);
-        // a plain pass batches chunks of one length, which the MoE's per-call costs (a launch per expert) dominate
-        let batched =
-            !score_only && twin_layer.is_none() && pairs.is_empty() && router_dump.is_none();
-        if batched {
-            let mut i = 0;
-            while i < states.len() {
-                let len = states[i].dims().to_vec();
-                let mut j = i + 1;
-                while j < states.len()
-                    && j - i < STREAM_BATCH_CHUNKS
-                    && states[j].dims() == len.as_slice()
-                {
-                    j += 1;
+            for (i, module) in group.iter().enumerate() {
+                if sources[i] == i && !score_only && !gptaq && router_dump.is_none() {
+                    module.ct.begin_track_hessian()?;
                 }
-                let xs = Tensor::cat(
-                    &states[i..j]
-                        .iter()
-                        .map(|s| s.to_device(&gpu))
-                        .collect::<inference_tensor::Result<Vec<_>>>()?,
-                    0,
-                )?;
-                let ys = layer.forward(&xs)?;
-                for (k, state) in states[i..j].iter_mut().enumerate() {
-                    let y = ys.narrow(0, k, 1)?;
-                    *state = if resident {
-                        y
+            }
+            let forward_span = profile::span("stream.forward", Some(&gpu));
+            let before = (!candidates.is_empty()).then(|| states.clone());
+            // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed);
+            // a plain pass batches chunks of one length, which the MoE's per-call costs (a launch per expert) dominate
+            let batched =
+                !score_only && twin_layer.is_none() && pairs.is_empty() && router_dump.is_none();
+            if batched {
+                let mut i = 0;
+                while i < states.len() {
+                    let len = states[i].dims().to_vec();
+                    let mut j = i + 1;
+                    while j < states.len()
+                        && j - i < STREAM_BATCH_CHUNKS
+                        && states[j].dims() == len.as_slice()
+                    {
+                        j += 1;
+                    }
+                    let xs = Tensor::cat(
+                        &states[i..j]
+                            .iter()
+                            .map(|s| s.to_device(&gpu))
+                            .collect::<inference_tensor::Result<Vec<_>>>()?,
+                        0,
+                    )?;
+                    let ys = layer.forward(&xs)?;
+                    for (k, state) in states[i..j].iter_mut().enumerate() {
+                        let y = ys.narrow(0, k, 1)?;
+                        *state = if resident {
+                            y
+                        } else {
+                            y.to_device(&Device::Cpu)?
+                        };
+                    }
+                    i = j;
+                }
+            }
+            for (i, state) in states.iter_mut().enumerate().filter(|_| !batched) {
+                if twin_layer.is_some() && !free_routes {
+                    inference_nn::ops::record_routes();
+                }
+                let next = layer.forward(&state.to_device(&gpu)?)?;
+                *state = if resident {
+                    next
+                } else {
+                    next.to_device(&Device::Cpu)?
+                };
+                if let (Some(twin_layer), Some(twin_states)) = (&twin_layer, &mut twin_states) {
+                    if !free_routes {
+                        inference_nn::ops::replay_routes(inference_nn::ops::take_recorded_routes());
+                    }
+                    let twin_state = &mut twin_states[i];
+                    let next = twin_layer.forward(&twin_state.to_device(&gpu)?);
+                    inference_nn::ops::stop_replaying_routes();
+                    *twin_state = if resident {
+                        next?
                     } else {
-                        y.to_device(&Device::Cpu)?
+                        next?.to_device(&Device::Cpu)?
                     };
                 }
-                i = j;
-            }
-        }
-        for (i, state) in states.iter_mut().enumerate().filter(|_| !batched) {
-            if twin_layer.is_some() && !free_routes {
-                inference_nn::ops::record_routes();
-            }
-            let next = layer.forward(&state.to_device(&gpu)?)?;
-            *state = if resident {
-                next
-            } else {
-                next.to_device(&Device::Cpu)?
-            };
-            if let (Some(twin_layer), Some(twin_states)) = (&twin_layer, &mut twin_states) {
-                if !free_routes {
-                    inference_nn::ops::replay_routes(inference_nn::ops::take_recorded_routes());
+                for pair in &mut pairs {
+                    pair.add_chunk()?;
                 }
-                let twin_state = &mut twin_states[i];
-                let next = twin_layer.forward(&twin_state.to_device(&gpu)?);
-                inference_nn::ops::stop_replaying_routes();
-                *twin_state = if resident {
-                    next?
-                } else {
-                    next?.to_device(&Device::Cpu)?
+                if let Some((_, model, twin, xf, xq)) = &mut router_dump {
+                    for x in model.ct.take_captured_inputs()? {
+                        xf.push(
+                            x.to_dtype(inference_tensor::DType::BF16)?
+                                .to_device(&Device::Cpu)?,
+                        );
+                    }
+                    for x in twin.ct.take_captured_inputs()? {
+                        xq.push(
+                            x.to_dtype(inference_tensor::DType::BF16)?
+                                .to_device(&Device::Cpu)?,
+                        );
+                    }
+                }
+            }
+            let dumping = router_dump.is_some();
+            if let Some((dir, _, _, xf, xq)) = router_dump {
+                std::fs::create_dir_all(&dir)?;
+                inference_tensor::safetensors::save(
+                    &HashMap::from([
+                        ("xf".to_string(), Tensor::cat(&xf, 0)?),
+                        ("xq".to_string(), Tensor::cat(&xq, 0)?),
+                    ]),
+                    dir.join(format!("layer{layer_idx}.safetensors")),
+                )?;
+            }
+            for (candidate, own_states) in candidates.iter().zip(&mut candidate_states) {
+                let replaced = candidate.layers.contains(&layer_idx);
+                let input = match own_states.take() {
+                    Some(own) => own,
+                    None if replaced => before.clone().context("the states before the layer")?,
+                    None => continue,
                 };
-            }
-            for pair in &mut pairs {
-                pair.add_chunk()?;
-            }
-            if let Some((_, model, twin, xf, xq)) = &mut router_dump {
-                for x in model.ct.take_captured_inputs()? {
-                    xf.push(
-                        x.to_dtype(inference_tensor::DType::BF16)?
-                            .to_device(&Device::Cpu)?,
-                    );
+                let own_layer = replaced
+                    .then(|| stream.build_layer_from(layer_idx, &gpu, &candidate.weights))
+                    .transpose()?;
+                let run_layer = own_layer.as_deref().unwrap_or(&*layer);
+                let mut next = Vec::with_capacity(input.len());
+                for state in &input {
+                    let out = run_layer.forward(&state.to_device(&gpu)?)?;
+                    next.push(if resident {
+                        out
+                    } else {
+                        out.to_device(&Device::Cpu)?
+                    });
                 }
-                for x in twin.ct.take_captured_inputs()? {
-                    xq.push(
-                        x.to_dtype(inference_tensor::DType::BF16)?
-                            .to_device(&Device::Cpu)?,
-                    );
+                *own_states = Some(next);
+            }
+            drop(forward_span);
+            let hessians_span = profile::span("stream.hessians", Some(&gpu));
+            let mut hessians = vec![None; group.len()];
+            let mut crosses = vec![None; group.len()];
+            for (i, module) in group.iter().enumerate() {
+                if sources[i] == i && !score_only && !gptaq && !dumping {
+                    hessians[i] = take_hessian(module)?
+                        .map(|h| h.to_device(&Device::Cpu))
+                        .transpose()?;
                 }
             }
-        }
-        let dumping = router_dump.is_some();
-        if let Some((dir, _, _, xf, xq)) = router_dump {
-            std::fs::create_dir_all(&dir)?;
-            inference_tensor::safetensors::save(
-                &HashMap::from([
-                    ("xf".to_string(), Tensor::cat(&xf, 0)?),
-                    ("xq".to_string(), Tensor::cat(&xq, 0)?),
-                ]),
-                dir.join(format!("layer{layer_idx}.safetensors")),
-            )?;
-        }
-        for (candidate, own_states) in candidates.iter().zip(&mut candidate_states) {
-            let replaced = candidate.layers.contains(&layer_idx);
-            let input = match own_states.take() {
-                Some(own) => own,
-                None if replaced => before.clone().context("the states before the layer")?,
-                None => continue,
-            };
-            let own_layer = replaced
-                .then(|| stream.build_layer_from(layer_idx, &gpu, &candidate.weights))
-                .transpose()?;
-            let run_layer = own_layer.as_deref().unwrap_or(&*layer);
-            let mut next = Vec::with_capacity(input.len());
-            for state in &input {
-                let out = run_layer.forward(&state.to_device(&gpu)?)?;
-                next.push(if resident {
-                    out
-                } else {
-                    out.to_device(&Device::Cpu)?
+            for pair in pairs {
+                let index = pair.index;
+                if let Some((h, cross)) = pair.finish()? {
+                    hessians[index] = Some(h);
+                    crosses[index] = Some(cross);
+                }
+            }
+            let mut jobs = Vec::new();
+            for (i, module) in group.iter().enumerate() {
+                let (Some(h), Some(_)) = (&hessians[sources[i]], dir) else {
+                    continue;
+                };
+                let h = h.to_device(&Device::Cpu)?;
+                jobs.push(match h.rank() {
+                    // a stack reading another's input (up beside gate) is found through it, not written again
+                    3 if each && sources[i] != i => continue,
+                    3 => SaveJob::Experts(module.key.clone(), h),
+                    _ => match &crosses[sources[i]] {
+                        Some(cross) => {
+                            SaveJob::Pair(module.key.clone(), h, cross.to_device(&Device::Cpu)?)
+                        }
+                        None => SaveJob::Single(module.key.clone(), h),
+                    },
                 });
             }
-            *own_states = Some(next);
-        }
-        drop(forward_span);
-        let hessians_span = profile::span("stream.hessians", Some(&gpu));
-        let mut hessians = vec![None; group.len()];
-        let mut crosses = vec![None; group.len()];
-        for (i, module) in group.iter().enumerate() {
-            if sources[i] == i && !score_only && !gptaq && !dumping {
-                hessians[i] = take_hessian(module)?
-                    .map(|h| h.to_device(&Device::Cpu))
-                    .transpose()?;
+            // the files written beside the next layer's work, one layer's at a time
+            if let Some(previous) = writing.take() {
+                join_writer(previous)?;
             }
-        }
-        for pair in pairs {
-            let index = pair.index;
-            if let Some((h, cross)) = pair.finish()? {
-                hessians[index] = Some(h);
-                crosses[index] = Some(cross);
+            if let Some(dir) = dir {
+                let dir = dir.to_path_buf();
+                writing = Some(std::thread::spawn(move || {
+                    jobs.into_iter().try_for_each(|job| job.save(&dir, each))
+                }));
             }
+            drop(hessians_span);
+            drop(group);
+            drop(layer);
+            info!(
+                "Layer {}/{layers} in {:.1}s.",
+                layer_idx + 1,
+                start.elapsed().as_secs_f32()
+            );
         }
-        let mut jobs = Vec::new();
-        for (i, module) in group.iter().enumerate() {
-            let (Some(h), Some(_)) = (&hessians[sources[i]], dir) else {
-                continue;
-            };
-            let h = h.to_device(&Device::Cpu)?;
-            jobs.push(match h.rank() {
-                // a stack reading another's input (up beside gate) is found through it, not written again
-                3 if each && sources[i] != i => continue,
-                3 => SaveJob::Experts(module.key.clone(), h),
-                _ => match &crosses[sources[i]] {
-                    Some(cross) => {
-                        SaveJob::Pair(module.key.clone(), h, cross.to_device(&Device::Cpu)?)
-                    }
-                    None => SaveJob::Single(module.key.clone(), h),
-                },
-            });
-        }
-        // the files written beside the next layer's work, one layer's at a time
-        if let Some(previous) = writing.take() {
-            join_writer(previous)?;
-        }
-        if let Some(dir) = dir {
-            let dir = dir.to_path_buf();
-            writing = Some(std::thread::spawn(move || {
-                jobs.into_iter().try_for_each(|job| job.save(&dir, each))
-            }));
-        }
-        drop(hessians_span);
-        drop(group);
-        drop(layer);
-        info!(
-            "Layer {}/{layers} in {:.1}s.",
-            layer_idx + 1,
-            start.elapsed().as_secs_f32()
-        );
-    }
+        Ok(())
+    })?;
     if let Some(previous) = writing.take() {
         join_writer(previous)?;
     }
@@ -1346,6 +1382,20 @@ fn run_streamed(
 }
 
 // each chunk's final logits over its second half (llama-perplexity's scored rows) into the base
+// the head in BF16 on `gpu`: a quantized one goes up packed and dequantizes there, not through f32 on the host
+#[cfg(feature = "cuda")]
+fn dense_head(head: &std::sync::Arc<dyn QuantMethod>, gpu: &Device) -> Result<Tensor> {
+    use inference_tensor::DType;
+    use inference_tensor::quantized::{QStorage, QTensor};
+    if let Some(q) = head.get_qtensor() {
+        let storage = QStorage::from_data(q.data()?, gpu, q.dtype())?;
+        return Ok(QTensor::new(storage, q.shape())?
+            .dequantize(gpu)?
+            .to_dtype(DType::BF16)?);
+    }
+    Ok(head.dequantize_w()?.to_dtype(DType::BF16)?.to_device(gpu)?)
+}
+
 #[cfg(feature = "cuda")]
 fn write_base_states(
     stream: &dyn inference_nn::model::LayerStream,
@@ -1355,11 +1405,7 @@ fn write_base_states(
     gpu: &Device,
 ) -> Result<()> {
     use inference_tensor::DType;
-    let head = stream
-        .head()
-        .dequantize_w()?
-        .to_dtype(DType::BF16)?
-        .to_device(gpu)?;
+    let head = dense_head(&stream.head(), gpu)?;
     for (state, tokens) in states.iter().zip(chunks) {
         let first = tokens.len() / 2;
         let rows = tokens.len() - 1 - first;
@@ -1385,57 +1431,83 @@ fn score_states(
     gpu: &Device,
 ) -> Result<()> {
     use inference_tensor::{D, DType};
-    let dense = |head: &std::sync::Arc<dyn QuantMethod>| -> Result<Tensor> {
-        Ok(head.dequantize_w()?.to_dtype(DType::BF16)?.to_device(gpu)?)
-    };
-    let model_head = dense(&stream.head())?;
+    let head_span = profile::span("score.dense_head", Some(gpu));
+    let model_head = dense_head(&stream.head(), gpu)?;
+    drop(head_span);
     let heads = runs
         .iter()
-        .map(|run| run.head.as_ref().map(dense).transpose())
+        .map(|run| run.head.as_ref().map(|h| dense_head(h, gpu)).transpose())
         .collect::<Result<Vec<_>>>()?;
     let mut scores = vec![RunScore::default(); runs.len()];
     let first = base.first_row();
-    for (c, tokens) in chunks.iter().enumerate() {
-        // one read and decode of the chunk's base records serves every run
-        let reference = base.next_chunk()?;
-        let reference = inference_nn::logits_reference::decode_reference(
-            &reference,
-            tokens,
-            model_head.dim(0)?,
-            gpu,
-        )?;
-        for ((run, head), score) in runs.iter().zip(&heads).zip(&mut scores) {
-            let xs = stream
-                .final_norm(&run.states[c])?
-                .to_device(gpu)?
-                .to_dtype(DType::BF16)?
-                .squeeze(0)?;
-            let head = head.as_ref().unwrap_or(&model_head);
-            let logits = xs.matmul(&head.t()?)?.to_dtype(DType::F32)?;
-            let divergence =
-                inference_nn::logits_reference::divergence_decoded(&logits, &reference)?;
-            let rows = divergence.kld.len();
-            let next = Tensor::from_slice(&tokens[first + 1..first + 1 + rows], (rows, 1), gpu)?;
-            let logp =
-                inference_tensor::nn::ops::log_softmax(&logits.narrow(0, first, rows)?, D::Minus1)?;
-            score.nll -= logp
-                .gather(&next, 1)?
-                .to_dtype(DType::F64)?
-                .sum_all()?
-                .to_scalar::<f64>()?;
-            score.nll_base -= divergence
-                .reference_logprobs
-                .iter()
-                .map(|&l| f64::from(l))
-                .sum::<f64>();
-            score.same += divergence.same_top.iter().filter(|&&s| s).count();
-            score.chunk_means.push(
-                divergence.kld.iter().map(|&k| f64::from(k)).sum::<f64>()
-                    / f64::from(u32::try_from(rows)?),
-            );
-            score.klds.extend(divergence.kld);
+    let n_ctx = base.n_ctx;
+    // the base's records read on a thread, chunks ahead of the GPU's work on them
+    let (tx, rx) = std::sync::mpsc::sync_channel(BASE_READ_AHEAD);
+    std::thread::scope(|scope| -> Result<()> {
+        scope.spawn(move || {
+            for _ in 0..chunks.len() {
+                let chunk = base.next_chunk();
+                let failed = chunk.is_err();
+                if tx.send(chunk).is_err() || failed {
+                    return;
+                }
+            }
+        });
+        for (c, tokens) in chunks.iter().enumerate() {
+            // one read and decode of the chunk's base records serves every run
+            let wait = profile::span("score.read_wait", None);
+            let reference = rx.recv().context("the base reader stopped")??;
+            drop(wait);
+            let decode = profile::span("score.decode", Some(gpu));
+            let reference = inference_nn::logits_reference::decode_reference(
+                &reference,
+                tokens,
+                model_head.dim(0)?,
+                gpu,
+            )?;
+            drop(decode);
+            for ((run, head), score) in runs.iter().zip(&heads).zip(&mut scores) {
+                let head_span = profile::span("score.head", Some(gpu));
+                let xs = stream
+                    .final_norm(&run.states[c])?
+                    .to_device(gpu)?
+                    .to_dtype(DType::BF16)?
+                    .squeeze(0)?;
+                let head = head.as_ref().unwrap_or(&model_head);
+                let logits = xs.matmul(&head.t()?)?.to_dtype(DType::F32)?;
+                drop(head_span);
+                let kl_span = profile::span("score.divergence", Some(gpu));
+                let divergence =
+                    inference_nn::logits_reference::divergence_decoded(&logits, &reference)?;
+                drop(kl_span);
+                let _nll_span = profile::span("score.nll", Some(gpu));
+                let rows = divergence.kld.len();
+                let next =
+                    Tensor::from_slice(&tokens[first + 1..first + 1 + rows], (rows, 1), gpu)?;
+                let logp = inference_tensor::nn::ops::log_softmax(
+                    &logits.narrow(0, first, rows)?,
+                    D::Minus1,
+                )?;
+                score.nll -= logp
+                    .gather(&next, 1)?
+                    .to_dtype(DType::F64)?
+                    .sum_all()?
+                    .to_scalar::<f64>()?;
+                score.nll_base -= divergence
+                    .reference_logprobs
+                    .iter()
+                    .map(|&l| f64::from(l))
+                    .sum::<f64>();
+                score.same += divergence.same_top.iter().filter(|&&s| s).count();
+                score.chunk_means.push(
+                    divergence.kld.iter().map(|&k| f64::from(k)).sum::<f64>()
+                        / f64::from(u32::try_from(rows)?),
+                );
+                score.klds.extend(divergence.kld);
+            }
         }
-    }
+        Ok(())
+    })?;
     let mut report = Vec::with_capacity(runs.len());
     for (run, score) in runs.iter().zip(&mut scores) {
         let n = f64::from(u32::try_from(score.klds.len())?);
@@ -1450,7 +1522,7 @@ fn score_states(
             run.name,
             score.klds.len(),
             chunks.len(),
-            base.n_ctx,
+            n_ctx,
             pick(50),
             pick(99),
             (score.nll / n).exp(),
@@ -1507,11 +1579,7 @@ fn stream_logits(
     use_: LogitsUse<'_>,
 ) -> Result<()> {
     use inference_tensor::{D, DType};
-    let head = stream
-        .head()
-        .dequantize_w()?
-        .to_dtype(DType::BF16)?
-        .to_device(gpu)?;
+    let head = dense_head(&stream.head(), gpu)?;
     if let LogitsUse::Record(dir) = use_ {
         std::fs::create_dir_all(dir)?;
     }

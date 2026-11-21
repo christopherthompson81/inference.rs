@@ -161,3 +161,42 @@ Streamed scoring, `inference quantize kld -m recipe-v2.gguf --kld-base ours-chat
 ```
 quantize kld, one score (35B)       before 33-39 s   now 22-23 s warm
 ```
+
+## Run 7 - 2026-11-21 05:30
+
+The streamed loop (collection and scoring) builds the next layer on a thread while the current one runs, and the
+scoring tail lost its host work. 64K-token collection and one score of recipe-v2 against the chat base:
+
+- Layer build ahead: `build_layer(i + 1)` on a scoped thread, synced on its own stream before the main thread takes
+  it; the read-ahead moves to `i + 2`. Off with a twin or candidates (they build on the same trackers). The first try
+  wrote 265 of 10,571 files: the load's capture settings (`ENGINE_IMMEDIATE_ISQ`) are thread-local, so a layer built
+  on another thread was not tracked; they are now handed to the builder (`set_immediate_isq_params`). Then 0 of
+  10,571 files differ from the old code's. Collection 40 s -> 29 s warm (32 s with little free memory); scoring's
+  layer loop 10.9 -> 9.0 s (`stream.build` 3.68 -> 0.12 s).
+- A scoring run read slower than Run 6 (31-44 s), the old binary as much: the load had grown from 1.9 s to 15-19 s.
+  It happened only with little free memory (15 GB free, 104 GB of cache after collection had read the BF16 file); with
+  the BF16 file dropped from the cache (81 GB free) the load was 1.9 s again. Counters: ~12,000 direct compaction
+  stalls and 5,200 huge-page faults a run; `MIMALLOC_ALLOW_THP=0` gave 3.8 s loads under pressure, but 4.0 s against
+  1.9 s with memory free, so neither setting wins. What the load allocated: 9.6 GB in one mimalloc region, filled
+  by the kernel and freed. `KldBaseJob::read` (checking whether the calibration file is a base job) read the whole file
+  with `fs::read`, and on a scoring run that file is the 20 GB base. It now reads the 8-byte magic first: load 0.7 s,
+  with or without memory pressure.
+- Base records read on a thread two chunks ahead (`BASE_READ_AHEAD`): the tail 8.7 -> 7.0 s. New spans: `score.decode`
+  2.39 s (40 calls), `score.divergence` 0.96, `score.head` 0.91, `score.nll` 0.24, `score.read_wait` 0.06,
+  `score.dense_head` 2.44 (one call: the Q6_K head dequantized on the host through F16, then to BF16 and up).
+- The head now goes up packed and dequantizes on the GPU (`dense_head`, also for the base writer and the logits
+  dump): 2.44 -> 0.06 s. It rounds f32 -> BF16 once instead of through F16, so the last digits moved: mean 0.01208
+  (same), p99 0.1203 -> 0.1194, same top 96.53 -> 96.54%, PPL 1.8672 -> 1.8675.
+
+```
+quantize kld, one score (35B)       Run 6 22-23 s   now 15.5 s (load 0.7, layers 9.0, tail 4.7)
+Hessian collection, 64K tokens      40 s            29-32 s, files identical
+```
+
+Left in scoring: the layers' forward (9 s, `layer.gdn` 7.3 s) and the base decode (2.4 s: 254 MB a chunk uploaded
+pageable, then decoded by elementwise ops).
+- GPTQ's GPU block loop kept each block's bytes on the device (`encode_blocks_on`) and read the tensor back once,
+  instead of a read-back (a sync) per block: identical bytes, and no measurable gain (alternating old/new binaries:
+  new 52, 52 s; old 57, 52 s). `gptq.encode` is 12.9 s over 14,088 calls (0.92 ms each with the span's sync), so the
+  Q8_0 tensors' 32-column steps are bound by the per-step launches (narrow, encode, error, carry), not the read-back;
+  fewer, wider steps would change GPTQ's error feedback and so the bytes.

@@ -580,11 +580,12 @@ fn quantize_on(
         _ => None,
     };
     if let Some(dev) = gpu_blocks {
-        let mut out = Vec::new();
+        // each block's bytes stay on the device, read back once for the whole tensor
+        let mut encoded_blocks = Vec::with_capacity(blocks);
         for b in 0..blocks {
             let current = columns.block(b, block)?;
             let span = profile::span("gptq.encode", Some(current.device()));
-            let encoded = super::quantize_cuda::encode_blocks(
+            let (bytes, decoded) = super::quantize_cuda::encode_blocks_on(
                 dev,
                 ty,
                 &current,
@@ -592,15 +593,7 @@ fn quantize_on(
                 rows,
             )?;
             drop(span);
-            let (bytes, decoded) = encoded;
-            let row_block_bytes = bytes.len() / rows;
-            if b == 0 {
-                out = vec![0u8; rows * blocks * row_block_bytes];
-            }
-            for r in 0..rows {
-                out[(r * blocks + b) * row_block_bytes..][..row_block_bytes]
-                    .copy_from_slice(&bytes[r * row_block_bytes..][..row_block_bytes]);
-            }
+            encoded_blocks.push(bytes);
             if b + 1 == blocks {
                 break;
             }
@@ -608,7 +601,9 @@ fn quantize_on(
             let asym = prepared.p.as_ref().map(|p| (p, &current));
             columns.advance(b, block, error.as_ref(), u3.as_ref(), asym)?;
         }
-        return Ok(out);
+        return Tensor::cat(&encoded_blocks, 1)?
+            .flatten_all()?
+            .to_vec1::<u8>();
     }
     let first = columns.block(0, block)?;
     let first = first.flatten_all()?.to_vec1::<f32>()?;

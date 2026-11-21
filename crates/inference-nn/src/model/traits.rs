@@ -19,7 +19,7 @@ use crate::{
 
 /// A decoder a converter runs a layer at a time (writing EXL3 for a model larger than the device): each layer built
 /// alone, on a device of the caller's choosing, from the checkpoint.
-pub trait LayerStream {
+pub trait LayerStream: Sync {
     fn num_layers(&self) -> usize;
     /// The token embeddings of `ids` `(1, tokens)`, on the model's own device.
     fn embed(&self, ids: &Tensor) -> inference_tensor::Result<Tensor>;
@@ -63,7 +63,7 @@ pub trait LayerStream {
 }
 
 /// One layer a [`LayerStream`] built.
-pub trait StreamedLayer {
+pub trait StreamedLayer: Send {
     /// The layer over one sequence `(1, tokens, hidden)` on its device, alone (causal, no cache).
     fn forward(&self, xs: &Tensor) -> inference_tensor::Result<Tensor>;
     /// Its linears, captured unquantized under their checkpoint keys.
