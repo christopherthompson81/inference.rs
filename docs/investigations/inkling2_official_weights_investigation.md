@@ -100,3 +100,22 @@ Same size, 2.7x lower KLD; what remains is the Q8_0 dense weights and the MXFP8 
 NVFP4 experts run slower than IQ4_NL's: the per-expert scales are applied in separate ops around the raw kernels (the
 gated activation path at decode, the explicit activation path at prefill instead of the fused GLU), and the NVFP4
 matvec itself.
+
+## Run 4 - 2026-11-21 21:30
+
+`quantize gguf --nvfp4-from <checkpoint dir>` writes recipe A in Rust: an `Nvfp4Source` on the requantize plan
+(`ModeloptExperts`, the checkpoint's NVFP4 stacks repacked into ggml NVFP4 blocks, `w13`'s interleaved rows stacked
+gate then up) supplies each stack it holds whatever the rules say, and the per-expert `<weight>.scale` is written as
+the entry after it. Inkling's mapping (GGUF stack to official stack) is `inference_gguf::official_nvfp4_experts`.
+
+```
+inference quantize gguf -m Inkling-2-Mini-IQ4_NL.gguf -o Inkling-2-Mini-NVFP4.gguf \
+    --nvfp4-from /mnt/data/models/inkling2-mini-official
+Wrote ... (16.41 GiB): 40 NVFP4 (10935.0 MiB), 186 Q8_0 (5724.2 MiB), ...   (28 s)
+```
+
+Against the gguf-py graft of Run 3: the same 744 tensors, every one byte-identical, the same metadata keys.
+
+Decode profile of recipe A against IQ4_NL (nsys, ms a token under the profiler): the NVFP4 expert matvec 2.82 against
+IQ4_NL's 2.43 (same bytes, 16% slower), and the per-expert scales' separate ops 0.6 (`bmul_f32` 136 a token,
+`index_select` 132 more), which a scale applied where the matvec writes its outputs would remove.

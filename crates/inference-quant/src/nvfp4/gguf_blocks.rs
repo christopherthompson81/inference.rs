@@ -124,11 +124,111 @@ pub fn gguf_nvfp4_linear(
     Ok((Arc::new(linear), ratios))
 }
 
+/// Where a GGUF tensor's experts are in a ModelOpt checkpoint: the stack `[experts, rows, cols / 2]` and whether its
+/// rows interleave two projections (a fused gate/up's, even rows the gate's), which GGUF stacks one after the other.
+pub struct ModeloptStack {
+    pub weight: String,
+    pub interleaved: bool,
+}
+
+/// A GGUF tensor's stack in a checkpoint, where it has one.
+pub type StackOf = Box<dyn Fn(&str) -> Option<ModeloptStack> + Send + Sync>;
+
+/// A ModelOpt checkpoint's NVFP4 expert stacks (`<w>`, `<w>_scale`, and the per-expert second level
+/// `<w>_amax / <w>_outer_scale_denominator`) as GGUF tensors, for a quantizer to write as stored.
+pub struct ModeloptExperts {
+    tensors: crate::safetensors::MmapedSafetensors,
+    stack: StackOf,
+}
+
+impl ModeloptExperts {
+    /// The checkpoint's safetensors `paths`, with `stack` naming a GGUF tensor's stack where it has one.
+    ///
+    /// # Safety
+    ///
+    /// The files are memory-mapped (see [`crate::safetensors::MmapedSafetensors::multi`]).
+    pub unsafe fn open(paths: &[std::path::PathBuf], stack: StackOf) -> Result<Self> {
+        // SAFETY: the caller's
+        let tensors = unsafe { crate::safetensors::MmapedSafetensors::multi(paths)? };
+        Ok(Self { tensors, stack })
+    }
+
+    fn scalar_f32(&self, name: &str) -> Result<Vec<f32>> {
+        let view = self.tensors.get(name)?;
+        Ok(view
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect())
+    }
+}
+
+impl crate::requantize::Nvfp4Source for ModeloptExperts {
+    fn holds(&self, tensor: &str) -> bool {
+        (self.stack)(tensor)
+            .is_some_and(|stack| self.tensors.get(&format!("{}_amax", stack.weight)).is_ok())
+    }
+
+    fn read(&self, tensor: &str) -> Result<(Vec<u8>, Vec<f32>)> {
+        let stack = (self.stack)(tensor)
+            .ok_or_else(|| inference_tensor::Error::msg("not an NVFP4 expert stack"))?;
+        let weight = self.tensors.get(&stack.weight)?;
+        let scales = self.tensors.get(&format!("{}_scale", stack.weight))?;
+        let &[experts, rows, half] = weight.shape() else {
+            inference_tensor::bail!("an expert stack of shape {:?}", weight.shape());
+        };
+        let cols = half * 2;
+        let scale_cols = cols / NVFP4_BLOCK_SIZE;
+        if scales.shape() != [experts, rows, scale_cols] {
+            inference_tensor::bail!("block scales of shape {:?}", scales.shape());
+        }
+        let (packed, block_scales) = (weight.data(), scales.data());
+        // the gate's rows (even) then the up's (odd) where the checkpoint interleaves them
+        let order = (0..rows)
+            .map(|r| match stack.interleaved {
+                true if r < rows / 2 => 2 * r,
+                true => 2 * (r - rows / 2) + 1,
+                false => r,
+            })
+            .collect::<Vec<_>>();
+        let mut blocks = Vec::new();
+        let (mut expert_packed, mut expert_scales) = (Vec::new(), Vec::new());
+        for e in 0..experts {
+            expert_packed.clear();
+            expert_scales.clear();
+            for &r in &order {
+                let row = e * rows + r;
+                expert_packed.extend_from_slice(&packed[row * half..(row + 1) * half]);
+                expert_scales
+                    .extend_from_slice(&block_scales[row * scale_cols..(row + 1) * scale_cols]);
+            }
+            blocks.extend(modelopt_to_gguf_blocks(
+                &expert_packed,
+                &expert_scales,
+                rows,
+                cols,
+            )?);
+        }
+        let amax = self.scalar_f32(&format!("{}_amax", stack.weight))?;
+        let denominator = self.scalar_f32(&format!("{}_outer_scale_denominator", stack.weight))?;
+        let &[denominator] = denominator.as_slice() else {
+            inference_tensor::bail!("an outer scale denominator of {} values", denominator.len());
+        };
+        if amax.len() != experts {
+            inference_tensor::bail!("{} amax values for {experts} experts", amax.len());
+        }
+        Ok((blocks, amax.iter().map(|a| a / denominator).collect()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{GGUF_BLOCK_VALUES, ModeloptNvfp4Weight, gguf_nvfp4_linear};
+    use crate::NVFP4_BLOCK_SIZE;
     use crate::gguf::kernel::GgufType;
     use crate::gguf::raw::RawGgufTensor;
 
@@ -213,6 +313,72 @@ mod tests {
             .collect::<Result<Vec<_>>>()?
             .concat();
         assert_eq!(weight.flatten_all()?.to_vec1::<f32>()?, expected);
+        Ok(())
+    }
+
+    // a fused gate/up stack's interleaved rows come out the gate's then the up's, each expert's blocks after the last's,
+    // with its scale the stack's amax over the denominator
+    #[test]
+    fn modelopt_experts_repack_their_stacks_with_their_scales() -> Result<()> {
+        use crate::requantize::Nvfp4Source;
+        let (experts, rows) = (2, 4);
+        let packed = (0..experts * rows * COLS / 2)
+            .map(|i| (i * 29) as u8)
+            .collect::<Vec<_>>();
+        let scales = (0..experts * rows * COLS / NVFP4_BLOCK_SIZE)
+            .map(scale_byte)
+            .collect::<Vec<_>>();
+        let dev = &Device::Cpu;
+        let tensors = std::collections::HashMap::from([
+            (
+                "w13".to_string(),
+                Tensor::from_raw_buffer(&packed, DType::U8, &[experts, rows, COLS / 2], dev)?,
+            ),
+            (
+                "w13_scale".to_string(),
+                Tensor::from_raw_buffer(
+                    &scales,
+                    DType::F8E4M3,
+                    &[experts, rows, COLS / NVFP4_BLOCK_SIZE],
+                    dev,
+                )?,
+            ),
+            ("w13_amax".to_string(), Tensor::new(&[3.0f32, 6.0], dev)?),
+            (
+                "w13_outer_scale_denominator".to_string(),
+                Tensor::new(&[1.5f32], dev)?,
+            ),
+        ]);
+        let dir = tempfile::tempdir().map_err(inference_tensor::Error::wrap)?;
+        let path = dir.path().join("experts.safetensors");
+        inference_tensor::safetensors::save(&tensors, &path)?;
+        // SAFETY: the file is only read
+        let source = unsafe {
+            super::ModeloptExperts::open(
+                &[path],
+                Box::new(|tensor| {
+                    (tensor == "stack").then(|| super::ModeloptStack {
+                        weight: "w13".to_string(),
+                        interleaved: true,
+                    })
+                }),
+            )?
+        };
+        assert!(source.holds("stack") && !source.holds("other"));
+        let (blocks, expert_scales) = source.read("stack")?;
+        assert_eq!(expert_scales, [2.0, 4.0]);
+        let (half, scale_cols) = (COLS / 2, COLS / NVFP4_BLOCK_SIZE);
+        let mut expected = Vec::new();
+        for e in 0..experts {
+            let (mut p, mut s) = (Vec::new(), Vec::new());
+            for r in [0, 2, 1, 3] {
+                let row = e * rows + r;
+                p.extend_from_slice(&packed[row * half..(row + 1) * half]);
+                s.extend_from_slice(&scales[row * scale_cols..(row + 1) * scale_cols]);
+            }
+            expected.extend(super::modelopt_to_gguf_blocks(&p, &s, rows, COLS)?);
+        }
+        assert_eq!(blocks, expected);
         Ok(())
     }
 }

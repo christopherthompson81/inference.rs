@@ -21,6 +21,9 @@ use super::archive::{GgufDType, OVERLAY_GGUF_TYPE};
 use super::iq_quantize;
 use super::kernel::GgufType;
 
+// ggml's F32 tensor type
+const GGML_F32: u32 = 0;
+
 // rows a parallel task quantizes through `QTensor`
 const ROWS_PER_TASK: usize = 64;
 // the source bytes read at once: one expert of an expert stack, else rows up to this
@@ -176,6 +179,15 @@ impl HessianSource for HessianFile {
     }
 }
 
+/// A checkpoint whose NVFP4 tensors are written as stored, in llama.cpp's NVFP4 blocks: each a stack of experts with
+/// their second-level scales beside it as `<weight>.scale` (`[experts]` F32), whatever the rules say of it.
+pub trait Nvfp4Source: Send + Sync {
+    /// Whether the source stores the GGUF tensor `tensor` as NVFP4.
+    fn holds(&self, tensor: &str) -> bool;
+    /// `tensor`'s blocks and its experts' scales.
+    fn read(&self, tensor: &str) -> Result<(Vec<u8>, Vec<f32>)>;
+}
+
 /// The rules for which tensors become which type, in order: the first pattern matching a name wins, and a tensor
 /// no pattern matches is copied as it is.
 pub struct RequantizePlan {
@@ -199,6 +211,8 @@ pub struct RequantizePlan {
     pub gptq_damp: f64,
     /// Hessians GPTQ's diagnostic report measures the encodings' error over in place of `hessians` (out of sample).
     pub report_hessians: Option<Box<dyn HessianSource>>,
+    /// A checkpoint's NVFP4 experts, written as stored in place of the source's.
+    pub nvfp4: Option<Box<dyn Nvfp4Source>>,
 }
 
 #[derive(Debug, Default)]
@@ -241,6 +255,8 @@ struct Planned<'a> {
     source_bytes: usize,
     target: Option<GgufType>,
     size: usize,
+    // the NVFP4 source's in place of the source's, its scales the entry after it
+    from_nvfp4: bool,
 }
 
 fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Result<Planned<'a>> {
@@ -256,7 +272,10 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
                 source.name()
             ))
         })?;
-    let target = if dims.len() < 2 {
+    let from_nvfp4 = plan.nvfp4.as_ref().is_some_and(|nvfp4| nvfp4.holds(name));
+    let target = if from_nvfp4 {
+        Some(GgufType::Nvfp4)
+    } else if dims.len() < 2 {
         None
     } else {
         plan.rules
@@ -280,7 +299,13 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
         source_bytes,
         target,
         size,
+        from_nvfp4,
     })
+}
+
+// the `<weight>.scale` entry an NVFP4 source's stack carries
+fn scale_name(weight: &str) -> String {
+    format!("{}.scale", weight.strip_suffix(".weight").unwrap_or(weight))
 }
 
 // what GPTQ reads for a tensor before its GPU pass: its Hessians and its values, uploaded as stored and widened to
@@ -680,19 +705,35 @@ pub fn requantize_gguf(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut writer = BufWriter::new(File::create(dst)?);
-    let entries = tensors
+    // an NVFP4 source's stack is followed by its experts' scales
+    let scales = tensors
         .iter()
-        .map(|t| TensorEntry {
+        .filter(|t| t.from_nvfp4)
+        .map(|t| (scale_name(t.name), vec![t.dims[0]]))
+        .collect::<Vec<_>>();
+    let mut scale_entries = scales.iter();
+    let mut entries = Vec::with_capacity(tensors.len() + scales.len());
+    for t in &tensors {
+        entries.push(TensorEntry {
             name: t.name,
             dims: &t.dims,
             ggml_dtype: t.target.map_or(t.source_type, |ty| ty.id()),
             size_in_bytes: t.size,
-        })
-        .collect::<Vec<_>>();
+        });
+        if t.from_nvfp4 {
+            let (name, dims) = scale_entries.next().expect("one a stack");
+            entries.push(TensorEntry {
+                name,
+                dims,
+                ggml_dtype: GGML_F32,
+                size_in_bytes: dims[0] * std::mem::size_of::<f32>(),
+            });
+        }
+    }
     write_header(&mut writer, kv_count, &kv_bytes, &entries)?;
 
     let mut summary = RequantizeSummary {
-        tensors: tensors.len(),
+        tensors: entries.len(),
         ..Default::default()
     };
     let mut by_type = HashMap::<u32, (usize, u64)>::new();
@@ -762,12 +803,14 @@ pub fn requantize_gguf(
             let cols = *t.dims.last().unwrap_or(&1);
             let rows = t.dims.iter().product::<usize>() / cols.max(1);
             let source_row = t.source_bytes / rows.max(1);
+            // an NVFP4 source's stack is written as stored, which no imatrix weighs
             let imatrix = t
                 .target
+                .filter(|_| !t.from_nvfp4)
                 .and(plan.imatrix.as_ref())
                 .and_then(|m| m.get(t.name));
             if t.target.is_some() {
-                if plan.imatrix.is_some() && imatrix.is_none() {
+                if plan.imatrix.is_some() && imatrix.is_none() && !t.from_nvfp4 {
                     summary.without_imatrix.push(t.name.to_string());
                 }
                 summary.quantized += 1;
@@ -778,6 +821,36 @@ pub fn requantize_gguf(
                 && w.len() != cols * (rows / expert_rows.unwrap_or(rows))
             {
                 inference_tensor::bail!("{}: an imatrix of {} for rows of {cols}", t.name, w.len());
+            }
+            if t.from_nvfp4 {
+                let source = plan.nvfp4.as_ref().expect("planned from it");
+                let (blocks, scales) = source
+                    .read(t.name)
+                    .map_err(|e| inference_tensor::Error::Msg(format!("{}: {e}", t.name)))?;
+                if blocks.len() != t.size || scales.len() != t.dims[0] {
+                    inference_tensor::bail!(
+                        "{}: the NVFP4 source holds {} bytes and {} scales, planned {} and {}",
+                        t.name,
+                        blocks.len(),
+                        scales.len(),
+                        t.size,
+                        t.dims[0]
+                    );
+                }
+                writer.write_all(&blocks)?;
+                write_tensor_padding(&mut writer, t.size)?;
+                let scale_bytes = scales
+                    .iter()
+                    .flat_map(|s| s.to_le_bytes())
+                    .collect::<Vec<_>>();
+                writer.write_all(&scale_bytes)?;
+                write_tensor_padding(&mut writer, scale_bytes.len())?;
+                summary.bytes_in += t.source_bytes as u64;
+                summary.bytes_out += (t.size + scale_bytes.len()) as u64;
+                let entry = by_type.entry(GgufType::Nvfp4.id()).or_default();
+                entry.0 += 1;
+                entry.1 += t.size as u64;
+                continue;
             }
             let reused = t.target.and_then(|ty| {
                 reuse.iter_mut().find(|(_, h)| {
@@ -1212,6 +1285,7 @@ mod tests {
             hessian_weights_only: false,
             gptq_damp: 0.0,
             report_hessians: None,
+            nvfp4: None,
         };
         let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
         assert_eq!(summary.quantized, 2);
@@ -1238,6 +1312,7 @@ mod tests {
             hessian_weights_only: false,
             gptq_damp: 0.0,
             report_hessians: None,
+            nvfp4: None,
         };
         let overlaid = requantize_gguf(&src, &overlay, &overlaying, |_, _, _| {})?;
         assert_eq!(overlaid.tensors, 1);
@@ -1290,6 +1365,118 @@ mod tests {
         let dat = dir.path().join("imatrix.dat");
         save_legacy_imatrix(&imatrix, "synthetic", &dat)?;
         assert_eq!(load_imatrix(&dat)?, imatrix);
+        Ok(())
+    }
+
+    // an NVFP4 source's fixed blocks and scales for one expert stack
+    struct FixedNvfp4 {
+        tensor: &'static str,
+        blocks: Vec<u8>,
+        scales: Vec<f32>,
+    }
+
+    impl Nvfp4Source for FixedNvfp4 {
+        fn holds(&self, tensor: &str) -> bool {
+            tensor == self.tensor
+        }
+
+        fn read(&self, _tensor: &str) -> Result<(Vec<u8>, Vec<f32>)> {
+            Ok((self.blocks.clone(), self.scales.clone()))
+        }
+    }
+
+    // a stack an NVFP4 source holds is written as its blocks whatever the rules say, its scales the next tensor
+    #[test]
+    fn an_nvfp4_source_writes_its_stacks_and_their_scales() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (src, dst) = (dir.path().join("src.gguf"), dir.path().join("dst.gguf"));
+        let (experts, rows, cols) = (2, 2, 128);
+        let values = (0..experts * rows * cols)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 64.0)
+            .collect::<Vec<_>>();
+        let stack = Tensor::from_slice(&values, (experts, rows, cols), &Device::Cpu)?;
+        let other = Tensor::from_slice(&values[..rows * cols], (rows, cols), &Device::Cpu)?;
+        let tensors = [
+            (
+                "blk.0.ffn_down_exps.weight",
+                QTensor::quantize(&stack, GgmlDType::BF16)?,
+            ),
+            (
+                "blk.0.attn_q.weight",
+                QTensor::quantize(&other, GgmlDType::BF16)?,
+            ),
+        ];
+        let arch = Value::String("tiny".into());
+        let mut file = File::create(&src)?;
+        gguf_file::write(
+            &mut file,
+            &[("general.architecture", &arch)],
+            &tensors.iter().map(|(n, t)| (*n, t)).collect::<Vec<_>>(),
+        )?;
+        drop(file);
+        let size = experts * rows * GgufType::Nvfp4.row_bytes(cols).unwrap();
+        let blocks = (0..size).map(|i| (i * 13) as u8).collect::<Vec<_>>();
+        let scales = vec![0.5f32, 2.0];
+        let plan = RequantizePlan {
+            rules: vec![(Regex::new(r".*").unwrap(), writable_type("q8_0")?)],
+            imatrix: None,
+            quantizer: Quantizer::LlamaCpp,
+            reuse: Vec::new(),
+            only: None,
+            gpu: None,
+            hessians: None,
+            hessian_weights_only: false,
+            gptq_damp: 0.0,
+            report_hessians: None,
+            nvfp4: Some(Box::new(FixedNvfp4 {
+                tensor: "blk.0.ffn_down_exps.weight",
+                blocks: blocks.clone(),
+                scales: scales.clone(),
+            })),
+        };
+        let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
+        assert_eq!(summary.tensors, 3);
+        let mut reader = BufReader::new(File::open(&dst)?);
+        let header = Header::read(&mut reader)?;
+        assert_eq!(
+            header.tensor_order,
+            [
+                "blk.0.ffn_down_exps.weight",
+                "blk.0.ffn_down_exps.scale",
+                "blk.0.attn_q.weight"
+            ]
+        );
+        let read = |reader: &mut BufReader<File>, name: &str, len: usize| -> Result<Vec<u8>> {
+            let mut bytes = vec![0u8; len];
+            reader.seek(SeekFrom::Start(
+                header.tensor_data_offset + header.tensor_infos[name].offset,
+            ))?;
+            reader.read_exact(&mut bytes)?;
+            Ok(bytes)
+        };
+        let stack = &header.tensor_infos["blk.0.ffn_down_exps.weight"];
+        assert_eq!(stack.ggml_dtype, GgufType::Nvfp4.id());
+        assert_eq!(
+            read(&mut reader, "blk.0.ffn_down_exps.weight", size)?,
+            blocks
+        );
+        let scale = &header.tensor_infos["blk.0.ffn_down_exps.scale"];
+        assert_eq!(
+            (scale.ggml_dtype, scale.shape.dims()),
+            (GGML_F32, &[experts][..])
+        );
+        let stored = read(&mut reader, "blk.0.ffn_down_exps.scale", 4 * experts)?;
+        assert_eq!(
+            stored,
+            scales
+                .iter()
+                .flat_map(|s| s.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            header.tensor_infos["blk.0.attn_q.weight"].ggml_dtype,
+            GgufType::Q8_0.id()
+        );
         Ok(())
     }
 }

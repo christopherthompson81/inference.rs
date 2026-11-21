@@ -104,6 +104,7 @@ mod engine;
 mod gguf_imatrix;
 mod gguf_write;
 pub use gguf_imatrix::{HessianDir, ImatrixMapping, cimatrix_for_gguf, hessians_for_gguf};
+pub use inference_gguf::official_nvfp4_experts;
 
 /// While it lives, a CUDA device's memory pool keeps what it frees instead of handing it back to the driver at the
 /// next sync, as a running engine's does: a long tool reallocating large buffers (a GGUF quantize, a streamed

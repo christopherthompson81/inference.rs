@@ -181,3 +181,69 @@ fn bind_reshaped(
     }
     Ok(())
 }
+
+// the official checkpoint's names: a layer's experts, its fused gate/up stack (gate and up rows interleaved) and its
+// down stack
+const OFFICIAL_EXPERTS: &str = "model.llm.layers";
+const OFFICIAL_MTP: &str = "mtp.safetensors";
+
+/// The official checkpoint's stack of a GGUF expert tensor (`blk.N.ffn_gate_up_exps.weight`, `blk.N.ffn_down_exps.weight`).
+fn official_stack(tensor: &str) -> Option<inference_quant::nvfp4::gguf_blocks::ModeloptStack> {
+    let (layer, role, suffix) = super::normal_bindings::parse_block_tensor(tensor)?;
+    if suffix != "weight" {
+        return None;
+    }
+    let (stored, interleaved) = match role {
+        "ffn_gate_up_exps" => ("w13", true),
+        "ffn_down_exps" => ("w2", false),
+        _ => return None,
+    };
+    Some(inference_quant::nvfp4::gguf_blocks::ModeloptStack {
+        weight: format!("{OFFICIAL_EXPERTS}.{layer}.mlp.experts.{stored}_weight"),
+        interleaved,
+    })
+}
+
+/// An Inkling 2 checkpoint's NVFP4 experts (thinkingmachines' releases), for a GGUF quantizer to write as stored; `None`
+/// for another checkpoint.
+pub fn official_nvfp4_experts(
+    dir: &std::path::Path,
+) -> Result<Option<inference_quant::nvfp4::gguf_blocks::ModeloptExperts>> {
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
+    let inkling = config["text_config"]["model_type"]
+        .as_str()
+        .is_some_and(|ty| ty.starts_with("inkling2"));
+    if !inkling {
+        return Ok(None);
+    }
+    let mut paths = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "safetensors"))
+        .filter(|p| p.file_name().is_none_or(|name| name != OFFICIAL_MTP))
+        .collect::<Vec<_>>();
+    paths.sort();
+    // SAFETY: the checkpoint's files are only read
+    let experts = unsafe {
+        inference_quant::nvfp4::gguf_blocks::ModeloptExperts::open(
+            &paths,
+            Box::new(official_stack),
+        )?
+    };
+    Ok(Some(experts))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gguf_expert_stacks_name_the_official_stacks() {
+        let stack = super::official_stack("blk.7.ffn_gate_up_exps.weight").unwrap();
+        assert_eq!(stack.weight, "model.llm.layers.7.mlp.experts.w13_weight");
+        assert!(stack.interleaved);
+        let stack = super::official_stack("blk.7.ffn_down_exps.weight").unwrap();
+        assert_eq!(stack.weight, "model.llm.layers.7.mlp.experts.w2_weight");
+        assert!(!stack.interleaved);
+        assert!(super::official_stack("blk.7.ffn_down_exps.scale").is_none());
+        assert!(super::official_stack("blk.7.attn_q.weight").is_none());
+    }
+}
