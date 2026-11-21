@@ -1,8 +1,9 @@
 //! A tiny random-weight Inkling 2 (sliding and global layers with relative-position biases and per-query sinks, short
 //! convolutions with their state, block attention residuals, a looped core run three times under its controllers,
 //! softcapped SwiGLU experts and a padded vocabulary): decoding step by step through the KV and convolution states of
-//! every pass scores the tokens as one prefill over them does, on the CPU, Vulkan and CUDA, and a prompt past the
-//! window and the bias's extent scores on Vulkan and CUDA as on the CPU.
+//! every pass scores the tokens as one prefill over them does, on the CPU, Vulkan and CUDA (also through the paged
+//! cache), a prompt past the window and the bias's extent scores on Vulkan and CUDA as on the CPU, and paged decode
+//! steps replay captured CUDA graphs and give the eager output.
 
 use std::collections::HashMap;
 
@@ -14,6 +15,8 @@ use inference_tensor::{DType, Device, Tensor};
 use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
 
+#[path = "../support/decode_graphs.rs"]
+mod decode_graphs;
 #[path = "../support/traces.rs"]
 mod traces;
 
@@ -40,8 +43,8 @@ const GATE_RANK: usize = 8;
 const SLIDING: [usize; 4] = [0, 1, 3, 4];
 const HEADS: usize = 2;
 const KV_HEADS: usize = 1;
-// a head size the fused CUDA attention takes
-const HEAD_DIM: usize = 32;
+// a head size the fused CUDA attention and the decode graphs' paged check take
+const HEAD_DIM: usize = 64;
 const D_REL: usize = 4;
 // short, so the chat prompt runs past both
 const REL_EXTENT: usize = 8;
@@ -59,6 +62,8 @@ const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
 // CUDA's matmuls and the fused attention sum in other orders too
 const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 const LONG_PROMPT_REPEATS: usize = 6;
+// decode steps a graph round takes a prompt
+const GRAPH_MAX_LEN: usize = 8;
 
 fn config() -> serde_json::Value {
     serde_json::json!({
@@ -316,6 +321,9 @@ async fn decode_scores_as_prefill(device: Option<&str>, tolerance: f32) -> anyho
 
 #[tokio::test]
 async fn a_step_by_step_decode_scores_as_one_prefill() -> anyhow::Result<()> {
+    // f32 KV, so the decode reads the keys the prefill computed (the CPU stores f16 by default)
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
     decode_scores_as_prefill(None, LOGPROB_TOLERANCE).await
 }
 
@@ -382,4 +390,121 @@ async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
         return Ok(());
     }
     long_prompt_scores_as_on_the_cpu("cuda:0", CUDA_LOGPROB_TOLERANCE).await
+}
+
+async fn paged_model(dtype: ModelDType) -> anyhow::Result<(tempfile::TempDir, inference::Model)> {
+    let dir = checkpoint()?;
+    let model = TextModelBuilder::new(dir.path().to_string_lossy())
+        .with_dtype(dtype)
+        .with_prefix_cache_n(None)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .build()
+        .await?;
+    Ok((dir, model))
+}
+
+#[tokio::test]
+async fn a_paged_cuda_decode_scores_as_one_prefill() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let (_dir, model) = paged_model(ModelDType::F32).await?;
+    let prompt = "say something long";
+    let (decoded, _) = traces::greedy(&model, chat(prompt), MAX_LEN).await?;
+    let mut tokens = model
+        .tokenize_chat(ChatRequest::from(chat(prompt)).request)
+        .await?
+        .tokens;
+    tokens.extend(decoded.iter().map(|(token, _)| *token));
+    let scored = prompt_logprobs(&model, tokens).await?;
+    let prefilled = &scored[scored.len() - decoded.len()..];
+    for (step, ((_, decoded), prefilled)) in decoded.iter().zip(prefilled).enumerate() {
+        anyhow::ensure!(
+            (decoded - prefilled).abs() < CUDA_LOGPROB_TOLERANCE,
+            "step {step}: decoded {decoded}, one prefill {prefilled}"
+        );
+    }
+    Ok(())
+}
+
+async fn paged_rounds() -> anyhow::Result<decode_graphs::Rounds> {
+    let (_dir, model) = paged_model(ModelDType::BF16).await?;
+    decode_graphs::rounds(&model, GRAPH_MAX_LEN).await
+}
+
+// Each GRAPH_PROMPTS entry's greedy (token, logprob) per step, eager (BF16)
+const GRAPH_TRACES: [&[(u32, f32)]; decode_graphs::GRAPH_PROMPTS.len()] = [
+    &[
+        (48, -2.9551888),
+        (150, -3.2265258),
+        (137, -3.194851),
+        (191, -2.4267263),
+        (119, -3.4348319),
+        (149, -3.3291705),
+        (141, -2.8890543),
+        (77, -2.9204497),
+    ],
+    &[
+        (16, -3.3449197),
+        (262, -1.2122244),
+        (38, -3.0433576),
+        (61, -3.1591885),
+        (226, -3.1263769),
+        (262, -2.958307),
+        (192, -2.863158),
+        (150, -2.1006672),
+    ],
+    &[
+        (48, -2.497094),
+        (185, -3.548465),
+        (257, -3.0858254),
+        (87, -3.3803632),
+        (48, -2.3982816),
+        (74, -2.3380835),
+        (178, -2.2719083),
+        (102, -3.9094074),
+    ],
+    &[
+        (185, -3.2546346),
+        (161, -3.1738234),
+        (64, -3.339417),
+        (2, -3.548018),
+    ],
+    &[
+        (48, -3.009561),
+        (150, -3.1070476),
+        (172, -3.3455296),
+        (160, -3.1594114),
+        (81, -2.7371683),
+        (195, -3.1146226),
+        (112, -3.4764118),
+        (10, -3.338034),
+    ],
+];
+
+// paged decode steps (attention slots and convolution states) replay captured graphs and give the eager output; the
+// random weights' flat logits leave BF16 near-ties a batch breaks either way
+#[tokio::test]
+async fn paged_cuda_decode_replays_cuda_graphs() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let rounds = paged_rounds().await?;
+    decode_graphs::assert_replayed(&decode_graphs::Counters::take(&snapshotter));
+    decode_graphs::assert_traces_up_to_ties(&rounds, &GRAPH_TRACES);
+    Ok(())
+}
+
+#[tokio::test]
+async fn paged_cuda_decode_without_cuda_graphs_matches() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    decode_graphs::disable_graphs();
+    let snapshotter = decode_graphs::recorder();
+    let rounds = paged_rounds().await?;
+    decode_graphs::assert_disabled(&decode_graphs::Counters::take(&snapshotter));
+    decode_graphs::assert_traces_up_to_ties(&rounds, &GRAPH_TRACES);
+    Ok(())
 }
