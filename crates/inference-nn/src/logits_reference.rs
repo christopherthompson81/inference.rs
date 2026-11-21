@@ -368,13 +368,17 @@ impl KldBaseJob {
 
     /// The job at `path`, or `None` when the file is not one.
     pub fn read(path: &Path) -> Result<Option<Self>> {
-        let Ok(bytes) = std::fs::read(path) else {
+        // the calibration file may be a many-GB base or text: read on only past the magic
+        let mut magic = [0u8; 8];
+        let Ok(mut file) = File::open(path) else {
             return Ok(None);
         };
-        let Some(body) = bytes.strip_prefix(KLD_JOB_MAGIC.as_slice()) else {
+        if file.read_exact(&mut magic).is_err() || &magic != KLD_JOB_MAGIC {
             return Ok(None);
-        };
-        let body = String::from_utf8_lossy(body);
+        }
+        let mut body = Vec::new();
+        file.read_to_end(&mut body)?;
+        let body = String::from_utf8_lossy(&body);
         let mut lines = body.lines();
         let mut int = || -> Result<usize> {
             lines.next().and_then(|l| l.parse().ok()).ok_or_else(|| {

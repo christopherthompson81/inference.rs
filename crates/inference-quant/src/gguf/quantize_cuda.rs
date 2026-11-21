@@ -402,6 +402,18 @@ pub fn encode_blocks(
     importance: Option<&[f32]>,
     rows_per_importance: usize,
 ) -> Result<(Vec<u8>, Tensor)> {
+    let (bytes, decoded) = encode_blocks_on(dev, ty, x, importance, rows_per_importance)?;
+    Ok((bytes.flatten_all()?.to_vec1::<u8>()?, decoded))
+}
+
+/// As [`encode_blocks`], the bytes left on the device as u8 `(rows, row bytes)`.
+pub fn encode_blocks_on(
+    dev: &CudaDevice,
+    ty: GgufType,
+    x: &Tensor,
+    importance: Option<&[f32]>,
+    rows_per_importance: usize,
+) -> Result<(Tensor, Tensor)> {
     ensure_loaded().map_err(inference_tensor::Error::msg)?;
     let x = x.to_dtype(DType::F32)?.contiguous()?;
     let (rows, cols) = x.dims2()?;
@@ -474,7 +486,13 @@ pub fn encode_blocks(
             );
         }
     }
-    let bytes = dev.clone_dtoh(&out)?;
+    let bytes = Tensor::from((
+        inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+            out,
+            dev.clone(),
+        )),
+        inference_tensor::Shape::from((rows, cols / block * block_bytes)),
+    ));
     let decoded = Tensor::from((
         inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
             decoded,
