@@ -178,6 +178,17 @@ pub trait DeviceMappedModelLoader {
     fn checkpoint_layer_index(&self, _config: &str, tensor_name: &str) -> Option<usize> {
         standard_layer_index(tensor_name)
     }
+    /// A checkpoint tensor's bytes once loaded (`dtype` the safetensors name), where the loader keeps it otherwise
+    /// than the inventory assumes (a float tensor at the model's dtype, any other as stored); `None` for that.
+    fn checkpoint_tensor_bytes(
+        &self,
+        _config: &str,
+        _tensor_name: &str,
+        _dtype: &str,
+        _stored_bytes: usize,
+    ) -> Option<usize> {
+        None
+    }
     /// The mapped layer each checkpoint layer belongs to, by checkpoint layer, where several make one (Nemotron-H's
     /// mixer and the feed-forward after it); `None` when they map one to one.
     fn checkpoint_layer_groups(&self, _config: &str) -> Result<Option<Vec<usize>>> {

@@ -813,6 +813,8 @@ pub struct GgufRawMatMul {
     w: RawGgufTensor,
     b: Option<Tensor>,
     scale: Option<f32>,
+    // stacked experts' own scales, `[experts]` F32
+    expert_scales: Option<Tensor>,
     stats: crate::ImatrixLayerStats,
 }
 
@@ -822,6 +824,7 @@ impl GgufRawMatMul {
             w,
             b,
             scale: None,
+            expert_scales: None,
             stats: crate::ImatrixLayerStats::empty(),
         }
     }
@@ -829,6 +832,12 @@ impl GgufRawMatMul {
     /// The weight's tensor-wide scale (llama.cpp's `<name>.scale`, NVFP4's second level), applied to each output.
     pub fn with_output_scale(mut self, scale: Option<f32>) -> Self {
         self.scale = scale;
+        self
+    }
+
+    /// A scale per stacked expert (F32 `[experts]`, NVFP4's second level when each expert has its own).
+    pub fn with_expert_scales(mut self, scales: Option<Tensor>) -> Self {
+        self.expert_scales = scales;
         self
     }
 
@@ -985,7 +994,15 @@ impl QuantMethod for GgufRawMatMul {
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
-        self.scaled(self.w.dequantize(&self.w.device())?)
+        let w = self.scaled(self.w.dequantize(&self.w.device())?)?;
+        match &self.expert_scales {
+            Some(scales) => w.broadcast_mul(&scales.to_dtype(w.dtype())?.reshape(((), 1, 1))?),
+            None => Ok(w),
+        }
+    }
+
+    fn expert_scales(&self) -> Option<&Tensor> {
+        self.expert_scales.as_ref()
     }
 
     fn embedding_forward_raw(&self, ids: &Tensor) -> Result<Tensor> {
@@ -995,8 +1012,11 @@ impl QuantMethod for GgufRawMatMul {
     #[cfg(feature = "cuda")]
     fn to_mapped_host(&self) -> Result<Option<Arc<dyn QuantMethod>>> {
         Ok(self.w.to_mapped_host()?.map(|w| {
-            Arc::new(Self::new(w, self.b.clone()).with_output_scale(self.scale))
-                as Arc<dyn QuantMethod>
+            Arc::new(
+                Self::new(w, self.b.clone())
+                    .with_output_scale(self.scale)
+                    .with_expert_scales(self.expert_scales.clone()),
+            ) as Arc<dyn QuantMethod>
         }))
     }
 
@@ -1007,7 +1027,9 @@ impl QuantMethod for GgufRawMatMul {
 
     fn vulkan_block_weight(&self) -> Option<inference_tensor::vulkan::BlockWeight> {
         match &self.w.storage {
-            RawStorage::Vulkan { weight, .. } if self.b.is_none() && self.scale.is_none() => {
+            RawStorage::Vulkan { weight, .. }
+                if self.b.is_none() && self.scale.is_none() && self.expert_scales.is_none() =>
+            {
                 Some(weight.clone())
             }
             _ => None,
@@ -1016,11 +1038,13 @@ impl QuantMethod for GgufRawMatMul {
 
     fn cpu_gguf_blocks(&self) -> Option<super::cpu_experts::CpuGgufBlocks<'_>> {
         match &self.w.storage {
-            RawStorage::Cpu(bytes) if self.b.is_none() => Some(super::cpu_experts::CpuGgufBlocks {
-                ty: self.w.ty,
-                dims: self.w.shape.dims(),
-                bytes: std::borrow::Cow::Borrowed(bytes.as_slice()),
-            }),
+            RawStorage::Cpu(bytes) if self.b.is_none() && self.expert_scales.is_none() => {
+                Some(super::cpu_experts::CpuGgufBlocks {
+                    ty: self.w.ty,
+                    dims: self.w.shape.dims(),
+                    bytes: std::borrow::Cow::Borrowed(bytes.as_slice()),
+                })
+            }
             _ => None,
         }
     }
@@ -1076,6 +1100,14 @@ impl QuantMethod for GgufRawMatMul {
         }
         let inverse = Tensor::from_vec(inverse, slots, a.device())?;
         let out = self.scaled(Tensor::cat(&outputs, 0)?.index_select(&inverse, 0)?)?;
+        let out = match &self.expert_scales {
+            Some(scales) => {
+                let ids = indices.flatten_all()?.to_device(scales.device())?;
+                let per_slot = scales.index_select(&ids, 0)?.unsqueeze(1)?;
+                out.broadcast_mul(&per_slot.to_device(out.device())?.to_dtype(out.dtype())?)?
+            }
+            None => out,
+        };
         let out = match &self.b {
             Some(b) => {
                 let b = b.index_select(&indices.flatten_all()?.to_device(b.device())?, 0)?;

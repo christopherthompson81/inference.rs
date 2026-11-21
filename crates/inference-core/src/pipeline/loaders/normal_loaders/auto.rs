@@ -28,7 +28,17 @@ impl AutoNormalLoader {
 
         let name = &auto_cfg.architectures[0];
 
-        let tp = NormalLoaderType::from_causal_lm_name(name)?;
+        let tp = match NormalLoaderType::from_causal_lm_name(name) {
+            Ok(tp) => tp,
+            // a multimodal class with no multimodal loader runs its text model
+            Err(err) => {
+                let value: serde_json::Value = serde_json::from_str(config)?;
+                value["text_config"]["model_type"]
+                    .as_str()
+                    .and_then(NormalLoaderType::from_model_type)
+                    .ok_or(err)?
+            }
+        };
 
         once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
 

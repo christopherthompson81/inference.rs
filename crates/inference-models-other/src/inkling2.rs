@@ -1266,6 +1266,7 @@ impl Model {
             }
             AttentionImplementation::Eager => None,
         };
+        let vb = crate::inkling2_official::bind(cfg, vb)?;
         let vb_m = vb.pp("model");
         let mapper = normal_loading_metadata.mapper;
         let loading_isq = normal_loading_metadata.loading_isq;

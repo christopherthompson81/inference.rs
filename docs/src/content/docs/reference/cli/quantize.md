@@ -332,4 +332,5 @@ inference quantize kld [OPTIONS] --model-id <MODEL_ID> --kld-base <KLD_BASE>
 | `--text <TEXT>` |  | Write `--kld-base` from this model over this text (special tokens parsed, as a chat template writes them), in llama-perplexity's format, instead of scoring against it |
 | `--ctx <CTX>` | `512` | With `--text`, the tokens a chunk (each chunk's second half is recorded) |
 | `--chunks <CHUNKS>` | `40` | With `--text`, the most chunks written (fewer when the text runs out) |
+| `--resident` | `false` | Load the model whole onto its device and score through it, for a model that fits and the streamed load cannot run a layer at a time (a looped core) |
 
