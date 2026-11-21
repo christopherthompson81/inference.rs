@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 57;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 50;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 58;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 51;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -42,6 +42,7 @@ pub enum CanonicalGgufArchitecture {
     HunYuanMoe,
     Lfm2,
     Lfm2Moe,
+    Inkling2Loop,
     SeedOss,
     Exaone,
     Exaone4,
@@ -97,6 +98,7 @@ impl CanonicalGgufArchitecture {
             Self::HunYuanMoe => "hunyuan-moe",
             Self::Lfm2 => "lfm2",
             Self::Lfm2Moe => "lfm2moe",
+            Self::Inkling2Loop => "inkling2_loop",
             Self::SeedOss => "seed_oss",
             Self::Exaone => "exaone",
             Self::Exaone4 => "exaone4",
@@ -162,6 +164,7 @@ impl FromStr for CanonicalGgufArchitecture {
             "hunyuan-moe" => Ok(Self::HunYuanMoe),
             "lfm2" => Ok(Self::Lfm2),
             "lfm2moe" => Ok(Self::Lfm2Moe),
+            "inkling2_loop" => Ok(Self::Inkling2Loop),
             "seed_oss" => Ok(Self::SeedOss),
             "exaone" => Ok(Self::Exaone),
             "exaone4" => Ok(Self::Exaone4),
@@ -461,6 +464,16 @@ const QWEN35_MOE_METADATA: &[&str] = &[
     "{arch}.ssm.time_step_rank",
 ];
 const LFM2_METADATA: &[&str] = &["{arch}.shortconv.l_cache"];
+const INKLING2_LOOP_METADATA: &[&str] = &[
+    "{arch}.shortconv.l_cache",
+    "{arch}.loop.start",
+    "{arch}.loop.end",
+    "{arch}.loop.count",
+    "{arch}.loop.gate_rank",
+    "{arch}.attn_res.block_size",
+    "{arch}.attention.relative_extent",
+];
+const INKLING2_LOOP_TENSORS: &[&str] = &[".attn_rel_bias.", ".loop_msg_query."];
 const LFM2_MOE_METADATA: &[&str] = &[
     "{arch}.shortconv.l_cache",
     "{arch}.expert_count",
@@ -572,6 +585,7 @@ const HUNYUAN_DENSE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::HunYuanDe
 const HUNYUAN_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::HunYuanMoEV1];
 const LFM2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Lfm2];
 const LFM2_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Lfm2Moe];
+const INKLING2_LOOP_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Inkling2Loop];
 const SEED_OSS_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::SeedOss];
 const EXAONE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Exaone];
 const EXAONE4_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Exaone4];
@@ -858,6 +872,15 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: LFM2_MOE_METADATA,
         required_tensors: SHORTCONV_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    // no RoPE: a relative-position bias carries the positions
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Inkling2Loop,
+        compatible_loaders: INKLING2_LOOP_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: INKLING2_LOOP_METADATA,
+        required_tensors: INKLING2_LOOP_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     // NoPE attention: the pairing is never used
@@ -1303,6 +1326,11 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
             GgufLayout::PerLayerInventory,
             GgufLayout::SqueezedShortConv,
         ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Inkling2Loop,
+        architectures: &[CanonicalGgufArchitecture::Inkling2Loop],
+        layouts: &[GgufLayout::Direct, GgufLayout::StackedExperts],
     },
     NativeModelAdapter {
         loader: NormalLoaderType::Lfm2Moe,

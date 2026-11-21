@@ -1,4 +1,4 @@
-//! Models from other families: BERT-family, Nomic BERT, ModernBERT and NeoBERT encoders, DeepSeek 2/3, ERNIE 4.5 (dense and MoE), EXAONE 3.x and 4.0, K-EXAONE, GLM-4 and its MoE variants, GPT-OSS, Granite, Hunyuan, LFM2, Seed-OSS and StarCoder2 text models, and LFM2-VL and PaddleOCR-VL.
+//! Models from other families: BERT-family, Nomic BERT, ModernBERT and NeoBERT encoders, DeepSeek 2/3, ERNIE 4.5 (dense and MoE), EXAONE 3.x and 4.0, K-EXAONE, GLM-4 and its MoE variants, GPT-OSS, Granite, Hunyuan, Inkling 2, LFM2, Seed-OSS and StarCoder2 text models, and LFM2-VL and PaddleOCR-VL.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::serde_default_fn;
@@ -36,6 +36,7 @@ mod hunyuan_dense_tests;
 mod hunyuan_rope;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
+pub mod inkling2;
 pub mod jamba;
 pub mod jina_v3;
 pub mod kimi_linear;
@@ -70,6 +71,7 @@ inference_nn::json_config!(
     bert::Config,
     jamba::Config,
     kimi_linear::Config,
+    inkling2::Config,
     jina_v3::Config,
     modern_bert::Config,
     falcon_h1::Config,

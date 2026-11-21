@@ -137,6 +137,12 @@ impl ChatTemplate {
             .any(|t| crate::reasoning_parsers::tag_based::is_seed_think_template(t))
     }
 
+    pub fn uses_inkling_blocks(&self) -> bool {
+        self.get_template_contents()
+            .iter()
+            .any(|t| crate::reasoning_parsers::tag_based::is_inkling_template(t))
+    }
+
     pub fn uses_channel_tags(&self) -> bool {
         self.get_template_contents()
             .iter()

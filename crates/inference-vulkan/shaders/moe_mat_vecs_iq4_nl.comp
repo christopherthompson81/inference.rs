@@ -1,0 +1,6 @@
+#version 450
+// The expert matvec over a stack of IQ4_NL experts.
+#extension GL_GOOGLE_include_directive : require
+#include "moe_mat_vec_head.glsl"
+#include "iq4_nl_int8.glsl"
+#include "moe_mat_vec_main.glsl"

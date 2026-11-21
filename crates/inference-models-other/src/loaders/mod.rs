@@ -39,6 +39,7 @@ mod granite4_vision;
 mod granite_speech;
 mod hunyuan_v1_dense;
 mod hunyuan_v1_moe;
+mod inkling2;
 mod jamba;
 mod kimi_linear;
 mod lfm2;
@@ -81,6 +82,7 @@ pub use granite_speech::*;
 pub use granite4_vision::*;
 pub use hunyuan_v1_dense::*;
 pub use hunyuan_v1_moe::*;
+pub use inkling2::*;
 pub use jamba::*;
 pub use kimi_linear::*;
 pub use lfm2::*;
@@ -128,6 +130,7 @@ inference_nn::boxed_loaders!(
     GraniteMoeHybridLoader,
     HunYuanDenseV1Loader,
     HunYuanMoEV1Loader,
+    Inkling2Loader,
     Lfm2Loader,
     NemotronHLoader,
     Olmo2Loader,

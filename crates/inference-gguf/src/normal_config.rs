@@ -224,6 +224,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         build: build_lfm2_moe,
     },
     NormalConfigBuilder {
+        loader: NormalLoaderType::Inkling2Loop,
+        build: build_inkling2_loop,
+    },
+    NormalConfigBuilder {
         loader: NormalLoaderType::NemotronH,
         build: build_nemotron_h,
     },
@@ -3390,6 +3394,67 @@ fn build_lfm(metadata: &MetadataView<'_>, is_moe: bool) -> SynthesisResult<JsonV
     Ok(JsonValue::Object(config))
 }
 
+// llama.cpp's `inkling2_loop`: a fixed loop over the core, attention heads alike on every layer
+fn build_inkling2_loop(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    if metadata.optional_bool("loop.varying")?.unwrap_or(false) {
+        return Err(NormalConfigSynthesisError::new(
+            "Inkling 2 with a variable loop is not supported",
+        ));
+    }
+    let num_hidden_layers = transformer_block_count(metadata)?;
+    let local_layer_ids = metadata
+        .sliding_pattern(num_hidden_layers)?
+        .ok_or_else(|| {
+            NormalConfigSynthesisError::new(format!(
+                "Inkling 2 requires `{}`",
+                metadata.key("attention.sliding_window_pattern")
+            ))
+        })?
+        .into_iter()
+        .enumerate()
+        .filter_map(|(layer, sliding)| sliding.then_some(layer))
+        .collect::<Vec<_>>();
+    let usize_key = |key: &str| metadata.required_usize(key);
+    let f64_key = |key: &str| metadata.required_f64(key);
+    Ok(json!({
+        "model_type": "inkling2_loop_text",
+        "architectures": ["Inkling2LoopForCausalLM"],
+        "vocab_size": metadata.vocab_size()?,
+        "unpadded_vocab_size": usize_key("vocab_size_unpadded")?,
+        "hidden_size": metadata.required_uniform_usize("embedding_length")?,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": metadata.required_uniform_usize("attention.head_count")?,
+        "num_key_value_heads": metadata.required_uniform_usize("attention.head_count_kv")?,
+        "head_dim": usize_key("attention.key_length")?,
+        "d_rel": usize_key("attention.relative_length")?,
+        "rel_extent": usize_key("attention.relative_extent")?,
+        "log_scaling_n_floor": usize_key("attention.log_scale_floor")?,
+        "log_scaling_alpha": f64_key("attention.log_scale_alpha")?,
+        "rms_norm_eps": metadata.norm_epsilon()?,
+        "qk_l2_clip_threshold": f64_key("attention.qk_clip")?,
+        "rel_l2_clip_threshold": f64_key("attention.relative_clip")?,
+        "local_layer_ids": local_layer_ids,
+        "sconv_kernel_size": usize_key("shortconv.l_cache")?,
+        "final_logit_softcapping": f64_key("final_logit_softcapping")?,
+        "sliding_window_size": usize_key("attention.sliding_window")?,
+        "n_layers_per_attn_res_block": usize_key("attn_res.block_size")?,
+        "n_routed_experts": usize_key("expert_count")?,
+        "num_experts_per_tok": usize_key("expert_used_count")?,
+        "intermediate_size": usize_key("expert_feed_forward_length")?,
+        "mlp_gate_softcap": f64_key("activation.situ_beta")?,
+        "mlp_up_softcap": f64_key("activation.situ_linear_beta")?,
+        "route_scale": metadata.optional_f64("expert_weights_scale")?.unwrap_or(1.0),
+        "loop_config": {
+            "core_start": usize_key("loop.start")?,
+            "core_end": usize_key("loop.end")?,
+            "num_passes": usize_key("loop.count")?,
+            "gate_rank": usize_key("loop.gate_rank")?,
+        },
+        "max_position_embeddings": usize_key("context_length")?,
+        "quantization_config": null,
+    }))
+}
+
 fn build_deepseek(metadata: &MetadataView<'_>, is_v3: bool) -> SynthesisResult<JsonValue> {
     let mut config = deepseek_core_json(metadata, false)?;
     let gating = metadata.expert_gating()?.unwrap_or(ExpertGating::Softmax);
@@ -3881,8 +3946,9 @@ mod tests {
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
             deepseek, ernie4_5, exaone, exaone_moe, exaone4, falcon_h1, glm4, glm4_moe,
-            glm4_moe_lite, gpt_oss, granite, hunyuan_v1_dense, hunyuan_v1_moe, jamba, kimi_linear,
-            lfm2, mamba, mamba2, nemotron_h, olmo, rwkv_hybrid, rwkv6, rwkv7, seed_oss, starcoder2,
+            glm4_moe_lite, gpt_oss, granite, hunyuan_v1_dense, hunyuan_v1_moe, inkling2, jamba,
+            kimi_linear, lfm2, mamba, mamba2, nemotron_h, olmo, rwkv_hybrid, rwkv6, rwkv7,
+            seed_oss, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -4230,6 +4296,53 @@ mod tests {
             tensors.push("blk.1.ffn_gate_shexp.weight".to_string());
         }
 
+        if matches!(loader, NormalLoaderType::Inkling2Loop) {
+            for (suffix, value) in [
+                ("vocab_size_unpadded", 31_000),
+                ("shortconv.l_cache", 4),
+                ("attn_res.block_size", 2),
+                ("loop.start", 2),
+                ("loop.end", 4),
+                ("loop.count", 3),
+                ("loop.gate_rank", 64),
+                ("attention.relative_length", 16),
+                ("attention.relative_extent", 1_024),
+                ("attention.log_scale_floor", 8_192),
+                ("attention.sliding_window", 1_024),
+                ("expert_count", 8),
+                ("expert_used_count", 2),
+                ("expert_feed_forward_length", 512),
+            ] {
+                insert_u32(&mut metadata, architecture, suffix, value);
+            }
+            for (suffix, value) in [
+                ("attention.log_scale_alpha", 0.1),
+                ("attention.qk_clip", 22.6),
+                ("attention.relative_clip", 8.0),
+                ("final_logit_softcapping", 30.0),
+                ("activation.situ_beta", 4.0),
+                ("activation.situ_linear_beta", 25.0),
+                ("expert_weights_scale", 8.0),
+            ] {
+                insert_f32(&mut metadata, architecture, suffix, value);
+            }
+            insert_bool(&mut metadata, architecture, "loop.varying", false);
+            metadata.insert(
+                format!("{}.attention.sliding_window_pattern", architecture.as_str()),
+                GgufValue::Array(
+                    [true, false, true, false]
+                        .into_iter()
+                        .map(GgufValue::Bool)
+                        .collect(),
+                ),
+            );
+            tensors.extend(
+                ["blk.0.attn_rel_bias.weight", "blk.2.loop_msg_query.weight"]
+                    .into_iter()
+                    .map(str::to_string),
+            );
+        }
+
         if matches!(
             loader,
             NormalLoaderType::GraniteSwa | NormalLoaderType::GraniteMoeSwa
@@ -4391,6 +4504,9 @@ mod tests {
             ),
             NormalLoaderType::Lfm2 | NormalLoaderType::Lfm2Moe => {
                 assert_deserializes(loader, config, models::lfm2::Config::from_json)
+            }
+            NormalLoaderType::Inkling2Loop => {
+                assert_deserializes(loader, config, models::inkling2::Config::from_json)
             }
             NormalLoaderType::Olmo => {
                 assert_deserializes(loader, config, models::olmo::OlmoConfig::from_json)

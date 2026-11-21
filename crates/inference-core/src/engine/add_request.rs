@@ -1200,6 +1200,8 @@ impl Engine {
             } else {
                 TagReasoningContext::new_gemma_channel()
             }
+        } else if chat_template.uses_inkling_blocks() {
+            TagReasoningContext::new_inkling()
         } else if chat_template.uses_seed_think_tags() {
             TagReasoningContext::new_seed_think_tags(seq.get_initial_prompt())
         } else if chat_template.uses_think_tags() {

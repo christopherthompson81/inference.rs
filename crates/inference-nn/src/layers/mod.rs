@@ -2588,6 +2588,9 @@ pub enum Activation {
     // transformers' ACT2FN name
     #[serde(alias = "quick_gelu")]
     QuickGelu,
+    /// A GLU's `g tanh(a / g) sigmoid(a) * u tanh(b / u)` over its gate `a` and up `b`, the caps `(g, u)`: it needs both
+    /// halves (`crate::ops::mul_and_act`), so it is not a unary activation
+    SoftcapSilu(f64, f64),
 }
 
 impl Module for Activation {
@@ -2611,6 +2614,9 @@ impl Module for Activation {
             }
             Self::GeluPytorchTanh => xs.gelu(),
             Self::QuickGelu => xs * inference_tensor::nn::ops::sigmoid(&(xs * 1.702f64)?),
+            Self::SoftcapSilu(..) => {
+                inference_tensor::bail!("the softcapped SiLU GLU needs its up half")
+            }
         }
     }
 }
@@ -2634,8 +2640,8 @@ impl TryInto<inference_tensor::nn::Activation> for Activation {
             Self::Elu(x) => Ok(inference_tensor::nn::Activation::Elu(x)),
             Self::LeakyRelu(x) => Ok(inference_tensor::nn::Activation::LeakyRelu(x)),
             Self::GeluPytorchTanh => Ok(inference_tensor::nn::Activation::GeluPytorchTanh),
-            Self::QuickGelu => {
-                inference_tensor::bail!("No mapping to inference_tensor::nn for QuickGelu")
+            Self::QuickGelu | Self::SoftcapSilu(..) => {
+                inference_tensor::bail!("No mapping to inference_tensor::nn for {self:?}")
             }
         }
     }

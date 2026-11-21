@@ -144,11 +144,13 @@ impl VulkanExperts {
             Some(hidden) => hidden,
             None => {
                 let g = g.contiguous()?;
-                let act = match self.act {
-                    inference_tensor::vulkan::GluAct::Gelu => g.gelu()?,
-                    _ => inference_tensor::nn::ops::silu(&g)?,
-                };
-                (act * u.contiguous()?)?
+                match self.act {
+                    inference_tensor::vulkan::GluAct::Gelu => (g.gelu()? * u.contiguous()?)?,
+                    inference_tensor::vulkan::GluAct::SoftcapSilu { gate, up } => {
+                        crate::ops::softcap_silu_mul(&g, &u, gate, up)?
+                    }
+                    _ => (inference_tensor::nn::ops::silu(&g)? * u.contiguous()?)?,
+                }
             }
         };
         let ys = down.expert_mat_vec(&hidden, &ids, 1)?;
@@ -470,12 +472,15 @@ impl MoEExperts {
         act: Activation,
         device: &Device,
     ) -> Result<Option<VulkanExperts>> {
-        let act = match backends::glu_activation(act) {
-            Some(inference_quant::GluActivationType::Silu) => {
+        let act = match (act, backends::glu_activation(act)) {
+            (_, Some(inference_quant::GluActivationType::Silu)) => {
                 inference_tensor::vulkan::GluAct::Silu
             }
-            Some(inference_quant::GluActivationType::Gelu) => {
+            (_, Some(inference_quant::GluActivationType::Gelu)) => {
                 inference_tensor::vulkan::GluAct::Gelu
+            }
+            (Activation::SoftcapSilu(gate, up), _) => {
+                inference_tensor::vulkan::GluAct::SoftcapSilu { gate, up }
             }
             _ => return Ok(None),
         };
@@ -928,6 +933,7 @@ mod vulkan_block_tests {
             (GgufType::Iq3S, BlockKind::Iq3S),
             (GgufType::Q3K, BlockKind::Q3K),
             (GgufType::Mxfp4, BlockKind::Mxfp4),
+            (GgufType::Iq4Nl, BlockKind::Iq4Nl),
         ] {
             let bytes = blocks(ty, EXPERTS * ROWS, 7);
             let w = reference(ty, &bytes, (EXPERTS, ROWS, COLS))?;
@@ -1001,7 +1007,12 @@ mod vulkan_block_tests {
             };
             pairs.push((format!("{dtype:?}"), [layer()?, layer()?]));
         }
-        for ty in [GgufType::Iq4Xs, GgufType::Iq3S, GgufType::Mxfp4] {
+        for ty in [
+            GgufType::Iq4Xs,
+            GgufType::Iq3S,
+            GgufType::Mxfp4,
+            GgufType::Iq4Nl,
+        ] {
             let layer = |seed: u64| -> Result<Arc<dyn QuantMethod>> {
                 let raw = inference_quant::RawGgufTensor::new(
                     ty,
@@ -1052,7 +1063,12 @@ mod vulkan_block_tests {
             return Ok(());
         };
         let cpu = Device::Cpu;
-        for ty in [GgufType::Iq4Xs, GgufType::Iq3S, GgufType::Mxfp4] {
+        for ty in [
+            GgufType::Iq4Xs,
+            GgufType::Iq3S,
+            GgufType::Mxfp4,
+            GgufType::Iq4Nl,
+        ] {
             let bytes = blocks(ty, ROWS, 11);
             let w = Tensor::from_vec(
                 inference_quant::dequantize_rows(ty, COLS, &bytes)?,

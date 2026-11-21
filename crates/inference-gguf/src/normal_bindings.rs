@@ -42,6 +42,9 @@ pub fn build_normal_bindings(
     if matches!(loader, NormalLoaderType::Qrwkv6) {
         return rwkv6qwen2_bindings(archive);
     }
+    if matches!(loader, NormalLoaderType::Inkling2Loop) {
+        return super::inkling2_bindings::build_inkling2_bindings(archive);
+    }
     if matches!(loader, NormalLoaderType::KimiLinear) {
         return kimi_linear_bindings(archive, architecture);
     }
