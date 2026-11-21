@@ -57,6 +57,8 @@ const STREAM_TWIN_FREE_ENV: &str = "INFERENCE_STREAM_TWIN_FREE";
 const STREAM_ROUTER_DUMP_ENV: &str = "INFERENCE_STREAM_ROUTER_DUMP";
 #[cfg(feature = "cuda")]
 const ROUTER_INPUT_MODULE: &str = "mlp.shared_expert.gate_proj";
+// chunks a plain streamed pass runs through a layer in one call
+const STREAM_BATCH_CHUNKS: usize = 8;
 // set to a path, a streamed scoring run writes each run's scores there as JSON, with each chunk's mean KLD
 #[cfg(feature = "cuda")]
 const STREAM_SCORES_OUT_ENV: &str = "INFERENCE_STREAM_SCORES_OUT";
@@ -1034,8 +1036,41 @@ fn run_streamed(
             }
         }
         let before = (!candidates.is_empty()).then(|| states.clone());
-        // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed)
-        for (i, state) in states.iter_mut().enumerate() {
+        // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed);
+        // a plain pass batches chunks of one length, which the MoE's per-call costs (a launch per expert) dominate
+        let batched =
+            !score_only && twin_layer.is_none() && pairs.is_empty() && router_dump.is_none();
+        if batched {
+            let mut i = 0;
+            while i < states.len() {
+                let len = states[i].dims().to_vec();
+                let mut j = i + 1;
+                while j < states.len()
+                    && j - i < STREAM_BATCH_CHUNKS
+                    && states[j].dims() == len.as_slice()
+                {
+                    j += 1;
+                }
+                let xs = Tensor::cat(
+                    &states[i..j]
+                        .iter()
+                        .map(|s| s.to_device(&gpu))
+                        .collect::<inference_tensor::Result<Vec<_>>>()?,
+                    0,
+                )?;
+                let ys = layer.forward(&xs)?;
+                for (k, state) in states[i..j].iter_mut().enumerate() {
+                    let y = ys.narrow(0, k, 1)?;
+                    *state = if resident {
+                        y
+                    } else {
+                        y.to_device(&Device::Cpu)?
+                    };
+                }
+                i = j;
+            }
+        }
+        for (i, state) in states.iter_mut().enumerate().filter(|_| !batched) {
             if twin_layer.is_some() && !free_routes {
                 inference_nn::ops::record_routes();
             }

@@ -10,6 +10,9 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use inference_tensor::{Context, D, DType, Device, Result, Tensor};
 use serde::Serialize;
 
+// routed rows buffered before their per-expert Grams run: one host sync and one gather per flush, not per forward
+const ROUTED_FLUSH_ROWS: usize = 1 << 17;
+
 #[derive(Debug)]
 enum ImatrixLayerStats_ {
     Dense {
@@ -39,6 +42,9 @@ enum ImatrixLayerStats_ {
         in_dim: usize,
         counts: Vec<usize>,
         h: Vec<Option<Tensor>>,
+        // forwards not yet added: each `(x, ids, a row per slot)`, and their routed rows
+        pending: Vec<(Tensor, Tensor, bool)>,
+        pending_rows: usize,
     },
     /// Every forward's input as it came (rows of `in`), for a caller pairing them with another model's.
     Capture {
@@ -179,6 +185,8 @@ impl ImatrixLayerStats {
             in_dim,
             counts: vec![0; num_experts],
             h: vec![None; num_experts],
+            pending: Vec::new(),
+            pending_rows: 0,
         });
         Ok(())
     }
@@ -272,25 +280,19 @@ impl ImatrixLayerStats {
             in_dim,
             counts,
             h,
+            pending,
+            pending_rows,
         }) = handle.as_mut()
         {
             let (n, k) = ids.dims2()?;
-            let experts = ids.to_dtype(DType::U32)?.flatten_all()?.to_vec1::<u32>()?;
-            let mut slots = vec![Vec::new(); counts.len()];
-            for (j, &e) in experts.iter().enumerate() {
-                // a row per token feeds all its experts; a row per slot only its own
-                let row = if x.dims().len() == 2 { j / k } else { j };
-                slots[e as usize].push(row as u32);
-            }
-            let x = x.reshape(((), *in_dim))?;
-            for (e, rows_e) in slots.into_iter().enumerate().filter(|(_, r)| !r.is_empty()) {
-                let count = rows_e.len();
-                let xe = x.index_select(&Tensor::from_vec(rows_e, count, x.device())?, 0)?;
-                h[e] = Some(add_gram(h[e].take(), &xe)?);
-                counts[e] += count;
-            }
+            pending.push((x.reshape(((), *in_dim))?, ids.clone(), x.rank() == 3));
+            *pending_rows += n * k;
             *rows += n * k;
             *ncalls += 1;
+            if *pending_rows >= ROUTED_FLUSH_ROWS {
+                flush_routed(pending, counts, h)?;
+                *pending_rows = 0;
+            }
             return Ok(());
         }
         let Some(ImatrixLayerStats_::Routed {
@@ -331,7 +333,18 @@ impl ImatrixLayerStats {
     /// recorded, divided by their count, `[in, in]`; routed, one per expert `[E, in, in]` on the host (unit for an expert
     /// no row reached).
     pub fn compute_imatrix(&self) -> Result<Tensor> {
-        let handle = self.0.read().unwrap();
+        let mut handle = self.0.write().unwrap();
+        if let Some(ImatrixLayerStats_::RoutedHessian {
+            counts,
+            h,
+            pending,
+            pending_rows,
+            ..
+        }) = handle.as_mut()
+        {
+            flush_routed(pending, counts, h)?;
+            *pending_rows = 0;
+        }
         match handle.as_ref().context("Layer stats were deinitialized!")? {
             ImatrixLayerStats_::Dense {
                 row_counts,
@@ -396,6 +409,55 @@ impl ImatrixLayerStats {
         *handle = None;
         Ok(())
     }
+}
+
+// the buffered forwards' rows added to their experts' Grams: the ids read back once, every routed row gathered in
+// expert order in one select, each expert's Gram over its run of it
+fn flush_routed(
+    pending: &mut Vec<(Tensor, Tensor, bool)>,
+    counts: &mut [usize],
+    h: &mut [Option<Tensor>],
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let mut slots = vec![Vec::new(); counts.len()];
+    let mut base = 0u32;
+    let xs = pending.iter().map(|(x, ..)| x.clone()).collect::<Vec<_>>();
+    let ids = Tensor::cat(
+        &pending
+            .iter()
+            .map(|(_, ids, _)| ids.to_dtype(DType::U32)?.flatten_all())
+            .collect::<Result<Vec<_>>>()?,
+        0,
+    )?
+    .to_vec1::<u32>()?;
+    let mut at = 0;
+    for (x, forward_ids, per_slot) in pending.iter() {
+        let (n, k) = forward_ids.dims2()?;
+        // a row per token feeds all its experts; a row per slot only its own
+        for (j, &e) in ids[at..at + n * k].iter().enumerate() {
+            let row = if *per_slot { j } else { j / k };
+            slots[e as usize].push(base + row as u32);
+        }
+        at += n * k;
+        base += x.dim(0)? as u32;
+    }
+    let x = Tensor::cat(&xs, 0)?;
+    let order = slots.iter().flatten().copied().collect::<Vec<_>>();
+    let sorted = x.index_select(
+        &Tensor::from_vec(order.clone(), order.len(), x.device())?,
+        0,
+    )?;
+    let mut start = 0;
+    for (e, rows_e) in slots.iter().enumerate().filter(|(_, r)| !r.is_empty()) {
+        let xe = sorted.narrow(0, start, rows_e.len())?;
+        h[e] = Some(add_gram(h[e].take(), &xe)?);
+        counts[e] += rows_e.len();
+        start += rows_e.len();
+    }
+    pending.clear();
+    Ok(())
 }
 
 /// Collected imatrix data keyed by layer tracking key (`.cimatrix` format).

@@ -1557,15 +1557,16 @@ struct StreamedQwenLayer {
 
 impl crate::model::StreamedLayer for StreamedQwenLayer {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let tokens = xs.dim(1)?;
+        let (batch, tokens) = (xs.dim(0)?, xs.dim(1)?);
         match &self.layer.layer_impl {
             LayerImpl::FullAttention(attn) => {
-                let positions =
-                    Tensor::arange(0u32, tokens as u32, xs.device())?.reshape((1, tokens))?;
+                let positions = Tensor::arange(0u32, tokens as u32, xs.device())?
+                    .reshape((1, tokens))?
+                    .repeat((batch, 1))?;
                 let cos_sin = attn
                     .rotary_emb
                     .compute_text_cos_sin(&positions, xs.dtype())?;
-                let ids = Tensor::zeros((1, tokens), DType::U32, xs.device())?;
+                let ids = Tensor::zeros((batch, tokens), DType::U32, xs.device())?;
                 let mask = CausalMasker.make_causal_mask(
                     &ids,
                     &crate::layers::masker::NotACache,
@@ -1578,8 +1579,12 @@ impl crate::model::StreamedLayer for StreamedQwenLayer {
                     .add()
             }
             LayerImpl::LinearAttention(_) => {
-                let mut cache =
-                    GdnLayerCache::new(&self.cfg as &dyn GdnConfig, xs.dtype(), xs.device())?;
+                let mut cache = GdnLayerCache::with_batch(
+                    &self.cfg as &dyn GdnConfig,
+                    xs.dim(0)?,
+                    xs.dtype(),
+                    xs.device(),
+                )?;
                 self.layer
                     .forward_linear_with_stash(LinearForwardContext {
                         x: xs,
