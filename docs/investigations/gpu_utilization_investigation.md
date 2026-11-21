@@ -144,3 +144,20 @@ Collection again (266K chat tokens, 97 s after Run 4):
 ```
 Hessian collection, 266K tokens     start 578 s   calibration Run 5 133 s   Run 4 97 s   now 88 s (GPU 74%)
 ```
+
+## Run 6 - 2026-11-21 04:30
+
+Streamed scoring, `inference quantize kld -m recipe-v2.gguf --kld-base ours-chat-c1024-ch40.kld` (40 chunks of
+1,024 tokens, a 10 GB base):
+
+- Plain: 43 s cold, 23 s and 22 s warm (33-39 s before the tools retained the memory pool; ik's perplexity 27 s on
+  the same file). KLD 0.01208, as before.
+- Profiled (27 s): `stream.forward` 8.69 s (`layer.gdn` 7.11, `layer.attention` 1.58), `stream.score` 8.69 s (one
+  call over the 40 chunks: reading and decoding 254 MB of base records a chunk, then the KL), `stream.build`
+  3.68 s, `build.upload` 0.08 s.
+- What is left splits about evenly between the base read, the forward and the layer builds. Reading the base ahead
+  on a thread while the forward runs would hide part of the read; a few seconds of 22, so left for later.
+
+```
+quantize kld, one score (35B)       before 33-39 s   now 22-23 s warm
+```
