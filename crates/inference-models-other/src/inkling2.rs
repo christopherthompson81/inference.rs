@@ -1037,11 +1037,12 @@ impl Model {
                 x = prelude.clone();
                 blocks = prelude_blocks.clone();
             }
-            for layer in lc.core_start..lc.core_end {
+            let core = &self.layers[lc.core_start..lc.core_end];
+            for (layer, decoder) in (lc.core_start..).zip(core) {
                 let slot = slot_of(cfg, pass, layer);
                 let messages = match &bank {
                     Some(bank) => {
-                        let lp = self.layers[layer].loop_layer.as_ref().ok_or_else(|| {
+                        let lp = decoder.loop_layer.as_ref().ok_or_else(|| {
                             inference_tensor::Error::msg(
                                 "Inkling 2: a looped layer has no loop weights",
                             )
