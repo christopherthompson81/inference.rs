@@ -33,9 +33,9 @@ const GPTQ_REPORT_ENV: &str = "INFERENCE_GPTQ_REPORT";
 // the stacked factors and rows one batched GPTQ pass over a stack's experts takes at most
 #[cfg(feature = "cuda")]
 const GPTQ_BATCH_BYTES: usize = 2 << 30;
-// GPTQ inputs read ahead of the GPU (each a tensor's values and Hessians, up to a few GB)
+// GPTQ inputs read ahead of the GPU (each a tensor's bytes and Hessians, an expert stack ~0.8 GB)
 #[cfg(feature = "cuda")]
-const GPTQ_PREFETCH_DEPTH: usize = 1;
+const GPTQ_PREFETCH_DEPTH: usize = 3;
 pub const DEFAULT_GPTQ_DAMP: f64 = 0.1;
 // f32 bytes of rows the GPU quantizes in one call (its scratch takes about three times this)
 const GPU_CHUNK_BYTES: usize = 1 << 30;
@@ -281,13 +281,13 @@ fn plan_tensor<'a>(name: &'a str, header: &Header, plan: &RequantizePlan) -> Res
     })
 }
 
-// what GPTQ reads for a tensor before its GPU pass: its Hessians and its values widened to f32
+// what GPTQ reads for a tensor before its GPU pass: its Hessians and its values' bytes as stored (widened on the GPU)
 #[cfg(feature = "cuda")]
 struct GptqInput {
     shared: Option<Vec<f32>>,
     cross: Option<Vec<f32>>,
     per_expert: Vec<Option<Vec<f32>>>,
-    values: Vec<f32>,
+    source: Vec<u8>,
 }
 
 // `t`'s GPTQ input from the source at `offset`, or None when no Hessian covers it
@@ -319,7 +319,7 @@ fn load_gptq(
         cross: hessians.cross(t.name)?,
         shared,
         per_expert,
-        values: to_f32(t.source_type, &bytes)?,
+        source: bytes,
     }))
 }
 
@@ -337,16 +337,32 @@ fn gptq_tensor(
         shared,
         cross,
         per_expert,
-        values,
+        source,
     } = input;
     let cols = *t.dims.last().unwrap_or(&1);
     let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
-    let per = values.len() / experts;
+    let dtype = match t.source_type {
+        0 => inference_tensor::DType::F32,
+        1 => inference_tensor::DType::F16,
+        30 => inference_tensor::DType::BF16,
+        other => inference_tensor::bail!(
+            "only float tensors are requantized, not {}",
+            GgufDType::new(other).name()
+        ),
+    };
+    let rows = source.len() / dtype.size_in_bytes() / cols;
+    let values = Tensor::from_raw_buffer(&source, dtype, &[rows, cols], device)?
+        .to_dtype(inference_tensor::DType::F32)?;
+    drop(source);
+    let per = rows * cols / experts;
+    let expert_rows = rows / experts;
+    // the diagnostic reads the values on the host
+    let host = || values.flatten_all()?.to_vec1::<f32>();
     let prepare = |h: &[f32]| {
         super::gptq::prepare(h, cols, !plan.hessian_weights_only, plan.gptq_damp, device)
             .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))
     };
-    let quantize = |values: &[f32], prepared: &super::gptq::Prepared| {
+    let quantize = |values: &Tensor, prepared: &super::gptq::Prepared| {
         super::gptq::quantize(
             ty,
             cols,
@@ -373,7 +389,7 @@ fn gptq_tensor(
                 t,
                 ty,
                 cols,
-                &values,
+                &host()?,
                 &out,
                 shared.as_deref(),
                 &per_expert,
@@ -384,10 +400,25 @@ fn gptq_tensor(
         return Ok(out);
     }
     let shared_prepared = shared.as_deref().map(prepare).transpose()?;
+    // the experts' own Hessians factored together
+    let owned = per_expert
+        .iter()
+        .flatten()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let mut factored = super::gptq::prepare_all(
+        &owned,
+        cols,
+        !plan.hessian_weights_only,
+        plan.gptq_damp,
+        device,
+    )
+    .map_err(|err| inference_tensor::Error::Msg(format!("{}: {err}", t.name)))?
+    .into_iter();
     let own = per_expert
-        .par_iter()
-        .map(|h| h.as_deref().map(prepare).transpose())
-        .collect::<Result<Vec<_>>>()?;
+        .iter()
+        .map(|h| h.as_ref().and_then(|_| factored.next()))
+        .collect::<Vec<_>>();
     let prepared = own
         .iter()
         .enumerate()
@@ -406,7 +437,7 @@ fn gptq_tensor(
         let Some(part) = super::gptq::quantize_experts(
             ty,
             cols,
-            &values[e0 * per..e1 * per],
+            &values.narrow(0, e0 * expert_rows, (e1 - e0) * expert_rows)?,
             &prepared[e0..e1],
             device,
         )
@@ -414,7 +445,12 @@ fn gptq_tensor(
         else {
             parts = (0..experts)
                 .into_par_iter()
-                .map(|e| quantize(&values[e * per..(e + 1) * per], prepared[e]))
+                .map(|e| {
+                    quantize(
+                        &values.narrow(0, e * expert_rows, expert_rows)?,
+                        prepared[e],
+                    )
+                })
                 .collect::<Result<Vec<_>>>()?;
             break;
         };
@@ -426,7 +462,7 @@ fn gptq_tensor(
             t,
             ty,
             cols,
-            &values,
+            &host()?,
             &out,
             shared.as_deref(),
             &per_expert,

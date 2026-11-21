@@ -15,6 +15,10 @@ const BLOCK_IQ4_KSS: usize = QK_K / 2;
 const BLOCK_IQ4_XS: usize = 2 + 2 + QK_K / 64 + QK_K / 2;
 const F16_ROW_HEADER: usize = 2;
 const BLOCK_IQ3_KS: usize = 102;
+const BLOCK_Q6K: usize = 210;
+const Q6K_SUB: usize = 16;
+const Q8_0_BLOCK: usize = 32;
+const BLOCK_Q8_0: usize = 34;
 const GGML_F32: u32 = 0;
 const GGML_F16: u32 = 1;
 const GGML_BF16: u32 = 30;
@@ -122,6 +126,16 @@ inference_tensor::kernel_library! {
         fn launch_iq3_ks_super_fixed(x: *const f32, importance: *const f32, rows: i64, rows_per_importance: i64, row_d: *const f32,
             weights: *mut f32, scales: *mut f32, shifted: *mut u8, out: *mut u8, terms: *mut f32, levels: *mut f32,
             sums: *mut f32, stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
+
+        /// `rows` rows of `cols` f32 (a multiple of 256) as Q6_K into `out`, each `rows_per_importance` rows weighed by
+        /// the next `cols` of `importance`, the decoded values into `decoded`; `ls` (a byte a value) and `scales` (a
+        /// float per 16) scratch.
+        fn launch_q6_k_encode(x: *const f32, importance: *const f32, rows: i64, rows_per_importance: i64, cols: i32,
+            ls: *mut i8, scales: *mut f32, out: *mut u8, decoded: *mut f32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
+        /// As `launch_q6_k_encode`, for Q8_0 (`cols` a multiple of 32; no importance).
+        fn launch_q8_0_encode(x: *const f32, rows: i64, cols: i32, out: *mut u8, decoded: *mut f32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream) -> i32;
     }
 }
 
@@ -373,9 +387,107 @@ pub fn super_block_fixed(
     Ok((bytes, levels))
 }
 
+/// Whether [`encode_blocks`] writes `ty` (with an importance where it takes one) on the GPU.
+pub fn blocks_supported(ty: GgufType) -> bool {
+    matches!(ty, GgufType::Q6K | GgufType::Q8_0)
+}
+
+/// `x` (rows of `cols` f32 on `dev`) as `ty`'s blocks, the bytes the CPU's `quantize_blocks` writes, each
+/// `rows_per_importance` rows weighed by the next `cols` of `importance` (Q6_K; Q8_0 takes none), with the values they
+/// decode to (as the CPU decodes them), left on the device.
+pub fn encode_blocks(
+    dev: &CudaDevice,
+    ty: GgufType,
+    x: &Tensor,
+    importance: Option<&[f32]>,
+    rows_per_importance: usize,
+) -> Result<(Vec<u8>, Tensor)> {
+    ensure_loaded().map_err(inference_tensor::Error::msg)?;
+    let x = x.to_dtype(DType::F32)?.contiguous()?;
+    let (rows, cols) = x.dims2()?;
+    let (block, block_bytes) = match ty {
+        GgufType::Q6K => (QK_K, BLOCK_Q6K),
+        GgufType::Q8_0 => (Q8_0_BLOCK, BLOCK_Q8_0),
+        _ => inference_tensor::bail!("{ty:?} has no GPU block encoder"),
+    };
+    if !cols.is_multiple_of(block)
+        || importance.is_some_and(|w| {
+            rows_per_importance == 0 || w.len() != rows.div_ceil(rows_per_importance) * cols
+        })
+    {
+        inference_tensor::bail!(
+            "{ty:?}: rows of {cols} with an importance of {:?}",
+            importance.map(<[f32]>::len)
+        );
+    }
+    // SAFETY: the encoders write every byte and every decoded value
+    let out = unsafe { dev.alloc::<u8>(rows * cols / block * block_bytes)? };
+    // SAFETY: as above
+    let decoded = unsafe { dev.alloc::<f32>(rows * cols)? };
+    {
+        let xp = tensor_ptr(&x)?;
+        let (op, _o) = slice_ptr(&out, 0);
+        let (dp, _d) = slice_ptr(&decoded, 0);
+        let stream = dev.cuda_stream().cu_stream();
+        // SAFETY: live device buffers sized as the kernels index them, on this device's stream
+        let status = match ty {
+            GgufType::Q6K => {
+                let w = importance.map(|w| dev.clone_htod(w)).transpose()?;
+                // SAFETY: the search kernel writes each before the super-block kernel reads it
+                let ls = unsafe { dev.alloc::<i8>(rows * cols)? };
+                // SAFETY: as above
+                let scales = unsafe { dev.alloc::<f32>(rows * cols / Q6K_SUB)? };
+                let w_ptr = w.as_ref().map(|w| slice_ptr(w, 0));
+                let (lp, _l) = slice_ptr(&ls, 0);
+                let (sp, _s) = slice_ptr(&scales, 0);
+                unsafe {
+                    launch_q6_k_encode(
+                        xp as *const f32,
+                        w_ptr
+                            .as_ref()
+                            .map_or(std::ptr::null(), |(p, _)| *p as *const f32),
+                        rows as i64,
+                        rows_per_importance as i64,
+                        cols as i32,
+                        lp as *mut i8,
+                        sp as *mut f32,
+                        op as *mut u8,
+                        dp as *mut f32,
+                        stream,
+                    )
+                }
+            }
+            _ => unsafe {
+                launch_q8_0_encode(
+                    xp as *const f32,
+                    rows as i64,
+                    cols as i32,
+                    op as *mut u8,
+                    dp as *mut f32,
+                    stream,
+                )
+            },
+        };
+        if status != 0 {
+            inference_tensor::bail!(
+                "the {ty:?} block encoder failed to launch (CUDA error {status})"
+            );
+        }
+    }
+    let bytes = dev.clone_dtoh(&out)?;
+    let decoded = Tensor::from((
+        inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+            decoded,
+            dev.clone(),
+        )),
+        inference_tensor::Shape::from((rows, cols)),
+    ));
+    Ok((bytes, decoded))
+}
+
 /// Whether [`quantize_rows`] writes `ty` on the GPU.
 pub fn can_quantize(ty: GgufType) -> bool {
-    kernels(ty, QK_K).is_some()
+    kernels(ty, QK_K).is_some() || blocks_supported(ty)
 }
 
 /// Rows of `cols` values (`source`, little-endian of ggml type `dtype`: f32, f16 or bf16) as `ty` on `dev`, the bytes
@@ -398,6 +510,17 @@ pub fn quantize_rows(
         ),
     };
     let values = source.len() / width;
+    if blocks_supported(ty) {
+        let dtype = match dtype {
+            GGML_F32 => DType::F32,
+            GGML_F16 => DType::F16,
+            _ => DType::BF16,
+        };
+        let shape = [values / cols.max(1), cols];
+        let device = inference_tensor::Device::Cuda(dev.clone());
+        let x = Tensor::from_raw_buffer(source, dtype, &shape, &device)?;
+        return Ok(encode_blocks(dev, ty, &x, imatrix, rows_per_imatrix)?.0);
+    }
     let Some((launch, row_bytes)) = kernels(ty, cols) else {
         inference_tensor::bail!("{ty:?} has no GPU quantizer");
     };
@@ -589,12 +712,61 @@ mod tests {
         Ok(())
     }
 
+    // Q6_K and Q8_0 blocks as the CPU's `quantize_blocks` writes them, and the values as its `dequantize` reads them
+    fn blocks_match_the_cpu() -> Result<()> {
+        use inference_tensor::quantized::{GgmlDType, QStorage, QTensor, quantize_blocks};
+        let device = Device::new_cuda(0)?;
+        let Device::Cuda(dev) = &device else {
+            unreachable!("a CUDA device")
+        };
+        for (ty, dtype) in [
+            (GgufType::Q6K, GgmlDType::Q6K),
+            (GgufType::Q8_0, GgmlDType::Q8_0),
+        ] {
+            for (rows, cols, seed) in [(64, 4096, 1), (3, 256, 2), (17, 2048, 3)] {
+                let (values, imatrix) = layer(rows, cols, seed);
+                let cpu =
+                    quantize_blocks(dtype, &values, Some(&imatrix), cols, Quantizer::IkLlama)?;
+                let x = Tensor::from_slice(&values, (rows, cols), &device)?;
+                let (gpu, decoded) = encode_blocks(dev, ty, &x, Some(&imatrix), rows)?;
+                let differing = cpu.iter().zip(&gpu).filter(|(a, b)| a != b).count();
+                assert_eq!(
+                    (gpu.len(), differing),
+                    (cpu.len(), 0),
+                    "{ty:?} {rows}x{cols}"
+                );
+                let storage =
+                    QStorage::from_data(std::borrow::Cow::Borrowed(&cpu), &Device::Cpu, dtype)?;
+                let expected = QTensor::new(storage, (rows, cols))?
+                    .dequantize(&Device::Cpu)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                let got = decoded.flatten_all()?.to_vec1::<f32>()?;
+                let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+                assert!(
+                    bits(&expected) == bits(&got),
+                    "{ty:?} {rows}x{cols}: decoded values"
+                );
+                // without an importance, from bf16 rows, as a tensor without a Hessian is written
+                let halves: Vec<half::bf16> =
+                    values.iter().map(|&v| half::bf16::from_f32(v)).collect();
+                let widened: Vec<f32> = halves.iter().map(|h| h.to_f32()).collect();
+                let source: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
+                let cpu = quantize_blocks(dtype, &widened, None, cols, Quantizer::IkLlama)?;
+                let gpu = quantize_rows(dev, ty, cols, GGML_BF16, &source, None, rows)?;
+                assert!(cpu == gpu, "{ty:?} {rows}x{cols}: bf16 rows, no importance");
+            }
+        }
+        Ok(())
+    }
+
     inference_tensor::gpu_cases!(
         cuda_cases,
         [
             matches_the_cpu_port,
             weighs_each_expert_by_its_slice,
-            reads_bf16_rows
+            reads_bf16_rows,
+            blocks_match_the_cpu
         ]
     );
 }
