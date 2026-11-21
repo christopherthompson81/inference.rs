@@ -55,3 +55,39 @@ v2 recipe quantize           total        GPU busy   KLD wiki B / chat (ours)
 batched factors (Run 1)      64 / 65 s    54%        0.01560 / 0.01196
 + block inverses on the GPU  64 / 60 s    57%        0.01560 / 0.01196
 ```
+
+## Run 3 - 2026-11-21 01:30
+
+Built-in per-op timing, so each step stops needing temporary log lines: `INFERENCE_PROFILE=1` makes named spans
+(`inference_tensor::profile::span`) sync their device as they end and sum time and calls per span and thread; the
+quantize commands print the table when they finish. The syncs serialize what overlaps, so a profiled run is slower
+than a plain one (85 s against 61 s); the spans give the cost of each op. Spans: the quantizer's `gptq.tensor`,
+`.upload`, `.factor`, `.row_scales`, `.encode`, `.carry`, its loader's `gptq.load` and the main loop's
+`gptq.wait`, `write`; the streamed loop's `stream.read_wait`, `.build`, `.forward`, `.hessians`, `.score`,
+`.write_base`.
+
+The first profiled quantize: `gptq.tensor` 88 s, of it the carry 25 s (640 calls, 39 ms each). The carry formed
+`E U_bb^-1`, then `(E U_bb^-1) U_rest`, subtracted it from a copy of the columns after the block and re-packed them.
+Now `M = U_bb^-1 U_rest` first and one cuBLAS GEMM (alpha -1, beta 1) writes `w[:, after] -= E M` into the matrix in
+place (`carry_in_place`; a stack's per-expert groups as one strided batch). All three of GPTQ's loops share it
+(`Columns`), so the GPU loop and the CPU loop still match byte for byte; GPTAQ's residual term keeps the narrowing
+carry. A batch of 3 experts and each alone now differ in 3 of 13,248 bytes (cuBLAS picks kernels by batch size,
+and a value at a rounding tie lands the other way), so that test allows 1 in 1,000.
+
+Then the values' upload and widening (11 s) moved into the loader thread, which syncs its stream before handing the
+device tensor over:
+
+```
+quantize (plain runs)                        total      GPU busy  KLD wiki B / chat (ours)
+Run 2                                        60-64 s    57%       0.01560 / 0.01196
+in-place carry                               61 s       55%       0.01534 / 0.01220
++ upload in the loader                       54-58 s    58-61%
+
+profiled spans (s)   tensor  load  encode  upload  row_scales  factor  carry  wait  write
+in-place carry       73.2    35.4  17.0    11.0    9.7         7.7     7.4    2.4   4.4
++ upload in loader   62.9    48.1  18.9    12.5*   10.0        8.3     7.5    8.5   4.5   (* on the loader)
+```
+
+106 s at the start of this investigation, 54-58 s now. The quantizer and the loader are close (the waits came
+back), so the next gains are on both sides: the loader's reads and Hessian unpacking, and the encode calls (14,088,
+mostly Q8_0's 32-column blocks, each with its carry).

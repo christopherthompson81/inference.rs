@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use inference_quant::{QuantMethod, TrackedModule};
-use inference_tensor::{Device, Tensor};
+use inference_tensor::{Device, Tensor, profile};
 use tracing::info;
 
 use super::drive::{
@@ -566,10 +566,13 @@ fn write_streamed(
         let start = std::time::Instant::now();
         // the read-ahead of this layer finishes before the next one's starts, so reads stay sequential
         if let Some(reading) = ahead.take() {
+            let _span = profile::span("stream.read_wait", None);
             let _ = reading.join();
         }
         ahead = ranges.remove(&(layer_idx + 1)).map(prefetch);
+        let span = profile::span("stream.build", Some(&gpu));
         let layer = stream.build_layer(layer_idx, &gpu)?;
+        drop(span);
         let group = layer
             .modules()
             .iter()
@@ -1002,10 +1005,13 @@ fn run_streamed(
     for layer_idx in 0..layers {
         let start = std::time::Instant::now();
         if let Some(reading) = ahead.take() {
+            let _span = profile::span("stream.read_wait", None);
             let _ = reading.join();
         }
         ahead = ranges.remove(&(layer_idx + 1)).map(prefetch);
+        let span = profile::span("stream.build", Some(&gpu));
         let layer = stream.build_layer(layer_idx, &gpu)?;
+        drop(span);
         let twin_layer = twin
             .as_ref()
             .map(|weights| stream.build_layer_from(layer_idx, &gpu, weights))
@@ -1090,6 +1096,7 @@ fn run_streamed(
                 module.ct.begin_track_hessian()?;
             }
         }
+        let forward_span = profile::span("stream.forward", Some(&gpu));
         let before = (!candidates.is_empty()).then(|| states.clone());
         // one pass collects the Hessians and runs the states on (the layer as loaded, so no second pass is needed);
         // a plain pass batches chunks of one length, which the MoE's per-call costs (a launch per expert) dominate
@@ -1199,6 +1206,8 @@ fn run_streamed(
             }
             *own_states = Some(next);
         }
+        drop(forward_span);
+        let hessians_span = profile::span("stream.hessians", Some(&gpu));
         let mut hessians = vec![None; group.len()];
         let mut crosses = vec![None; group.len()];
         for (i, module) in group.iter().enumerate() {
@@ -1229,6 +1238,7 @@ fn run_streamed(
                 },
             }
         }
+        drop(hessians_span);
         drop(group);
         drop(layer);
         info!(
@@ -1272,9 +1282,11 @@ fn run_streamed(
                         .transpose()?,
                 });
             }
+            let _span = profile::span("stream.score", Some(&gpu));
             score_states(stream, &runs, &chunks, base, &gpu)?
         }
         StreamedRun::WriteBase(writer) => {
+            let _span = profile::span("stream.write_base", Some(&gpu));
             write_base_states(stream, &states, &chunks, writer, &gpu)?
         }
     }
