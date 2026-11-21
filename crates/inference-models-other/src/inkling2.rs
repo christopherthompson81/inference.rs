@@ -15,6 +15,9 @@ use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 use serde::Serialize;
 
 use crate::gdn::RecurrentBatchKind;
+
+#[path = "inkling2_speculative.rs"]
+mod speculative;
 use crate::kv_cache::{
     EitherCache, HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, KvCache,
     RecurrentLayerConfig, RecurrentStateSpec,
@@ -115,6 +118,10 @@ impl Config {
     }
 
     /// A slot's convolution channels: K, V, the attention output and the FFN output.
+    pub fn conv_state_channels(&self) -> usize {
+        self.conv_channels()
+    }
+
     fn conv_channels(&self) -> usize {
         2 * self.kv_dim() + 2 * self.hidden_size
     }
@@ -370,16 +377,29 @@ impl ProjGroup {
 }
 
 /// A slot's convolution states: its rows gathered from the pool (`[b, channels, hist]`, a fresh copy), or the pool
-/// itself and the batch's rows of it, which a Vulkan decode step updates in place.
+/// itself and the batch's rows of it, which a Vulkan decode step updates in place. A verify step's rows also collect
+/// each conv's input, in the states' channel order, for its rollback.
 #[derive(Clone, Copy)]
 enum ConvState<'a> {
-    Rows(&'a Tensor),
-    Pool { pool: &'a Tensor, slots: &'a Tensor },
+    Rows {
+        rows: &'a Tensor,
+        inputs: Option<&'a ConvInputs>,
+    },
+    Pool {
+        pool: &'a Tensor,
+        slots: &'a Tensor,
+    },
 }
+
+/// A slot's conv inputs `[b, t, channels]` (F32) as its convs take them.
+type ConvInputs = std::cell::RefCell<Vec<Tensor>>;
 
 /// One conv's channels of a slot's states.
 enum ConvPart<'a> {
-    Rows(Tensor),
+    Rows {
+        state: Tensor,
+        inputs: Option<&'a ConvInputs>,
+    },
     Pool {
         pool: &'a Tensor,
         slots: &'a Tensor,
@@ -390,7 +410,10 @@ enum ConvPart<'a> {
 impl<'a> ConvState<'a> {
     fn part(self, channel_off: usize, channels: usize) -> Result<ConvPart<'a>> {
         Ok(match self {
-            Self::Rows(rows) => ConvPart::Rows(rows.narrow(1, channel_off, channels)?),
+            Self::Rows { rows, inputs } => ConvPart::Rows {
+                state: rows.narrow(1, channel_off, channels)?,
+                inputs,
+            },
             Self::Pool { pool, slots } => ConvPart::Pool {
                 pool,
                 slots,
@@ -432,7 +455,12 @@ impl ShortConv {
         };
         let terms = 1 + width + taps.as_ref().map_or(0, |_| width);
         let state = match state {
-            ConvPart::Rows(rows) => rows,
+            ConvPart::Rows { state, inputs } => {
+                if let Some(inputs) = inputs {
+                    inputs.borrow_mut().push(x.to_dtype(DType::F32)?);
+                }
+                state
+            }
             ConvPart::Pool {
                 pool,
                 slots,
@@ -1235,6 +1263,7 @@ pub struct Model {
     meta: ModelConfigMetadata,
     // under paged attention: what writes each step's K/V rows into the paged cache
     paged_writer: Option<PagedAttention>,
+    spec: speculative::SpecState,
 }
 
 impl Model {
@@ -1370,6 +1399,7 @@ impl Model {
             cfg: cfg.clone(),
             mapper,
             paged_writer,
+            spec: speculative::SpecState::default(),
         })
     }
 
@@ -1495,6 +1525,11 @@ impl Model {
             device.is_vulkan() && t == 1 && recurrent.batch_kind() == RecurrentBatchKind::Decode;
 
         let stacks = BlockStacks::default();
+        // a verify step keeps each slot's state and conv inputs, for the commit to cut back to the accepted rows
+        let verifying = self.spec.drafter().is_some()
+            && recurrent.batch_kind() == RecurrentBatchKind::SpeculativeDecode
+            && t > 1;
+        let replays = std::cell::RefCell::new(Vec::new());
         let mut run = |layer: usize,
                        slot: usize,
                        x: &Tensor,
@@ -1522,6 +1557,7 @@ impl Model {
                     (None, Some(state))
                 }
             };
+            let conv_inputs = ConvInputs::default();
             let pool_slots = if in_place {
                 Some(indices.to_dtype(DType::U32)?)
             } else {
@@ -1529,7 +1565,10 @@ impl Model {
             };
             let conv_state = match (&pool, &pool_slots, &gathered) {
                 (Some(pool), Some(slots), _) => ConvState::Pool { pool, slots },
-                (_, _, Some(rows)) => ConvState::Rows(rows),
+                (_, _, Some(rows)) => ConvState::Rows {
+                    rows,
+                    inputs: verifying.then_some(&conv_inputs),
+                },
                 _ => unreachable!("a slot's states are pooled or gathered"),
             };
             let x = self.mapper.map(x.clone(), layer)?;
@@ -1572,6 +1611,15 @@ impl Model {
                     stacks: &stacks,
                 },
             )?;
+            if verifying && let Some(before) = &gathered {
+                replays.borrow_mut().push(speculative::ConvReplay {
+                    slot: slots + slot,
+                    indices: indices.clone(),
+                    host_indices: recurrent.state_indices_host().map(<[u32]>::to_vec),
+                    state: before.clone(),
+                    inputs: Tensor::cat(&conv_inputs.take(), 2)?,
+                });
+            }
             if let Some(state) = state {
                 let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(slots + slot) else {
                     inference_tensor::bail!("Inkling 2: slot {slot} has no convolution state");
@@ -1585,6 +1633,22 @@ impl Model {
             Ok(out)
         };
 
+        // the drafter's taps: the residual stream before each tapped layer visit (the looped core's per pass)
+        let tap_visits = self.spec.tap_visits();
+        let taps = std::cell::RefCell::new(Vec::new());
+        let visit = std::cell::Cell::new(0usize);
+        let mut run = |layer: usize,
+                       slot: usize,
+                       x: &Tensor,
+                       blocks: &mut Blocks,
+                       messages: Option<&Tensor>|
+         -> Result<Tensor> {
+            if tap_visits.contains(&visit.get()) {
+                taps.borrow_mut().push(x.clone());
+            }
+            visit.set(visit.get() + 1);
+            run(layer, slot, x, blocks, messages)
+        };
         let lc = &cfg.loop_config;
         let mut blocks = Blocks::default();
         let mut x = x;
@@ -1629,6 +1693,16 @@ impl Model {
         let x = self.mapper.cast_nm_device(&x, false)?;
         let x = mixed(&mut blocks, &x, &self.final_query, 0, self.dtype, &stacks)?;
         let x = self.norm.forward(&x)?;
+        let mut taps = taps.into_inner();
+        if self.spec.taps_output() {
+            taps.push(x.clone());
+        }
+        self.spec.store(
+            taps,
+            replays.into_inner(),
+            recurrent.batch_kind() == RecurrentBatchKind::Prefill,
+            |tap| ctx.logits(tap),
+        )?;
         let x = ctx.logits(&x)?;
         let logits = ctx.lm_head(&*self.lm_head, &x)?;
         if logits.dim(D::Minus1)? != cfg.vocab_size {
@@ -1671,8 +1745,6 @@ impl IsqModel for Model {
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for Model {}
-
 impl NormalModel for Model {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
@@ -1694,7 +1766,8 @@ impl NormalModel for Model {
         &self.meta
     }
 
-    // a decode step reads its positions and lengths from the paged metadata's device tensors
+    // a decode step reads its positions and lengths from the paged metadata's device tensors (a drafter's taps and
+    // verify replays ride the speculative graph state)
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
         self.paged_writer.is_some()

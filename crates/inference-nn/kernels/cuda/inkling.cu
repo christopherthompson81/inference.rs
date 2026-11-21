@@ -225,6 +225,33 @@ __global__ void short_conv_kernel(const X* x, const S* state, int64_t state_batc
   }
 }
 
+// a slot of a verify step's convolution rollback: its pool `[slots, c, hist]`, the batch's pool rows, its state
+// before the step `[b, c, hist]` and the conv inputs over the step `[b, t, c]`
+struct ConvRollbackSlot {
+  float* pool;
+  const uint32_t* rows;
+  const float* state;
+  const float* inputs;
+};
+
+// each batch row that kept `keep[row]` of the step's rows takes the window of `[state, inputs]` ending at its last kept
+// row; a negative `keep` leaves the row as the step wrote it
+__global__ void conv_rollback_kernel(const ConvRollbackSlot* slots, const int32_t* keep, int b, int t, int c,
+                                     int hist) {
+  const ConvRollbackSlot s = slots[blockIdx.y];
+  const int64_t e = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (e >= int64_t(b) * c * hist) return;
+  const int j = e % hist;
+  const int ci = (e / hist) % c;
+  const int bi = e / (int64_t(c) * hist);
+  const int k = keep[bi];
+  if (k < 0) return;
+  const int src = k + j;
+  const float v = src < hist ? s.state[(int64_t(bi) * c + ci) * hist + src]
+                             : s.inputs[(int64_t(bi) * t + (src - hist)) * c + ci];
+  s.pool[(int64_t(s.rows[bi]) * c + ci) * hist + j] = v;
+}
+
 int64_t blocks_for(int64_t threads) { return (threads + ROW_THREADS - 1) / ROW_THREADS; }
 
 }  // namespace
@@ -344,5 +371,13 @@ extern "C" int inkling_sigmoid_gate(const float* x, const void* gate, int gate_d
 #define GATE(G, O) sigmoid_gate_kernel<<<grid, ROW_THREADS, 0, s>>>(x, (const G*)gate, (O*)out, n)
   PAIR(gate_dtype, out_dtype, GATE)
 #undef GATE
+  return (int)cudaGetLastError();
+}
+
+extern "C" int inkling_conv_rollback(const void* slots, const int32_t* keep, int n_slots, int b, int t, int c,
+                                     int hist, int64_t stream) {
+  const dim3 grid(blocks_for(int64_t(b) * c * hist), n_slots);
+  conv_rollback_kernel<<<grid, ROW_THREADS, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      (const ConvRollbackSlot*)slots, keep, b, t, c, hist);
   return (int)cudaGetLastError();
 }

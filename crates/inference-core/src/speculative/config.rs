@@ -80,7 +80,15 @@ pub fn external_weight_size_in_bytes(
         paths.sort();
         paths
     };
-    let weight_paths = with_extension(&["safetensors"]);
+    #[cfg_attr(not(feature = "drafters"), allow(unused_mut))]
+    let mut weight_paths = with_extension(&["safetensors"]);
+    #[cfg(feature = "drafters")]
+    if let Some(dflash) = super::dflash::peek_config(&MtpConfig {
+        model: Some(path.to_string_lossy().into_owned()),
+        ..config.clone()
+    })? {
+        weight_paths.retain(|path| dflash.reads_weight_file(path));
+    }
     // a pickled drafter (some EAGLE-3 checkpoints) reserves its size on disk
     let pickled = || -> Option<usize> {
         let bytes = with_extension(PICKLE_EXTENSIONS)
@@ -173,8 +181,12 @@ pub fn reserve_external_mtp_memory_with_runtime(
         cache_config = cache_config.with_auxiliary_layers(eagle3.auxiliary_layers());
         // a recurrent target rolls a rejected tail back from per-draft checkpoints
         let drafts = mtp_config.n_predict.unwrap_or(eagle3.n_predict());
-        cache_config = cache_config.with_recurrent_checkpoint_lanes(drafts + 1)?;
+        cache_config = cache_config
+            .with_recurrent_checkpoint_lanes(drafts + 1)?
+            .with_speculative_query_rows(drafts + 1);
     }
+    #[cfg_attr(not(feature = "drafters"), allow(unused_mut))]
+    let mut drafter_runtime = 0usize;
     #[cfg(feature = "drafters")]
     let local_mtp = MtpConfig {
         model: Some(resolve_mtp_path(mtp_config)?.to_string_lossy().into_owned()),
@@ -191,8 +203,11 @@ pub fn reserve_external_mtp_memory_with_runtime(
                 "requested {drafts} draft tokens but this DFlash drafter supports 1..={max_drafts}"
             );
         }
-        cache_config = cache_config.with_recurrent_checkpoint_lanes(drafts + 1)?;
+        cache_config = cache_config
+            .with_recurrent_checkpoint_lanes(drafts + 1)?
+            .with_speculative_query_rows(drafts + 1);
         cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
+        drafter_runtime = dflash_config.runtime_bytes(dtype);
         // a full-attention drafter keeps its context in the target's blocks, which only the CUDA kernels read
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if device.is_cuda()
@@ -201,7 +216,9 @@ pub fn reserve_external_mtp_memory_with_runtime(
             cache_config = cache_config.with_auxiliary_layers(layers);
         }
     }
-    let bytes = external_weight_size_in_bytes(mtp_config, dtype)?;
+    let bytes = external_weight_size_in_bytes(mtp_config, dtype)?
+        .checked_add(drafter_runtime)
+        .ok_or_else(|| anyhow::anyhow!("external MTP memory reservation overflow"))?;
     #[cfg(all(feature = "cuda", feature = "drafters", target_family = "unix"))]
     let bytes = if device.is_cuda() {
         if let Some(serving_capacity) = cache_config.serving_capacity {

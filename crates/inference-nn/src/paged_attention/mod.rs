@@ -263,6 +263,9 @@ pub struct PagedAttentionConfig {
     /// The prompt chunk the scheduler was told to run (`--max-prefill-chunk-tokens`), which a load sizes for in place
     /// of planning one.
     pub prompt_chunk_tokens: Option<usize>,
+    /// The rows a speculative verify step runs a sequence (the anchor and its drafts), 1 without a proposer: the load
+    /// reserves what each row past the first holds in its captured graphs.
+    pub speculative_query_rows: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -297,7 +300,13 @@ impl PagedAttentionConfig {
             need_floor: false,
             draft_head_isq: None,
             prompt_chunk_tokens: None,
+            speculative_query_rows: 1,
         })
+    }
+
+    pub fn with_speculative_query_rows(mut self, rows: usize) -> Self {
+        self.speculative_query_rows = rows.max(1);
+        self
     }
 
     pub fn with_prompt_chunk_tokens(mut self, tokens: Option<usize>) -> Self {
