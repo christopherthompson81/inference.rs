@@ -37,6 +37,7 @@ mod hunyuan_rope;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
 pub mod inkling2;
+mod inkling2_official;
 pub mod jamba;
 pub mod jina_v3;
 pub mod kimi_linear;

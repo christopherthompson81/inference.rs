@@ -2087,6 +2087,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         None
     }
 
+    /// Stacked experts' scale each (F32 `[experts]`), applied to every output of the expert, which the kernels reading
+    /// [`Self::kernel_weight`] leave to the caller.
+    fn expert_scales(&self) -> Option<&Tensor> {
+        None
+    }
+
     /// The layer as an EXL3 trellis on a GPU, for fused projection groups.
     #[cfg(feature = "cuda")]
     fn exl3_layer(&self) -> Option<&exl3::Exl3Layer> {

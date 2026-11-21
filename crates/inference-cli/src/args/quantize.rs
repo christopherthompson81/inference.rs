@@ -86,6 +86,11 @@ pub struct KldOptions {
     /// With `--text`, the most chunks written (fewer when the text runs out)
     #[arg(long, default_value_t = 40, requires = "text")]
     pub chunks: usize,
+
+    /// Load the model whole onto its device and score through it, for a model that fits and the streamed load cannot
+    /// run a layer at a time (a looped core)
+    #[arg(long)]
+    pub resident: bool,
 }
 
 #[derive(Args, Clone)]

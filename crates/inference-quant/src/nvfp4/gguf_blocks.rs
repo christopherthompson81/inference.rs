@@ -73,7 +73,8 @@ impl ModeloptNvfp4Weight {
         Ok((rows, half * 2))
     }
 
-    fn block_bytes(&self) -> Result<Vec<u8>> {
+    /// The weight as llama.cpp NVFP4 blocks.
+    pub fn block_bytes(&self) -> Result<Vec<u8>> {
         let (rows, cols) = self.rows_cols()?;
         if self.weight.dtype() != DType::U8 || self.scales.dtype() != DType::F8E4M3 {
             inference_tensor::bail!(

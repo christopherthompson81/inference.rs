@@ -277,6 +277,19 @@ impl QuantMethod for BlockwiseFP8Linear {
         }
     }
     fn dequantize_w(&self) -> Result<inference_tensor::Tensor> {
+        // stacked experts dequantize as one matrix of their rows, which whole row blocks keep from crossing experts
+        if let [experts, rows, cols] = *self.weight.dims() {
+            let (_, scale_rows, scale_cols) = self.weight_scale_inv.dims3()?;
+            return ops::fp8_blockwise_dequantize(
+                &self.weight.reshape((experts * rows, cols))?,
+                &self
+                    .weight_scale_inv
+                    .reshape((experts * scale_rows, scale_cols))?,
+                self.weight_block_size.to_vec(),
+                self.dequant_dtype,
+            )?
+            .reshape((experts, rows, cols));
+        }
         ops::fp8_blockwise_dequantize(
             &self.weight,
             &self.weight_scale_inv,
@@ -456,8 +469,10 @@ impl QuantMethod for BlockwiseFP8Linear {
         // Try to use native FP8 indexed MoE GEMM kernel on CUDA
         #[cfg(feature = "cuda")]
         {
+            // the kernel reads half-precision inputs; f32 ones take the dequantized fallback
             if matches!(x.device(), inference_tensor::Device::Cuda(_))
                 && ffi::HAVE_BLOCKWISE_GEMM_KERNELS
+                && matches!(x.dtype(), DType::BF16 | DType::F16)
             {
                 // Use native FP8 indexed MoE GEMM kernel (expects U32 indices)
                 let result = ops::fp8_indexed_moe_gemm(
@@ -475,48 +490,28 @@ impl QuantMethod for BlockwiseFP8Linear {
             }
         }
 
-        // Fallback: dequantize weights and compute manually
-        let weight = self.dequantize_w()?;
-
-        // Expected shapes:
-        // - x: (n_tokens, 1, hidden_dim) or (n_tokens, n_experts_per_tok, hidden_dim)
-        // - indices: (n_tokens, n_experts_per_tok)
-        // - weight: (n_experts, out_features, in_features)
-
-        let (n_tokens, n_experts_per_tok) = indices.dims2()?;
-        let (_n_experts, out_features, _in_features) = weight.dims3()?;
-
-        // Flatten indices to select expert weights
-        let flat_indices = indices.flatten_all()?;
-
-        // Select weights for each (token, expert) pair
-        // weight_selected: (n_tokens * n_experts_per_tok, out_features, in_features)
-        let weight_selected = weight.index_select(&flat_indices, 0)?;
-
-        // Reshape x for batched matmul
-        let x_expanded = if x.dims().len() == 3 && x.dim(1)? == 1 {
-            // x is (n_tokens, 1, hidden_dim) - broadcast to (n_tokens * n_experts_per_tok, 1, hidden_dim)
-            x.squeeze(1)?
-                .unsqueeze(1)?
-                .broadcast_as((n_tokens * n_experts_per_tok, 1, x.dim(2)?))?
-                .contiguous()?
-        } else if x.dims().len() == 3 {
-            // x is (n_tokens, n_experts_per_tok, hidden_dim)
-            x.reshape((n_tokens * n_experts_per_tok, 1, x.dim(2)?))?
+        // Fallback: dequantize the weights and multiply each route's row by its expert's
+        let weight = self.dequantize_w()?.to_dtype(x.dtype())?;
+        // `indices` is `[.., experts per token]`; the output is that with the weight's rows after
+        let n_experts_per_tok = indices.dim(inference_tensor::D::Minus1)?;
+        let n_tokens = indices.elem_count() / n_experts_per_tok;
+        let (_n_experts, out_features, in_features) = weight.dims3()?;
+        let routes = n_tokens * n_experts_per_tok;
+        // `x` holds a row per route, or one per token that each of its experts reads
+        let rows = if x.elem_count() == routes * in_features {
+            x.reshape((routes, 1, in_features))?
         } else {
-            // x is (n_tokens, hidden_dim)
-            x.unsqueeze(1)?
-                .broadcast_as((n_tokens * n_experts_per_tok, 1, x.dim(1)?))?
+            x.reshape((n_tokens, 1, in_features))?
+                .broadcast_as((n_tokens, n_experts_per_tok, in_features))?
                 .contiguous()?
+                .reshape((routes, 1, in_features))?
         };
-
-        // Batched matmul: (batch, 1, k) @ (batch, k, n).T = (batch, 1, n)
-        // weight_selected is (batch, n, k), so we need to transpose last two dims
-        let weight_t = weight_selected.transpose(1, 2)?;
-        let result = x_expanded.matmul(&weight_t)?;
-
-        // Reshape result to (n_tokens, n_experts_per_tok, out_features)
-        let result = result.reshape((n_tokens, n_experts_per_tok, out_features))?;
+        let weight_t = weight
+            .index_select(&indices.flatten_all()?, 0)?
+            .transpose(1, 2)?;
+        let mut out_dims = indices.dims().to_vec();
+        out_dims.push(out_features);
+        let result = rows.matmul(&weight_t)?.reshape(out_dims)?;
 
         // Apply bias if present
         if let Some(ref bias) = self.bias {

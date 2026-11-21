@@ -121,6 +121,7 @@ pub(crate) fn checkpoint_device_map_sizes(
     num_layers: usize,
     target_dtype: DType,
     layer_index: impl Fn(&str) -> Option<usize>,
+    tensor_bytes: impl Fn(&str, &str, usize) -> Option<usize>,
 ) -> Result<Option<CheckpointDeviceMapSizes>> {
     if paths.is_empty()
         || paths
@@ -144,7 +145,10 @@ pub(crate) fn checkpoint_device_map_sizes(
         if name.contains(HOST_TABLE) {
             continue;
         }
-        let bytes = runtime_tensor_bytes(&name, &view, target_dtype)?;
+        let bytes = match tensor_bytes(&name, &format!("{:?}", view.dtype()), view.data().len()) {
+            Some(bytes) => bytes,
+            None => runtime_tensor_bytes(&name, &view, target_dtype)?,
+        };
         if let Some(layer_idx) = layer_index(&name)
             && let Some(expert) = expert_index(&name)
             && layer_idx < num_layers
@@ -227,10 +231,14 @@ mod tests {
                 })
                 .collect::<Result<HashMap<_, _>>>()?;
             serialize_to_file(tensors, None, &path)?;
-            Ok(
-                checkpoint_device_map_sizes(&[path], 1, DType::BF16, standard_layer_index)?
-                    .unwrap(),
-            )
+            Ok(checkpoint_device_map_sizes(
+                &[path],
+                1,
+                DType::BF16,
+                standard_layer_index,
+                |_, _, _| None,
+            )?
+            .unwrap())
         };
         let exl3 = inventory(&[
             (
@@ -330,6 +338,7 @@ mod tests {
             2,
             DType::BF16,
             standard_layer_index,
+            |_, _, _| None,
         )?
         .unwrap();
         assert_eq!(sizes.layer_sizes_in_bytes, [40, 40]);
@@ -354,7 +363,14 @@ mod tests {
         serialize_to_file(tensors, None, &path)?;
 
         assert!(
-            checkpoint_device_map_sizes(&[path], 2, DType::BF16, standard_layer_index,)?.is_none()
+            checkpoint_device_map_sizes(
+                &[path],
+                2,
+                DType::BF16,
+                standard_layer_index,
+                |_, _, _| None
+            )?
+            .is_none()
         );
         Ok(())
     }

@@ -284,6 +284,11 @@ pub(crate) fn checkpoint_inventory(
         num_layers,
         dtype,
         |name| inputs.loader.checkpoint_layer_index(inputs.config, name),
+        |name, dtype, stored| {
+            inputs
+                .loader
+                .checkpoint_tensor_bytes(inputs.config, name, dtype, stored)
+        },
     )
 }
 

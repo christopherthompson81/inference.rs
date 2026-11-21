@@ -1,7 +1,9 @@
 //! Scoring a prompt: the log-probability of each of its tokens, and on request the raw logits behind them.
 
 use inference_core::logits_reference::divergence;
-pub use inference_core::logits_reference::{Divergence, KldBaseJob, LogitsReference, base_record};
+pub use inference_core::logits_reference::{
+    Divergence, KldBase, KldBaseJob, KldBaseWriter, LogitsReference, base_record,
+};
 use inference_core::{
     InferenceRs, ModelCategory, NormalRequest, Request, RequestMessage, Response, SamplingParams,
 };

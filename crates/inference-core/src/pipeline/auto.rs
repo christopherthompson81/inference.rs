@@ -697,8 +697,13 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
     if let Ok(tp) = MultimodalLoaderType::from_causal_lm_name(name) {
         return Ok(Detected::Multimodal(tp));
     }
-    let tp = NormalLoaderType::from_causal_lm_name(name)?;
-    Ok(Detected::Normal(tp))
+    match NormalLoaderType::from_causal_lm_name(name) {
+        Ok(tp) => Ok(Detected::Normal(tp)),
+        // a multimodal class with no multimodal loader runs its text model
+        Err(err) => text_loader_of_multimodal(config)
+            .map(Detected::Normal)
+            .ok_or(err),
+    }
 }
 
 // the text loader for a multimodal config's `text_config`, by its `model_type`
@@ -1024,6 +1029,30 @@ mod tests {
             Some(NormalLoaderType::Qwen3_5Moe)
         );
         assert_eq!(text_loader_of_multimodal(r#"{"model_type":"llama"}"#), None);
+    }
+
+    // a multimodal class with only a text loader (Inkling 2's own checkpoints) runs its text model
+    #[test]
+    fn a_multimodal_class_without_its_loader_runs_its_text_model() {
+        let detected = detect(
+            "thinkingmachines/Inkling-2-Mini",
+            &ConfigArtifacts {
+                contents: Some(
+                    r#"{"architectures":["Inkling2LoopForConditionalGeneration"],
+                        "text_config":{"model_type":"inkling2_loop_text"}}"#
+                        .to_string(),
+                ),
+                sentence_transformers_present: false,
+                repo_files: Vec::new(),
+                remote_access_issue: None,
+                weight_index: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            detected,
+            Detected::Normal(NormalLoaderType::Inkling2Loop)
+        ));
     }
 
     #[test]

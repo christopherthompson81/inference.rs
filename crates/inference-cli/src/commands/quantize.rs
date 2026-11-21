@@ -300,6 +300,9 @@ pub async fn run_exl3_quantize(options: Exl3QuantizeOptions, global: GlobalOptio
 
 /// Score against a KL-divergence base, or with `--text` write one, through the streamed load that collects Hessians.
 pub async fn run_kld(options: KldOptions, global: GlobalOptions) -> Result<()> {
+    if options.resident {
+        return run_kld_resident(options, global).await;
+    }
     let Some(text) = options.text else {
         // a base given as the calibration file is scored against, writing nothing
         return run_hessians(
@@ -334,10 +337,11 @@ pub async fn run_kld(options: KldOptions, global: GlobalOptions) -> Result<()> {
     written
 }
 
-pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Result<()> {
-    initialize_logging();
-    let gguf = Path::new(&options.model_id);
-    let model = if gguf.is_file() && gguf.extension().is_some_and(|e| e == GGUF_EXTENSION) {
+// `model_id` (a GGUF file or a model) in BF16, streamed through `calibration` (and where it writes) when given
+fn bf16_model(model_id: String, streamed: Option<(PathBuf, PathBuf)>) -> ModelSelected {
+    let (calibration_file, hessians_out) = streamed.unzip();
+    let gguf = Path::new(&model_id);
+    if gguf.is_file() && gguf.extension().is_some_and(|e| e == GGUF_EXTENSION) {
         ModelSelected::GGUF {
             tok_model_id: None,
             quantized_model_id: gguf
@@ -358,8 +362,8 @@ pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Re
             organization: None,
             write_uqff: None,
             imatrix: None,
-            calibration_file: Some(options.calibration_file),
-            hessians_out: Some(options.output_path),
+            calibration_file: calibration_file.clone(),
+            hessians_out: hessians_out.clone(),
             max_edge: None,
             max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
             max_batch_size: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
@@ -371,7 +375,7 @@ pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Re
         }
     } else {
         ModelSelected::Run {
-            model_id: options.model_id,
+            model_id,
             quant: None,
             tokenizer_json: None,
             // the host's auto dtype is f32, twice what a streamed model holds in RAM
@@ -381,8 +385,8 @@ pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Re
             write_uqff: None,
             from_uqff: None,
             imatrix: None,
-            calibration_file: Some(options.calibration_file),
-            hessians_out: Some(options.output_path),
+            calibration_file,
+            hessians_out,
             exl3_out: None,
             max_edge: None,
             max_seq_len: inference_api::engine::AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
@@ -393,7 +397,176 @@ pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Re
             matformer_config_path: None,
             matformer_slice_name: None,
         }
+    }
+}
+
+/// `--resident`: the model loaded whole onto its device, its prompt scoring writing the base over `--text` or scoring
+/// against it, reported as the streamed scoring does.
+async fn run_kld_resident(options: KldOptions, global: GlobalOptions) -> Result<()> {
+    use inference_api::engine_logits::{
+        KldBase, KldBaseWriter, LogitsOutput, PromptInput, PromptLogitsRequest,
     };
+    use inference_api::operations::TokenizeRequest;
+    initialize_logging();
+    let model = resolve_model_source(
+        bf16_model(options.model_id, None),
+        &global.token_source,
+        false,
+        QuantPolicy::GgufInput,
+    )
+    .await?
+    .model;
+    let spec = EngineSpec {
+        model: Some(model),
+        model_id: None,
+        runtime: RuntimeSpec {
+            max_seqs: Some(1),
+            prefix_cache_n: Some(0),
+            // one sequence at a time; a paged cache would take the memory the full logits need
+            paged_attn: Some(false),
+            token_source: Some(global.token_source.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let engine = Engine::load(spec).await?;
+    let tokenize = |text: String| TokenizeRequest {
+        model: None,
+        text,
+        add_special_tokens: true,
+    };
+    // llama-perplexity starts each chunk with the BOS where encoding adds one
+    let bos = engine
+        .tokenize(tokenize(String::new()))
+        .await
+        .map_err(anyhow::Error::msg)?
+        .tokens
+        .first()
+        .copied();
+    let score = |tokens: Vec<u32>,
+                 reference: Option<inference_api::engine_logits::LogitsReference>| {
+        PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens(tokens),
+            output: if reference.is_some() {
+                LogitsOutput::Logprobs
+            } else {
+                LogitsOutput::Logits
+            },
+            audio: Vec::new(),
+            reference,
+        }
+    };
+    let chunk_of = |chunk: &[u32]| {
+        let mut chunk = chunk.to_vec();
+        if let Some(bos) = bos {
+            chunk[0] = bos;
+        }
+        chunk
+    };
+    if let Some(text) = options.text {
+        let tokens = engine
+            .tokenize(tokenize(std::fs::read_to_string(&text)?))
+            .await
+            .map_err(anyhow::Error::msg)?
+            .tokens;
+        let n_chunk = options.chunks.min(tokens.len() / options.ctx);
+        anyhow::ensure!(
+            n_chunk > 0,
+            "{} holds {} tokens, less than one chunk of {}",
+            text.display(),
+            tokens.len(),
+            options.ctx
+        );
+        let tokens = &tokens[..n_chunk * options.ctx];
+        let mut writer = None;
+        for chunk in tokens.chunks(options.ctx) {
+            let scored = engine
+                .prompt_logits(score(chunk_of(chunk), None))
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let vocab = scored.vocab_size;
+            let logits = scored
+                .logits
+                .ok_or_else(|| anyhow::anyhow!("prompt scoring returned no logits"))?;
+            let writer = match &mut writer {
+                Some(writer) => writer,
+                None => writer.insert(KldBaseWriter::create(
+                    &options.kld_base,
+                    options.ctx,
+                    vocab,
+                    tokens,
+                )?),
+            };
+            // the second half's rows but the last, each predicting the token after it
+            let first = options.ctx / 2;
+            writer.write_chunk(&logits[first * vocab..(options.ctx - 1) * vocab])?;
+        }
+        writer.expect("at least one chunk").finish()?;
+        info!(
+            "Wrote a base of {n_chunk} chunks of {} tokens to `{}`.",
+            options.ctx,
+            options.kld_base.display()
+        );
+    } else {
+        let mut base = KldBase::open(&options.kld_base)?;
+        let chunks = base
+            .tokens
+            .chunks(base.n_ctx)
+            .map(chunk_of)
+            .collect::<Vec<_>>();
+        let (mut klds, mut same, mut nll, mut nll_base) = (Vec::new(), 0usize, 0f64, 0f64);
+        for chunk in chunks {
+            let reference = base.next_chunk()?;
+            let first = reference.first_row;
+            let scored = engine
+                .prompt_logits(score(chunk, Some(reference)))
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let divergence = scored
+                .divergence
+                .ok_or_else(|| anyhow::anyhow!("prompt scoring returned no divergence"))?;
+            let rows = divergence.kld.len();
+            // token_logprobs[i] scores token i, the one row i - 1 predicts
+            nll -= scored.token_logprobs[first + 1..first + 1 + rows]
+                .iter()
+                .map(|l| f64::from(l.unwrap_or(f32::NAN)))
+                .sum::<f64>();
+            nll_base -= divergence
+                .reference_logprobs
+                .iter()
+                .map(|&l| f64::from(l))
+                .sum::<f64>();
+            same += divergence.same_top.iter().filter(|&&s| s).count();
+            klds.extend(divergence.kld);
+        }
+        let n = f64::from(u32::try_from(klds.len())?);
+        let mean = klds.iter().map(|&k| f64::from(k)).sum::<f64>() / n;
+        klds.sort_by(f32::total_cmp);
+        let pick = |hundredths: usize| klds[(klds.len() - 1) * hundredths / 100];
+        info!(
+            "KLD over {} positions ({} chunks of {}): mean {mean:.5}, median {:.5}, p99 {:.4}, same top {:.2}%, \
+             PPL {:.4} (base {:.4})",
+            klds.len(),
+            base.n_chunk,
+            base.n_ctx,
+            pick(50),
+            pick(99),
+            100.0 * f64::from(u32::try_from(same)?) / n,
+            (nll / n).exp(),
+            (nll_base / n).exp()
+        );
+    }
+    engine.shutdown().await.map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+pub async fn run_hessians(options: HessiansOptions, global: GlobalOptions) -> Result<()> {
+    initialize_logging();
+    let model = bf16_model(
+        options.model_id,
+        Some((options.calibration_file, options.output_path)),
+    );
     let model = resolve_model_source(model, &global.token_source, false, QuantPolicy::GgufInput)
         .await?
         .model;
