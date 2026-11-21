@@ -28,7 +28,7 @@ macro_rules! delegate_to {
     };
     (@method $i:tt tracking) => {
         delegate_to!($i: dtype_and_device, plan_isq, begin_track_stats, begin_track_hessian, stats_snapshot,
-            process_routed_stats, end_track_stats);
+            process_routed_stats, process_sorted_routed_stats, end_track_stats);
     };
     (@method $i:tt activations) => {
         delegate_to!($i: activation_quantization_scheme, activation_quantization_scheme_for,
@@ -89,6 +89,9 @@ macro_rules! delegate_to {
     (@method $i:tt stats_snapshot) => { delegate_to!(@fn $i stats_snapshot() -> Option<(usize, usize)>); };
     (@method $i:tt process_routed_stats) => {
         delegate_to!(@fn $i process_routed_stats(x: &Tensor, ids: &Tensor) -> Result<()>);
+    };
+    (@method $i:tt process_sorted_routed_stats) => {
+        delegate_to!(@fn $i process_sorted_routed_stats(x: &Tensor, counts: &[usize]) -> Result<()>);
     };
     (@method $i:tt end_track_stats) => { delegate_to!(@fn $i end_track_stats() -> Result<Tensor>); };
     (@method $i:tt activation_quantization_scheme) => {

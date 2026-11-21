@@ -2270,6 +2270,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         Ok(())
     }
 
+    /// As [`Self::process_routed_stats`], for rows already grouped by expert: `counts[e]` rows of `x` for expert `e`,
+    /// in order (a grouped GEMM's own ordering). No-op unless routed tracking is enabled.
+    fn process_sorted_routed_stats(&self, _x: &Tensor, _counts: &[usize]) -> Result<()> {
+        Ok(())
+    }
+
     fn is_distributed(&self) -> Option<DistributedKind> {
         None
     }

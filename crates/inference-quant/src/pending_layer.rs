@@ -302,6 +302,10 @@ impl QuantMethod for PendingIsqLayer {
         self.resolve()?.process_routed_stats(x, ids)
     }
 
+    fn process_sorted_routed_stats(&self, x: &Tensor, counts: &[usize]) -> Result<()> {
+        self.resolve()?.process_sorted_routed_stats(x, counts)
+    }
+
     fn is_distributed(&self) -> Option<DistributedKind> {
         self.resolve().ok()?.is_distributed()
     }

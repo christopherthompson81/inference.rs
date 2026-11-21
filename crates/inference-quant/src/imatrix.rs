@@ -234,6 +234,7 @@ impl ImatrixLayerStats {
             let x = inp.reshape(((), inp.dim(D::Minus1)?))?;
             *ncalls += 1;
             *rows += x.dim(0)?;
+            let _span = inference_tensor::profile::span("hessian.dense", Some(x.device()));
             *h = add_gram(Some(h.clone()), &x)?;
             return Ok(());
         }
@@ -329,6 +330,69 @@ impl ImatrixLayerStats {
         Ok(())
     }
 
+    /// Accumulate routed activations already grouped by expert: `counts[e]` consecutive rows of `x` (`(n, in)`) for
+    /// expert `e`, as a grouped GEMM orders its rows.
+    pub fn process_sorted(&self, x: &Tensor, counts: &[usize]) -> Result<()> {
+        if self.0.read().unwrap().is_none() {
+            return Ok(());
+        }
+        let mut handle = self.0.write().unwrap();
+        let n = x.dim(0)?;
+        if counts.iter().sum::<usize>() != n {
+            inference_tensor::bail!(
+                "{n} rows grouped as {} by expert",
+                counts.iter().sum::<usize>()
+            );
+        }
+        match handle.as_mut() {
+            Some(ImatrixLayerStats_::RoutedHessian {
+                ncalls,
+                rows,
+                counts: seen,
+                h,
+                pending,
+                pending_rows,
+                ..
+            }) => {
+                // queued as rows a slot each, with their experts, for the next flush's one gather
+                let ids = counts
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(e, &c)| std::iter::repeat_n(e as u32, c))
+                    .collect::<Vec<_>>();
+                let ids = Tensor::from_vec(ids, (n, 1), x.device())?;
+                pending.push((x.clone(), ids, true));
+                *pending_rows += n;
+                *rows += n;
+                *ncalls += 1;
+                if *pending_rows >= ROUTED_FLUSH_ROWS {
+                    flush_routed(pending, seen, h)?;
+                    *pending_rows = 0;
+                }
+            }
+            Some(ImatrixLayerStats_::Routed {
+                ncalls,
+                rows,
+                counts: seen,
+                accum,
+            }) => {
+                let ids = counts
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(e, &c)| std::iter::repeat_n(e as u32, c))
+                    .collect::<Vec<_>>();
+                let ids = Tensor::from_vec(ids, n, x.device())?;
+                *accum = accum.index_add(&ids, &x.to_dtype(DType::F32)?.sqr()?, 0)?;
+                let ones = Tensor::ones(n, DType::F32, seen.device())?;
+                *seen = seen.index_add(&ids, &ones, 0)?;
+                *rows += n;
+                *ncalls += 1;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Dense: `[in]`. Routed: `[E, in]` with all-zero rows for zero-traffic experts. Hessian: `x^T x` over the rows
     /// recorded, divided by their count, `[in, in]`; routed, one per expert `[E, in, in]` on the host (unit for an expert
     /// no row reached).
@@ -421,6 +485,7 @@ fn flush_routed(
     if pending.is_empty() {
         return Ok(());
     }
+    let _span = inference_tensor::profile::span("hessian.routed", Some(pending[0].0.device()));
     let mut slots = vec![Vec::new(); counts.len()];
     let mut base = 0u32;
     let xs = pending.iter().map(|(x, ..)| x.clone()).collect::<Vec<_>>();

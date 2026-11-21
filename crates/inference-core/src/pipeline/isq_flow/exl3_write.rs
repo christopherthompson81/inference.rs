@@ -930,6 +930,7 @@ fn run_streamed(
     weights: &[PathBuf],
 ) -> Result<()> {
     let gpu = Device::new_cuda(0)?;
+    let _pool = crate::retain_memory_pool(&gpu);
     let dir = match &run {
         StreamedRun::Collect(dir) => {
             std::fs::create_dir_all(dir)?;

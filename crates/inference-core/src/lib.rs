@@ -104,6 +104,39 @@ mod engine;
 mod gguf_imatrix;
 mod gguf_write;
 pub use gguf_imatrix::{HessianDir, ImatrixMapping, cimatrix_for_gguf, hessians_for_gguf};
+
+/// While it lives, a CUDA device's memory pool keeps what it frees instead of handing it back to the driver at the
+/// next sync, as a running engine's does: a long tool reallocating large buffers (a GGUF quantize, a streamed
+/// collection) otherwise maps them afresh after every sync (~65 ms a GB). Holds nothing off CUDA.
+pub struct MemoryPoolRetention {
+    #[cfg(feature = "cuda")]
+    _retention: Option<pipeline::cuda_graph::CudaMemoryPoolRetention>,
+}
+
+/// [`MemoryPoolRetention`] for `device`; a failure to retain is logged and leaves the pool as it is.
+pub fn retain_memory_pool(device: &inference_tensor::Device) -> MemoryPoolRetention {
+    #[cfg(feature = "cuda")]
+    {
+        let retention = match device {
+            inference_tensor::Device::Cuda(cuda) => {
+                pipeline::cuda_graph::retain_cuda_memory_pool(&cuda.cuda_stream())
+                    .inspect_err(|err| {
+                        tracing::warn!("Failed to retain the CUDA memory pool: {err}")
+                    })
+                    .ok()
+            }
+            _ => None,
+        };
+        MemoryPoolRetention {
+            _retention: retention,
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = device;
+        MemoryPoolRetention {}
+    }
+}
 pub use gguf_write::GgufWriteSummary;
 use inference_nn::media_inputs::video as video_input;
 pub use video_input::{VideoFrameSampling, VideoInput, sample_frame_indices};

@@ -125,6 +125,63 @@ pub fn cutlass_fused_moe(
     act: super::cuda::GatedAct,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
+    Ok(fused_moe(
+        xs,
+        gate_up,
+        down,
+        topk_ids,
+        topk_weights,
+        num_experts,
+        act,
+        dev,
+        false,
+    )?
+    .0)
+}
+
+/// As [`cutlass_fused_moe`], with the down projection's inputs as the kernels ordered them: the GLU outputs of every
+/// routed row `(num_tokens * topk, inter)`, grouped by expert, and each expert's row count.
+#[allow(clippy::too_many_arguments)]
+pub fn cutlass_fused_moe_routed(
+    xs: &Tensor,
+    gate_up: &Tensor,
+    down: &Tensor,
+    topk_ids: &Tensor,
+    topk_weights: &Tensor,
+    num_experts: usize,
+    act: super::cuda::GatedAct,
+    dev: &CudaDevice,
+) -> Result<(Tensor, Tensor, Vec<usize>)> {
+    let (out, routed) = fused_moe(
+        xs,
+        gate_up,
+        down,
+        topk_ids,
+        topk_weights,
+        num_experts,
+        act,
+        dev,
+        true,
+    )?;
+    let (act, counts) = routed.expect("kept routes");
+    Ok((out, act, counts))
+}
+
+// the down projection's inputs as the kernels grouped them, and each expert's row count
+type Routes = (Tensor, Vec<usize>);
+
+#[allow(clippy::too_many_arguments)]
+fn fused_moe(
+    xs: &Tensor,
+    gate_up: &Tensor,
+    down: &Tensor,
+    topk_ids: &Tensor,
+    topk_weights: &Tensor,
+    num_experts: usize,
+    act: super::cuda::GatedAct,
+    dev: &CudaDevice,
+    keep_routes: bool,
+) -> Result<(Tensor, Option<Routes>)> {
     let (num_tokens, hidden) = xs.dims2()?;
     let (_, two_inter, k1) = gate_up.dims3()?;
     let inter = two_inter / 2;
@@ -350,5 +407,18 @@ pub fn cutlass_fused_moe(
 
     let out_storage = inference_tensor::CudaStorage::wrap_cuda_slice(out, dev.clone());
     let out_tensor = Tensor::from((Storage::Cuda(out_storage), (num_valid, hidden)));
-    super::cuda::moe_sum_bf16(&out_tensor, num_tokens, topk, dev)
+    let summed = super::cuda::moe_sum_bf16(&out_tensor, num_tokens, topk, dev)?;
+    let routes = match keep_routes {
+        // the expert offsets' successive differences: each expert's rows of `act`, in order
+        true => {
+            let offsets = dev.clone_dtoh(&offsets)?;
+            let counts = offsets
+                .windows(2)
+                .map(|w| usize::try_from(w[1] - w[0]).map_err(inference_tensor::Error::wrap))
+                .collect::<Result<Vec<_>>>()?;
+            Some((act, counts))
+        }
+        false => None,
+    };
+    Ok((summed, routes))
 }

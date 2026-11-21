@@ -91,3 +91,34 @@ in-place carry       73.2    35.4  17.0    11.0    9.7         7.7     7.4    2.
 106 s at the start of this investigation, 54-58 s now. The quantizer and the loader are close (the waits came
 back), so the next gains are on both sides: the loader's reads and Hessian unpacking, and the encode calls (14,088,
 mostly Q8_0's 32-column blocks, each with its carry).
+
+## Run 4 - 2026-11-21 02:30
+
+Hessian collection (266K chat tokens, 133 s, GPU 61%), profiled: `stream.forward` 97 s of it, and under finer spans
+(`layer.gdn`, `layer.attention`, `moe.gather`, `hessian.dense`, `hessian.routed`) the tracked experts' gather path
+(`moe.gather`, a pass per expert each call) 117 of 162 profiled seconds.
+
+Tracked BF16 experts now run the grouped CUTLASS MoE (`cutlass_fused_moe_routed`), which also returns the down
+projection's inputs as the kernels ordered them (each expert's GLU outputs in a run, with the counts), fed to the
+down stack's statistics (`process_sorted_routed_stats`, queued with their experts for the batched flush). Layer 0's
+down Hessians match the gather path's to 1.3e-3 (the GLU's bf16 rounding differs), deeper ones by the usual route
+flips. The grouped call still read 100 ms per 8 chunks, and a benchmark of the MoE alone (8192 tokens, 256 experts,
+2048 -> 512) put CUTLASS at 74-80 ms against 10.6 ms for a loop of one cuBLAS GEMM per expert. Replacing its GEMMs
+with cuBLAS's grouped GEMM changed nothing (76-95 ms): the stages, timed inside, summed to 13 ms. The rest was the
+CUDA memory pool: its release threshold is 0 outside a running engine (which retains it), so every sync handed the
+~1 GB the call allocates back to the driver and the next call mapped it again. With the pool retained, CUTLASS reads
+12.3 ms and the cuBLAS version 12.8 ms; CUTLASS stays. (The engine retains the pool while it runs, so serving never
+paid this; a model's load, the streamed tools and `quantize gguf` did.)
+
+`inference_core::retain_memory_pool` now holds the pool for the streamed run and for `requantize_gguf` (through
+inference-api's wrapper).
+
+```
+                                        before     now
+Hessian collection, 266K tokens         133 s      97 s (GPU 75%)
+  profiled forward (64K tokens)         50.7 s     16.3 s
+quantize gguf, v2 recipe                54-58 s    52-53 s (GPU 61%)
+```
+
+Collection now: ~1.1 s a layer, of it the layer's build ~0.58 s (1.6 GB of BF16 uploaded from the mapping), the
+Hessians' save ~0.25 s, the forward the rest.
