@@ -749,7 +749,8 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
             ignore_merges: false,
             normalize_nfc: false,
         },
-        "gpt-4o" | "llama4" => BpePreTokenizerSpec {
+        // Inkling 2 is GPT-4o's split (llama.cpp's `inkling2` profile differs only in having no BOS)
+        "gpt-4o" | "llama4" | "inkling2" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Gpt4O,
             regexes: &[GPT4O_REGEX],
             ignore_merges: false,
@@ -1833,6 +1834,7 @@ mod tests {
             ("hunyuan", BpePreTokenizerKind::Qwen2, false, false, 1),
             ("falcon", BpePreTokenizerKind::Falcon, false, false, 3),
             ("gpt-4o", BpePreTokenizerKind::Gpt4O, false, false, 1),
+            ("inkling2", BpePreTokenizerKind::Gpt4O, false, false, 1),
             ("tekken", BpePreTokenizerKind::Tekken, true, false, 1),
         ];
 

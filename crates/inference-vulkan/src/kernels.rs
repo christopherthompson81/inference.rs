@@ -57,6 +57,7 @@ macro_rules! kernels {
             BlockType::Q5K => &self.mul_mm_q5_k,
             BlockType::Q6K => &self.mul_mm_q6_k,
             BlockType::IQ4XS => &self.mul_mm_iq4_xs,
+            BlockType::IQ4NL => &self.mul_mm_iq4_nl,
             BlockType::IQ3S => &self.mul_mm_iq3_s,
             BlockType::Q3K => &self.mul_mm_q3_k,
             BlockType::MXFP4 => &self.mul_mm_mxfp4,
@@ -94,6 +95,7 @@ kernels! {
     embed_q5_k: EMBED_Q5_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     embed_q6_k: EMBED_Q6_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     embed_iq4_xs: EMBED_IQ4_XS, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_iq4_nl: EMBED_IQ4_NL, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     embed_iq3_s: EMBED_IQ3_S, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     embed_q3_k: EMBED_Q3_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     embed_mxfp4: EMBED_MXFP4, EMBED_BINDINGS, EMBED_PUSH_BYTES;
@@ -107,6 +109,7 @@ kernels! {
     mat_vecs_q5_k: MUL_MAT_VECS_Q5_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q6_k: MUL_MAT_VECS_Q6_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_iq4_xs: MUL_MAT_VECS_IQ4_XS, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_iq4_nl: MUL_MAT_VECS_IQ4_NL, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_iq3_s: MUL_MAT_VECS_IQ3_S, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q3_k: MUL_MAT_VECS_Q3_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_mxfp4: MUL_MAT_VECS_MXFP4, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
@@ -119,6 +122,7 @@ kernels! {
     glu_mat_vecs_q5_k: MUL_MAT_VECS_GLU_Q5_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     glu_mat_vecs_q6_k: MUL_MAT_VECS_GLU_Q6_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     glu_mat_vecs_iq4_xs: MUL_MAT_VECS_GLU_IQ4_XS, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_iq4_nl: MUL_MAT_VECS_GLU_IQ4_NL, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     glu_mat_vecs_iq3_s: MUL_MAT_VECS_GLU_IQ3_S, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     glu_mat_vecs_q3_k: MUL_MAT_VECS_GLU_Q3_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     glu_mat_vecs_mxfp4: MUL_MAT_VECS_GLU_MXFP4, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
@@ -135,6 +139,7 @@ kernels! {
     mul_mm_q5_k: MUL_MM_Q5_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q6_k: MUL_MM_Q6_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_iq4_xs: MUL_MM_IQ4_XS, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_iq4_nl: MUL_MM_IQ4_NL, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_iq3_s: MUL_MM_IQ3_S, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q3_k: MUL_MM_Q3_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_mxfp4: MUL_MM_MXFP4, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
@@ -177,6 +182,7 @@ kernels! {
     moe_mat_vecs_q5_k: MOE_MAT_VECS_Q5_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_mat_vecs_q6_k: MOE_MAT_VECS_Q6_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_mat_vecs_iq4_xs: MOE_MAT_VECS_IQ4_XS, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_iq4_nl: MOE_MAT_VECS_IQ4_NL, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_mat_vecs_iq3_s: MOE_MAT_VECS_IQ3_S, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_mat_vecs_q3_k: MOE_MAT_VECS_Q3_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_mat_vecs_mxfp4: MOE_MAT_VECS_MXFP4, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
@@ -190,6 +196,7 @@ kernels! {
     moe_mm_q5_k: MOE_MM_Q5_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_q6_k: MOE_MM_Q6_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_iq4_xs: MOE_MM_IQ4_XS, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_iq4_nl: MOE_MM_IQ4_NL, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_iq3_s: MOE_MM_IQ3_S, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_q3_k: MOE_MM_Q3_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_mxfp4: MOE_MM_MXFP4, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
@@ -201,6 +208,7 @@ kernels! {
     paged_decode_reduce: PAGED_DECODE_REDUCE, ops::PAGED_REDUCE_BINDINGS, ops::PAGED_REDUCE_PUSH_BYTES;
     flash_attn: FLASH_ATTN, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
     flash_decode: FLASH_DECODE, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
+    biased_decode: BIASED_DECODE, ops::FLASH_BINDINGS, ops::BIASED_DECODE_PUSH_BYTES;
     gated_rmsnorm: GATED_RMSNORM, ops::GATED_RMSNORM_BINDINGS, ops::GATED_RMSNORM_PUSH_BYTES;
     gated_rmsnorm_q8: GATED_RMSNORM_Q8, ops::GATED_Q8_BINDINGS, ops::GATED_Q8_PUSH_BYTES;
     paged_prefill: PAGED_PREFILL, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
@@ -289,6 +297,7 @@ impl Kernels {
             BlockType::Q5K => &self.glu_mat_vecs_q5_k,
             BlockType::Q6K => &self.glu_mat_vecs_q6_k,
             BlockType::IQ4XS => &self.glu_mat_vecs_iq4_xs,
+            BlockType::IQ4NL => &self.glu_mat_vecs_iq4_nl,
             BlockType::IQ3S => &self.glu_mat_vecs_iq3_s,
             BlockType::Q3K => &self.glu_mat_vecs_q3_k,
             BlockType::MXFP4 => &self.glu_mat_vecs_mxfp4,
@@ -307,6 +316,7 @@ impl Kernels {
             BlockType::Q5K => &self.moe_mat_vecs_q5_k,
             BlockType::Q6K => &self.moe_mat_vecs_q6_k,
             BlockType::IQ4XS => &self.moe_mat_vecs_iq4_xs,
+            BlockType::IQ4NL => &self.moe_mat_vecs_iq4_nl,
             BlockType::IQ3S => &self.moe_mat_vecs_iq3_s,
             BlockType::Q3K => &self.moe_mat_vecs_q3_k,
             BlockType::MXFP4 => &self.moe_mat_vecs_mxfp4,
@@ -325,6 +335,7 @@ impl Kernels {
             BlockType::Q5K => &self.moe_mm_q5_k,
             BlockType::Q6K => &self.moe_mm_q6_k,
             BlockType::IQ4XS => &self.moe_mm_iq4_xs,
+            BlockType::IQ4NL => &self.moe_mm_iq4_nl,
             BlockType::IQ3S => &self.moe_mm_iq3_s,
             BlockType::Q3K => &self.moe_mm_q3_k,
             BlockType::MXFP4 => &self.moe_mm_mxfp4,
@@ -393,7 +404,7 @@ pub(crate) enum PrefillWidth {
 // the matrix-core prompt attention's cache types (f32, f16, quantized), a set for each PrefillWidth
 const PREFILL_CACHE_TYPES: usize = 3;
 // BlockType's variants
-const BLOCK_TYPES: usize = 12;
+const BLOCK_TYPES: usize = 13;
 // the cm2 kernels' tile (weight rows, and tokens of the prompt matmul), and their K step: a row a whole number of them
 const CM2_TILE: usize = 128;
 pub(crate) const CM2_K_STEP: usize = 64;
@@ -432,6 +443,7 @@ impl CoopKernels {
             (shaders::MUL_MMC_IQ3_S, "mul_mmc_iq3_s"),
             (shaders::MUL_MMC_Q3_K, "mul_mmc_q3_k"),
             (shaders::MUL_MMC_MXFP4, "mul_mmc_mxfp4"),
+            (shaders::MUL_MMC_IQ4_NL, "mul_mmc_iq4_nl"),
         ]
         .map(|(spirv, name)| {
             PipelineSpec::new(spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name).subgroup(subgroup)
@@ -449,6 +461,7 @@ impl CoopKernels {
             (shaders::MUL_MMCL_IQ3_S, "mul_mmcl_iq3_s"),
             (shaders::MUL_MMCL_Q3_K, "mul_mmcl_q3_k"),
             (shaders::MUL_MMCL_MXFP4, "mul_mmcl_mxfp4"),
+            (shaders::MUL_MMCL_IQ4_NL, "mul_mmcl_iq4_nl"),
         ]
         .map(|(spirv, name)| {
             PipelineSpec::new(spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name).subgroup(subgroup)
@@ -466,6 +479,7 @@ impl CoopKernels {
             (shaders::MOE_MMC_IQ3_S, "moe_mmc_iq3_s"),
             (shaders::MOE_MMC_Q3_K, "moe_mmc_q3_k"),
             (shaders::MOE_MMC_MXFP4, "moe_mmc_mxfp4"),
+            (shaders::MOE_MMC_IQ4_NL, "moe_mmc_iq4_nl"),
         ]
         .map(|(spirv, name)| {
             PipelineSpec::new(spirv, MOE_MMC_BINDINGS, MOE_MMC_PUSH_BYTES, name).subgroup(subgroup)
@@ -667,6 +681,11 @@ impl CoopKernels {
                 shaders::MUL_MMQ_CM_MXFP4,
                 "mul_mmq_cm_mxfp4",
             ),
+            (
+                BlockType::IQ4NL,
+                shaders::MUL_MMQ_CM_IQ4_NL,
+                "mul_mmq_cm_iq4_nl",
+            ),
         ];
         let moe_mmq_cm_types = [
             (BlockType::Q8_0, shaders::MOE_MMQ_CM_Q8_0, "moe_mmq_cm_q8_0"),
@@ -690,6 +709,11 @@ impl CoopKernels {
                 BlockType::MXFP4,
                 shaders::MOE_MMQ_CM_MXFP4,
                 "moe_mmq_cm_mxfp4",
+            ),
+            (
+                BlockType::IQ4NL,
+                shaders::MOE_MMQ_CM_IQ4_NL,
+                "moe_mmq_cm_iq4_nl",
             ),
         ];
         if int8 {
@@ -866,6 +890,8 @@ pub enum BlockType {
     Q3K,
     /// an E8M0 scale byte (padded to two) and 32 E2M1 nibbles, the file's 17-byte block widened at upload so blocks start on u16s
     MXFP4,
+    /// an f16 scale and 32 nibbles as indices into IQ4XS's 16-entry nonlinear table
+    IQ4NL,
 }
 
 impl BlockType {
@@ -884,6 +910,7 @@ impl BlockType {
             Self::IQ3S => 110,
             Self::Q3K => 110,
             Self::MXFP4 => 18,
+            Self::IQ4NL => 18,
         }
     }
 
@@ -1040,6 +1067,7 @@ impl Recorder<'_> {
             BlockType::Q5K => &kernels.embed_q5_k,
             BlockType::Q6K => &kernels.embed_q6_k,
             BlockType::IQ4XS => &kernels.embed_iq4_xs,
+            BlockType::IQ4NL => &kernels.embed_iq4_nl,
             BlockType::IQ3S => &kernels.embed_iq3_s,
             BlockType::Q3K => &kernels.embed_q3_k,
             BlockType::MXFP4 => &kernels.embed_mxfp4,
@@ -1344,6 +1372,7 @@ impl Recorder<'_> {
             BlockType::Q5K => &kernels.mat_vecs_q5_k,
             BlockType::Q6K => &kernels.mat_vecs_q6_k,
             BlockType::IQ4XS => &kernels.mat_vecs_iq4_xs,
+            BlockType::IQ4NL => &kernels.mat_vecs_iq4_nl,
             BlockType::IQ3S => &kernels.mat_vecs_iq3_s,
             BlockType::Q3K => &kernels.mat_vecs_q3_k,
             BlockType::MXFP4 => &kernels.mat_vecs_mxfp4,

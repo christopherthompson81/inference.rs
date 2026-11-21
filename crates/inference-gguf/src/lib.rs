@@ -13,6 +13,7 @@ mod gguf_tokenizer;
 pub mod glm_asr_bindings;
 pub mod granite_multimodal_bindings;
 pub mod idefics3_bindings;
+mod inkling2_bindings;
 pub mod lfm2_vl_bindings;
 pub mod llama4_bindings;
 #[cfg(any(test, feature = "models-gemma"))]

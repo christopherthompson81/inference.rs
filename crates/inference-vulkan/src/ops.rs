@@ -2116,6 +2116,7 @@ impl Recorder<'_> {
 
 pub(crate) const FLASH_BINDINGS: usize = 5;
 pub(crate) const FLASH_PUSH_BYTES: u32 = 16 * 4;
+pub(crate) const BIASED_DECODE_PUSH_BYTES: u32 = 13 * 4;
 // flash_attn.comp's rows a workgroup, widest head and vec4 width
 const FLASH_ROWS: usize = 128;
 const FLASH_MAX_HEAD: usize = 128;
@@ -2168,6 +2169,82 @@ impl FlashAttn<'_> {
             .find(|h| group.is_multiple_of(*h))
             .unwrap_or(1);
         (row_heads, FLASH_ROWS / row_heads)
+    }
+}
+
+/// The attention of a cache's last position, a workgroup a query head, over f32 `k` and `v` read in place: a kv head's
+/// keys are `head_size`-wide rows from `kv_head_stride` floats past the last head's, a batch `kv_batch_stride` past the
+/// last. `bias` holds `extent + 1` floats a (batch, head): the additive bias at distances `0..extent` (none past them),
+/// then the head's sink logit (with a zero value); keys `window` or more back are hidden (`0` for none). `q` and `out`
+/// are contiguous `(batch, heads, head_size)`.
+pub struct BiasedDecode<'a> {
+    pub batch: usize,
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub keys: usize,
+    pub head_size: usize,
+    pub kv_head_stride: usize,
+    pub kv_batch_stride: usize,
+    pub extent: usize,
+    pub window: usize,
+    pub scale: f32,
+    pub q: At<'a>,
+    pub k: At<'a>,
+    pub v: At<'a>,
+    pub bias: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
+impl Recorder<'_> {
+    pub fn biased_decode(&self, op: &BiasedDecode<'_>) -> Result<()> {
+        let vec4 = |at: usize| at.is_multiple_of(FLASH_VEC);
+        if !FlashAttn::supports(op.heads, op.kv_heads, op.head_size)
+            || ![
+                op.q.1,
+                op.k.1,
+                op.v.1,
+                op.kv_head_stride,
+                op.kv_batch_stride,
+            ]
+            .into_iter()
+            .all(vec4)
+        {
+            return Err(Error::Invalid(format!(
+                "biased decode of {} heads over {} kv heads, head size {}",
+                op.heads, op.kv_heads, op.head_size
+            )));
+        }
+        if op.batch == 0 {
+            return Ok(());
+        }
+        let mut bytes = words(&[op.keys, op.heads, op.kv_heads, op.head_size / FLASH_VEC])?;
+        bytes.extend_from_slice(&op.scale.to_bits().to_le_bytes());
+        bytes.extend(words(&[
+            op.q.1 / FLASH_VEC,
+            op.k.1 / FLASH_VEC,
+            op.v.1 / FLASH_VEC,
+            op.bias.1,
+            op.kv_head_stride / FLASH_VEC,
+            op.kv_batch_stride / FLASH_VEC,
+            op.extent,
+            op.window,
+        ])?);
+        let buffers = [op.q.0, op.k.0, op.v.0, op.bias.0, op.out];
+        self.context.kernels.biased_decode.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [op.heads as u32, 1, op.batch as u32],
+        );
+        self.work.set(
+            self.work
+                .get()
+                .saturating_add((2 * op.batch * op.heads * op.keys * op.head_size) as u64),
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
     }
 }
 

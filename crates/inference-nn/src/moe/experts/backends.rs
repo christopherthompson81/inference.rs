@@ -1083,7 +1083,8 @@ impl FusedExpertsWeights {
             .narrow(D::Minus1, self.w.w_size_n, self.w.w_size_n)?
             .contiguous()?;
 
-        let down_inputs = (up * gate.apply(&config.act)?)?.reshape(((), self.w.w_size_n))?;
+        let down_inputs =
+            crate::ops::mul_and_act(&gate, &up, config.act)?.reshape(((), self.w.w_size_n))?;
 
         let ys = moe::moe_gemm(
             &down_inputs,
@@ -1568,7 +1569,7 @@ impl FastExpertsWeights {
                     .reshape((forward.shape.num_tokens, 1, forward.shape.hidden_dim))?;
             let gate = self.fused_gate_proj.gather_forward(&xs, forward.topk_ids)?;
             let up = self.fused_up_proj.gather_forward(&xs, forward.topk_ids)?;
-            let down_in = (up * gate.apply(&config.act)?)?;
+            let down_in = crate::ops::mul_and_act(&gate, &up, config.act)?;
             self.fused_down_proj.process_routed_stats(&down_in, ids)?;
             self.fused_down_proj
                 .gather_forward(&down_in, forward.topk_ids)?
@@ -1587,7 +1588,7 @@ impl FastExpertsWeights {
             ))?;
             let gate = self.fused_gate_proj.gather_forward(&xs, &indices)?;
             let up = self.fused_up_proj.gather_forward(&xs, &indices)?;
-            let down_in = (up * gate.apply(&config.act)?)?;
+            let down_in = crate::ops::mul_and_act(&gate, &up, config.act)?;
             let inter = down_in.dim(D::Minus1)?;
             self.fused_down_proj.process_routed_stats(
                 &down_in.reshape((forward.shape.num_tokens, config.num_experts_per_tok, inter))?,

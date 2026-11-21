@@ -54,6 +54,9 @@ pub enum GatedActivationOrder {
 }
 
 pub fn mul_and_act(a: &Tensor, b: &Tensor, act: Activation) -> Result<Tensor> {
+    if let Activation::SoftcapSilu(gate, up) = act {
+        return softcap_silu_mul(a, b, gate, up);
+    }
     // Check if we can use the fused kernel (works on CUDA, Metal, and CPU)
     if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32)
         && a.dtype() == b.dtype()
@@ -146,6 +149,21 @@ pub fn split_mul_and_act_order(
         GatedActivationOrder::GateUp => mul_and_act(&first, &second, act),
         GatedActivationOrder::UpGate => mul_and_act(&second, &first, act),
     }
+}
+
+/// `gate tanh(a / gate) sigmoid(a) * up tanh(b / up)`, in f32.
+pub fn softcap_silu_mul(a: &Tensor, b: &Tensor, gate: f64, up: f64) -> Result<Tensor> {
+    let dtype = a.dtype();
+    let (a, b) = (a.to_dtype(DType::F32)?, b.to_dtype(DType::F32)?);
+    if a.device().is_vulkan() {
+        let act = inference_tensor::vulkan::GluAct::SoftcapSilu { gate, up };
+        if let Some(out) = inference_tensor::vulkan::glu(&a.contiguous()?, &b.contiguous()?, act)? {
+            return out.to_dtype(dtype);
+        }
+    }
+    let capped = ((&a / gate)?.tanh()? * gate)?;
+    let up = ((&b / up)?.tanh()? * up)?;
+    ((capped * inference_tensor::nn::ops::sigmoid(&a)?)? * up)?.to_dtype(dtype)
 }
 
 type QuantProjection = Arc<dyn inference_quant::QuantMethod>;

@@ -62,6 +62,8 @@ pub enum MapOp {
     ReluMul = 33,
     GeluErfMul = 34,
     SigmoidMul = 35,
+    /// `p0 tanh(a / p0) sigmoid(a) * p1 tanh(b / p1)`
+    SoftcapSiluMul = 36,
 }
 
 impl MapOp {

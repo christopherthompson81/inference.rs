@@ -68,6 +68,8 @@ const uint ELU = 27;
 const uint SIGMOID = 28;
 const uint RELU2 = 29;
 const uint GELU_ERF = 30;
+// the GLUs (31 to 35) are glu_act.glsl's; this one reads its caps from the push constants
+const uint SOFTCAP_SILU_MUL = 36;
 #include "glu_act.glsl"
 
 // Rust's powf: GLSL's pow leaves a negative base (and 0^0) undefined, where an integer exponent's parity sets the sign
@@ -124,6 +126,7 @@ float apply(float x, float y) {
         case RELU_MUL:
         case GELU_ERF_MUL:
         case SIGMOID_MUL: return glu(pc.op, x, y);
+        case SOFTCAP_SILU_MUL: return pc.p0 * tanh(x / pc.p0) / (1.0 + exp(-x)) * (pc.p1 * tanh(y / pc.p1));
     }
     return x;
 }

@@ -1015,14 +1015,16 @@ pub(crate) fn gated_rmsnorm(
     Ok(tensor_of(out, x.dims()))
 }
 
-fn glu_op(act: crate::vulkan::GluAct) -> MapOp {
+// the op and its two parameters; None where only the elementwise kernel has it (not the matvecs ending in a GLU)
+fn glu_op(act: crate::vulkan::GluAct) -> (MapOp, [f32; 2]) {
     use crate::vulkan::GluAct as G;
     match act {
-        G::Silu => MapOp::SiluMul,
-        G::Gelu => MapOp::GeluMul,
-        G::Relu => MapOp::ReluMul,
-        G::GeluErf => MapOp::GeluErfMul,
-        G::Sigmoid => MapOp::SigmoidMul,
+        G::Silu => (MapOp::SiluMul, [0.0; 2]),
+        G::Gelu => (MapOp::GeluMul, [0.0; 2]),
+        G::Relu => (MapOp::ReluMul, [0.0; 2]),
+        G::GeluErf => (MapOp::GeluErfMul, [0.0; 2]),
+        G::Sigmoid => (MapOp::SigmoidMul, [0.0; 2]),
+        G::SoftcapSilu { gate, up } => (MapOp::SoftcapSiluMul, [gate as f32, up as f32]),
     }
 }
 
@@ -1030,7 +1032,7 @@ pub(crate) fn glu(a: &Tensor, b: &Tensor, act: crate::vulkan::GluAct) -> Result<
     if a.dims() != b.dims() || !computed(a.dtype()) || b.dtype() != a.dtype() {
         return Ok(None);
     }
-    let op = glu_op(act);
+    let (op, params) = glu_op(act);
     let (a_storage, a_l) = a.storage_and_layout();
     let (b_storage, b_l) = b.storage_and_layout();
     let (crate::Storage::Vulkan(a_vk), crate::Storage::Vulkan(b_vk)) = (&*a_storage, &*b_storage)
@@ -1040,7 +1042,7 @@ pub(crate) fn glu(a: &Tensor, b: &Tensor, act: crate::vulkan::GluAct) -> Result<
     if !a_vk.native(a_l) {
         return Ok(None);
     }
-    let out = a_vk.map_f32(op, a_l, Some((b_vk, b_l)), [0.0; 2])?;
+    let out = a_vk.map_f32(op, a_l, Some((b_vk, b_l)), params)?;
     Ok(Some(tensor_of(out, a.dims())))
 }
 
@@ -1110,6 +1112,7 @@ pub(crate) fn block_type(kind: crate::vulkan::BlockKind) -> BlockType {
         K::Iq3S => BlockType::IQ3S,
         K::Q3K => BlockType::Q3K,
         K::Mxfp4 => BlockType::MXFP4,
+        K::Iq4Nl => BlockType::IQ4NL,
     }
 }
 
@@ -1128,6 +1131,7 @@ pub(crate) fn block_kind(ty: BlockType) -> crate::vulkan::BlockKind {
         BlockType::IQ3S => K::Iq3S,
         BlockType::Q3K => K::Q3K,
         BlockType::MXFP4 => K::Mxfp4,
+        BlockType::IQ4NL => K::Iq4Nl,
     }
 }
 
@@ -1442,6 +1446,82 @@ pub(crate) fn flash_attn(op: &crate::vulkan::FlashAttn<'_>) -> Result<Option<Ten
             .map_err(vk_err)?;
     }
     Ok(Some(tensor_of(out, (batch, heads, positions, head_size))))
+}
+
+// a strided operand's buffer and start, where its last two dims are contiguous rows of `cols`
+fn rows_bound(t: &Tensor, cols: usize) -> Option<(Arc<Buffer>, usize, [usize; 2])> {
+    let stride = t.stride();
+    if t.dtype() != DType::F32 || stride.len() != 4 || stride[3] != 1 || stride[2] != cols {
+        return None;
+    }
+    match &*t.storage() {
+        crate::Storage::Vulkan(s) => Some((
+            s.buffer.clone(),
+            t.layout().start_offset(),
+            [stride[0], stride[1]],
+        )),
+        _ => None,
+    }
+}
+
+pub(crate) fn biased_decode(op: &crate::vulkan::BiasedDecode<'_>) -> Result<Option<Tensor>> {
+    let (q, k, v, bias) = (op.q, op.k, op.v, op.bias);
+    let (batch, heads, positions, head_size) = q.dims4()?;
+    let (k_batch, kv_heads, keys, k_head) = k.dims4()?;
+    let (b_batch, b_heads, columns) = bias.dims3()?;
+    if positions != 1
+        || k_batch != batch
+        || k_head != head_size
+        || v.dims() != k.dims()
+        || (b_batch, b_heads) != (batch, heads)
+        || columns == 0
+        || !inference_vulkan::FlashAttn::supports(heads, kv_heads, head_size)
+    {
+        return Ok(None);
+    }
+    let (Some(kb), Some(vb)) = (rows_bound(k, head_size), rows_bound(v, head_size)) else {
+        return Ok(None);
+    };
+    if kb.2 != vb.2 || [kb.1, vb.1].iter().any(|o| o % 4 != 0) {
+        return Ok(None);
+    }
+    let q = q.to_dtype(DType::F32)?.contiguous()?;
+    let bias = bias.to_dtype(DType::F32)?.contiguous()?;
+    let (qb, bb) = (bound(&q, DType::F32)?, bound(&bias, DType::F32)?);
+    if qb.1 % 4 != 0 {
+        return Ok(None);
+    }
+    let device = q.device().as_vulkan_device()?.clone();
+    let count = batch * heads * head_size;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: DType::F32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.biased_decode(&inference_vulkan::BiasedDecode {
+                batch,
+                heads,
+                kv_heads,
+                keys,
+                head_size,
+                kv_head_stride: kb.2[1],
+                kv_batch_stride: kb.2[0],
+                extent: columns - 1,
+                window: op.window,
+                scale: op.scale,
+                q: (&qb.0, qb.1),
+                k: (&kb.0, kb.1),
+                v: (&vb.0, vb.1),
+                bias: (&bb.0, bb.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some(tensor_of(out, (batch, heads, 1, head_size))))
 }
 
 // attention's output over a quantized cache, rotated back out of the cache's space in place
@@ -1776,6 +1856,7 @@ pub(crate) fn glu_mat_vec(
         || !l.is_contiguous()
         || l.shape().dims().last() != Some(&k)
         || !(1..=inference_vulkan::MATVEC_MAX_ROWS).contains(&rows)
+        || matches!(act, crate::vulkan::GluAct::SoftcapSilu { .. })
     {
         return Ok(None);
     }
@@ -1789,7 +1870,7 @@ pub(crate) fn glu_mat_vec(
                 ty,
                 gate: &gate,
                 up: &up,
-                act: glu_op(act),
+                act: glu_op(act).0,
                 rows: n,
                 cols: k,
                 x: &x.buffer,

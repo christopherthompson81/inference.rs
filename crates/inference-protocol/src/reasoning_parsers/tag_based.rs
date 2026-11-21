@@ -37,6 +37,12 @@ pub const CHANNEL_CLOSE_TAG: &str = "<channel|>";
 pub const GEMMA_THOUGHT_OPEN_TAG: &str = "<unused94>";
 pub const GEMMA_THOUGHT_CLOSE_TAG: &str = "<unused95>";
 
+/// Inkling's thinking block: `<|message_model|><|content_thinking|>...<|end_message|>`, then the answer's blocks.
+pub const INKLING_THINKING_TAG: &str = "<|content_thinking|>";
+pub const INKLING_END_TAG: &str = "<|end_message|>";
+// a block's header tokens, which carry no text of the answer
+const INKLING_BLOCK_MARKERS: &[&str] = &["<|message_model|>", "<|content_text|>"];
+
 /// Context for tracking tag-delimited reasoning parsing state within a sequence.
 ///
 /// This provides incremental parsing of token streams containing reasoning tags,
@@ -66,6 +72,8 @@ pub struct TagReasoningContext {
     sent_reasoning_len: usize,
     /// Buffer for handling incomplete UTF-8 byte sequences across token boundaries
     utf8_buffer: Vec<u8>,
+    /// Special tokens dropped wherever they appear (each arrives whole, as one token's text)
+    dropped_markers: &'static [&'static str],
 }
 
 impl TagReasoningContext {
@@ -115,6 +123,13 @@ impl TagReasoningContext {
         ctx
     }
 
+    /// Create a parser for Inkling's blocks: the thinking block is the reasoning, the text blocks the content.
+    pub fn new_inkling() -> Self {
+        let mut ctx = Self::with_tags(INKLING_THINKING_TAG, INKLING_END_TAG);
+        ctx.dropped_markers = INKLING_BLOCK_MARKERS;
+        ctx
+    }
+
     /// Create a TagReasoningContext that starts inside a think block.
     ///
     /// Use this when the chat template hardcodes `<think>` in the generation prompt,
@@ -140,6 +155,7 @@ impl TagReasoningContext {
             sent_content_len: 0,
             sent_reasoning_len: 0,
             utf8_buffer: Vec::new(),
+            dropped_markers: &[],
         }
     }
 
@@ -180,8 +196,13 @@ impl TagReasoningContext {
     /// This method handles text that may contain partial tags split across
     /// token boundaries by buffering potentially incomplete tags.
     pub fn process_text(&mut self, text: &str) {
-        // Add new text to buffer
-        self.buffer.push_str(text);
+        let mut text = std::borrow::Cow::Borrowed(text);
+        for marker in self.dropped_markers {
+            if text.contains(marker) {
+                text = std::borrow::Cow::Owned(text.replace(marker, ""));
+            }
+        }
+        self.buffer.push_str(&text);
 
         // Process the buffer, looking for complete tags
         loop {
@@ -442,6 +463,10 @@ pub fn is_think_tag_template(template: &str) -> bool {
     template.contains(THINK_OPEN_TAG) && template.contains(THINK_CLOSE_TAG)
 }
 
+pub fn is_inkling_template(template: &str) -> bool {
+    template.contains("<|message_user|>") && template.contains(INKLING_THINKING_TAG)
+}
+
 pub fn is_seed_think_template(template: &str) -> bool {
     template.contains(SEED_THINK_OPEN_TAG) && template.contains(SEED_THINK_CLOSE_TAG)
 }
@@ -455,6 +480,30 @@ pub fn is_channel_tag_template(template: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inkling_blocks_split_thinking_from_the_text_blocks() {
+        let mut ctx = TagReasoningContext::new_inkling();
+        for chunk in [
+            "<|content_thinking|>",
+            "Need one",
+            " sentence.",
+            "<|end_message|>",
+            "<|message_model|>",
+            "<|content_text|>",
+            "Rayleigh",
+            " scattering.",
+            "<|end_message|>",
+        ] {
+            ctx.process_bytes(chunk.as_bytes());
+        }
+        ctx.finalize();
+        assert_eq!(
+            ctx.reasoning_content().as_deref(),
+            Some("Need one sentence.")
+        );
+        assert_eq!(ctx.content().as_deref(), Some("Rayleigh scattering."));
+    }
+
     #[test]
     fn gemma_thought_convention_splits_and_strips() {
         let mut ctx = TagReasoningContext::new_gemma_thought();

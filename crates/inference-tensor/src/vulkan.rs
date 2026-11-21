@@ -99,6 +99,7 @@ pub enum BlockKind {
     Iq3S,
     Q3K,
     Mxfp4,
+    Iq4Nl,
 }
 
 /// A weight of ggml blocks in a Vulkan device's memory: `(experts, rows, cols)`, one expert for a dense matrix.
@@ -308,13 +309,18 @@ pub fn gated_rmsnorm(
 }
 
 /// A GLU's activation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GluAct {
     Silu,
     Gelu,
     Relu,
     GeluErf,
     Sigmoid,
+    /// `g tanh(a / g) sigmoid(a) * u tanh(b / u)`, SiLU with its linear factor and its up half softcapped
+    SoftcapSilu {
+        gate: f64,
+        up: f64,
+    },
 }
 
 /// `act(a) * b` in one pass, `a` and `b` f32 of one shape; `None` where the device has no kernel for the layout.
@@ -459,6 +465,32 @@ pub struct FlashAttn<'a> {
 pub fn flash_attn(op: &FlashAttn<'_>) -> Result<Option<Tensor>> {
     #[cfg(feature = "vulkan")]
     return crate::vulkan_backend::flash_attn(op);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = op;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
+/// The attention of a KV cache's last position over the cache read in place, with a relative bias of every head's own
+/// and a sink.
+pub struct BiasedDecode<'a> {
+    /// f32 `(batch, heads, 1, head_size)`
+    pub q: &'a Tensor,
+    /// f32 `(batch, kv_heads, keys, head_size)` of one layout whose rows are contiguous (a cache's narrowed view)
+    pub k: &'a Tensor,
+    pub v: &'a Tensor,
+    /// f32 `(batch, heads, extent + 1)`: the bias at distances `0..extent` (none past them), then the head's sink logit
+    pub bias: &'a Tensor,
+    /// keys this many or more back are hidden; 0 for none
+    pub window: usize,
+    pub scale: f32,
+}
+
+/// `None` where the kernel does not take the shapes or layouts.
+pub fn biased_decode(op: &BiasedDecode<'_>) -> Result<Option<Tensor>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::biased_decode(op);
     #[cfg(not(feature = "vulkan"))]
     {
         let _ = op;

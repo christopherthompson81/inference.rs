@@ -4,6 +4,7 @@
 //! - **Think tags**: `<think>...</think>` (DeepSeek R1, QwQ, SmolLM3)
 //! - **Seed think tags**: `<seed:think>...</seed:think>` (Seed-OSS)
 //! - **Channel tags**: `<|channel>thought\n...<channel|>` (Gemma 4)
+//! - **Inkling blocks**: `<|content_thinking|>...<|end_message|>` then the text blocks (Inkling 2)
 
 pub mod harmony;
 pub mod tag_based;
@@ -43,4 +44,5 @@ pub fn is_reasoning_template(template: &str) -> bool {
     tag_based::is_think_tag_template(template)
         || tag_based::is_seed_think_template(template)
         || tag_based::is_channel_tag_template(template)
+        || tag_based::is_inkling_template(template)
 }
