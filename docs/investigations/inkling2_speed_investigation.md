@@ -303,3 +303,30 @@ sampling in the target's vocabulary. No tree, no confidence stop (the generic DS
 head's scores, but this checkpoint has none: `mtp.safetensors` holds `fuse_weight`, `mask_embed`, `norm`, the layers
 and the `markov_head`). It suits batched serving, where a step reads most experts anyway and draft rows come nearly
 free. At one sequence each row brings its own experts.
+
+## Run 12 - 2026-11-22 13:15
+
+Run 11's host gap was mostly the profiler: node-level graph tracing inflates `cuGraphLaunch` (2.95 ms a launch).
+Graph-level tracing (`--cuda-graph-trace=graph`) gives the real cycle: 25.7 ms (3.46 s for 131 cycles, the
+unprofiled run's 3.37 s): verify graph 21.3, drafter 2.8, GPU idle 1.9 (1.08 of it from the drafts' readback to the
+verify graph's start, a launch costing ~0.9 ms of host for ~3,200 nodes). Plain decode's launch (0.44 ms host) overlaps
+the previous step: 0.07 ms idle a step. A verify can't launch until the host has the drafts, so its launch is exposed.
+
+Per kernel, the verify graph (4 rows) against a plain decode graph (1 row), us a step (node-level, GPU times):
+
+```
+                                 plain    verify   ratio
+NVFP4 expert matvec              2530     8551     3.4   (expert bytes)
+Q6_K / Q8_0 experts 20-23         303     1136     3.7   (expert bytes)
+cast_bf16_f32                     184     1380     7.5   (113 -> 307 launches)
+copies (copy2d, ucopy f32/bf16)   260     1333     5.1   (new in verify: ucopy_bf16 185, ucopy_f32 98 a step)
+loop controllers                  748     1556     2.1
+attention (decode_kernel)         461      861     1.9
+depth mix, conv, norms, router   ~2.5 ms  ~2.5 ms  1.0
+graph total                     10524    21358
+```
+
+Not bytes, ~3.5 ms: the casts, the copies (likely the rollback's stash of each layer's conv inputs and the taps), the
+controllers and attention past one row. The drafter's 2.8 ms: its three dense layers' BF16 weights (~0.64 GB a pass,
+cuBLAS gemms 0.68 ms), the target head over the draft rows (0.52), the recurrent head's fold (`[201024, 256]` BF16,
+103 MB, 122 us a draft) and an argmax over the one 201K row (134 us a draft where 0.8 MB should take a few us).
