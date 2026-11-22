@@ -270,3 +270,36 @@ drafts 3               78.8    126.7   77.0    88.2
 Plain is up ~1 tok/s from B (the smaller head) and the prompts' prefill. Speculation is where Run 5 left it: it pays
 only on code (+32% at drafts 2-3) and loses elsewhere at every depth, even at one draft (-10% on prose). The prefill
 work doesn't reach the verify, which runs the 4-row grouped matvec (Run 5: ~3.6x a decode step's expert bytes).
+
+## Run 11 - 2026-11-22 12:30
+
+Where a speculative cycle goes (recipe C, drafts 3, the prose prompt, one served request of 256 tokens under nsys
+`--cuda-graph-trace=node`; 131 cycles, 1.97 tokens a cycle, accepted per position 88 / 35 / 18 of 146):
+
+```
+a cycle                         ms      (a plain decode step: 10.1)
+wall                            28.4
+GPU busy                        24.1
+  verify graph                  21.4
+    NVFP4 expert matvec (4 rows)  8.55   (89 launches, 96 us; decode ~2.5)
+    Q6_K / Q8_0 experts 20-23     1.14
+    Q8_0 dense matvec (4 rows)    2.21
+    loop controllers              1.56   (decode 0.81)
+    cast_bf16_f32                 1.38   (307 launches)
+    copies (copy2d, ucopy)        1.33   (~670 launches)
+    attention (decode_kernel)     0.86
+    depth mix                     0.84
+    head (mmvq_tc_k)              0.52
+  drafter, eager                2.75   (206 launches: head 0.52, argmax 3 x 134 us, cuBLAS gemv 3 x 122 us, gemms 0.68)
+host gaps                       4.3    (3.3 before the verify graph's launch)
+```
+
+The experts (9.7 ms) are the floor: 4 rows x 8 routes reach ~29 distinct experts. The rest (~7-8 ms: the gaps, the
+drafter's eager pass, the casts and copies, the controllers past one row) doesn't follow the bytes.
+
+The published setup (vLLM `models/inkling2/nvidia/dspark.py`, `v1/worker/gpu/spec_decode/dspark/speculator.py`) is
+a linear chain: one argmax a position, `num_speculative_tokens` forced to `block_size - 1` (7), every step, rejection
+sampling in the target's vocabulary. No tree, no confidence stop (the generic DSpark speculator stores a confidence
+head's scores, but this checkpoint has none: `mtp.safetensors` holds `fuse_weight`, `mask_embed`, `norm`, the layers
+and the `markov_head`). It suits batched serving, where a step reads most experts anyway and draft rows come nearly
+free. At one sequence each row brings its own experts.
