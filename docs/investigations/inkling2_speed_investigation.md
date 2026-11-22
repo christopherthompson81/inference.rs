@@ -435,3 +435,25 @@ and 1, view and paged BF16).
 At 9,824 tokens the attention is 47 us a call (2.2 ms a token): a global layer's BF16 K/V at that depth is ~40 MB a
 token (9824 x 8 KV heads x 128 x 2 x 2 bytes), the 3090's bandwidth for 47 us. What's left is the read itself: a
 quantized KV cache would halve it.
+
+## Run 16 - 2026-11-22 17:45
+
+The verify's launch waited on the drafts. A CUDA API backtrace on the readbacks (`nsys --cudabacktrace=memory:10`,
+`CUDA_CALLCHAINS`) put 14 of a request's DtoH copies in `DFlashDraftModel::finish_proposals`. Its greedy branch with no
+selector read the picks to the host (`to_vec2`), so the host waited out the drafter before staging the tokens and
+launching the verify graph. The engine already packs device draft rows into a verify's input (`pack_completion_input`,
+which the graphed DFlash path's `DeviceTokens` takes). That branch now returns `DeviceTokens` on CUDA, so the host
+stages them and launches without waiting:
+
+```
+drafts 3, prose, graph-level   cycle   verify graph   drafter   idle
+Run 14                         23.72   20.20          2.29      1.45
+device drafts                  22.94   20.16          2.30      0.70
+```
+
+Served: drafts 2 87.0 / 136.4 / 86.2 / 102.8, drafts 3 77.4 / 139.7 / 78.3 / 91.4 (prose / code / story / explainer).
+
+On the way: `cuda_fused_controller_matches_the_reference` failed once at 4 BF16 rows (0.027 against a 2e-2 bound) on
+unseeded random inputs. The kernel's BF16 output lands within a step of the f32 reference, and a step at the draw's
+tails (|v| ~5-7) is ~0.02-0.03. The bound is now two BF16 steps of each element (2^-8 of the value each) plus 1e-4.
+It passed six runs in a row.

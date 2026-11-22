@@ -1302,10 +1302,12 @@ mod tests {
             let rms = (t.sqr()?.mean_keepdim(D::Minus1)? + f64::from(EPS))?.sqrt()?;
             t.broadcast_div(&rms)
         };
-        for (rows, dtype, tolerance) in [
-            (1, DType::F32, 1e-4f32),
-            (4, DType::BF16, 2e-2),
-            (7, DType::F32, 1e-4),
+        // a BF16 output within two of its steps (2^-8 of the value each) of the f32 reference, past 1e-4
+        const BF16_ROUNDING: f64 = 2.0 / 256.0;
+        for (rows, dtype, relative) in [
+            (1, DType::F32, 0.0),
+            (4, DType::BF16, BF16_ROUNDING),
+            (7, DType::F32, 0.0),
         ] {
             let x = Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu)?.to_dtype(dtype)?;
             let message = Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu)?;
@@ -1328,11 +1330,15 @@ mod tests {
             )?
             .expect("a few rows of a narrow rank fuse");
             assert_eq!(fused.dtype(), dtype);
-            let error = (fused.to_device(&Device::Cpu)?.to_dtype(DType::F32)? - &expected)?
+            let error = ((fused.to_device(&Device::Cpu)?.to_dtype(DType::F32)? - &expected)?
                 .abs()?
+                - (expected.abs()? * relative)?)?
                 .max_all()?
                 .to_scalar::<f32>()?;
-            assert!(error < tolerance, "{rows} rows {dtype:?}: error {error}");
+            assert!(
+                error < 1e-4,
+                "{rows} rows {dtype:?}: error {error} past the rounding"
+            );
         }
         Ok(())
     }
