@@ -682,3 +682,34 @@ warps x rows a block   tg128   expert matvecs (us a step)
 ```
 
 The current shape is best: the idle lanes are not what limits the down projection.
+
+## Run 26 - 2026-11-23 04:10
+
+k and v projections in one launch. The fused QKV matvec took one quantized input for all three matrices. Here it
+takes one per matrix, and `fast_mmvq::fused_pair` runs two matrices over their own inputs (the third gets no rows).
+Inkling's k and v groups use it at decode on both layer kinds: concatenated groups on the global layers, and one
+projection each on the sliding ones. A case in `fast_mmq`'s CUDA tests matches it to each matrix alone.
+
+```
+                       launch                       us     a step   tg128
+before   k, v apart    2 x 1024 rows (sliding)      2x4.4  352 us   107.1
+         pair          2048 rows                    8.8    350 us   107.0
+```
+
+The pair saves nothing: 2048 rows take as long as two 1024-row launches. The launch ramp is not the cost; the kernel
+reads ~570 GB/s at this size, against ~790 for the 6552-row q group. A 2304-wide Q8_0 row is 72 blocks, and 8 warps
+cover 64 a pass, so the second pass has 8 of 64 slots busy. Single-token block shapes (plain and fused set together):
+
+```
+warps x rows   tg128   q8_0 matvec us a step
+8 x 2 (now)    107.0   1891 (with the pair)
+4 x 2          107.7   1891
+4 x 1          107.0   1949
+8 x 1          102.2   2384
+3 x 2          108.0   1852    72 blocks = 3 passes of 24
+fused 3, plain 8   107.6
+```
+
+3 warps fit this row width exactly, but the defines cover every model and type. For 4096-wide rows (128 blocks),
+8 warps divide evenly and 3 do not, so it would have to be picked per row width at launch. That gain is ~1% (0.1 ms
+a token). Restored to 8 x 2, and the pair dropped (no gain without the shape change).
