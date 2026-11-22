@@ -19,6 +19,12 @@ const LANES: usize = 8;
 pub(super) const BLOCK_IQ2_KL: usize = 86;
 pub(super) const BLOCK_IQ3_K: usize = 110;
 pub(super) const BLOCK_IQ3_KS: usize = 102;
+// f16 scale, the codebook bits, the scales' high 2 bits (QK_K / 64) and low 4 (QK_K / 32), then 4-bit indices
+pub(super) const BLOCK_IQ4_K: usize = 2 + 2 + QK_K / 64 + QK_K / 32 + QK_K / 2;
+const IQ4_K_BLOCK: usize = 16;
+// a block scale's 6-bit range around zero
+const IQ4_K_SCALE_OFFSET: i32 = 32;
+const IQ4_K_FUDGE: f32 = 1.0;
 const IQ3_KS_TRIES: i32 = 5;
 const IQ3_K_FUDGE: f32 = 1.01;
 // the AVX2 scale search's steps either side of each codebook's max-based scale, and their spacing
@@ -1068,6 +1074,99 @@ pub(super) fn iq3_ks_super_block(
 }
 
 /// One row of `ty`, the imatrix reweighed as `QHelper` does for the type's block size.
+// an IQ4_K block's weights: the imatrix over the value's spread (`sqrt(sigma2 + x^2)`, fused), else its square
+fn iq4_k_weights(xb: &[f32], qw: Option<&[f32]>, sigma2: f32, weight: &mut [f32; IQ4_K_BLOCK]) {
+    match qw {
+        Some(qw) => {
+            for j in 0..IQ4_K_BLOCK {
+                weight[j] = qw[j] * fma(xb[j], xb[j], sigma2).sqrt();
+            }
+        }
+        None => {
+            for j in 0..IQ4_K_BLOCK {
+                weight[j] = xb[j] * xb[j];
+            }
+        }
+    }
+}
+
+/// One IQ4_K super-block (`quantize_row_iq4_k_impl_bs16`): per 16 values the best scale over both 4-bit codebooks
+/// (IQ4_KS's search), the scales as signed 6-bit multiples of the largest over 32, then the super-block scale refit
+/// to the indices.
+fn quantize_iq4_k(xbl: &[f32], qw: Option<&[f32]>, out: &mut [u8]) {
+    let (values, shifted) = super::iq_quantize::IQ4K_VALUES.split_at(16);
+    out.fill(0);
+    let sigma2 = xbl.iter().fold(0f32, |s, &v| fma(v, v, s)) * (2.0 / QK_K as f32);
+    let mut scales = [0f32; QK_K / IQ4_K_BLOCK];
+    let mut weight = [0f32; IQ4_K_BLOCK];
+    let mut extra = 0u16;
+    let (mut max_scale, mut amax_scale) = (0f32, 0f32);
+    for ib in 0..QK_K / IQ4_K_BLOCK {
+        let xb = &xbl[IQ4_K_BLOCK * ib..][..IQ4_K_BLOCK];
+        iq4_k_weights(
+            xb,
+            qw.map(|w| &w[IQ4_K_BLOCK * ib..][..IQ4_K_BLOCK]),
+            sigma2,
+            &mut weight,
+        );
+        let Some((d, is_shifted)) = super::iq_quantize::iq4_ks_search(xb, &weight) else {
+            continue;
+        };
+        if is_shifted {
+            extra |= 1 << ib;
+        }
+        scales[ib] = d;
+        if d.abs() > amax_scale {
+            (amax_scale, max_scale) = (d.abs(), d);
+        }
+    }
+    let d = -max_scale / IQ4_K_SCALE_OFFSET as f32;
+    out[..2].copy_from_slice(&half::f16::from_f32(IQ4_K_FUDGE * d).to_le_bytes());
+    out[2..4].copy_from_slice(&extra.to_le_bytes());
+    let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+    let (mut sumqx, mut sumq2) = (0f32, 0f32);
+    let mut scales_h = [0u16; 2];
+    let mut indices = [0u8; QK_K];
+    for ib in 0..QK_K / IQ4_K_BLOCK {
+        let codebook = if extra & (1 << ib) != 0 {
+            shifted
+        } else {
+            values
+        };
+        let l = nearest_int(id * scales[ib]).clamp(-IQ4_K_SCALE_OFFSET, IQ4_K_SCALE_OFFSET - 1);
+        let dl = d * l as f32;
+        let idl = if dl != 0.0 { 1.0 / dl } else { 0.0 };
+        let xb = &xbl[IQ4_K_BLOCK * ib..][..IQ4_K_BLOCK];
+        iq4_k_weights(
+            xb,
+            qw.map(|w| &w[IQ4_K_BLOCK * ib..][..IQ4_K_BLOCK]),
+            sigma2,
+            &mut weight,
+        );
+        for j in 0..IQ4_K_BLOCK {
+            let index = super::iq_quantize::best_index_iq4k(codebook, idl * xb[j]);
+            indices[IQ4_K_BLOCK * ib + j] = index as u8;
+            let q = (i32::from(codebook[index]) * l) as f32;
+            sumqx = fma(weight[j] * q, xb[j], sumqx);
+            sumq2 = fma(weight[j] * q, q, sumq2);
+        }
+        let l = (l + IQ4_K_SCALE_OFFSET) as u8;
+        out[8 + ib / 2] |= (l & 0x0F) << (4 * (ib % 2));
+        scales_h[ib / 8] |= u16::from(l >> 4) << (2 * (ib % 8));
+    }
+    out[4..6].copy_from_slice(&scales_h[0].to_le_bytes());
+    out[6..8].copy_from_slice(&scales_h[1].to_le_bytes());
+    if sumq2 > 0.0 {
+        out[..2].copy_from_slice(&half::f16::from_f32(IQ4_K_FUDGE * sumqx / sumq2).to_le_bytes());
+    }
+    // each 32 values' first 16 in the low nibbles, the next 16 in the high
+    for i in 0..QK_K / 32 {
+        for j in 0..16 {
+            out[16 + 16 * i + j] = indices[32 * i + j] | (indices[32 * i + 16 + j] << 4);
+        }
+    }
+}
+
 pub(super) fn quantize_row(ty: GgufType, row: &[f32], imatrix: Option<&[f32]>, out: &mut [u8]) {
     match ty {
         GgufType::Iq2K => {
@@ -1095,6 +1194,13 @@ pub(super) fn quantize_row(ty: GgufType, row: &[f32], imatrix: Option<&[f32]>, o
         GgufType::Iq3Ks => {
             let weights = imatrix.map(|w| row_weights(row, w, 32));
             quantize_iq3_ks_row(row, weights.as_deref(), out);
+        }
+        GgufType::Iq4K => {
+            let weights = imatrix.map(|w| row_weights(row, w, 16));
+            let blocks = out.as_chunks_mut::<BLOCK_IQ4_K>().0;
+            for (i, (xbl, o)) in row.as_chunks::<QK_K>().0.iter().zip(blocks).enumerate() {
+                quantize_iq4_k(xbl, weights.as_deref().map(|w| &w[i * QK_K..][..QK_K]), o);
+            }
         }
         other => unreachable!("{other:?} is not an ik table type"),
     }

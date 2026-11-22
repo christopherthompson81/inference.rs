@@ -367,9 +367,11 @@ struct GptqInput {
 
 // `t`'s GPTQ input from the source at `offset`, or None when no Hessian covers it
 #[cfg(feature = "cuda")]
+// `checkpoint`: where a tensor planned from the checkpoint's values reads them
 fn load_gptq(
     t: &Planned<'_>,
     hessians: &dyn HessianSource,
+    checkpoint: Option<&dyn CheckpointSource>,
     reader: &mut BufReader<File>,
     offset: u64,
     device: &Device,
@@ -388,6 +390,19 @@ fn load_gptq(
     if shared.is_none() && per_expert.iter().all(Option::is_none) {
         return Ok(None);
     }
+    let cols = *t.dims.last().unwrap_or(&1);
+    if let Some(source) = checkpoint {
+        let values = checkpoint_values(source, t.name, cols)?;
+        let rows = values.len() / cols;
+        let values = Tensor::from_vec(values, (rows, cols), device)?;
+        device.synchronize()?;
+        return Ok(Some(GptqInput {
+            cross: hessians.cross(t.name)?,
+            shared,
+            per_expert,
+            values,
+        }));
+    }
     let mut bytes = vec![0u8; t.source_bytes];
     reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut bytes)?;
@@ -400,7 +415,6 @@ fn load_gptq(
             GgufDType::new(other).name()
         ),
     };
-    let cols = *t.dims.last().unwrap_or(&1);
     let rows = bytes.len() / dtype.size_in_bytes() / cols;
     let span = profile::span("gptq.upload", Some(device));
     let values = Tensor::from_raw_buffer(&bytes, dtype, &[rows, cols], device)?
@@ -804,7 +818,6 @@ pub fn requantize_gguf(
             plan.hessians.is_some()
                 && matches!(plan.gpu, Some(Device::Cuda(_)))
                 && t.target.is_some_and(super::gptq::supports)
-                && !t.from_values
                 && !t.target.is_some_and(|ty| {
                     reuse.iter().any(|(_, h)| {
                         h.tensor_infos.get(t.name).is_some_and(|info| {
@@ -825,6 +838,7 @@ pub fn requantize_gguf(
             order.sort_unstable();
             let tensors = &tensors;
             let header = &header;
+            let checkpoint = plan.checkpoint.as_deref();
             let loader = std::thread::Builder::new().name(GPTQ_LOADER_THREAD.into());
             let device = plan.gpu.clone();
             let spawned = loader.spawn_scoped(scope, move || {
@@ -842,7 +856,8 @@ pub fn requantize_gguf(
                     let t = &tensors[i];
                     let offset = header.tensor_data_offset + header.tensor_infos[t.name].offset;
                     let span = profile::span("gptq.load", None);
-                    let loaded = load_gptq(t, hessians, &mut reader, offset, &device);
+                    let checkpoint = t.from_values.then_some(()).and(checkpoint);
+                    let loaded = load_gptq(t, hessians, checkpoint, &mut reader, offset, &device);
                     drop(span);
                     // a send fails only once the loop has stopped, which ends this thread too
                     if tx.send((i, loaded)).is_err() {
@@ -1289,7 +1304,7 @@ mod tests {
         ("iq1_m", 4877935477014574425, 546727153653379684),
     ];
 
-    const PINNED_IK: [(&str, u64, u64); 15] = [
+    const PINNED_IK: [(&str, u64, u64); 16] = [
         ("q2_k", 13302739417286923110, 11601392929549359756),
         ("q3_k", 16392672201002081248, 17943740573164000344),
         ("q4_k", 14679928973253263191, 14544912929349767743),
@@ -1305,6 +1320,7 @@ mod tests {
         ("iq4_ks", 15587783422239331424, 2233139334062329897),
         ("iq4_kss", 6028622500172932859, 11259105053868730158),
         ("iq3_ks", 9489437392515969846, 7909008254536332893),
+        ("iq4_k", 1218790085772916998, 1746605175614080506),
     ];
 
     #[test]
@@ -1673,6 +1689,97 @@ mod tests {
         reader.seek(SeekFrom::Start(header.tensor_data_offset + info.offset))?;
         reader.read_exact(&mut bytes)?;
         assert_eq!(bytes, expected);
+        Ok(())
+    }
+
+    // one Hessian for a whole stack, as a calibration collects for an expert stack's shared input
+    #[cfg(feature = "cuda")]
+    struct StackHessian {
+        name: &'static str,
+        cols: usize,
+    }
+
+    #[cfg(feature = "cuda")]
+    impl HessianSource for StackHessian {
+        fn hessian(&self, name: &str, expert: Option<usize>) -> Result<Option<Vec<f32>>> {
+            Ok((name == self.name && expert.is_none()).then(|| {
+                (0..self.cols * self.cols)
+                    .map(|i| if i % (self.cols + 1) == 0 { 1.0 } else { 0.01 })
+                    .collect()
+            }))
+        }
+    }
+
+    // GPTQ takes a stack the checkpoint's values stand in for (an NVFP4 one a rule requantizes), its Hessian beside it
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn gptq_requantizes_an_nvfp4_stack_from_its_values() -> Result<()> {
+        const SCALE_BYTE: u8 = 0x30;
+        const NVFP4_SCALES: usize = 4;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let dir = tempfile::tempdir()?;
+        let (src, dst) = (dir.path().join("src.gguf"), dir.path().join("dst.gguf"));
+        let (experts, rows, cols) = (2, 4, 128);
+        let stack = Tensor::zeros(
+            (experts, rows, cols),
+            inference_tensor::DType::F32,
+            &Device::Cpu,
+        )?;
+        let tensors = [(
+            "blk.0.ffn_down_exps.weight",
+            QTensor::quantize(&stack, GgmlDType::BF16)?,
+        )];
+        let arch = Value::String("tiny".into());
+        let mut file = File::create(&src)?;
+        gguf_file::write(
+            &mut file,
+            &[("general.architecture", &arch)],
+            &tensors.iter().map(|(n, t)| (*n, t)).collect::<Vec<_>>(),
+        )?;
+        drop(file);
+        let block_bytes = GgufType::Nvfp4.type_size();
+        let size = experts * rows * GgufType::Nvfp4.row_bytes(cols).unwrap();
+        let blocks = (0..size)
+            .map(|i| match i % block_bytes {
+                k if k < NVFP4_SCALES => SCALE_BYTE + (i / block_bytes % 8) as u8,
+                _ => (i * 13) as u8,
+            })
+            .collect::<Vec<_>>();
+        let plan = RequantizePlan {
+            rules: vec![(
+                Regex::new(r"ffn_down_exps").unwrap(),
+                writable_type("iq4_nl")?,
+            )],
+            imatrix: None,
+            quantizer: Quantizer::LlamaCpp,
+            reuse: Vec::new(),
+            only: None,
+            gpu: Some(cuda),
+            hessians: Some(Box::new(StackHessian {
+                name: "blk.0.ffn_down_exps.weight",
+                cols,
+            })),
+            hessian_weights_only: false,
+            gptq_damp: 0.1,
+            report_hessians: None,
+            checkpoint: Some(Box::new(FixedNvfp4 {
+                tensor: "blk.0.ffn_down_exps.weight",
+                blocks,
+                scales: vec![0.5, 2.0],
+                values_of: "",
+                values: Vec::new(),
+            })),
+        };
+        let summary = requantize_gguf(&src, &dst, &plan, |_, _, _| {})?;
+        assert_eq!(summary.gptq, 1);
+        let header = Header::read(&mut BufReader::new(File::open(&dst)?))?;
+        assert_eq!(
+            header.tensor_infos["blk.0.ffn_down_exps.weight"].ggml_dtype,
+            GgufType::Iq4Nl.id()
+        );
         Ok(())
     }
 }

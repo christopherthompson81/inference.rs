@@ -592,3 +592,47 @@ f8e4m3                0.00520   96.80%     6.7711   110.2 / 98.5 / 94.1
 ```
 
 q8 costs 0.0002 of KLD (the edge of the model's noise) for half the KV memory at the same speed. FP8 costs 0.0014.
+
+## Run 22 - 2026-11-22 23:45
+
+NVFP4 experts to IQ4_NL, weighted. Inkling has no ISQ layer list (online calibration can't track its stacks) and its
+looped core keeps `quantize hessians` from running a layer at a time, so a local patch (not committed) collected the
+statistics. It ran beside each expert forward: each route's gate-up input and its down-projection input (the gate and
+up stacks gathered, the softcapped SwiGLU applied; the weighted down projection of it matches the experts' output to
+~1%, their Q8_1 rounding). It accumulated each expert's input sums of squares and route counts, and each stack's
+`X^T X / n`. Driven by `quantize kld --resident --text` over the mixed calibration text, 100 chunks of 512 (~51K
+tokens, all 128 experts seen in every NVFP4 layer). The dumps became llama.cpp's imatrix (35 MB) and a Hessian
+safetensors file keyed by GGUF name (530 MB, one per stack). GPTQ now takes tensors the checkpoint's values stand in
+for (`load_gptq` reads them from the checkpoint; test `gptq_requantizes_an_nvfp4_stack_from_its_values`).
+
+```
+NVFP4 -> IQ4_NL (recipe C's experts 0-19)   KLD       same top   PPL      quantize
+unweighted                                  0.00992   95.75%     6.7863   13.6 min
+imatrix                                     0.00924   95.94%     6.7837   13.3 min
+GPTQ, a Hessian a stack                     0.00840   95.78%     6.7840   10.7 min
+recipe C (NVFP4 as stored)                  0.00389   97.32%     6.7630
+```
+
+GPTQ narrows it 15%, and it stays 2.2x C's divergence for +3.4% prefill. What remains is IQ4_NL's grid: its 16 levels
+and one scale per 32 can't follow E2M1 with a scale per 16, whatever weighs the rounding. Recipe C stays.
+
+## Run 23 - 2026-11-23 00:30
+
+IQ4_K, whose scale a 16 values matches NVFP4's granularity. Our writer lacked it, so it's ported from ik_llama.cpp's
+`quantize_row_iq4_k_impl_bs16` (IQ4_KS's codebook search over 16-value blocks, the scales as signed 6-bit multiples
+of the largest over 32, the super-block scale refit to the indices). Against ik's build (`scripts/iq_quantize_parity.py
+... iq4_k`): 0 of 147,456 bytes differing, plain and with an imatrix. ik's `ggml_quantize_chunk` hashes on the pin
+layer match ours, now pinned in `the_ik_quantizer_writes_ik_llamas_bytes`.
+
+IQ4_K's super-blocks are 256 values, and the down stacks' rows are 1152 (4.5 x 256), so only gate-up takes it. With
+no rule for down, down stays NVFP4 as stored:
+
+```
+experts 0-19                              KLD       same top   pp512        tg128
+recipe C (NVFP4)                          0.00389   97.32%     2335         103.3
+gate-up IQ4_K (imatrix), down NVFP4       0.00625   96.75%     2348-2355    102.3-102.6
+IQ4_NL both, GPTQ (Run 22)                0.00840   95.78%     ~2425        ~103.6
+```
+
+IQ4_K follows E2M1 more closely than IQ4_NL (the gate-up stacks alone cost 0.0024 of KLD, where IQ4_NL's two cost
+0.0045 with GPTQ), but it is no faster than NVFP4 (its mmq requantizes past a tile width). Recipe C stays.

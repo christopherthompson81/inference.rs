@@ -423,7 +423,7 @@ fn iq4_xs_block(search: SuperBlock, x: &[f32], qw: Option<&[f32]>, out: &mut [u8
 }
 
 // ik_llama.cpp's `best_index_iq4nl` over a 16-value codebook
-fn best_index_iq4k(values: &[i8], x: f32) -> usize {
+pub(super) fn best_index_iq4k(values: &[i8], x: f32) -> usize {
     let ix = x as i32 - i32::from(values[0]);
     if !(0..241).contains(&ix) {
         return if ix < 0 { 0 } else { 15 };
@@ -538,7 +538,7 @@ fn sigma2(x: &[f32]) -> f32 {
 
 // one IQ4_KS block's scale search: the best scale over both codebooks and whether it took the shifted one; None for
 // a block of all but zeros
-fn iq4_ks_search(xb: &[f32], weight: &[f32]) -> Option<(f32, bool)> {
+pub(super) fn iq4_ks_search(xb: &[f32], weight: &[f32]) -> Option<(f32, bool)> {
     let (values, shifted) = IQ4K_VALUES.split_at(16);
     let (mut amax, mut max) = (0f32, 0f32);
     for &v in xb {
@@ -1087,6 +1087,7 @@ pub fn can_quantize(ty: GgufType) -> bool {
             | GgufType::Iq2Ks
             | GgufType::Iq2Kl
             | GgufType::Iq3K
+            | GgufType::Iq4K
             | GgufType::Iq3Ks
             | GgufType::Iq1Kt
             | GgufType::Iq2Kt
@@ -1170,6 +1171,7 @@ pub fn quantize_rows(
             None,
         ),
         GgufType::Iq3K => (QK_K, cols / QK_K * iqk::BLOCK_IQ3_K, None),
+        GgufType::Iq4K => (QK_K, cols / QK_K * iqk::BLOCK_IQ4_K, None),
         GgufType::Iq2Kt => (
             QK_K,
             kt::F32_ROW_SCALE + cols / QK_K * kt::BLOCK_IQ2_KT,
