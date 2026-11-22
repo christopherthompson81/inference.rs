@@ -615,3 +615,24 @@ recipe C (NVFP4 as stored)                  0.00389   97.32%     6.7630
 
 GPTQ narrows it 15%, and it stays 2.2x C's divergence for +3.4% prefill. What remains is IQ4_NL's grid: its 16 levels
 and one scale per 32 can't follow E2M1 with a scale per 16, whatever weighs the rounding. Recipe C stays.
+
+## Run 23 - 2026-11-23 00:30
+
+IQ4_K, whose scale a 16 values matches NVFP4's granularity. Our writer lacked it, so it's ported from ik_llama.cpp's
+`quantize_row_iq4_k_impl_bs16` (IQ4_KS's codebook search over 16-value blocks, the scales as signed 6-bit multiples
+of the largest over 32, the super-block scale refit to the indices). Against ik's build (`scripts/iq_quantize_parity.py
+... iq4_k`): 0 of 147,456 bytes differing, plain and with an imatrix. ik's `ggml_quantize_chunk` hashes on the pin
+layer match ours, now pinned in `the_ik_quantizer_writes_ik_llamas_bytes`.
+
+IQ4_K's super-blocks are 256 values, and the down stacks' rows are 1152 (4.5 x 256), so only gate-up takes it. With
+no rule for down, down stays NVFP4 as stored:
+
+```
+experts 0-19                              KLD       same top   pp512        tg128
+recipe C (NVFP4)                          0.00389   97.32%     2335         103.3
+gate-up IQ4_K (imatrix), down NVFP4       0.00625   96.75%     2348-2355    102.3-102.6
+IQ4_NL both, GPTQ (Run 22)                0.00840   95.78%     ~2425        ~103.6
+```
+
+IQ4_K follows E2M1 more closely than IQ4_NL (the gate-up stacks alone cost 0.0024 of KLD, where IQ4_NL's two cost
+0.0045 with GPTQ), but it is no faster than NVFP4 (its mmq requantizes past a tile width). Recipe C stays.
