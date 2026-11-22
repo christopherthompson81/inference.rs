@@ -36,3 +36,39 @@ ggml-org IQ4_NL       1913    83.6    (before the split)
 
 Next: the softcapped SwiGLU is no activation the fused kernels take, so every NVFP4 decode visit is three matvec
 launches plus `softcap_silu_mul` and copies, and prefill takes the explicit path (`ucopy_f32`, `bmul_f32`).
+
+## Run 2 - 2026-11-22 01:30
+
+The softcapped SwiGLU fused: `MoeGlu` (an activation, or `SoftcapSilu { gate_cap, up_cap }`, kernel code 5 with its
+caps beside it) through the expert matvec (`mmvq_gguf.cuh` and `mmvq_rows.cuh` MoE entries) and the grouped GLU
+quantize (`quantize_mmq_q8_1_glu`, whose own copy of the activations went for `glu_activation.cuh`'s).
+
+```
+                          pp512   tg128   KLD
+split mix (Run 1)         1548    90.1    0.00381
++ fused softcapped GLU    1647    89.4    0.00368 (inside the floor)
+```
+
+Prefill +6% (the explicit path's `ucopy_f32` / `bmul_f32` gone). Decode level: per NVFP4 visit the separate gate and
+up (~18 us each) plus `softcap_silu_mul` (1.6 us) became one fused launch of 38.2 us, the down 29.2 us either way.
+The down reads the gate's bytes in 1.6x its time: its rows are 18 NVFP4 blocks, which at `qi / vdr` = 2 threads a
+block keep 36 of 128 threads busy (IQ4_NL's 72).
+
+But the vec dot's per-16 `ggml_cuda_ue4m3_to_fp32` (branches and `ldexpf`) was the cost, not the idle threads. The f32
+bits built directly (exponent `exp + 119`, mantissa `man << 20`; subnormals `man * 2^-10`; 0x7F zero), exact for
+every byte (test `cuda_nvfp4_scales_decode_as_the_cpu_for_every_byte`, all 256 against the CPU bit for bit), in one
+header (`ue4m3.cuh`) for the matvec and mmq:
+
+```
+                          pp512   tg128
+matvec decode             1652    93.8
+VDR_NVFP4_MMVQ 4 -> 2             93.9   (no gain once the decode is cheap: reverted)
++ mmq decode              1749    93.8
+ggml-org IQ4_NL           1932    93.8   (same build: the split mix and the fused GLU help it too)
+```
+
+Recipe B since Run 1: pp512 1531 -> 1749 (+14%), tg128 81.7 -> 93.8 (+15%), KLD unchanged. NVFP4 decode is now level
+with IQ4_NL; prefill trails by 10% (was 20%).
+
+`--size`: the baseline (#998) was 1.16 MiB behind master already (master alone fails: ffi `.text` +0.86 MiB from the
+merges since); this branch adds 0.04 MiB. Baseline rewritten.
