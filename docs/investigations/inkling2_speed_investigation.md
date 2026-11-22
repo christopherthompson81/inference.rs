@@ -163,3 +163,31 @@ when its token runs alone): every type's sums are width-independent but ik_llama
 which requantize their weights to Q8_0 rows past a width (`mmq_requant`, 48/40/32/48): ~0.4% off the narrow tiles'
 sums, both 0.6-0.7% from the dequantized weights. The offload test's staged path (fewer experts a pass, so wider
 tiles) crossed IQ3_K's 40 against the resident path's 16; both tests bound those types by the requantization.
+
+## Run 7 - 2026-11-22 07:30
+
+Prefill after Run 6 (pp512, nsys): the NVFP4 mmq 0.785 ms a launch against IQ4_NL's 0.634 (1.24x, llama.cpp's 1.34x),
+~80 ms of a 1107 ms prefill; the attention (`prefill_kernel`) 1.52 ms a call, 26% of prefill on either GGUF. ncu: 40%
+of the SMs, 2% of DRAM, scalar f32 with 8 queries a block (a 32-key tile reused 8 times, a shuffle loop a key):
+~3% of the tensor cores' rate for its ~3 GFLOP. llama.cpp's fattn (inference-fattn) cannot take the bias: its mask
+is per sequence, and its mma kernel packs GQA heads into a tile that shares one mask.
+
+`prefill_mma_kernel` (sm80+, prompts from 32 queries, half-precision caches): a block 64 queries of one head, a warp 16;
+each 64-key tile's K and V^T in shared memory as f16 (a BF16 cache's values exactly); S = Q K^T and O += P V by
+`mma.sync.m16n8k16` with f32 sums; the bias by distance, the log scale, the causal and window masks and the sink as
+the scalar kernel; softmax online.
+
+```
+                                         pp512   pp2048   KLD
+scalar (Run 6)                           1868    1265     0.00368
+mma, q and P in f16                      2218             0.00348
+mma, q and P each f16 + its remainder    2209    1898     0.00368
+IQ4_NL                                   2432             (2023 before)
+```
+
+f16 q and P alone moved the tiny model's pinned greedy traces (a step 0.21 in logprob) and its long prompt against
+the CPU (0.003): the scalar kernel with the same f16 rounding moves them the same way (-7.24594 against the mma's
+-7.24590, CPU -7.24290), so precision, not a bug. Each as an f16 part and its f16 remainder (two mma), and an f32
+cache left to the f32 kernel (its K and V are not exact in f16), and every test passes at its tolerance; the
+attention is 0.576 ms a call (2.6x). Tests: tensor-core cases at head sizes 32, 64 and 128 with a past, the log
+scale, a window and paged BF16 caches, against the reference at 1e-3.
