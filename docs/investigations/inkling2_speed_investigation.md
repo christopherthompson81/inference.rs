@@ -92,3 +92,27 @@ drafts 3               69.3    122.9   74.7    83.4
 
 Plain is ~11% faster than at #1041; speculation pays only on code (+45% at drafts 3), and loses elsewhere at every
 depth: the verify step's cost did not fall as much as the plain step's.
+
+## Run 4 - 2026-11-22 02:45
+
+The loop controllers fused for <= 16 rows (decode, verify; rank <= 128): ~6 launches a controller (`controller_in`,
+two f32 gemvs, two narrow copies, `controller_out`), 96 controllers a token, ~1.6 ms. The unit norms are scalars, so
+`down . [x / |x|, m / |m|]` is `ix (down_x . x) + im (down_m . m)`: a down kernel of block (rank output, hidden slice,
+row) writes each slice's two dots and two sums of squares; an up kernel sums the slices into the bottleneck as it loads
+it, then a warp an index takes the gain's and forget's rows (lanes over the rank, each row read whole) and writes
+`(1 - tanh(forget)) x + tanh(gain) m` in x's dtype. Test `cuda_fused_controller_matches_the_reference` (1 row f32, 4
+rows bf16).
+
+```
+                                               tg128   controllers (ms a token)
+before (Run 2)                                 93.8    ~1.6
+fused, up kernel a thread an index (9 blocks)  86.0    (slower: uncoalesced rows, 9 SMs)
+fused, up kernel a warp an index               98.3    0.81 (down 0.48, up 0.33)
++ down split over 4 hidden slices              98.75
+
+serve, greedy, 256 tokens (tok/s)   prose   code    story   explainer
+plain                               95.8    95.7    95.4    95.6
+drafts 3                            78.7    128.4   76.9    88.4     564 / 1374 accepted
+```
+
+Greedy text changes on some prompts (summation order against cuBLAS's gemv, the floor's kind of difference).

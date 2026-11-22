@@ -965,6 +965,9 @@ struct Controller {
     // reads its own contiguous row; f32 as stored, on f32 unit-normed inputs whatever the model's dtype
     down: Arc<dyn QuantMethod>,
     gain_forget: Arc<dyn QuantMethod>,
+    // the same weights for the fused controller of a few rows
+    #[cfg(feature = "cuda")]
+    weights: (Tensor, Tensor),
     hidden: usize,
 }
 
@@ -981,9 +984,13 @@ impl Controller {
         };
         let gain = weight("gain", (hidden, rank))?;
         let forget = weight("forget", (hidden, rank))?;
+        let down = weight("down", (rank, 2 * hidden))?;
+        let gain_forget = Tensor::cat(&[&gain, &forget], 0)?;
         Ok(Self {
-            down: proj(weight("down", (rank, 2 * hidden))?)?,
-            gain_forget: proj(Tensor::cat(&[&gain, &forget], 0)?)?,
+            #[cfg(feature = "cuda")]
+            weights: (down.clone(), gain_forget.clone()),
+            down: proj(down)?,
+            gain_forget: proj(gain_forget)?,
             hidden,
         })
     }
@@ -1002,6 +1009,16 @@ impl Controller {
 
     fn forward(&self, x: &Tensor, message: &Tensor) -> Result<Tensor> {
         let dtype = x.dtype();
+        #[cfg(feature = "cuda")]
+        if let Some(out) = inference_nn::cuda::inkling::controller(
+            x,
+            message,
+            &self.weights.0,
+            &self.weights.1,
+            UNIT_NORM_EPS as f32,
+        )? {
+            return Ok(out);
+        }
         #[cfg(feature = "cuda")]
         if let Some(gate) =
             inference_nn::cuda::inkling::controller_in(x, message, UNIT_NORM_EPS as f32)?
