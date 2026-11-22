@@ -191,3 +191,16 @@ the CPU (0.003): the scalar kernel with the same f16 rounding moves them the sam
 cache left to the f32 kernel (its K and V are not exact in f16), and every test passes at its tolerance; the
 attention is 0.576 ms a call (2.6x). Tests: tensor-core cases at head sizes 32, 64 and 128 with a past, the log
 scale, a window and paged BF16 caches, against the reference at 1e-3.
+
+## Run 8 - 2026-11-22 09:00
+
+Recipe C (B with head and embedding at Q6_K, the preferred recipe) on the tensor-core attention, against B in the same
+session:
+
+```
+          pp512   pp2048   tg128   KLD
+recipe B  2191    1894     98.5    0.00368
+recipe C  2209    1899     98.9    0.00387 (same as before the kernel)
+```
+
+C's prefill is level with B (the head is one matmul a prompt); its smaller head reads give decode +0.4 tok/s.
