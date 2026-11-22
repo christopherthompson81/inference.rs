@@ -1693,11 +1693,13 @@ mod tests {
     }
 
     // one Hessian for a whole stack, as a calibration collects for an expert stack's shared input
+    #[cfg(feature = "cuda")]
     struct StackHessian {
         name: &'static str,
         cols: usize,
     }
 
+    #[cfg(feature = "cuda")]
     impl HessianSource for StackHessian {
         fn hessian(&self, name: &str, expert: Option<usize>) -> Result<Option<Vec<f32>>> {
             Ok((name == self.name && expert.is_none()).then(|| {
