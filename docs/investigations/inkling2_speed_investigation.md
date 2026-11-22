@@ -116,3 +116,20 @@ drafts 3                            78.7    128.4   76.9    88.4     564 / 1374 
 ```
 
 Greedy text changes on some prompts (summation order against cuBLAS's gemv, the floor's kind of difference).
+
+## Run 5 - 2026-11-22 03:15
+
+The verify step (drafts 3, prose, one served request under nsys; the trace caught ~21 of the run's verify steps):
+per NVFP4 visit the 4-row grouped matvecs take 112 + 100 us against a decode step's 32 + 25 (4 rows x 8 routes reach
+~29 distinct of 128 experts, ~3.6x the expert bytes); the fused controllers at 4 rows 10.5 + 7.4 us against 3.4 +
+4.9 at one, each row's blocks rereading the weights. Rows moved inside the blocks (each weight read once, the up
+kernel's gain/forget rows kept in registers across the rows):
+
+```
+                    tg128   prose   code    story   explainer   (serve, drafts 3)
+Run 4               98.75   78.7    128.4   76.9    88.4
+rows in the blocks  99.0    78.8    126.7   77.0    88.2
+```
+
+No speculative gain: the verify is bound by its expert reads, which follow the routing, not the kernels. Drafting
+pays on this MoE only where acceptance is high (code).

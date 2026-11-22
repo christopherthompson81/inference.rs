@@ -242,15 +242,15 @@ __global__ void depth_mix_apply_kernel(const T* blocks, const T* current, const 
   }
 }
 
-// a fused loop controller's bottleneck, block (r, chunk, row): over its slice of the hidden dim, down[r]'s dots with
-// x's half and the message's, and their sums of squares; partials (rows, rank, chunks, 4)
+// a fused loop controller's bottleneck, block (r, chunk): over its slice of the hidden dim, down[r]'s dots with x's
+// half and the message's, and their sums of squares, a row at a time (the slice read from memory once); partials
+// (rows, rank, chunks, 4)
 template <typename X, typename M>
-__global__ void controller_down_kernel(const X* x, const M* message, const float* down, float* partials, int hidden,
-                                       int rank) {
+__global__ void controller_down_kernel(const X* x, const M* message, const float* down, float* partials, int64_t rows,
+                                       int hidden, int rank) {
   __shared__ float warp_sums[CONTROLLER_THREADS / WARP][CONTROLLER_PARTIALS];
   const int r = blockIdx.x;
   const int chunk = blockIdx.y;
-  const int64_t row = blockIdx.z;
   const int warp = threadIdx.x / WARP;
   const int lane = threadIdx.x % WARP;
   const int span = (hidden + CONTROLLER_DOWN_CHUNKS - 1) / CONTROLLER_DOWN_CHUNKS;
@@ -258,45 +258,49 @@ __global__ void controller_down_kernel(const X* x, const M* message, const float
   const int hi = min(lo + span, hidden);
   const float* dx = down + int64_t(r) * 2 * hidden;
   const float* dm = dx + hidden;
-  float acc_x = 0.0f, acc_m = 0.0f, sq_x = 0.0f, sq_m = 0.0f;
-  for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
-    const float xv = load(x, row * hidden + i);
-    const float mv = load(message, row * hidden + i);
-    acc_x += dx[i] * xv;
-    acc_m += dm[i] * mv;
-    sq_x += xv * xv;
-    sq_m += mv * mv;
-  }
-  const float sums[CONTROLLER_PARTIALS] = {warp_sum(acc_x), warp_sum(acc_m), warp_sum(sq_x), warp_sum(sq_m)};
-  if (lane == 0) {
+  for (int64_t row = 0; row < rows; row++) {
+    float acc_x = 0.0f, acc_m = 0.0f, sq_x = 0.0f, sq_m = 0.0f;
+    for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+      const float xv = load(x, row * hidden + i);
+      const float mv = load(message, row * hidden + i);
+      acc_x += dx[i] * xv;
+      acc_m += dm[i] * mv;
+      sq_x += xv * xv;
+      sq_m += mv * mv;
+    }
+    const float sums[CONTROLLER_PARTIALS] = {warp_sum(acc_x), warp_sum(acc_m), warp_sum(sq_x), warp_sum(sq_m)};
+    if (lane == 0) {
 #pragma unroll
-    for (int k = 0; k < CONTROLLER_PARTIALS; k++) warp_sums[warp][k] = sums[k];
-  }
-  __syncthreads();
-  if (threadIdx.x < CONTROLLER_PARTIALS) {
-    float t = 0.0f;
-    for (int w = 0; w < CONTROLLER_THREADS / WARP; w++) t += warp_sums[w][threadIdx.x];
-    partials[((row * rank + r) * CONTROLLER_DOWN_CHUNKS + chunk) * CONTROLLER_PARTIALS + threadIdx.x] = t;
+      for (int k = 0; k < CONTROLLER_PARTIALS; k++) warp_sums[warp][k] = sums[k];
+    }
+    __syncthreads();
+    if (threadIdx.x < CONTROLLER_PARTIALS) {
+      float t = 0.0f;
+      for (int w = 0; w < CONTROLLER_THREADS / WARP; w++) t += warp_sums[w][threadIdx.x];
+      partials[((row * rank + r) * CONTROLLER_DOWN_CHUNKS + chunk) * CONTROLLER_PARTIALS + threadIdx.x] = t;
+    }
+    __syncthreads();
   }
 }
 
-// a fused loop controller's output, a warp an index (row, i): gain and forget from z through `gain_forget`
-// (2 hidden, rank) by lanes over the rank (each row read whole by its warp), (1 - tanh(forget)) x + tanh(gain) message
-// in x's dtype
+// a fused loop controller's output, a warp an index i for every row: the bottleneck of each row from the down slices,
+// gain and forget from it through `gain_forget` (2 hidden, rank) by lanes over the rank (each row of the weight read
+// once, kept in registers across the rows), (1 - tanh(forget)) x + tanh(gain) message in x's dtype
 template <typename X, typename M>
 __global__ void controller_up_kernel(const X* x, const M* message, const float* gain_forget, const float* partials,
-                                     X* out, int hidden, int rank, float eps) {
-  __shared__ float zs[CONTROLLER_MAX_RANK];
-  const int64_t row = blockIdx.y;
-  // the bottleneck from the down slices: each half's dot over its norm
-  for (int r = threadIdx.x; r < rank; r += blockDim.x) {
+                                     X* out, int64_t rows, int hidden, int rank, float eps) {
+  constexpr int PER_LANE = CONTROLLER_MAX_RANK / WARP;
+  __shared__ float zs[CONTROLLER_MAX_ROWS][CONTROLLER_MAX_RANK];
+  for (int k = threadIdx.x; k < rows * rank; k += blockDim.x) {
+    const int64_t row = k / rank;
+    const int r = k % rank;
     float t[CONTROLLER_PARTIALS] = {0.0f, 0.0f, 0.0f, 0.0f};
     const float* p = partials + (row * rank + r) * CONTROLLER_DOWN_CHUNKS * CONTROLLER_PARTIALS;
     for (int c = 0; c < CONTROLLER_DOWN_CHUNKS; c++) {
 #pragma unroll
-      for (int k = 0; k < CONTROLLER_PARTIALS; k++) t[k] += p[c * CONTROLLER_PARTIALS + k];
+      for (int q = 0; q < CONTROLLER_PARTIALS; q++) t[q] += p[c * CONTROLLER_PARTIALS + q];
     }
-    zs[r] = rsqrtf(t[2] / hidden + eps) * t[0] + rsqrtf(t[3] / hidden + eps) * t[1];
+    zs[row][r] = rsqrtf(t[2] / hidden + eps) * t[0] + rsqrtf(t[3] / hidden + eps) * t[1];
   }
   __syncthreads();
   const int i = blockIdx.x * (CONTROLLER_THREADS / WARP) + threadIdx.x / WARP;
@@ -304,16 +308,28 @@ __global__ void controller_up_kernel(const X* x, const M* message, const float* 
   if (i >= hidden) return;
   const float* g = gain_forget + int64_t(i) * rank;
   const float* f = gain_forget + int64_t(hidden + i) * rank;
-  float gain = 0.0f, forget = 0.0f;
-  for (int r = lane; r < rank; r += WARP) {
-    gain += g[r] * zs[r];
-    forget += f[r] * zs[r];
+  float gw[PER_LANE], fw[PER_LANE];
+#pragma unroll
+  for (int k = 0; k < PER_LANE; k++) {
+    const int r = lane + k * WARP;
+    gw[k] = r < rank ? g[r] : 0.0f;
+    fw[k] = r < rank ? f[r] : 0.0f;
   }
-  gain = warp_sum(gain);
-  forget = warp_sum(forget);
-  if (lane == 0) {
-    const float xv = load(x, row * hidden + i);
-    store(out, row * hidden + i, xv - tanhf(forget) * xv + tanhf(gain) * load(message, row * hidden + i));
+  for (int64_t row = 0; row < rows; row++) {
+    float gain = 0.0f, forget = 0.0f;
+#pragma unroll
+    for (int k = 0; k < PER_LANE; k++) {
+      const int r = lane + k * WARP;
+      const float zr = r < rank ? zs[row][r] : 0.0f;
+      gain += gw[k] * zr;
+      forget += fw[k] * zr;
+    }
+    gain = warp_sum(gain);
+    forget = warp_sum(forget);
+    if (lane == 0) {
+      const float xv = load(x, row * hidden + i);
+      store(out, row * hidden + i, xv - tanhf(forget) * xv + tanhf(gain) * load(message, row * hidden + i));
+    }
   }
 }
 
@@ -551,14 +567,14 @@ extern "C" int inkling_controller(const void* x, int x_dtype, const void* messag
                                   float eps, int64_t stream) {
   if (inkling_controller_scratch(rows, rank) == 0) return -1;
   const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
-  const dim3 down_grid((unsigned)rank, CONTROLLER_DOWN_CHUNKS, (unsigned)rows);
+  const dim3 down_grid((unsigned)rank, CONTROLLER_DOWN_CHUNKS);
   constexpr int up_per_block = CONTROLLER_THREADS / WARP;
-  const dim3 up_grid((unsigned)((hidden + up_per_block - 1) / up_per_block), (unsigned)rows);
+  const unsigned up_grid = (unsigned)((hidden + up_per_block - 1) / up_per_block);
 #define CTRL(X, M)                                                                                              \
   controller_down_kernel<<<down_grid, CONTROLLER_THREADS, 0, s>>>((const X*)x, (const M*)message, down, z,    \
-                                                                  hidden, rank);                              \
+                                                                  rows, hidden, rank);                        \
   controller_up_kernel<<<up_grid, CONTROLLER_THREADS, 0, s>>>((const X*)x, (const M*)message, gain_forget, z, \
-                                                              (X*)out, hidden, rank, eps)
+                                                              (X*)out, rows, hidden, rank, eps)
   PAIR(x_dtype, m_dtype, CTRL)
 #undef CTRL
   return (int)cudaGetLastError();
