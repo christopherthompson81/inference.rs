@@ -413,6 +413,92 @@ pub fn controller_in(x: &Tensor, message: &Tensor, eps: f32) -> Result<Option<Te
     Ok(Some(wrap(out, dev, Shape::from(dims))))
 }
 
+/// A whole loop controller over a few rows (decode, verify) in two launches: `x` and `message` unit-normed into f32
+/// `down` `[rank, 2 hidden]`, the bottleneck through f32 `gain_forget` `[2 hidden, rank]` (the gain's rows over the
+/// forget's), `(1 - tanh(forget)) x + tanh(gain) message` in `x`'s dtype. `None` past the rows or rank it fuses.
+pub fn controller(
+    x: &Tensor,
+    message: &Tensor,
+    down: &Tensor,
+    gain_forget: &Tensor,
+    eps: f32,
+) -> Result<Option<Tensor>> {
+    let Device::Cuda(dev) = x.device() else {
+        return Ok(None);
+    };
+    let hidden = x.dim(x.rank() - 1)?;
+    let rank = down.dim(0)?;
+    let rows = x.elem_count() / hidden.max(1);
+    // SAFETY: a pure size computation
+    let scratch = unsafe { super::ffi::inkling_controller_scratch(i64_of(rows)?, i32_of(rank)?) };
+    if scratch == 0
+        || !takes(x)
+        || !takes(message)
+        || message.shape() != x.shape()
+        || [down, gain_forget]
+            .iter()
+            .any(|w| w.dtype() != DType::F32 || !w.is_contiguous())
+        || down.dims() != [rank, 2 * hidden]
+        || gain_forget.dims() != [2 * hidden, rank]
+    {
+        return Ok(None);
+    }
+    let (x, message) = (x.contiguous()?, message.contiguous()?);
+    let stream = dev.cuda_stream();
+    let shape = x.shape().clone();
+    let scratch = usize::try_from(scratch).map_err(inference_tensor::Error::wrap)?;
+    // SAFETY: the first kernel writes every element before the second reads it
+    let mut z = unsafe { dev.alloc::<f32>(scratch)? };
+    let (xg, xl) = x.storage_and_layout();
+    let (xp, dtype, _x) = device_ptr(&xg, xl, &stream)?;
+    let (mg, ml) = message.storage_and_layout();
+    let (mp, m_dtype, _m) = device_ptr(&mg, ml, &stream)?;
+    let (dg, dl) = down.storage_and_layout();
+    let (dp, _, _d) = device_ptr(&dg, dl, &stream)?;
+    let (gg, gl) = gain_forget.storage_and_layout();
+    let (gp, _, _g) = device_ptr(&gg, gl, &stream)?;
+    let (zp, _z) = z.device_ptr_mut(&stream);
+    macro_rules! run {
+        ($ty:ty) => {{
+            // SAFETY: the kernel writes every element
+            let mut out = unsafe { dev.alloc::<$ty>(x.elem_count())? };
+            {
+                let (op, _o) = out.device_ptr_mut(&stream);
+                // SAFETY: the buffers cover the rows, the weights their shapes and z the scratch, on this stream
+                status(
+                    unsafe {
+                        super::ffi::inkling_controller(
+                            xp as *const core::ffi::c_void,
+                            dtype,
+                            mp as *const core::ffi::c_void,
+                            m_dtype,
+                            dp as *const f32,
+                            gp as *const f32,
+                            zp as *mut f32,
+                            op as *mut core::ffi::c_void,
+                            i64_of(rows)?,
+                            i32_of(hidden)?,
+                            i32_of(rank)?,
+                            eps,
+                            stream.cu_stream() as i64,
+                        )
+                    },
+                    "controller",
+                )?;
+            }
+            Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+                shape,
+            ))
+        }};
+    }
+    Ok(Some(if dtype == F32_CODE {
+        run!(f32)
+    } else {
+        run!(half::bf16)
+    }))
+}
+
 /// A loop controller's output, `(1 - tanh(forget)) x + tanh(gain) message`, in `x`'s dtype (the message f32 or bf16) (`gain` and `forget` f32
 /// of `x`'s shape).
 pub fn controller_out(
@@ -780,5 +866,52 @@ mod tests {
         Ok(())
     }
 
-    inference_tensor::gpu_cases!(cuda_cases, [cuda_depth_mix_matches_the_reference]);
+    // the fused controller of a few rows: the unit-normed pair through the bottleneck, the gated sum, in x's dtype
+    fn cuda_fused_controller_matches_the_reference() -> Result<()> {
+        const RANK: usize = 24;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let unit = |t: &Tensor| -> Result<Tensor> {
+            let rms = (t.sqr()?.mean_keepdim(D::Minus1)? + f64::from(EPS))?.sqrt()?;
+            t.broadcast_div(&rms)
+        };
+        for (rows, dtype, tolerance) in [(1, DType::F32, 1e-4f32), (4, DType::BF16, 2e-2)] {
+            let x = Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu)?.to_dtype(dtype)?;
+            let message = Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu)?;
+            let down = Tensor::randn(0f32, 0.05f32, (RANK, 2 * HIDDEN), &Device::Cpu)?;
+            let gain_forget = Tensor::randn(0f32, 0.3f32, (2 * HIDDEN, RANK), &Device::Cpu)?;
+            let xf = x.to_dtype(DType::F32)?;
+            let gate = Tensor::cat(&[&unit(&xf)?, &unit(&message)?], D::Minus1)?;
+            let both = gate
+                .broadcast_matmul(&down.t()?)?
+                .broadcast_matmul(&gain_forget.t()?)?;
+            let gain = both.narrow(D::Minus1, 0, HIDDEN)?.tanh()?;
+            let forget = both.narrow(D::Minus1, HIDDEN, HIDDEN)?.tanh()?;
+            let expected = ((&xf - (forget * &xf)?)? + (gain * &message)?)?;
+            let fused = super::controller(
+                &x.to_device(&cuda)?,
+                &message.to_device(&cuda)?,
+                &down.to_device(&cuda)?,
+                &gain_forget.to_device(&cuda)?,
+                EPS,
+            )?
+            .expect("a few rows of a narrow rank fuse");
+            assert_eq!(fused.dtype(), dtype);
+            let error = (fused.to_device(&Device::Cpu)?.to_dtype(DType::F32)? - &expected)?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            assert!(error < tolerance, "{rows} rows {dtype:?}: error {error}");
+        }
+        Ok(())
+    }
+
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            cuda_depth_mix_matches_the_reference,
+            cuda_fused_controller_matches_the_reference
+        ]
+    );
 }

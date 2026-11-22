@@ -254,6 +254,22 @@ inference_tensor::kernel_library! {
             eps: f32,
             stream: i64,
         ) -> i32;
+        pub fn inkling_controller_scratch(rows: i64, rank: i32) -> i64;
+        pub fn inkling_controller(
+            x: *const c_void,
+            x_dtype: i32,
+            message: *const c_void,
+            m_dtype: i32,
+            down: *const f32,
+            gain_forget: *const f32,
+            z: *mut f32,
+            out: *mut c_void,
+            rows: i64,
+            hidden: i32,
+            rank: i32,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
         pub fn inkling_controller_in(
             x: *const c_void,
             x_dtype: i32,
