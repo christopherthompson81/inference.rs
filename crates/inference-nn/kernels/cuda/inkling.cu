@@ -14,6 +14,11 @@ constexpr int MAX_STATES = 16;
 constexpr int MAX_QUERIES = 4;
 // a depth mix's block
 constexpr int MIX_THREADS = 512;
+// a few rows (decode, verify) split each row's hidden dim over blocks of MIX_CHUNK values instead of one block a row
+constexpr int64_t MIX_SPLIT_MAX_ROWS = 16;
+constexpr int MIX_CHUNK = 128;
+constexpr int MIX_SPLIT_THREADS = 128;
+constexpr int MIX_SUMS = MAX_STATES * (1 + MAX_QUERIES);
 
 __device__ __forceinline__ float load(const float* p, int64_t i) { return p[i]; }
 __device__ __forceinline__ float load(const __nv_bfloat16* p, int64_t i) { return __bfloat162float(p[i]); }
@@ -127,6 +132,101 @@ __global__ void depth_mix_kernel(const T* blocks, const T* current, const float*
     for (int s = 0; s < MAX_STATES; s++) {
       if (s >= s_count) break;
       const float v = load(state(s), i) * inv_rms[s];
+#pragma unroll
+      for (int q = 0; q < MAX_QUERIES; q++) acc[q] += weights[q][s] * v;
+    }
+    for (int q = 0; q < q_count; q++) store(out, (row * q_count + q) * hidden + i, acc[q]);
+  }
+}
+
+// the split depth mix's first half: block (row, chunk)'s sums of squares and query dots over its chunk of every state,
+// partials (rows, chunks, MIX_SUMS)
+template <typename T>
+__global__ void depth_mix_partials_kernel(const T* blocks, const T* current, const float* queries, float* partials,
+                                          int s_count, int64_t rows, int q_count, int hidden) {
+  __shared__ float warp_sums[MIX_SPLIT_THREADS / WARP][MIX_SUMS];
+  const int64_t row = blockIdx.x;
+  const int chunk = blockIdx.y;
+  const int warp = threadIdx.x / WARP;
+  const int lane = threadIdx.x % WARP;
+  const int lo = chunk * MIX_CHUNK;
+  const int hi = min(lo + MIX_CHUNK, hidden);
+  float sums[MIX_SUMS];
+#pragma unroll
+  for (int k = 0; k < MIX_SUMS; k++) sums[k] = 0.0f;
+  for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+    float qv[MAX_QUERIES];
+#pragma unroll
+    for (int q = 0; q < MAX_QUERIES; q++) qv[q] = q < q_count ? queries[q * hidden + i] : 0.0f;
+#pragma unroll
+    for (int s = 0; s < MAX_STATES; s++) {
+      if (s >= s_count) break;
+      const T* state = s < s_count - 1 ? blocks + (int64_t(s) * rows + row) * hidden : current + row * hidden;
+      const float v = load(state, i);
+      sums[s * (1 + MAX_QUERIES)] += v * v;
+#pragma unroll
+      for (int q = 0; q < MAX_QUERIES; q++) sums[s * (1 + MAX_QUERIES) + 1 + q] += v * qv[q];
+    }
+  }
+  const int used = s_count * (1 + MAX_QUERIES);
+#pragma unroll
+  for (int k = 0; k < MIX_SUMS; k++) {
+    if (k >= used) break;
+    const float v = warp_sum(sums[k]);
+    if (lane == 0) warp_sums[warp][k] = v;
+  }
+  __syncthreads();
+  float* dst = partials + (row * gridDim.y + chunk) * MIX_SUMS;
+  for (int k = threadIdx.x; k < used; k += blockDim.x) {
+    float acc = 0.0f;
+    for (int w = 0; w < MIX_SPLIT_THREADS / WARP; w++) acc += warp_sums[w][k];
+    dst[k] = acc;
+  }
+}
+
+// the split depth mix's second half: block (row, chunk) sums the row's partials, takes each query's softmax and
+// writes its chunk of the output
+template <typename T, typename O>
+__global__ void depth_mix_apply_kernel(const T* blocks, const T* current, const float* partials, O* out, int s_count,
+                                       int64_t rows, int q_count, int hidden, float eps) {
+  __shared__ float total[MIX_SUMS];
+  __shared__ float inv_rms[MAX_STATES];
+  __shared__ float weights[MAX_QUERIES][MAX_STATES];
+  const int64_t row = blockIdx.x;
+  const int chunks = gridDim.y;
+  const int used = s_count * (1 + MAX_QUERIES);
+  for (int k = threadIdx.x; k < used; k += blockDim.x) {
+    float acc = 0.0f;
+    for (int c = 0; c < chunks; c++) acc += partials[(row * chunks + c) * MIX_SUMS + k];
+    total[k] = acc;
+  }
+  __syncthreads();
+  if (threadIdx.x < q_count) {
+    const int q = threadIdx.x;
+    float m = -INFINITY;
+    for (int s = 0; s < s_count; s++) {
+      const float inv = rsqrtf(total[s * (1 + MAX_QUERIES)] / hidden + eps);
+      if (q == 0) inv_rms[s] = inv;
+      weights[q][s] = total[s * (1 + MAX_QUERIES) + 1 + q] * inv * rsqrtf((float)hidden);
+      m = fmaxf(m, weights[q][s]);
+    }
+    float l = 0.0f;
+    for (int s = 0; s < s_count; s++) {
+      weights[q][s] = __expf(weights[q][s] - m);
+      l += weights[q][s];
+    }
+    for (int s = 0; s < s_count; s++) weights[q][s] /= l;
+  }
+  __syncthreads();
+  const int lo = blockIdx.y * MIX_CHUNK;
+  const int hi = min(lo + MIX_CHUNK, hidden);
+  for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+    float acc[MAX_QUERIES] = {0.0f, 0.0f, 0.0f, 0.0f};
+#pragma unroll
+    for (int s = 0; s < MAX_STATES; s++) {
+      if (s >= s_count) break;
+      const T* state = s < s_count - 1 ? blocks + (int64_t(s) * rows + row) * hidden : current + row * hidden;
+      const float v = load(state, i) * inv_rms[s];
 #pragma unroll
       for (int q = 0; q < MAX_QUERIES; q++) acc[q] += weights[q][s] * v;
     }
@@ -294,11 +394,29 @@ extern "C" int inkling_unit_rms(const void* x, int dtype, float* out, int64_t ro
   return (int)cudaGetLastError();
 }
 
+// the f32 partials a depth mix of `rows` takes (0: one block a row, no scratch)
+extern "C" int64_t inkling_depth_mix_scratch(int64_t rows, int hidden) {
+  if (rows > MIX_SPLIT_MAX_ROWS) return 0;
+  return rows * ((hidden + MIX_CHUNK - 1) / MIX_CHUNK) * MIX_SUMS;
+}
+
+// `partials` of inkling_depth_mix_scratch's size, null when it is 0
 extern "C" int inkling_depth_mix(const void* blocks, const void* current, int dtype, const float* queries, void* out,
-                                 int out_dtype, int s_count, int64_t rows, int q_count, int hidden, float eps,
-                                 int64_t stream) {
+                                 int out_dtype, float* partials, int s_count, int64_t rows, int q_count, int hidden,
+                                 float eps, int64_t stream) {
   if (s_count > MAX_STATES || q_count > MAX_QUERIES) return -1;
   const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+  if (partials) {
+    const dim3 grid((unsigned)rows, (unsigned)((hidden + MIX_CHUNK - 1) / MIX_CHUNK));
+#define SPLIT(T, O)                                                                                           \
+  depth_mix_partials_kernel<<<grid, MIX_SPLIT_THREADS, 0, s>>>((const T*)blocks, (const T*)current, queries, \
+                                                               partials, s_count, rows, q_count, hidden);    \
+  depth_mix_apply_kernel<<<grid, MIX_SPLIT_THREADS, 0, s>>>((const T*)blocks, (const T*)current, partials,  \
+                                                            (O*)out, s_count, rows, q_count, hidden, eps)
+    PAIR(dtype, out_dtype, SPLIT)
+#undef SPLIT
+    return (int)cudaGetLastError();
+  }
 #define MIX(T, O)                                                                                                \
   depth_mix_kernel<<<rows, MIX_THREADS, 0, s>>>((const T*)blocks, (const T*)current, queries, (O*)out, s_count, rows, \
                                                 q_count, hidden, eps)
