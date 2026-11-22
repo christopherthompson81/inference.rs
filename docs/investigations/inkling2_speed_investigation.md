@@ -457,3 +457,29 @@ On the way: `cuda_fused_controller_matches_the_reference` failed once at 4 BF16 
 unseeded random inputs. The kernel's BF16 output lands within a step of the f32 reference, and a step at the draw's
 tails (|v| ~5-7) is ~0.02-0.03. The bound is now two BF16 steps of each element (2^-8 of the value each) plus 1e-4.
 It passed six runs in a row.
+
+## Run 17 - 2026-11-22 18:45
+
+A drafter graph's ceiling first, from a node trace: one cycle's eager drafter pass spans 2.53 ms with 2.01 ms of
+kernels, so a graph could save at most the 0.52 ms of gaps (~2% of a 22.9 ms cycle). Most of the gaps are in the
+context append (projecting the accepted rows' taps into the drafter's KV: ~30 small kernels, 8-10 us of host dispatch
+between each), whose row count changes every step. The block forward and the recurrent head already run GPU-bound
+(1-3 us gaps). Busy time: the three layers' BF16 weights ~0.75 ms (the FFN gemms 112 + 61 us a layer for ~85 + 42 MB),
+the target head over the rows 0.53 ms, the head's picks 0.38 ms.
+
+The drafter's weights at `--mtp-draft-isq` (served, 256 tokens, prose / code / story / explainer):
+
+```
+drafts 2        tok/s                        accepted
+bf16            87.9  137.7  86.9  103.5     317 / 177
+q8_0            89.6  139.3  87.9  105.8     317 / 179
+q6k             88.4  139.4  87.5  105.9     314 / 181
+q5k             84.9  136.1  87.8  105.4     313 / 179
+q4k             85.8  135.4  88.3  103.6     313 / 178
+drafts 3
+bf16            78.0  140.2  78.6  92.1      281 / 155 / 100
+q8_0            77.9  141.8  79.4  93.7      280 / 156 / 101
+```
+
+Q8_0 gains 1-2 tok/s at the same acceptance. Below 6 bits acceptance slips on prose, and the 8-row k-quant matvecs are
+no faster. Recommended: `--mtp-draft-isq q8_0` (drafts 2).
