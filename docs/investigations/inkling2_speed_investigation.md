@@ -713,3 +713,46 @@ fused 3, plain 8   107.6
 3 warps fit this row width exactly, but the defines cover every model and type. For 4096-wide rows (128 blocks),
 8 warps divide evenly and 3 do not, so it would have to be picked per row width at launch. That gain is ~1% (0.1 ms
 a token). Restored to 8 x 2, and the pair dropped (no gain without the shape change).
+
+## Run 27 - 2026-11-23 05:30
+
+Does acceptance stay in one regime per reply, so drafting could switch on and off? A temporary trace printed each
+verify step's accepted drafts. `inference serve` at drafts 2 and plain, eight chat prompts (prose, code, story,
+explainer, email, how-to list, Rust, JSON reformat), greedy, 768 tokens. Scratchpad `acc/` holds the scripts and traces.
+
+A drafts-2 cycle costs 18.1 ms (17.9-18.3 across requests), a plain step 9.0 ms: drafting breaks even at 1.02
+accepted a step. Plain is 111.1-111.2 tok/s on every prompt.
+
+```
+tok/s        plain   always on   per-request best   per-16-cycle best   windows below / above break-even
+prose        111.2    93.4        111.2              111.9               26 / 3
+code         111.2   125.2        125.2              126.3                4 / 18
+story        111.2    99.6        111.2              113.1               21 / 6
+explainer    111.2   105.8        111.2              112.6               21 / 4
+email        111.2   117.5        117.5              122.0                4 / 8
+how-to       111.1   105.1        111.1              113.4               19 / 6
+rust         111.2   136.1        136.1              138.1                4 / 16
+json         111.2   150.9        150.9              150.9                0 / 9
+all          111.1   111.8        118.8              120.6
+```
+
+Unlike Qwen3.8 27B with DSpine (dspine investigation Runs 10-13: depth choices, a flat payoff around 7), this is an
+on/off choice with a wide gap, and replies mostly stay on one side of break-even. Choosing once per request takes
+most of what any window-level choice could (118.8 of 120.6).
+
+A rule, simulated over the traces: draft while an average of accepted drafts stays at or above break-even, with
+hysteresis 0.15. While off, run plain steps and one probe cycle every K tokens. A probe takes the acceptance the
+drafting trace had at that position, so the simulation is approximate.
+
+```
+K     alpha   all     worst   prose   code    explainer   rust    json
+128   0.05    118.1   109.8   110.5   125.0   109.8       135.9   150.9
+64    0.05    117.9   109.8   109.9   125.0   109.8       135.9   150.9
+32    0.20    114.9   110.1   110.2   117.4   110.2       125.6   129.7   (fast average: code and json switch off)
+none  0.20    111.8                   111.1                112.6   111.1   (no probes: off for good)
+```
+
+A slow average (0.05) matters, since a fast one switches off on code's short dips. The gain is about +6% over always
+on across the set, and up to +18% on prose. The worst request is 1.2% under plain (the explainer: the average takes
+a while to fall). Not modelled: keeping the drafter's context current while off (each plain step's hidden state, or
+the gap re-read at resume), sampled decoding's lower acceptance, and the eight prompts the parameters were picked on.
