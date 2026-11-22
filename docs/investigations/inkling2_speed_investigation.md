@@ -72,3 +72,23 @@ with IQ4_NL; prefill trails by 10% (was 20%).
 
 `--size`: the baseline (#998) was 1.16 MiB behind master already (master alone fails: ffi `.text` +0.86 MiB from the
 merges since); this branch adds 0.04 MiB. Baseline rewritten.
+
+## Run 3 - 2026-11-22 02:00
+
+Plain against speculative after Runs 1-2, as the drafter's Run 5 measured them (`inference serve`, greedy, 256 tokens a
+completion, wall time a request including its prompt; the official checkpoint's drafter, `--mtp-model`):
+
+```
+recipe B (tok/s)       prose   code    story   explainer   accepted / drafted
+plain                  85.0    86.6    91.2    91.2
+drafts 1               82.1    103.7   80.7    88.9        397 / 625   (0.64)
+drafts 2               83.2    120.2   76.1    90.8        501 / 1042  (per position 314, 187)
+drafts 3               76.7    125.6   70.9    85.4        557 / 1392  (per position 280, 169, 108)
+
+IQ4_NL at #1041 (drafter Run 5, before Runs 1-2)
+plain                  76.5    79.0    80.9    81.0
+drafts 3               69.3    122.9   74.7    83.4
+```
+
+Plain is ~11% faster than at #1041; speculation pays only on code (+45% at drafts 3), and loses elsewhere at every
+depth: the verify step's cost did not fall as much as the plain step's.
