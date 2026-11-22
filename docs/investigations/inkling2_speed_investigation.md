@@ -204,3 +204,49 @@ recipe C  2209    1899     98.9    0.00387 (same as before the kernel)
 ```
 
 C's prefill is level with B (the head is one matmul a prompt); its smaller head reads give decode +0.4 tok/s.
+
+## Run 9 - 2026-11-22 10:30
+
+Closing the NVFP4 prefill matmul's gap to IQ4_NL (recipe C, pp512, nsys over 5 prefills,
+`ink_pp_prof.sh`):
+
+```
+                      ms a prefill   us a launch
+NVFP4 mmq (C)         104            786
+IQ4_NL mmq            83             630
+```
+
+The prefill gap between the two GGUFs (21 ms) is all the expert mmq. Both are 4.5 bits a weight and both expand to
+int8 in shared memory; NVFP4 took the 16-wide-scale path (`vec_dot_q8_0_16_q8_1_mma`, Q3_K's), so it ran half-K
+mma steps and twice the scale products of IQ4_NL's per-32 path.
+
+The fix folds each pair of 16-wide UE4M3 scales into one f32 per 32 in `load_tiles_nvfp4`, so NVFP4 takes the Q8_0
+tile and dot product. The larger scale's 16 map e2m1's 12 (6.0) to 120, which is exact. The other 16 are code x 10 x
+(small / big), rounded within int8, which isn't exact.
+
+```
+                                                          pp512   KLD
+before (per-16 path)                                      2209    0.00387
+fold, every value scaled in floats                        2071    0.00389
+fold a no-op (wrong values, the Q8_0 path's floor)        2568    -
+fold on the 16-entry table (exact table for the larger)   2348    0.00389
++ int4 smem stores, __fdividef                            2342    0.00411 (fast divide moves .5 ties)
+thread a 16 (coalesced rows), a table each                2328
+thread a 32, exact divide                                 2361    0.00389
+IQ4_NL, same session                                      2453
+```
+
+ncu, one launch at base clocks (a thread a 64, before the remap, against IQ4_NL): 803 against 750 us, the same
+instructions (165M against 162M) and the same occupancy (1 block, 168 registers, 48 KiB). But `lg_throttle` was
+34.5K against 14.6K and global load sectors 68M against 26M, because each thread read a whole 36-byte block, so a
+warp's load touched ~32 scattered sectors. A thread a 16 cut the sectors to 24M and lg_throttle to 1.1K, but building
+a table per 16 added 23M instructions (819 us). A thread a 32 (one small-scale table per group, the constant table
+for the larger) keeps most of both.
+
+Result: recipe C pp512 2209 -> 2361 (+7%), pp2048 1899 -> 1993, tg128 unchanged (the matvec keeps its per-16
+scales), KLD 0.00389 against 0.00387 (noise). Against IQ4_NL the gap is 3.8% (was 9%).
+
+Test `nvfp4_mmq_folds_each_scale_pair_into_one` takes 33 rows through mmq against each row alone through the matvec
+(per-16, unfolded), with F32 in and out (BF16 output rounding alone is 2e-3). Equal pairs give 2.2e-4, the same as the
+unfolded kernel on either weight, so that's the two kernels' own difference. Unequal pairs give 3.3e-3 relative, the
+fold's rounding.
