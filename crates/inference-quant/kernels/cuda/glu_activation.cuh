@@ -6,7 +6,9 @@ enum GluActivation {
   GLU_GELU = 1,
   GLU_RELU = 2,
   GLU_GELU_ERF = 3,
-  GLU_SIGMOID = 4
+  GLU_SIGMOID = 4,
+  // gate_cap tanh(g / gate_cap) sigmoid(g) times up_cap tanh(u / up_cap), its caps beside the code
+  GLU_SOFTCAP_SILU = 5
 };
 
 static __device__ __forceinline__ float glu_silu(float x) {
@@ -44,4 +46,12 @@ static __device__ __forceinline__ float apply_glu_activation(float x, int act) {
   default:
     return glu_silu(x);
   }
+}
+
+// the GLU's product of a gate and an up value: act(gate) * up, or the softcapped SwiGLU over both
+static __device__ __forceinline__ float apply_glu(float gate, float up, int act, float gate_cap, float up_cap) {
+  if (act == GLU_SOFTCAP_SILU) {
+    return gate_cap * tanhf(gate / gate_cap) / (1.0f + expf(-gate)) * (up_cap * tanhf(up / up_cap));
+  }
+  return apply_glu_activation(gate, act) * up;
 }

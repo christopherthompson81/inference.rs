@@ -210,6 +210,17 @@ pub fn depth_mix(
     let (qg, ql) = queries.storage_and_layout();
     let (qp, _, _q) = device_ptr(&qg, ql, &stream)?;
     let shape = Shape::from((b, t, q_count, hidden));
+    // SAFETY: a pure size computation
+    let scratch = unsafe { super::ffi::inkling_depth_mix_scratch(i64_of(rows)?, i32_of(hidden)?) };
+    // SAFETY: the kernels write every partial before reading it
+    let scratch = usize::try_from(scratch).map_err(inference_tensor::Error::wrap)?;
+    let mut partials = (scratch > 0)
+        .then(|| unsafe { dev.alloc::<f32>(scratch) })
+        .transpose()?;
+    let partials_guard = partials.as_mut().map(|p| p.device_ptr_mut(&stream));
+    let partials_ptr = partials_guard
+        .as_ref()
+        .map_or(std::ptr::null_mut(), |(p, _)| *p as *mut f32);
     macro_rules! run {
         ($ty:ty, $code:expr) => {{
             // SAFETY: the kernel writes every element
@@ -228,6 +239,7 @@ pub fn depth_mix(
                             qp as *const f32,
                             op as *mut core::ffi::c_void,
                             $code,
+                            partials_ptr,
                             i32_of(n_states)?,
                             i64_of(rows)?,
                             i32_of(q_count)?,
@@ -707,4 +719,66 @@ pub fn conv_rollback(slots: &[ConvRollbackSlot<'_>], keep: &[i32]) -> Result<boo
     )?;
     drop(guards);
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use inference_tensor::{D, DType, Device, Result, Tensor};
+
+    const HIDDEN: usize = 576;
+    // sqrt(HIDDEN), the scores' scale
+    const HIDDEN_SQRT: f64 = 24.0;
+    const EPS: f32 = 1e-6;
+    const TOLERANCE: f32 = 1e-4;
+
+    // the mix on the CPU: each state unit-normed, each query's softmax over the states' scores
+    fn reference(states: &[Tensor], queries: &Tensor) -> Result<Tensor> {
+        let stacked = Tensor::stack(states, 2)?;
+        let rms = (stacked.sqr()?.mean_keepdim(D::Minus1)? + f64::from(EPS))?.sqrt()?;
+        let normed = stacked.broadcast_div(&rms)?;
+        let (b, t, s, h) = normed.dims4()?;
+        let flat = normed.reshape((b * t, s, h))?;
+        let scores = (flat.broadcast_matmul(&queries.t()?)? / HIDDEN_SQRT)?;
+        let weights = inference_tensor::nn::ops::softmax(&scores, 1)?;
+        weights
+            .transpose(1, 2)?
+            .contiguous()?
+            .matmul(&flat)?
+            .reshape((b, t, queries.dim(0)?, h))
+    }
+
+    // a decode's few rows split over blocks, a prefill's many one block a row: both give the CPU's mix
+    fn cuda_depth_mix_matches_the_reference() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        for (rows, n_states, q_count) in [(1, 13, 3), (5, 2, 1), (40, 7, 4)] {
+            let states = (0..n_states)
+                .map(|_| Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu))
+                .collect::<Result<Vec<_>>>()?;
+            let queries = Tensor::randn(0f32, 0.2f32, (q_count, HIDDEN), &Device::Cpu)?;
+            let expected = reference(&states, &queries)?;
+            let blocks = Tensor::stack(&states[..n_states - 1], 0)?.to_device(&cuda)?;
+            let current = states[n_states - 1].to_device(&cuda)?;
+            let mixed = super::depth_mix(
+                (n_states > 1).then_some(&blocks),
+                &current,
+                &queries.to_device(&cuda)?,
+                EPS,
+                DType::F32,
+            )?
+            .expect("the kernel takes f32 states");
+            let error = (mixed.to_device(&Device::Cpu)? - &expected)?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            assert!(
+                error < TOLERANCE,
+                "{rows} rows of {n_states} states: error {error}"
+            );
+        }
+        Ok(())
+    }
+
+    inference_tensor::gpu_cases!(cuda_cases, [cuda_depth_mix_matches_the_reference]);
 }

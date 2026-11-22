@@ -1320,6 +1320,7 @@ mod tests {
         cuda_cases,
         [
             cuda_dequantization_matches_the_cpu,
+            cuda_nvfp4_scales_decode_as_the_cpu_for_every_byte,
             cuda_kernels_match_the_dequantized_weight,
             grouped_mmq_reads_raw_expert_stacks,
             indexed_mmvq_matches_the_dequantized_experts,
@@ -1780,7 +1781,7 @@ mod tests {
                     &xs,
                     &indices,
                     k,
-                    crate::GluActivationType::Silu,
+                    crate::MoeGlu::Act(crate::GluActivationType::Silu),
                     super::super::fast_mmvq::ExpertScales::default(),
                 )?
                 .to_device(&Device::Cpu)?;
@@ -1864,7 +1865,42 @@ mod tests {
         Ok(())
     }
 
-    // an NVFP4 stack's per-expert scales, applied in the matvec: the gate's and up's before the activation, fused or not
+    // every UE4M3 scale byte (the sign bit, subnormals and 0x7F's zero among them) decodes on the GPU exactly as on
+    // the CPU
+    #[cfg(feature = "cuda")]
+    fn cuda_nvfp4_scales_decode_as_the_cpu_for_every_byte() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let ty = GgufType::Nvfp4;
+        let (scales_per_block, blocks) = (4, 64);
+        let bytes = (0..blocks)
+            .flat_map(|b| {
+                let scales = (0..scales_per_block).map(move |i| (b * scales_per_block + i) as u8);
+                // every code of both nibbles
+                let qs = (0..32).map(|j| (j * 17 % 256) as u8);
+                scales.chain(qs)
+            })
+            .collect::<Vec<_>>();
+        let cols = blocks * ty.block_size();
+        let expected = RawGgufTensor::new(ty, &[1, cols], bytes.clone(), &Device::Cpu)?
+            .dequantize(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let gpu = RawGgufTensor::new(ty, &[1, cols], bytes, &cuda)?;
+        let actual = super::super::fast_mmvq::dequantize(&gpu, DType::F32)?
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(a.to_bits(), e.to_bits(), "value {i}: {a} against {e}");
+        }
+        Ok(())
+    }
+
+    // an NVFP4 stack's per-expert scales, applied in the matvec: the gate's and up's before the activation, fused or
+    // not, and the softcapped SwiGLU fused
     #[cfg(feature = "cuda")]
     fn indexed_mmvq_applies_each_experts_scales() -> Result<()> {
         use super::super::fast_mmvq::{ExpertScales, moe_decode, moe_decode_gated};
@@ -1910,20 +1946,37 @@ mod tests {
             Tensor::from_iter(ids.iter().flatten().copied(), &cuda)?.reshape((tokens, k))?;
         let xs = Tensor::randn(0f32, 1f32, (tokens, HIDDEN), &cuda)?.to_dtype(DType::BF16)?;
         let x_cpu = xs.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
-        let mut expected = Vec::new();
-        for (t, row) in ids.iter().enumerate() {
-            let x = x_cpu.get(t)?.unsqueeze(1)?;
-            for &e in row {
-                let e = e as usize;
-                let project = |m: &Tensor, v: &Tensor, f: &[f32; 4]| -> Result<Tensor> {
-                    m.get(e)?.matmul(v)?.affine(f64::from(f[e]), 0.)
-                };
-                let activated =
-                    (project(&g, &x, &factors[0])?.silu()? * project(&u, &x, &factors[1])?)?;
-                expected.push(project(&d, &activated, &factors[2])?.squeeze(1)?);
+        // the softcapped SwiGLU's caps, small enough that the matvec's outputs reach them
+        const GATE_CAP: f32 = 1.5;
+        const UP_CAP: f32 = 2.0;
+        let softcapped = |g: &Tensor, u: &Tensor| -> Result<Tensor> {
+            let cap = |x: &Tensor, c: f32| -> Result<Tensor> {
+                x.affine(1.0 / f64::from(c), 0.)?
+                    .tanh()?
+                    .affine(f64::from(c), 0.)
+            };
+            cap(g, GATE_CAP)? * inference_tensor::nn::ops::sigmoid(g)? * cap(u, UP_CAP)?
+        };
+        let reference = |act: &dyn Fn(&Tensor, &Tensor) -> Result<Tensor>| -> Result<Tensor> {
+            let mut expected = Vec::new();
+            for (t, row) in ids.iter().enumerate() {
+                let x = x_cpu.get(t)?.unsqueeze(1)?;
+                for &e in row {
+                    let e = e as usize;
+                    let project = |m: &Tensor, v: &Tensor, f: &[f32; 4]| -> Result<Tensor> {
+                        m.get(e)?.matmul(v)?.affine(f64::from(f[e]), 0.)
+                    };
+                    let activated = act(
+                        &project(&g, &x, &factors[0])?,
+                        &project(&u, &x, &factors[1])?,
+                    )?;
+                    expected.push(project(&d, &activated, &factors[2])?.squeeze(1)?);
+                }
             }
-        }
-        let expected = Tensor::stack(&expected, 0)?;
+            Tensor::stack(&expected, 0)
+        };
+        let expected = reference(&|g, u| g.silu()? * u)?;
+        let expected_softcapped = reference(&softcapped)?;
         let fused = moe_decode(
             &w[0],
             &w[1],
@@ -1931,7 +1984,7 @@ mod tests {
             &xs,
             &indices,
             k,
-            crate::GluActivationType::Silu,
+            crate::MoeGlu::Act(crate::GluActivationType::Silu),
             scales,
         )?
         .to_device(&Device::Cpu)?;
@@ -1946,6 +1999,22 @@ mod tests {
             scales,
         )?
         .to_device(&Device::Cpu)?;
+        let fused_softcapped = moe_decode(
+            &w[0],
+            &w[1],
+            &w[2],
+            &xs,
+            &indices,
+            k,
+            crate::MoeGlu::SoftcapSilu {
+                gate_cap: GATE_CAP,
+                up_cap: UP_CAP,
+            },
+            scales,
+        )?
+        .to_device(&Device::Cpu)?;
+        let similarity = cosine(&fused_softcapped, &expected_softcapped)?;
+        assert!(similarity > 0.999, "fused softcapped: cosine {similarity}");
         for (label, actual) in [("fused", fused), ("apart", apart)] {
             let similarity = cosine(&actual, &expected)?;
             assert!(similarity > 0.999, "{label}: cosine {similarity}");

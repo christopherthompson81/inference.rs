@@ -238,6 +238,7 @@ inference_tensor::kernel_library! {
             eps: f32,
             stream: i64,
         ) -> i32;
+        pub fn inkling_depth_mix_scratch(rows: i64, hidden: i32) -> i64;
         pub fn inkling_depth_mix(
             blocks: *const c_void,
             current: *const c_void,
@@ -245,6 +246,7 @@ inference_tensor::kernel_library! {
             queries: *const f32,
             out: *mut c_void,
             out_dtype: i32,
+            partials: *mut f32,
             s_count: i32,
             rows: i64,
             q_count: i32,

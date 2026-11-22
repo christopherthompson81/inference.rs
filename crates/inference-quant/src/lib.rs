@@ -323,7 +323,7 @@ pub use utils::isq::{
 pub use utils::softcap;
 pub use utils::softmax_with_sinks;
 pub use utils::{BitWiseOp, LeftshiftOp, NonZeroOp, log};
-pub use utils::{GluActivationType, fused_glu, fused_split_glu};
+pub use utils::{GluActivationType, MoeGlu, fused_glu, fused_split_glu};
 
 use inference_tensor::nn::{Conv1d, Conv2d, Linear, Module};
 use serde::{Deserialize, Deserializer, Serialize};
