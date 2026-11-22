@@ -322,6 +322,7 @@ inference_tensor::kernel_library! {
             t: i32,
             c: i32,
             hist: i32,
+            inputs_dtype: i32,
             stream: i64,
         ) -> i32;
         pub fn inkling_short_conv(
@@ -336,6 +337,28 @@ inference_tensor::kernel_library! {
             out: *mut c_void,
             out_like_x: i32,
             new_state: *mut f32,
+            b: i32,
+            t: i32,
+            c: i32,
+            width: i32,
+            stream: i64,
+        ) -> i32;
+        pub fn inkling_short_conv_pool_max_hist() -> i32;
+        pub fn inkling_short_conv_pool(
+            x: *const c_void,
+            x_dtype: i32,
+            pool: *mut f32,
+            slots: *const u32,
+            pool_rows: i32,
+            pool_c: i32,
+            channel_off: i32,
+            weight: *const f32,
+            taps: *const f32,
+            heads: i32,
+            out: *mut c_void,
+            out_like_x: i32,
+            before: *mut f32,
+            stash: *mut c_void,
             b: i32,
             t: i32,
             c: i32,

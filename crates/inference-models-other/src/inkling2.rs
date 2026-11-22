@@ -389,10 +389,18 @@ enum ConvState<'a> {
     Pool {
         pool: &'a Tensor,
         slots: &'a Tensor,
+        rollback: Option<&'a ConvRollback>,
     },
 }
 
-/// A slot's conv inputs `[b, t, channels]` (F32) as its convs take them.
+/// A verify step's states as read `[b, channels, hist]` F32 and its conv inputs `[b, t, channels]` in x's dtype, the
+/// CUDA pool kernel's to fill.
+struct ConvRollback {
+    before: Tensor,
+    stash: Tensor,
+}
+
+/// A slot's conv inputs `[b, t, channels]` as its convs take them, in their dtype (the rollback widens them to F32).
 type ConvInputs = std::cell::RefCell<Vec<Tensor>>;
 
 /// One conv's channels of a slot's states.
@@ -405,6 +413,7 @@ enum ConvPart<'a> {
         pool: &'a Tensor,
         slots: &'a Tensor,
         channel_off: usize,
+        rollback: Option<&'a ConvRollback>,
     },
 }
 
@@ -415,10 +424,15 @@ impl<'a> ConvState<'a> {
                 state: rows.narrow(1, channel_off, channels)?,
                 inputs,
             },
-            Self::Pool { pool, slots } => ConvPart::Pool {
+            Self::Pool {
+                pool,
+                slots,
+                rollback,
+            } => ConvPart::Pool {
                 pool,
                 slots,
                 channel_off,
+                rollback,
             },
         })
     }
@@ -458,7 +472,7 @@ impl ShortConv {
         let state = match state {
             ConvPart::Rows { state, inputs } => {
                 if let Some(inputs) = inputs {
-                    inputs.borrow_mut().push(x.to_dtype(DType::F32)?);
+                    inputs.borrow_mut().push(x.clone());
                 }
                 state
             }
@@ -466,7 +480,29 @@ impl ShortConv {
                 pool,
                 slots,
                 channel_off,
+                rollback,
             } => {
+                #[cfg(feature = "cuda")]
+                if x.device().is_cuda() {
+                    let op = inference_nn::cuda::inkling::ShortConvPool {
+                        x,
+                        pool,
+                        slots,
+                        channel_off,
+                        weight: &self.weight,
+                        taps: taps.as_ref().map(|(taps, heads)| (taps, *heads)),
+                        out_like_x: out_dtype != DType::F32,
+                        before: rollback.map(|r| &r.before),
+                        stash: rollback.map(|r| &r.stash),
+                    };
+                    let Some(out) = inference_nn::cuda::inkling::short_conv_pool(&op)? else {
+                        inference_tensor::bail!(
+                            "Inkling 2: the pool convolution does not take this layout"
+                        );
+                    };
+                    return Ok((out, None));
+                }
+                let _ = rollback;
                 let taps = taps
                     .as_ref()
                     .map(|(taps, heads)| taps.reshape((b, *heads, width))?.contiguous())
@@ -1538,15 +1574,17 @@ impl Model {
                 Tensor::from_vec(tau, (1, t, 1, 1), &device)?.broadcast_as((b, t, 1, 1))
             })
             .transpose()?;
-        // a Vulkan decode step updates the pools' rows in place rather than gathering and scattering them
-        let in_place =
-            device.is_vulkan() && t == 1 && recurrent.batch_kind() == RecurrentBatchKind::Decode;
+        let decode = t == 1 && recurrent.batch_kind() == RecurrentBatchKind::Decode;
 
         let stacks = BlockStacks::default();
         // a verify step keeps each slot's state and conv inputs, for the commit to cut back to the accepted rows
         let verifying = self.spec.drafter().is_some()
             && recurrent.batch_kind() == RecurrentBatchKind::SpeculativeDecode
             && t > 1;
+        // a decode step updates the pools' rows in place rather than gathering and scattering them; on CUDA a verify
+        // too, its kernels keeping the states as read and the inputs for the rollback
+        let in_place =
+            (device.is_vulkan() && decode) || (device.is_cuda() && (decode || verifying));
         let replays = std::cell::RefCell::new(Vec::new());
         let mut run = |layer: usize,
                        slot: usize,
@@ -1581,8 +1619,25 @@ impl Model {
             } else {
                 None
             };
+            let rollback = match (&pool, verifying) {
+                (Some(pool), true) => {
+                    let (_, channels, hist) = pool.dims3()?;
+                    // SAFETY: the convs write every channel of both before they are read
+                    Some(unsafe {
+                        ConvRollback {
+                            before: Tensor::empty((b, channels, hist), DType::F32, &device)?,
+                            stash: Tensor::empty((b, t, channels), x.dtype(), &device)?,
+                        }
+                    })
+                }
+                _ => None,
+            };
             let conv_state = match (&pool, &pool_slots, &gathered) {
-                (Some(pool), Some(slots), _) => ConvState::Pool { pool, slots },
+                (Some(pool), Some(slots), _) => ConvState::Pool {
+                    pool,
+                    slots,
+                    rollback: rollback.as_ref(),
+                },
                 (_, _, Some(rows)) => ConvState::Rows {
                     rows,
                     inputs: verifying.then_some(&conv_inputs),
@@ -1629,13 +1684,29 @@ impl Model {
                     stacks: &stacks,
                 },
             )?;
-            if verifying && let Some(before) = &gathered {
+            if let Some(ConvRollback { before, stash }) = rollback {
+                replays.borrow_mut().push(speculative::ConvReplay {
+                    slot: slots + slot,
+                    indices: indices.clone(),
+                    host_indices: recurrent.state_indices_host().map(<[u32]>::to_vec),
+                    state: before,
+                    inputs: stash,
+                });
+            } else if verifying && let Some(before) = &gathered {
                 replays.borrow_mut().push(speculative::ConvReplay {
                     slot: slots + slot,
                     indices: indices.clone(),
                     host_indices: recurrent.state_indices_host().map(<[u32]>::to_vec),
                     state: before.clone(),
-                    inputs: Tensor::cat(&conv_inputs.take(), 2)?,
+                    inputs: {
+                        let parts = conv_inputs.take();
+                        let dtype = parts[0].dtype();
+                        let parts = parts
+                            .iter()
+                            .map(|p| p.to_dtype(dtype))
+                            .collect::<Result<Vec<_>>>()?;
+                        Tensor::cat(&parts, 2)?
+                    },
                 });
             }
             if let Some(state) = state {

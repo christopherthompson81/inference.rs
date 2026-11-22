@@ -330,3 +330,31 @@ Not bytes, ~3.5 ms: the casts, the copies (likely the rollback's stash of each l
 controllers and attention past one row. The drafter's 2.8 ms: its three dense layers' BF16 weights (~0.64 GB a pass,
 cuBLAS gemms 0.68 ms), the target head over the draft rows (0.52), the recurrent head's fold (`[201024, 256]` BF16,
 103 MB, 122 us a draft) and an argmax over the one 201K row (134 us a draft where 0.8 MB should take a few us).
+
+## Run 13 - 2026-11-22 14:30
+
+The verify's conv stash and the conv states' round trip.
+
+Step 1: the stash kept each conv input as its BF16 (no cast to F32), and the rollback kernel (`conv_rollback_kernel<I>`)
+widens it, which is exact. Casts went from 1460 to 562 us a cycle (322 to 129 launches, plain's level). Drafts 3 prose
+went 76.0 to 77.5, the others within noise. Test `cuda_conv_rollback_takes_either_stash_dtype`.
+
+Step 2: per layer visit, decode and verify gathered the slot's states (`index_select`, with a clamp), ran four convs
+on the copy, concatenated their four new states (4 `copy2d_f32`), and scattered them back (`indexed_row_copy`). A verify
+also concatenated its stash (4 `copy2d_bf16`). These are ~1.4 us kernels, mostly launch cost. The CUDA pool kernel
+(`short_conv_pool_kernel`, like Vulkan's in-place step) takes a thread per (row, channel): it reads the state from the
+row's slot at the conv's channel offset into a register window, runs the rows, and writes the new state back into the
+slot. In a verify it also writes the state as read and the inputs into the rollback's buffers (`ConvRollback`). A slot
+past the pool (a padded row) reads zeros and writes nothing. Decode and verify now take the pool on CUDA. Test
+`cuda_pool_conv_matches_the_gathered_rows` (outputs, new states, before, stash, the other channels and slots left; t 1
+and 4, with and without taps, a padded row). The tiny model's decode-against-prefill and drafter tests pass.
+
+```
+recipe C                         tg128   served plain   drafts 3: prose   code    story   explainer
+Run 10                           99.0    ~96.5                    76.0    127.8   74.1    85.6
+step 1 (BF16 stash)                                               77.5    128.8   73.3    84.4
+step 2 (pool kernel)             103.0   ~99.2                    75.7    136.0   76.2    89.2
+```
+
+Plain decode +4% (each visit loses its gather, concatenation and scatter). Speculation gains on code (+6%), story and
+explainer; prose is level (its greedy text and drafts moved: accepted 280 / 156 / 101 against 286 / 163 / 102).
