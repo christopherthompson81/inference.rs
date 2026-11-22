@@ -249,7 +249,7 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
         case GGML_TYPE_Q5_1:    return MMQ_DP4A_TXS_Q8_1;
         case GGML_TYPE_Q8_0:    return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_MXFP4:   return MMQ_DP4A_TXS_Q8_1;
-        case GGML_TYPE_NVFP4:   return MMQ_DP4A_TXS_Q8_0_16;
+        case GGML_TYPE_NVFP4:   return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_Q2_K:    return MMQ_DP4A_TXS_Q2_K;
         case GGML_TYPE_Q3_K:    return MMQ_DP4A_TXS_Q3_K;
         case GGML_TYPE_Q4_K:    return MMQ_DP4A_TXS_Q4_K;
@@ -285,7 +285,6 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
 
 #define MMQ_MMA_TILE_X_K_Q8_0  (2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                   + 4)
 #define MMQ_MMA_TILE_X_K_FP4   (2*MMQ_TILE_NE_K + 8                                       + 4) // MXFP4
-#define MMQ_MMA_TILE_X_K_NVFP4 (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/2                         + 4) // NVFP4
 #define MMQ_MMA_TILE_X_K_Q8_1  (2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                   + 4)
 #define MMQ_MMA_TILE_X_K_Q2_K  (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K                           + 4)
 #define MMQ_MMA_TILE_X_K_Q3_K  (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/2                         + 4)
@@ -298,7 +297,6 @@ static_assert(MMQ_MMA_TILE_X_K_Q3_K % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_Q6_K % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_FP4  % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_FP4 == MMQ_MMA_TILE_X_K_Q8_1, "Wrong tile size for MXFP4");
-static_assert(MMQ_MMA_TILE_X_K_NVFP4 % 8 == 4, "Wrong padding.");
 
 
 static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
@@ -310,7 +308,7 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_Q8_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         // tile sizes are the same for Q8_1 and FP4 for blackwell
         case GGML_TYPE_MXFP4:   return MMQ_MMA_TILE_X_K_Q8_1;
-        case GGML_TYPE_NVFP4:   return MMQ_MMA_TILE_X_K_NVFP4;
+        case GGML_TYPE_NVFP4:   return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_Q2_K:    return MMQ_MMA_TILE_X_K_Q2_K;
         case GGML_TYPE_Q3_K:    return MMQ_MMA_TILE_X_K_Q3_K;
         case GGML_TYPE_Q4_K:    return MMQ_MMA_TILE_X_K_Q8_1;
@@ -924,6 +922,18 @@ static __device__ __forceinline__ void load_tiles_mxfp4_fp4(const char * __restr
 }
 
 
+// The larger scale of each 32 maps 12 (e2m1 6.0) to 120: exact there, the other 16 rounded within int8.
+#define NVFP4_FOLD_STEPS 10.0f
+
+static const __device__ int8_t kvalues_nvfp4_folded[16] = {0, 10, 20, 30, 40, 60, 80, 120, 0, -10, -20, -30, -40, -60, -80, -120};
+
+static __device__ __forceinline__ uint32_t nvfp4_fold_pack(const float f, const int a, const int b, const int c, const int d) {
+    return (__float2int_rn(a * f) & 0xFF) | ((__float2int_rn(b * f) & 0xFF) << 8) |
+           ((__float2int_rn(c * f) & 0xFF) << 16) | (__float2int_rn(d * f) << 24);
+}
+
+// Folds each pair of 16-wide scales into one per 32, so NVFP4 takes the Q8_0 tile and dot product. One thread per 32,
+// so a warp's loads run along each row.
 template <int mmq_y, bool need_check>
 static __device__ __forceinline__ void load_tiles_nvfp4(const char * __restrict__ x,
                                                         int * __restrict__ x_tile,
@@ -942,10 +952,15 @@ static __device__ __forceinline__ void load_tiles_nvfp4(const char * __restrict_
     float * x_df = (float *) (x_qs + txs.qs);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
-    constexpr int threads_per_row = MMQ_ITER_K / QK_NVFP4;
+    constexpr int groups = QK_NVFP4 / QK8_0;
+    constexpr int subs_per_group = QK8_0 / QK_NVFP4_SUB;
+    constexpr int threads_per_row = MMQ_ITER_K / QK8_0;
     constexpr int rows_per_warp = warp_size / threads_per_row;
-    const int kbx = threadIdx.x % threads_per_row;
+    const int t = threadIdx.x % threads_per_row;
+    const int kbx = t / groups;
+    const int g = t % groups;
     const int row_in_warp = threadIdx.x / threads_per_row;
+    const uint32_t * folded = (const uint32_t *) kvalues_nvfp4_folded;
 
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += rows_per_warp * nwarps) {
@@ -956,29 +971,45 @@ static __device__ __forceinline__ void load_tiles_nvfp4(const char * __restrict_
         }
 
         const block_nvfp4 * bxi = (const block_nvfp4 *) x + kb0 + i * stride + kbx;
-        const uint32_t * __restrict__ src_qs = reinterpret_cast<const uint32_t *>(bxi->qs);
-        const int kqs = 16 * kbx;
-        const int ksc = 4 * kbx;
+        const uint32_t * __restrict__ src_qs = reinterpret_cast<const uint32_t *>(bxi->qs) + 2 * subs_per_group * g;
+        const uint16_t pair = reinterpret_cast<const uint16_t *>(bxi->d)[g];
+        const float s0 = ggml_cuda_ue4m3_to_fp32(pair & 0xFF);
+        const float s1 = ggml_cuda_ue4m3_to_fp32(pair >> 8);
+        const int big_sub = s1 > s0;
+        const float big = fmaxf(s0, s1);
+        const float f = big > 0.0f ? fminf(s0, s1) * (NVFP4_FOLD_STEPS / big) : 0.0f;
+        uint32_t small[4];
+        small[0] = nvfp4_fold_pack(f, 0, 1, 2, 3);
+        small[1] = nvfp4_fold_pack(f, 4, 6, 8, 12);
+        small[2] = __vneg4(small[0]);
+        small[3] = __vneg4(small[1]);
+        const int k0 = 16 * kbx + 4 * subs_per_group * g;
 
 #pragma unroll
-        for (int sub = 0; sub < QK_NVFP4 / QK_NVFP4_SUB; ++sub) {
-            const int2 q0 = get_int_from_table_16(src_qs[2 * sub + 0], kvalues_mxfp4);
-            const int2 q1 = get_int_from_table_16(src_qs[2 * sub + 1], kvalues_mxfp4);
-
+        for (int h = 0; h < subs_per_group; ++h) {
+            uint32_t table[4];
+#pragma unroll
+            for (int w = 0; w < 4; ++w) {
+                table[w] = h == big_sub ? folded[w] : small[w];
+            }
+            const int2 q0 = get_int_from_table_16(src_qs[2 * h + 0], (const int8_t *) table);
+            const int2 q1 = get_int_from_table_16(src_qs[2 * h + 1], (const int8_t *) table);
+            const int k = k0 + 4 * h;
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 0] = q0.x;
-            x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 1] = q1.x;
-            x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 2] = q0.y;
-            x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 3] = q1.y;
-            x_df[i * MMQ_MMA_TILE_X_K_NVFP4 + ksc + sub] = ggml_cuda_ue4m3_to_fp32(bxi->d[sub]);
+            *reinterpret_cast<int4 *>(x_qs + i * MMQ_MMA_TILE_X_K_Q8_0 + k) = make_int4(q0.x, q1.x, q0.y, q1.y);
 #else
-            x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 0] = q0.x;
-            x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 1] = q1.x;
-            x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 2] = q0.y;
-            x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 3] = q1.y;
-            x_df[i * (2 * MMQ_TILE_NE_K * 2 / QI_NVFP4) + i / (QK_NVFP4_SUB / QI_NVFP4) + ksc + sub] = ggml_cuda_ue4m3_to_fp32(bxi->d[sub]);
+            int * dst = x_qs + i * (2 * MMQ_TILE_NE_K + 1) + k;
+            dst[0] = q0.x;
+            dst[1] = q1.x;
+            dst[2] = q0.y;
+            dst[3] = q1.y;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
         }
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_df[i * MMQ_MMA_TILE_X_K_Q8_0 + groups * kbx + g] = big / NVFP4_FOLD_STEPS;
+#else
+        x_df[i * (2 * MMQ_TILE_NE_K / QI8_0) + i / (QI8_0 / 2) + groups * kbx + g] = big / NVFP4_FOLD_STEPS;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 }
 
@@ -3421,8 +3452,8 @@ template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_NVFP4> {
     static constexpr int              vdr          = VDR_NVFP4_Q8_1_MMQ;
     static constexpr load_tiles_mmq_t load_tiles   = load_tiles_nvfp4<mmq_y, need_check>;
-    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_16_q8_1_mma<mmq_x, mmq_y>;
-    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_16_q8_1_dp4a<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
 };
 
 template <int mmq_x, int mmq_y, bool need_check>

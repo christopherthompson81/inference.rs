@@ -1322,6 +1322,7 @@ mod tests {
             cuda_dequantization_matches_the_cpu,
             cuda_nvfp4_scales_decode_as_the_cpu_for_every_byte,
             cuda_kernels_match_the_dequantized_weight,
+            nvfp4_mmq_folds_each_scale_pair_into_one,
             grouped_mmq_reads_raw_expert_stacks,
             grouped_mmq_spans_experts_over_several_tiles,
             indexed_mmvq_matches_the_dequantized_experts,
@@ -1370,6 +1371,49 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    // NVFP4's mmq folds each pair of 16-wide scales into one per 32 (the smaller rounded to int8); its matvec keeps
+    // them, so each row alone is the reference: equal pairs as unfolded, others to the rounding
+    #[cfg(feature = "cuda")]
+    fn nvfp4_mmq_folds_each_scale_pair_into_one() -> Result<()> {
+        const ROWS: usize = 64;
+        const COLS: usize = 512;
+        const BATCH: usize = 33;
+        // the two kernels apart unfolded (2.2e-4), and with the smaller scale of each pair rounded (3.3e-3)
+        const MATVEC_ERROR: f32 = 5e-4;
+        const FOLD_ERROR: f32 = 5e-3;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let ty = GgufType::Nvfp4;
+        let unequal = random_rows(ty, ROWS, COLS, 23);
+        let mut equal = unequal.clone();
+        for block in equal.chunks_exact_mut(ty.type_size()) {
+            block[1] = block[0];
+            block[3] = block[2];
+        }
+        let xs = Tensor::randn(0f32, 1f32, (BATCH, COLS), &cuda)?;
+        let mut errors = Vec::new();
+        for (bytes, bound) in [(equal, MATVEC_ERROR), (unequal, FOLD_ERROR)] {
+            let gpu =
+                GgufRawMatMul::new(RawGgufTensor::new(ty, &[ROWS, COLS], bytes, &cuda)?, None);
+            let all = gpu.forward(&xs)?;
+            let alone = (0..BATCH)
+                .map(|t| gpu.forward(&xs.narrow(0, t, 1)?))
+                .collect::<Result<Vec<_>>>()?;
+            let alone = Tensor::cat(&alone, 0)?;
+            let err = (&all - &alone)?
+                .sqr()?
+                .sum_all()?
+                .sqrt()?
+                .to_scalar::<f32>()?
+                / alone.sqr()?.sum_all()?.sqrt()?.to_scalar::<f32>()?;
+            errors.push((err, bound));
+        }
+        assert!(errors.iter().all(|&(err, bound)| err < bound), "{errors:?}");
         Ok(())
     }
 
