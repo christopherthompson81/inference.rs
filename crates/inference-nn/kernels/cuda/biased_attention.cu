@@ -30,7 +30,7 @@ constexpr int DECODE_KEYS = 2;
 // DECODE_SPLIT_KEYS of its keys, the grid's other blocks exiting
 constexpr int DECODE_MAX_SPLITS = 16;
 constexpr int DECODE_BLOCKS_PER_SM = 6;
-constexpr int DECODE_SPLIT_KEYS = 512;
+constexpr int DECODE_SPLIT_KEYS = 64;
 // the tensor-core prefill: a warp 16 queries, a block 4 warps, keys a tile at a time; prompts from this many queries
 constexpr int MMA_WARPS = 4;
 constexpr int MMA_ROWS = 16;

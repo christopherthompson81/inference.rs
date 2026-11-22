@@ -551,3 +551,22 @@ All of the long context's extra time is this kernel (the other graph kernels are
 reads ~40 MB, ~420 GB/s of the 3090's ~936, so it is still short of bandwidth. FP8's half bytes gain nothing yet:
 its widening costs what the bytes save. The 24 query heads share 8 KV heads, so three blocks read each K/V. A block
 a KV head serving its 3 query heads would read each key once for three queries.
+
+## Run 20 - 2026-11-22 22:00
+
+nsight-compute on long-context decode attention calls (9.8K context, `--set full`): 30 us, 4.3 MB from DRAM (~145
+GB/s), 23% of warp slots active, stalls mostly long scoreboard (memory latency). A split per 512 keys left a layer of
+~2K visible keys (a windowed one) on 4 of its 16 splits: 75% of the grid exited at once, and too few warps stayed to
+hide the loads. A split per 64 keys (`DECODE_SPLIT_KEYS`) puts a row on every split from ~1K keys:
+
+```
+served tok/s, context (tokens)      8       5689    9824
+plain bf16, Run 19                  110.7   98.6    89.9
+plain bf16, 64 keys a split         111.5   98.5    97.4
+plain f8e4m3                        110.2   98.5    94.1
+drafts 2, Run 17 (q8_0 drafter)     88.1 / 140.3 / 88.6 / 106.5     95.0    118.9
+drafts 2, now                       93.1 / 134.2 / 91.7 / 107.8     100.9   127.1
+```
+
+(drafts 2 at 8 tokens: prose / code / story / explainer.) Decode at 9.8K is now within 1 tok/s of 5.7K's. FP8 KV
+stays behind BF16: on this kernel a quantized cache buys context room, not speed.
