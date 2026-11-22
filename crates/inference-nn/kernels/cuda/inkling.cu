@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <math.h>
+#include <limits.h>
 #include <stdint.h>
 
 namespace {
@@ -23,6 +24,9 @@ constexpr int MIX_SUMS = MAX_STATES * (1 + MAX_QUERIES);
 constexpr int64_t CONTROLLER_MAX_ROWS = 16;
 constexpr int CONTROLLER_MAX_RANK = 128;
 constexpr int CONTROLLER_THREADS = 256;
+// a Markov pick's blocks a batch row (each a slice of the vocabulary) and its block
+constexpr int PICK_BLOCKS = 256;
+constexpr int PICK_THREADS = 256;
 // the down projection's dots split over this many slices of the hidden dim, their partial sums the up kernel's to add
 constexpr int CONTROLLER_DOWN_CHUNKS = 4;
 // a down block's partials: the x half's dot, the message half's, and their sums of squares
@@ -424,6 +428,77 @@ __global__ void short_conv_kernel(const X* x, const S* state, int64_t state_batc
   }
 }
 
+// the larger value, the lower index on a tie; NaN loses
+__device__ __forceinline__ void pick_better(float& v, int& i, float ov, int oi) {
+  if (ov != ov) return;
+  if (v != v || ov > v || (ov == v && oi < i)) {
+    v = ov;
+    i = oi;
+  }
+}
+
+__device__ __forceinline__ void pick_block(float& v, int& i) {
+  __shared__ float vs[PICK_THREADS / WARP];
+  __shared__ int is[PICK_THREADS / WARP];
+  for (int off = WARP / 2; off > 0; off /= 2) pick_better(v, i, __shfl_down_sync(0xffffffff, v, off), __shfl_down_sync(0xffffffff, i, off));
+  const int warp = threadIdx.x / WARP, lane = threadIdx.x % WARP;
+  if (lane == 0) {
+    vs[warp] = v;
+    is[warp] = i;
+  }
+  __syncthreads();
+  if (warp == 0) {
+    v = lane < PICK_THREADS / WARP ? vs[lane] : NAN;
+    i = lane < PICK_THREADS / WARP ? is[lane] : INT_MAX;
+    for (int off = WARP / 2; off > 0; off /= 2) pick_better(v, i, __shfl_down_sync(0xffffffff, v, off), __shfl_down_sync(0xffffffff, i, off));
+  }
+}
+
+// a slice of the vocabulary: each row's `logits[v] + fold_b[v] + fold_w[v] . latent`, a warp a row, its best kept
+template <typename L>
+__global__ void markov_pick_partial_kernel(const L* logits, int64_t logits_batch, const __nv_bfloat16* fold_w,
+                                           const float* fold_b, const float* latent, int rank, int vocab,
+                                           float* part_v, int* part_i) {
+  extern __shared__ float lat[];
+  const int bi = blockIdx.y;
+  for (int r = threadIdx.x; r < rank; r += blockDim.x) lat[r] = latent[int64_t(bi) * rank + r];
+  __syncthreads();
+  const int warp = threadIdx.x / WARP, lane = threadIdx.x % WARP;
+  const int per = (vocab + gridDim.x - 1) / gridDim.x;
+  const int lo = blockIdx.x * per, hi = min(vocab, lo + per);
+  float best = NAN;
+  int at = INT_MAX;
+  for (int v = lo + warp; v < hi; v += PICK_THREADS / WARP) {
+    const __nv_bfloat16* w = fold_w + int64_t(v) * rank;
+    float dot = 0.0f;
+    for (int r = lane * 8; r < rank; r += WARP * 8) {
+      const uint4 raw = *reinterpret_cast<const uint4*>(w + r);
+      const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&raw);
+#pragma unroll
+      for (int k = 0; k < 4; k++) {
+        const float2 f = __bfloat1622float2(h[k]);
+        dot += f.x * lat[r + 2 * k] + f.y * lat[r + 2 * k + 1];
+      }
+    }
+    for (int off = WARP / 2; off > 0; off /= 2) dot += __shfl_xor_sync(0xffffffff, dot, off);
+    if (lane == 0) pick_better(best, at, load(logits, int64_t(bi) * logits_batch + v) + fold_b[v] + dot, v);
+  }
+  pick_block(best, at);
+  if (threadIdx.x == 0) {
+    part_v[bi * gridDim.x + blockIdx.x] = best;
+    part_i[bi * gridDim.x + blockIdx.x] = at;
+  }
+}
+
+__global__ void markov_pick_final_kernel(const float* part_v, const int* part_i, int parts, uint32_t* out) {
+  const int bi = blockIdx.x;
+  float best = NAN;
+  int at = INT_MAX;
+  for (int p = threadIdx.x; p < parts; p += blockDim.x) pick_better(best, at, part_v[bi * parts + p], part_i[bi * parts + p]);
+  pick_block(best, at);
+  if (threadIdx.x == 0) out[bi] = at == INT_MAX ? 0u : uint32_t(at);
+}
+
 // the state window a thread keeps in registers
 constexpr int CONV_MAX_HIST = 8;
 
@@ -668,6 +743,31 @@ extern "C" int inkling_sigmoid_gate(const float* x, const void* gate, int gate_d
 #define GATE(G, O) sigmoid_gate_kernel<<<grid, ROW_THREADS, 0, s>>>(x, (const G*)gate, (O*)out, n)
   PAIR(gate_dtype, out_dtype, GATE)
 #undef GATE
+  return (int)cudaGetLastError();
+}
+
+// the f32 + i32 partials a Markov pick over `b` rows takes
+extern "C" int64_t inkling_markov_pick_scratch(int b) { return int64_t(b) * PICK_BLOCKS; }
+
+// each batch row's argmax over `v < vocab` of `logits[v] + fold_b[v] + fold_w[v] . latent` (fold_w bf16
+// `[>= vocab, rank]`, rank a multiple of 8 and its rows 16-byte aligned), `part_v`/`part_i` of the scratch's size
+extern "C" int inkling_markov_pick(const void* logits, int logits_dtype, int64_t logits_batch, const void* fold_w,
+                                   const float* fold_b, const float* latent, int b, int rank, int vocab,
+                                   float* part_v, int* part_i, uint32_t* out, int64_t stream) {
+  if (rank % 8 != 0) return -1;
+  const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+  const dim3 grid(PICK_BLOCKS, b);
+  const size_t smem = size_t(rank) * sizeof(float);
+  if (logits_dtype == 0) {
+    markov_pick_partial_kernel<<<grid, PICK_THREADS, smem, s>>>((const float*)logits, logits_batch,
+                                                                (const __nv_bfloat16*)fold_w, fold_b, latent, rank,
+                                                                vocab, part_v, part_i);
+  } else {
+    markov_pick_partial_kernel<<<grid, PICK_THREADS, smem, s>>>((const __nv_bfloat16*)logits, logits_batch,
+                                                                (const __nv_bfloat16*)fold_w, fold_b, latent, rank,
+                                                                vocab, part_v, part_i);
+  }
+  markov_pick_final_kernel<<<b, PICK_THREADS, 0, s>>>(part_v, part_i, PICK_BLOCKS, out);
   return (int)cudaGetLastError();
 }
 

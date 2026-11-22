@@ -358,3 +358,38 @@ step 2 (pool kernel)             103.0   ~99.2                    75.7    136.0 
 
 Plain decode +4% (each visit loses its gather, concatenation and scatter). Speculation gains on code (+6%), story and
 explainer; prose is level (its greedy text and drafts moved: accepted 280 / 156 / 101 against 286 / 163 / 102).
+
+## Run 14 - 2026-11-22 15:30
+
+The drafter's recurrent head ran, a draft, a cuBLAS gemv over the fold (`[201024, 256]` BF16, 103 MB, 156 us), a
+generic one-block argmax over the 201K row (`fast_argmax_f32`, 137 us), and ~8 vocabulary-wide elementwise kernels
+(the casts, the bias, the softcap). One fused pick (`inkling_markov_pick`) does it in two stages: a warp a vocabulary
+row takes `logits[v] + fold_b[v] + fold_w[v] . latent` (the latent in shared memory, one 16-byte load a lane), each
+block keeps its best, then one block a batch row reduces the partials. Ties go to the lower index, as the argmax.
+The softcap keeps the order, so the pick skips it. The bias sums in f32 where the matmul rounded it to BF16, so a
+draft may differ at a near tie. Test `cuda_markov_pick_takes_the_biased_argmax` (f32 and BF16 logits, a strided
+step, padded rows above every real one).
+
+A cycle, graph-level trace, the prose request at drafts 3:
+
+```
+                         cycle   verify graph   drafter   idle   cycles for 256 tokens
+Run 12                   25.73   21.28          2.82      1.89   132
+Runs 13-14               23.72   20.20          2.29      1.45   143
+```
+
+Prose tok/s hides the cycle's 8%: its greedy text moved (a verify's rows change with the drafts and flip near ties),
+so it took 143 cycles. Served (tok/s):
+
+```
+                 prose   code    story   explainer
+drafts 3         74.0    136.5   77.0    89.9     (281 / 155 / 100 accepted)
+drafts 2         86.1    135.1   85.5    101.8    (317 / 177)
+plain            ~99.2
+```
+
+At drafts 2 the explainer passes plain and code keeps drafts 3's speed.
+
+The drafter's pass stays eager: the DFlash host graphs a drafter only over its bounded windowed KV pool
+(`enable_windowed_kv`), which Inkling's doesn't take (layer 1 is global), so it runs the paged path with no graph. Its
+~200 launches leave gaps, and the verify's launch (0.54 ms of host for ~2,650 nodes) waits on the drafts' readback.

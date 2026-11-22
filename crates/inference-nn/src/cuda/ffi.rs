@@ -343,6 +343,22 @@ inference_tensor::kernel_library! {
             width: i32,
             stream: i64,
         ) -> i32;
+        pub fn inkling_markov_pick_scratch(b: i32) -> i64;
+        pub fn inkling_markov_pick(
+            logits: *const c_void,
+            logits_dtype: i32,
+            logits_batch: i64,
+            fold_w: *const c_void,
+            fold_b: *const f32,
+            latent: *const f32,
+            b: i32,
+            rank: i32,
+            vocab: i32,
+            part_v: *mut f32,
+            part_i: *mut i32,
+            out: *mut u32,
+            stream: i64,
+        ) -> i32;
         pub fn inkling_short_conv_pool_max_hist() -> i32;
         pub fn inkling_short_conv_pool(
             x: *const c_void,

@@ -369,6 +369,88 @@ pub fn short_conv(
     )))
 }
 
+/// Each row's greedy pick under a recurrent Markov head: the argmax over `v < vocab` of
+/// `logits[v] + fold_b[v] + fold_w[v] . latent` (`logits` `(b, >= vocab)` f32 or bf16 with its last axis contiguous,
+/// `fold_w` `(>= vocab, rank)` BF16, `fold_b` F32, `latent` `(b, rank)` F32), as U32 `(b,)`; `None` for a layout the
+/// kernel does not take.
+pub fn markov_pick(
+    logits: &Tensor,
+    fold_w: &Tensor,
+    fold_b: &Tensor,
+    latent: &Tensor,
+    vocab: usize,
+) -> Result<Option<Tensor>> {
+    let Device::Cuda(dev) = logits.device() else {
+        return Ok(None);
+    };
+    let (b, width) = logits.dims2()?;
+    let (rows, rank) = fold_w.dims2()?;
+    let stride = logits.stride();
+    if !takes(logits)
+        || stride[1] != 1
+        || fold_w.dtype() != DType::BF16
+        || !fold_w.is_contiguous()
+        || !fold_w.layout().start_offset().is_multiple_of(8)
+        || !rank.is_multiple_of(8)
+        || rows < vocab
+        || width < vocab
+        || fold_b.dtype() != DType::F32
+        || fold_b.dims1()? < vocab
+        || latent.dtype() != DType::F32
+        || latent.dims2()? != (b, rank)
+    {
+        return Ok(None);
+    }
+    let fold_b = fold_b.contiguous()?;
+    let latent = latent.contiguous()?;
+    let stream = dev.cuda_stream();
+    // SAFETY: a size query
+    let parts = usize::try_from(unsafe { super::ffi::inkling_markov_pick_scratch(i32_of(b)?) })
+        .map_err(inference_tensor::Error::wrap)?;
+    // SAFETY: the partial kernel writes every partial before the final one reads them
+    let mut part_v = unsafe { dev.alloc::<f32>(parts)? };
+    let mut part_i = unsafe { dev.alloc::<i32>(parts)? };
+    let mut out = unsafe { dev.alloc::<u32>(b)? };
+    let (lg, ll) = logits.storage_and_layout();
+    let (lp, l_dtype, _l) = device_ptr(&lg, ll, &stream)?;
+    let (wg, wl) = fold_w.storage_and_layout();
+    let (wp, _, _w) = device_ptr(&wg, wl, &stream)?;
+    let (bg, bl) = fold_b.storage_and_layout();
+    let (bp, _, _b) = device_ptr(&bg, bl, &stream)?;
+    let (ag, al) = latent.storage_and_layout();
+    let (ap, _, _a) = device_ptr(&ag, al, &stream)?;
+    {
+        let (vp, _v) = part_v.device_ptr_mut(&stream);
+        let (ip, _i) = part_i.device_ptr_mut(&stream);
+        let (op, _o) = out.device_ptr_mut(&stream);
+        // SAFETY: the buffers cover the shapes checked above, on this stream
+        status(
+            unsafe {
+                super::ffi::inkling_markov_pick(
+                    lp as *const core::ffi::c_void,
+                    l_dtype,
+                    i64_of(stride[0])?,
+                    wp as *const core::ffi::c_void,
+                    bp as *const f32,
+                    ap as *const f32,
+                    i32_of(b)?,
+                    i32_of(rank)?,
+                    i32_of(vocab)?,
+                    vp as *mut f32,
+                    ip as *mut i32,
+                    op as *mut u32,
+                    stream.cu_stream() as i64,
+                )
+            },
+            "Markov pick",
+        )?;
+    }
+    Ok(Some(Tensor::from((
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+        Shape::from(b),
+    ))))
+}
+
 /// [`short_conv`] over a slot pool in place: one conv's channels of each batch row's slot.
 pub struct ShortConvPool<'a> {
     // `(b, t, c)` f32 or bf16
@@ -964,7 +1046,7 @@ pub fn conv_rollback(slots: &[ConvRollbackSlot<'_>], keep: &[i32]) -> Result<boo
 
 #[cfg(test)]
 mod tests {
-    use inference_tensor::{D, DType, Device, Result, Tensor};
+    use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
     const HIDDEN: usize = 576;
     // sqrt(HIDDEN), the scores' scale
@@ -1017,6 +1099,46 @@ mod tests {
                 error < TOLERANCE,
                 "{rows} rows of {n_states} states: error {error}"
             );
+        }
+        Ok(())
+    }
+
+    // the fused pick against the bias through a matmul, the sum's argmax over the unpadded vocabulary; logits a
+    // strided step of `[b, steps, padded]`, and a padded row larger than every real one
+    fn cuda_markov_pick_takes_the_biased_argmax() -> Result<()> {
+        const B: usize = 3;
+        const STEPS: usize = 2;
+        const VOCAB: usize = 5000;
+        const PADDED: usize = 5056;
+        const RANK: usize = 64;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let fold_w = Tensor::randn(0f32, 1f32, (PADDED, RANK), &cuda)?.to_dtype(DType::BF16)?;
+        let fold_b = Tensor::randn(0f32, 1f32, PADDED, &cuda)?;
+        let latent = Tensor::randn(0f32, 1f32, (B, RANK), &cuda)?;
+        let padding = Tensor::full(1e4f32, (B, STEPS, PADDED - VOCAB), &cuda)?;
+        for dtype in [DType::F32, DType::BF16] {
+            let logits = Tensor::cat(
+                &[
+                    &Tensor::randn(0f32, 4f32, (B, STEPS, VOCAB), &cuda)?,
+                    &padding,
+                ],
+                2,
+            )?
+            .to_dtype(dtype)?;
+            let step = logits.i((.., 1))?;
+            let bias = latent
+                .matmul(&fold_w.to_dtype(DType::F32)?.t()?)?
+                .broadcast_add(&fold_b)?;
+            let expected = (step.to_dtype(DType::F32)? + bias)?
+                .narrow(1, 0, VOCAB)?
+                .argmax(D::Minus1)?
+                .to_vec1::<u32>()?;
+            let picked = super::markov_pick(&step, &fold_w, &fold_b, &latent, VOCAB)?
+                .expect("the kernel takes the layout")
+                .to_vec1::<u32>()?;
+            assert_eq!(picked, expected, "{dtype:?}");
         }
         Ok(())
     }
@@ -1217,7 +1339,8 @@ mod tests {
             cuda_depth_mix_matches_the_reference,
             cuda_fused_controller_matches_the_reference,
             cuda_conv_rollback_takes_either_stash_dtype,
-            cuda_pool_conv_matches_the_gathered_rows
+            cuda_pool_conv_matches_the_gathered_rows,
+            cuda_markov_pick_takes_the_biased_argmax
         ]
     );
 }
