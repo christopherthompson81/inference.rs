@@ -110,6 +110,9 @@ static void instantiate_mmq(float *tmp_fixup, const mmq_args &args,
   }
 }
 
+// an expert's tile in routes, as a multiple of the routes an expert sees on average
+constexpr int64_t MMQ_MOE_TILE_AVERAGES = 2;
+
 template <ggml_type type>
 static void launch_mmq_case(float *tmp_fixup, const mmq_args &args,
                             cudaStream_t stream, int cc, int nsm, size_t smpbo,
@@ -127,6 +130,11 @@ static void launch_mmq_case(float *tmp_fixup, const mmq_args &args,
                         : 64;
   const int nwarps = 256 / warp_size_host;
 
+  // experts: a tile most experts' routes fit (each tile rereads the expert's weights); the grid still covers ncols_max
+  const int64_t ncols_opt =
+      args.expert_bounds
+          ? MMQ_MOE_TILE_AVERAGES * ((args.ncols_dst + args.nchannels_x - 1) / args.nchannels_x)
+          : args.ncols_max;
   int mmq_x_best = 0;
   int ntiles_x_best = INT_MAX;
   for (int mmq_x = 8; mmq_x <= mmq_x_max && ntiles_x_best > 1; mmq_x += 8) {
@@ -137,7 +145,7 @@ static void launch_mmq_case(float *tmp_fixup, const mmq_args &args,
         mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size_host, nwarps);
     if (nbs > smpbo)
       continue;
-    const int ntiles_x = (args.ncols_max + mmq_x - 1) / mmq_x;
+    const int ntiles_x = (ncols_opt + mmq_x - 1) / mmq_x;
     if (ntiles_x < ntiles_x_best) {
       mmq_x_best = mmq_x;
       ntiles_x_best = ntiles_x;

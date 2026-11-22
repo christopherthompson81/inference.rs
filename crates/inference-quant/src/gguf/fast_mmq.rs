@@ -49,6 +49,15 @@ fn wrap_cuda_output<T: CudaDType + DeviceRepr>(
 }
 
 /// Quant types supported by MMQ kernels (same as MMVQ).
+/// Whether grouped mmq's sums for `ty` follow its tile width: ik_llama's IQ2_K, IQ3_K, IQ4_K and IQ5_K requantize
+/// their weights to Q8_0 rows past a width (`mmq_requant` in `mmq_iqk.cuh`), within ~0.5% of the narrow tiles' sums.
+pub fn requantizes_past_a_width(ty: GgufType) -> bool {
+    matches!(
+        ty,
+        GgufType::Iq2K | GgufType::Iq3K | GgufType::Iq4K | GgufType::Iq5K
+    )
+}
+
 pub fn supports(dtype: impl Into<GgufType>) -> bool {
     let dtype = dtype.into();
     matches!(

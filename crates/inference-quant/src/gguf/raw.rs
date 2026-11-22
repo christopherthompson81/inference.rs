@@ -1323,6 +1323,7 @@ mod tests {
             cuda_nvfp4_scales_decode_as_the_cpu_for_every_byte,
             cuda_kernels_match_the_dequantized_weight,
             grouped_mmq_reads_raw_expert_stacks,
+            grouped_mmq_spans_experts_over_several_tiles,
             indexed_mmvq_matches_the_dequantized_experts,
             indexed_mmvq_applies_each_experts_scales,
             a_tall_q6k_weight_past_eight_rows_takes_mmq,
@@ -1740,6 +1741,100 @@ mod tests {
             let similarity = cosine(&grouped, &gathered)?;
             assert!(similarity > 0.999, "{ty:?}: cosine {similarity}");
         }
+        Ok(())
+    }
+
+    // a prompt's experts each over several tiles of the width its average takes: every route as when its token runs
+    // alone (one tile), to summation order, or to the requantization of the types that requantize past a width
+    #[cfg(feature = "cuda")]
+    fn grouped_mmq_spans_experts_over_several_tiles() -> Result<()> {
+        const ROWS: usize = 64;
+        const COLS: usize = 512;
+        const TOKENS: usize = 40;
+        const TOPK: usize = 2;
+        // the same sums in other orders (stream-k splits K by the tiles), and the requantized weights' rounding
+        const ORDER_ERROR: f32 = 1e-5;
+        const REQUANT_ERROR: f32 = 1e-2;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let dev = cuda.as_cuda_device()?;
+        let xs = Tensor::randn(0f32, 1f32, (TOKENS, COLS), &cuda)?.to_dtype(DType::BF16)?;
+        let mut failures = Vec::new();
+        // 2 to 8 experts: averages of 40 to 10 routes, tiles of 40 to 16
+        for experts in [2usize, 3, 4, 8] {
+            // uneven loads: the first expert takes most tokens, so it spans the most tiles
+            let routes = (0..TOKENS)
+                .map(|t| {
+                    let first = if t % 5 == 4 { experts - 1 } else { 0 };
+                    // a token's routes are distinct experts
+                    [
+                        first as u32,
+                        ((first + 1 + t % (experts - 1)) % experts) as u32,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let grouped =
+                |weight: &RawGgufTensor, xs: &Tensor, ids: &[[u32; TOPK]]| -> Result<Tensor> {
+                    let tokens = ids.len();
+                    let flat = Tensor::from_iter(ids.iter().flatten().copied(), &cuda)?;
+                    let (storage, _) = flat.storage_and_layout();
+                    let inference_tensor::Storage::Cuda(ids_cuda) = &*storage else {
+                        unreachable!()
+                    };
+                    let (bounds, sorted_tokens, sorted_sources) = crate::moe_dispatch_build(
+                        ids_cuda.as_cuda_slice::<u32>()?,
+                        tokens * TOPK,
+                        experts,
+                        TOPK,
+                        dev,
+                    )?;
+                    super::super::fast_mmq::grouped(
+                        weight,
+                        xs,
+                        &sorted_sources,
+                        &sorted_tokens,
+                        &bounds,
+                        tokens * TOPK,
+                        tokens,
+                        experts,
+                        dev,
+                    )?
+                    .reshape((tokens, TOPK, ROWS))
+                };
+            for ty in GgufType::RAW_BLOCKS
+                .into_iter()
+                .filter(|&ty| super::super::fast_mmq::supports_shape(ty, COLS))
+            {
+                let weight = RawGgufTensor::new(
+                    ty,
+                    &[experts, ROWS, COLS],
+                    random_rows(ty, experts * ROWS, COLS, 17),
+                    &cuda,
+                )?;
+                let all = grouped(&weight, &xs, &routes)?;
+                let alone = (0..TOKENS)
+                    .map(|t| grouped(&weight, &xs.narrow(0, t, 1)?, &routes[t..t + 1]))
+                    .collect::<Result<Vec<_>>>()?;
+                let alone = Tensor::cat(&alone, 0)?;
+                let err = (&all - &alone)?
+                    .sqr()?
+                    .sum_all()?
+                    .sqrt()?
+                    .to_scalar::<f32>()?
+                    / alone.sqr()?.sum_all()?.sqrt()?.to_scalar::<f32>()?;
+                let bound = if super::super::fast_mmq::requantizes_past_a_width(ty) {
+                    REQUANT_ERROR
+                } else {
+                    ORDER_ERROR
+                };
+                if err >= bound {
+                    failures.push(format!("{ty:?} over {experts} experts: {err}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
         Ok(())
     }
 
