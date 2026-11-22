@@ -570,3 +570,25 @@ drafts 2, now                       93.1 / 134.2 / 91.7 / 107.8     100.9   127.
 
 (drafts 2 at 8 tokens: prose / code / story / explainer.) Decode at 9.8K is now within 1 tok/s of 5.7K's. FP8 KV
 stays behind BF16: on this kernel a quantized cache buys context room, not speed.
+
+## Run 21 - 2026-11-22 23:00
+
+A q8 paged KV cache (paged-attn's `kv_quant` at 8 bits: byte i is value i, `(q + 0.5 - 128) / 128` times its group's
+f16 scale, the scales after the data, each 32 values Hadamard-rotated first). The attention kernels read a `Q8` cache
+(dtype code 4): rows of `HD + HD / 16` bytes (`row_len<T>`), each load finding its group's scale from the row's base
+(`load_at<HD>`, `load_span_at<HD, N>`, 32-bit loads since a row is 4-byte aligned). The rotation stays outside the key
+loop: Q is rotated as K was, which keeps the scores, and the output as V was, which undoes it (`paged_attn::hadamard`,
+32 wide). The other widths (q2..q6) still have no read path. Test `cuda_paged_q8_matches_the_reference`: the cache
+filled by paged-attn's writer, the reference over what its gather reads back; decode, a split long-past decode, the
+scalar and the tensor-core prefill.
+
+`quantize kld --resident --pa-cache-type <type>` scores through a paged cache of that storage (4096 tokens):
+
+```
+recipe C, KV cache    KLD       same top   PPL      served tok/s at 8 / 5689 / 9824
+bf16 (paged)          0.00382   97.35%     6.7652   111.5 / 98.5 / 97.4
+q8                    0.00403   97.20%     6.7687   111.3 / 98.6 / 98.5
+f8e4m3                0.00520   96.80%     6.7711   110.2 / 98.5 / 94.1
+```
+
+q8 costs 0.0002 of KLD (the edge of the model's noise) for half the KV memory at the same speed. FP8 costs 0.0014.

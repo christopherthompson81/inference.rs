@@ -2,7 +2,9 @@
 
 use super::{parse_arch, parse_dtype};
 use clap::{Args, Subcommand, ValueEnum};
-use inference_api::engine::{AutoDeviceMapParams, IsqOrganization, ModelDType, NormalLoaderType};
+use inference_api::engine::{
+    AutoDeviceMapParams, IsqOrganization, ModelDType, NormalLoaderType, PagedCacheType,
+};
 use std::path::PathBuf;
 
 use super::{FormatOptions, ModelFormat};
@@ -91,6 +93,11 @@ pub struct KldOptions {
     /// run a layer at a time (a looped core)
     #[arg(long)]
     pub resident: bool,
+
+    /// With `--resident`, score through a paged KV cache of this storage (`q8`, `f8e4m3`, ...), sized for one chunk,
+    /// to measure what the cache's quantization costs
+    #[arg(long = "pa-cache-type", requires = "resident", value_parser = |s: &str| s.parse::<PagedCacheType>())]
+    pub cache_type: Option<PagedCacheType>,
 }
 
 #[derive(Args, Clone)]

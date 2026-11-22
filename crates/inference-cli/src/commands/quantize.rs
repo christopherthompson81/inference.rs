@@ -31,6 +31,8 @@ const MIB: f64 = (1u64 << 20) as f64;
 // a streamed EXL3 write holds the model on the host, its layers built on the GPU one at a time
 const HOST_DEVICE: &str = "cpu";
 const GGUF_EXTENSION: &str = "gguf";
+// a KLD base's chunks are 512 tokens by default; the paged cache a quantized-cache score runs through takes a few
+const KLD_PAGED_CONTEXT: usize = 4096;
 const REPORT_HESSIANS_ENV: &str = "INFERENCE_GPTQ_REPORT_HESSIANS";
 // the Hessian directory a scoring run names but never writes
 const KLD_SCRATCH_DIR: &str = "inference-kld";
@@ -438,8 +440,14 @@ async fn run_kld_resident(options: KldOptions, global: GlobalOptions) -> Result<
         runtime: RuntimeSpec {
             max_seqs: Some(1),
             prefix_cache_n: Some(0),
-            // one sequence at a time; a paged cache would take the memory the full logits need
-            paged_attn: Some(false),
+            // one sequence at a time; a paged cache would take the memory the full logits need, unless its storage is
+            // what is measured, then sized for a chunk
+            paged_attn: Some(options.cache_type.is_some()),
+            paged_cache: inference_api::engine::PagedCacheSpec {
+                context_len: options.cache_type.map(|_| KLD_PAGED_CONTEXT),
+                cache_type: options.cache_type.unwrap_or_default(),
+                ..Default::default()
+            },
             token_source: Some(global.token_source.to_string()),
             ..Default::default()
         },

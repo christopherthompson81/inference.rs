@@ -79,11 +79,58 @@ __device__ __forceinline__ void load_row<4, E4m3>(const E4m3* p, float (&o)[4]) 
   }
 }
 
+// a q8 cache's row (paged-attn's kv_quant at 8 bits): byte i is value i, (q + 0.5 - 128) / 128 times its group's f16
+// scale, the scales after the HD data bytes, one a 32 values; the values Hadamard-rotated a 32 at a time, which the
+// caller undoes on q and the output
+struct Q8 {
+  uint8_t bits;
+};
+constexpr int Q8_GROUP = 32;
+constexpr float Q8_MID = 128.0f;
+
+// a row's length in its elements: a q8 row carries its scales after its data
+template <typename T>
+__device__ __forceinline__ constexpr int row_len(int hd) {
+  return hd;
+}
+template <>
+__device__ __forceinline__ constexpr int row_len<Q8>(int hd) {
+  return hd + hd / Q8_GROUP * 2;
+}
+
+// value i of a row of HD values
+template <int HD, typename T>
+__device__ __forceinline__ float load_at(const T* row, int64_t i) {
+  return load(row, i);
+}
+template <int HD>
+__device__ __forceinline__ float load_at(const Q8* row, int64_t i) {
+  const float scale = __half2float(reinterpret_cast<const __half*>(row + HD)[i / Q8_GROUP]);
+  return (float(row[i].bits) + 0.5f - Q8_MID) * (scale / Q8_MID);
+}
+
 // a lane's N values (N a multiple of 4), 4 a load
 template <int N, typename T>
 __device__ __forceinline__ void load_span(const T* p, float (&o)[N]) {
 #pragma unroll
   for (int c = 0; c < N / 4; c++) load_row<4>(p + 4 * c, *reinterpret_cast<float(*)[4]>(o + 4 * c));
+}
+
+// a lane's N values from `off` of a row of HD values (N a multiple of 4, within one q8 group)
+template <int HD, int N, typename T>
+__device__ __forceinline__ void load_span_at(const T* row, int off, float (&o)[N]) {
+  load_span<N>(row + off, o);
+}
+template <int HD, int N>
+__device__ __forceinline__ void load_span_at(const Q8* row, int off, float (&o)[N]) {
+  const float scale = __half2float(reinterpret_cast<const __half*>(row + HD)[off / Q8_GROUP]) / Q8_MID;
+  // rows are 4-byte aligned (HD + HD / 16 bytes)
+#pragma unroll
+  for (int c = 0; c < N / 4; c++) {
+    const uint32_t raw = *reinterpret_cast<const uint32_t*>(row + off + 4 * c);
+#pragma unroll
+    for (int r = 0; r < 4; r++) o[4 * c + r] = (float((raw >> (8 * r)) & 0xFFu) + 0.5f - Q8_MID) * scale;
+  }
 }
 
 // where a (batch, kv head, key)'s row of K or V sits
@@ -222,8 +269,8 @@ __global__ void prefill_kernel(Args<T> a) {
       const int d = e % HD;
       const int key = base + j;
       const bool in = key < keys;
-      kt[j][d] = in ? load(a.k.row(batch, kvh, key, HD), d) : 0.0f;
-      vt[j][d] = in ? load(a.v.row(batch, kvh, key, HD), d) : 0.0f;
+      kt[j][d] = in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD)), d) : 0.0f;
+      vt[j][d] = in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD)), d) : 0.0f;
     }
     __syncthreads();
     if (!valid) continue;
@@ -335,8 +382,8 @@ __global__ void __launch_bounds__(MMA_WARPS * WARP) prefill_mma_kernel(Args<T> a
       const int d = e % HD;
       const int key = base + j;
       const bool in = key < keys;
-      ks[j][d] = __float2half(in ? load(a.k.row(batch, kvh, key, HD), d) : 0.0f);
-      vt[d][j] = __float2half(in ? load(a.v.row(batch, kvh, key, HD), d) : 0.0f);
+      ks[j][d] = __float2half(in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD)), d) : 0.0f);
+      vt[d][j] = __float2half(in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD)), d) : 0.0f);
     }
     __syncthreads();
     float sc[SN][4];
@@ -481,8 +528,8 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
     for (int k = 0; k < DECODE_KEYS; k++) {
       const int key = min(base + group * DECODE_KEYS + k, last);
       float kv[PER];
-      load_span<PER>(a.k.row(batch, kvh, key, HD) + j * PER, kv);
-      load_span<PER>(a.v.row(batch, kvh, key, HD) + j * PER, vr[k]);
+      load_span_at<HD, PER>(a.k.row(batch, kvh, key, row_len<T>(HD)), j * PER, kv);
+      load_span_at<HD, PER>(a.v.row(batch, kvh, key, row_len<T>(HD)), j * PER, vr[k]);
       float part = 0.0f;
 #pragma unroll
       for (int r = 0; r < PER; r++) part += qr[r] * kv[r];
@@ -695,7 +742,8 @@ extern "C" int biased_attention_f32(const float* q, const float* k, const float*
 }
 
 // K/V from a paged cache [blocks, kv_heads, block_size, head_dim] through block tables (batch, table_width) u32;
-// cache_dtype 0 f32, 1 f16, 2 bf16, 3 e4m3
+// cache_dtype 0 f32, 1 f16, 2 bf16, 3 e4m3, 4 q8 (rows of head_dim + head_dim / 16 bytes; the caller rotates q and
+// the output)
 extern "C" int biased_attention_paged(const float* q, const void* k_cache, const void* v_cache, int cache_dtype,
                                       const uint32_t* tables, int64_t table_stride, int table_width, int block_size,
                                       const float* table, const float* sinks, float* out,
@@ -718,6 +766,7 @@ extern "C" int biased_attention_paged(const float* q, const void* k_cache, const
     case 1: PAGED(__half)
     case 2: PAGED(__nv_bfloat16)
     case 3: PAGED(E4m3)
+    case 4: PAGED(Q8)
     default: return -1;
   }
 #undef PAGED
