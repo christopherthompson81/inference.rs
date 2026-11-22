@@ -18,6 +18,9 @@ const CACHE_F32: i32 = 0;
 const CACHE_F16: i32 = 1;
 const CACHE_BF16: i32 = 2;
 const CACHE_E4M3: i32 = 3;
+const CACHE_Q8: i32 = 4;
+// the q8 cache's bits; its other widths (q2..q6) have no read path here
+const Q8_BITS: u32 = 8;
 // rows (batch x queries x heads) a split decode counts its finished splits for; more take one block a row
 const MAX_SPLIT_ROWS: usize = 4096;
 
@@ -166,6 +169,10 @@ fn device_ptr<'a>(
             let (p, g) = s.as_cuda_slice::<float8::F8E4M3>()?.device_ptr(stream);
             (p + offset, g)
         }
+        DType::U8 => {
+            let (p, g) = s.as_cuda_slice::<u8>()?.device_ptr(stream);
+            (p + offset, g)
+        }
         dtype => inference_tensor::bail!("biased attention does not take {dtype:?}"),
     })
 }
@@ -173,6 +180,52 @@ fn device_ptr<'a>(
 /// `(b, t, heads * head_dim)` f32, the layout the output gate and projection take; `None` where the kernel does not
 /// take the head size, the dtypes or the K/V layouts.
 pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
+    // a q8 cache holds K and V Hadamard-rotated: Q rotated as K was keeps the scores, and the output rotated as V was
+    // undoes it
+    if let Keys::Paged {
+        k_cache,
+        v_cache,
+        block_tables,
+    } = &op.keys
+        && k_cache.dtype() == DType::U8
+    {
+        let d = op.q.dim(3)?;
+        if inference_paged_attn::quant_cache_bits(k_cache, v_cache, d) != Some((Q8_BITS, Q8_BITS)) {
+            return Ok(None);
+        }
+        let q =
+            inference_paged_attn::hadamard(op.q, inference_paged_attn::kv_quant::k_rotation(d))?;
+        let past = match &op.past {
+            Past::Fixed(past) => Past::Fixed(*past),
+            Past::Lens { lens, minus } => Past::Lens {
+                lens,
+                minus: *minus,
+            },
+        };
+        let rotated = BiasedAttention {
+            q: &q,
+            keys: Keys::Paged {
+                k_cache,
+                v_cache,
+                block_tables,
+            },
+            past,
+            table: op.table,
+            sinks: op.sinks,
+            window: op.window,
+            scale: op.scale,
+            log_scale: op.log_scale,
+        };
+        return biased_attention_rows(&rotated)?
+            .map(|out| {
+                inference_paged_attn::hadamard(&out, inference_paged_attn::kv_quant::v_rotation(d))
+            })
+            .transpose();
+    }
+    biased_attention_rows(op)
+}
+
+fn biased_attention_rows(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
     let Device::Cuda(dev) = op.q.device() else {
         return Ok(None);
     };
@@ -324,16 +377,20 @@ pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
                 block_tables,
             } => {
                 let (_, cache_heads, block_size, cache_d) = k_cache.dims4()?;
-                let cache_dtype = match k_cache.dtype() {
-                    DType::F32 => CACHE_F32,
-                    DType::F16 => CACHE_F16,
-                    DType::BF16 => CACHE_BF16,
-                    DType::F8E4M3 => CACHE_E4M3,
+                let (cache_dtype, row) = match k_cache.dtype() {
+                    DType::F32 => (CACHE_F32, d),
+                    DType::F16 => (CACHE_F16, d),
+                    DType::BF16 => (CACHE_BF16, d),
+                    DType::F8E4M3 => (CACHE_E4M3, d),
+                    DType::U8 => (
+                        CACHE_Q8,
+                        inference_paged_attn::kv_quant::row_bytes(d, Q8_BITS),
+                    ),
                     _ => return Ok(None),
                 };
                 let tables_l = block_tables.layout();
                 let (rows, width) = block_tables.dims2()?;
-                if (cache_heads, cache_d) != (kv_heads, d)
+                if (cache_heads, cache_d) != (kv_heads, row)
                     || v_cache.shape() != k_cache.shape()
                     || v_cache.dtype() != k_cache.dtype()
                     || !k_cache.is_contiguous()
@@ -508,6 +565,118 @@ mod tests {
             Tensor::from_vec(cache, (blocks, hkv, TEST_BLOCK_SIZE, d), device)?.to_dtype(dtype)?;
         let tables = Tensor::from_vec(ids, (b, per_seq), device)?;
         Ok((cache, tables))
+    }
+
+    // the kernel over a q8 cache that paged-attn's writer filled (rotated, 8 bits a value) against the reference over
+    // the values its gather reads back
+    fn run_q8(c: &Case) -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let s = c.past + c.t;
+        let rand = |dims: &[usize]| Tensor::randn(0f32, 1.0, dims, &device);
+        let q = rand(&[c.b, c.t, c.h, c.d])?;
+        let (k, v) = (rand(&[c.b, c.hkv, s, c.d])?, rand(&[c.b, c.hkv, s, c.d])?);
+        let table = rand(&[c.b, c.t, c.h, c.extent + 1])?;
+        let sinks = rand(&[c.b, c.t, c.h])?;
+        let per_seq = s.div_ceil(TEST_BLOCK_SIZE);
+        let blocks = c.b * per_seq + 1;
+        // the same shuffle as `paged`: block 0 unused
+        let ids = (0..c.b * per_seq)
+            .map(|i| (c.b * per_seq - i) as u32)
+            .collect::<Vec<_>>();
+        let slots = (0..c.b)
+            .flat_map(|bi| (0..s).map(move |key| (bi, key)))
+            .map(|(bi, key)| {
+                i64::from(ids[bi * per_seq + key / TEST_BLOCK_SIZE]) * TEST_BLOCK_SIZE as i64
+                    + (key % TEST_BLOCK_SIZE) as i64
+            })
+            .collect::<Vec<_>>();
+        let row = inference_paged_attn::kv_quant::row_bytes(c.d, Q8_BITS);
+        let cache = || Tensor::zeros((blocks, c.hkv, TEST_BLOCK_SIZE, row), DType::U8, &device);
+        let (k_cache, v_cache) = (cache()?, cache()?);
+        let tokens = |x: &Tensor| -> Result<Tensor> {
+            x.permute((0, 2, 1, 3))?
+                .contiguous()?
+                .reshape((c.b * s, c.hkv, c.d))
+        };
+        inference_paged_attn::reshape_and_cache_quant(
+            &tokens(&k)?,
+            &tokens(&v)?,
+            &k_cache,
+            &v_cache,
+            &Tensor::from_vec(slots, c.b * s, &device)?,
+        )?;
+        let tables = Tensor::from_vec(ids, (c.b, per_seq), &device)?;
+        let cu = Tensor::from_vec(
+            (0..=c.b).map(|i| (i * s) as u32).collect::<Vec<_>>(),
+            c.b + 1,
+            &device,
+        )?;
+        let (kg, vg) = inference_paged_attn::gather_kv_cache_quant(
+            &k_cache,
+            &v_cache,
+            &tables,
+            &cu,
+            c.b * s,
+            c.d,
+            DType::F32,
+        )?;
+        let heads_first = |x: Tensor| -> Result<Tensor> {
+            x.reshape((c.b, s, c.hkv, c.d))?
+                .permute((0, 2, 1, 3))?
+                .contiguous()
+        };
+        let (kg, vg) = (heads_first(kg)?, heads_first(vg)?);
+        let lens = Tensor::from_vec(vec![s as u32; c.b], c.b, &device)?;
+        let op = BiasedAttention {
+            q: &q,
+            keys: Keys::Paged {
+                k_cache: &k_cache,
+                v_cache: &v_cache,
+                block_tables: &tables,
+            },
+            past: Past::Lens {
+                lens: &lens,
+                minus: c.t,
+            },
+            table: &table,
+            sinks: &sinks,
+            window: c.window,
+            scale: 1.0 / (c.d as f32).sqrt(),
+            log_scale: c.log_scale,
+        };
+        let got = biased_attention(&op)?.expect("the kernel takes a q8 cache");
+        let want = reference(c, &q, &kg, &vg, &table, &sinks)?;
+        let err = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        let mag = want.abs()?.max_all()?.to_scalar::<f32>()?;
+        let tolerance = if c.t >= TENSOR_CORE_QUERIES {
+            TENSOR_CORE_TOLERANCE
+        } else {
+            F32_TOLERANCE
+        };
+        assert!(
+            err <= tolerance * mag.max(1.0),
+            "t {} past {}: q8 max error {err} of {mag}",
+            c.t,
+            c.past
+        );
+        Ok(())
+    }
+
+    // a q8 cache in every kernel: decode, a split long-past decode, the scalar and the tensor-core prefill
+    fn cuda_paged_q8_matches_the_reference() -> Result<()> {
+        let mut long = shape((2, 8, 2, 1, 2000, 128, 256, 1500));
+        long.log_scale = Some((0.1, 64.0));
+        for c in [
+            shape((2, 8, 2, 1, 700, 128, 256, 0)),
+            long,
+            shape((2, 8, 2, 4, 300, 64, 32, 0)),
+            shape((1, 8, 2, 100, 50, 64, 40, 0)),
+        ] {
+            run_q8(&c)?;
+        }
+        Ok(())
     }
 
     // the kernel against the reference, on a contiguous view (K/V narrowed from a longer cache) or a paged cache of
@@ -722,6 +891,7 @@ mod tests {
             cuda_short_decode_rows_match_the_reference,
             cuda_split_decode_over_long_pasts_matches_the_reference,
             cuda_paged_e4m3_matches_the_reference,
+            cuda_paged_q8_matches_the_reference,
             cuda_tensor_core_paged_bf16_prefill_matches_the_reference,
             cuda_tensor_core_tiny_shapes_match_the_reference,
             cuda_tensor_core_prefill_after_a_past_matches_the_reference,
