@@ -393,3 +393,45 @@ At drafts 2 the explainer passes plain and code keeps drafts 3's speed.
 The drafter's pass stays eager: the DFlash host graphs a drafter only over its bounded windowed KV pool
 (`enable_windowed_kv`), which Inkling's doesn't take (layer 1 is global), so it runs the paged path with no graph. Its
 ~200 launches leave gaps, and the verify's launch (0.54 ms of host for ~2,650 nodes) waits on the drafts' readback.
+
+## Run 15 - 2026-11-22 16:45
+
+Loop controllers at 4 rows (1.64 ms a verify against decode's 0.75): a down kernel summing 4 rows a pass over its
+weights (one sync pair a tile) and an up kernel of 8-lane groups a row (3 shuffles a reduction). Per launch, node
+trace:
+
+```
+                      decode down / up (us)   verify down / up
+before                3.46 / 4.43             7.86 / 8.96
+row tiles + groups    3.90 / 4.64             6.92 / 8.55
+```
+
+A verify saves ~0.13 ms and decode loses ~0.06 ms a token, so I reverted it. The controllers are 192 small launches a
+token, bound by launch latency more than by their loops. The test gained a 7-row case (a second tile, a part-filled
+group), which the kernels as they are pass.
+
+Long context. `inference bench` decodes at depth 4 whatever the prompt ("@ d4"), so served requests measure it
+(`avg_compl_tok_per_sec`, 256 tokens, `--pa-context-len 16384`):
+
+```
+plain, context (tokens)      8       5689    9824
+before                       109.6   82.2    75.6
+key splits, a combine        100.3   89.1    84.9
+adaptive splits              109.5   89.6    89.1
+drafts 2 (adaptive)          91.5    93.8    116.3    (summaries copy the text: 161 / 182 accepted at 9824)
+```
+
+The decode attention ran a 1,024-thread block a (query, head): 24 blocks a decode step on 82 SMs whatever the context.
+Splitting the keys over blocks (`decode_splits`: 2 blocks an SM's worth of rows, at most 8, from the shapes alone so a
+captured graph keeps it) with a combine kernel helped long contexts but cost short ones ~9% (a launch a visit and
+near-empty splits). Now a row takes a split per 512 of its keys (`DECODE_SPLIT_KEYS`), the grid's other blocks
+exiting at once. A row of one split writes its output as before. Several splits write (max, sum, values) partials,
+and the last to finish (a per-row count, zeroed once per device and reset by that block; `__threadfence` and
+`__syncwarp` before the count, `__ldcg` reads) merges them. No combine launch. `__launch_bounds__` keeps the
+1,024-thread kernel within its registers (without it, CUDA status 701). Test
+`cuda_split_decode_over_long_pasts_matches_the_reference` (2,000 past keys, a 1,500-key window, the log scale, 4 rows
+and 1, view and paged BF16).
+
+At 9,824 tokens the attention is 47 us a call (2.2 ms a token): a global layer's BF16 K/V at that depth is ~40 MB a
+token (9824 x 8 KV heads x 128 x 2 x 2 bytes), the 3090's bandwidth for 47 us. What's left is the read itself: a
+quantized KV cache would halve it.

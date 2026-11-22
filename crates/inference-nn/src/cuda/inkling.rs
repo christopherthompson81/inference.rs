@@ -1302,7 +1302,11 @@ mod tests {
             let rms = (t.sqr()?.mean_keepdim(D::Minus1)? + f64::from(EPS))?.sqrt()?;
             t.broadcast_div(&rms)
         };
-        for (rows, dtype, tolerance) in [(1, DType::F32, 1e-4f32), (4, DType::BF16, 2e-2)] {
+        for (rows, dtype, tolerance) in [
+            (1, DType::F32, 1e-4f32),
+            (4, DType::BF16, 2e-2),
+            (7, DType::F32, 1e-4),
+        ] {
             let x = Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu)?.to_dtype(dtype)?;
             let message = Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu)?;
             let down = Tensor::randn(0f32, 0.05f32, (RANK, 2 * HIDDEN), &Device::Cpu)?;

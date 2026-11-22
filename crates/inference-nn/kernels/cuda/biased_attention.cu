@@ -12,6 +12,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <type_traits>
 
 namespace {
@@ -22,6 +23,11 @@ constexpr int DECODE_WARPS = 32;
 constexpr int KEY_TILE = WARP;
 // keys a decode warp loads before it folds them
 constexpr int DECODE_KEYS = 4;
+// a decode's keys split over up to this many blocks a query, enough for 2 blocks an SM; a row takes a split a
+// DECODE_SPLIT_KEYS of its keys, the grid's other blocks exiting
+constexpr int DECODE_MAX_SPLITS = 8;
+constexpr int DECODE_BLOCKS_PER_SM = 2;
+constexpr int DECODE_SPLIT_KEYS = 512;
 // the tensor-core prefill: a warp 16 queries, a block 4 warps, keys a tile at a time; prompts from this many queries
 constexpr int MMA_WARPS = 4;
 constexpr int MMA_ROWS = 16;
@@ -78,6 +84,11 @@ struct Args {
   float scale;
   float log_alpha;
   float log_floor;
+  // a split decode's partials, `(rows, splits, head_dim + 2)`: each split's max, sum and unnormalized values, and
+  // each row's count of finished splits (zero between launches: the last split resets it)
+  float* partials;
+  unsigned int* arrived;
+  int splits;
 };
 
 template <typename T>
@@ -376,14 +387,16 @@ __global__ void __launch_bounds__(MMA_WARPS * WARP) prefill_mma_kernel(Args<T> a
 // a block a query of one head, its warps splitting the keys, a lane R of the head's dims (so a key's K and V rows load
 // coalesced), DECODE_KEYS keys a step to keep loads in flight; the warps merged in shared memory at the end
 template <int R, typename T>
-__global__ void decode_kernel(Args<T> a) {
+__global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) {
   constexpr int HD = R * WARP;
   __shared__ float sm[DECODE_WARPS];
   __shared__ float sl[DECODE_WARPS];
   __shared__ float sacc[DECODE_WARPS][HD];
   const int warp = threadIdx.x / WARP;
   const int lane = threadIdx.x % WARP;
-  const int i = blockIdx.x;
+  const int splits = max(1, a.splits);
+  const int i = blockIdx.x / splits;
+  const int split = blockIdx.x % splits;
   const int head = blockIdx.y;
   const int batch = blockIdx.z;
   const int kvh = head / (a.heads / a.kv_heads);
@@ -394,19 +407,26 @@ __global__ void decode_kernel(Args<T> a) {
 #pragma unroll
   for (int r = 0; r < R; r++) qr[r] = a.q[row * HD + lane * R + r] * a.scale;
   const float* bias = a.table + row * (a.extent + 1);
-  // the sink starts the first warp's softmax: its weight and no value
-  float m = warp == 0 ? a.sinks[row] : -INFINITY;
-  float l = warp == 0 ? 1.0f : 0.0f;
+  // the sink starts the first split's first warp's softmax: its weight and no value
+  float m = warp == 0 && split == 0 ? a.sinks[row] : -INFINITY;
+  float l = warp == 0 && split == 0 ? 1.0f : 0.0f;
   float acc[R];
 #pragma unroll
   for (int r = 0; r < R; r++) acc[r] = 0.0f;
+  // this split's contiguous share of the visible keys, over the splits the row's keys need
   const int first = first_key(a.window, pos);
-  for (int base = first + warp * DECODE_KEYS; base <= pos; base += DECODE_WARPS * DECODE_KEYS) {
+  const int keys = pos - first + 1;
+  const int used = min(splits, (keys + DECODE_SPLIT_KEYS - 1) / DECODE_SPLIT_KEYS);
+  if (split >= used) return;
+  const int per = (keys + used - 1) / used;
+  const int lo = first + split * per;
+  const int last = min(pos, lo + per - 1);
+  for (int base = lo + warp * DECODE_KEYS; base <= last; base += DECODE_WARPS * DECODE_KEYS) {
     float s[DECODE_KEYS];
     float vr[DECODE_KEYS][R];
 #pragma unroll
     for (int j = 0; j < DECODE_KEYS; j++) {
-      const int key = min(base + j, pos);
+      const int key = min(base + j, last);
       const T* kr = a.k.row(batch, kvh, key, HD) + lane * R;
       const T* vrow = a.v.row(batch, kvh, key, HD) + lane * R;
       float part = 0.0f;
@@ -422,7 +442,7 @@ __global__ void decode_kernel(Args<T> a) {
 #pragma unroll
     for (int j = 0; j < DECODE_KEYS; j++) {
       const int key = base + j;
-      if (key > pos) break;
+      if (key > last) break;
       const int dist = pos - key;
       const float score = (s[j] + (dist < a.extent ? bias[dist] : 0.0f)) * tau;
       const float m_new = fmaxf(m, score);
@@ -456,6 +476,38 @@ __global__ void decode_kernel(Args<T> a) {
     for (int r = 0; r < R; r++) out[r] += sacc[w][lane * R + r] * wt;
   }
   float* o = a.out + ((int64_t(batch) * a.t + i) * a.heads + head) * HD;
+  if (used > 1) {
+    float* parts = a.partials + row * splits * (HD + 2);
+    float* part = parts + split * (HD + 2);
+    if (lane == 0) {
+      part[0] = mt;
+      part[1] = lt;
+    }
+#pragma unroll
+    for (int r = 0; r < R; r++) part[2 + lane * R + r] = out[r];
+    __threadfence();
+    __syncwarp();
+    unsigned int before = 0;
+    if (lane == 0) before = atomicAdd(a.arrived + row, 1u);
+    before = __shfl_sync(0xffffffffu, before, 0);
+    // the last split merges every split's partials
+    if (before != unsigned(used) - 1) return;
+    __threadfence();
+    if (lane == 0) a.arrived[row] = 0;
+    mt = -INFINITY;
+    for (int sp = 0; sp < used; sp++) mt = fmaxf(mt, __ldcg(parts + sp * (HD + 2)));
+    lt = 0.0f;
+#pragma unroll
+    for (int r = 0; r < R; r++) out[r] = 0.0f;
+    for (int sp = 0; sp < used; sp++) {
+      const float ms = __ldcg(parts + sp * (HD + 2));
+      if (ms == -INFINITY) continue;
+      const float wt = __expf(ms - mt);
+      lt += __ldcg(parts + sp * (HD + 2) + 1) * wt;
+#pragma unroll
+      for (int r = 0; r < R; r++) out[r] += __ldcg(parts + sp * (HD + 2) + 2 + lane * R + r) * wt;
+    }
+  }
   const float inv = 1.0f / lt;
 #pragma unroll
   for (int r = 0; r < R; r++) o[lane * R + r] = out[r] * inv;
@@ -472,10 +524,34 @@ bool mma_device() {
   return mma;
 }
 
+// the SMs of the current device, asked once
+int sm_count() {
+  static const int count = [] {
+    int dev = 0, n = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev);
+    return n;
+  }();
+  return count;
+}
+
+// blocks a decode's (query, head) row takes: enough rows of blocks for the SMs; a function of the shapes alone, so a
+// captured graph keeps it at every position
+int decode_splits(int64_t rows) {
+  const int64_t want = (int64_t(sm_count()) * DECODE_BLOCKS_PER_SM + rows - 1) / rows;
+  return int(std::min<int64_t>(DECODE_MAX_SPLITS, std::max<int64_t>(1, want)));
+}
+
 template <int R, typename T>
 cudaError_t launch(const Args<T>& a, int batch, bool decode, cudaStream_t stream) {
   if (decode) {
-    decode_kernel<R, T><<<dim3(a.t, a.heads, batch), DECODE_WARPS * WARP, 0, stream>>>(a);
+    if (a.partials && a.arrived && a.splits > 1) {
+      decode_kernel<R, T><<<dim3(a.t * a.splits, a.heads, batch), DECODE_WARPS * WARP, 0, stream>>>(a);
+    } else {
+      Args<T> one = a;
+      one.splits = 1;
+      decode_kernel<R, T><<<dim3(a.t, a.heads, batch), DECODE_WARPS * WARP, 0, stream>>>(one);
+    }
   } else if (!std::is_same<T, float>::value && a.t >= MMA_MIN_QUERIES && mma_device()) {
     // a half-precision cache's values are exact in f16; an f32 one takes the f32 kernel
     const int tiles = (a.t + MMA_WARPS * MMA_ROWS - 1) / (MMA_WARPS * MMA_ROWS);
@@ -519,7 +595,18 @@ struct BiasedAttentionShape {
   int past;
   // queries up to this many take the key-splitting kernel
   int decode_rows;
+  // a split decode's partials, of biased_attention_decode_partials' size, and a zeroed count a row (rows of them,
+  // left zeroed); null for one block a row
+  float* partials;
+  unsigned int* arrived;
 };
+
+// the f32 partials a decode of `t` queries over `batch` sequences and `heads` takes (0: one block a row)
+extern "C" int64_t biased_attention_decode_partials(int batch, int t, int heads, int head_dim) {
+  const int64_t rows = int64_t(batch) * t * heads;
+  const int splits = decode_splits(rows);
+  return splits > 1 ? rows * splits * (head_dim + 2) : 0;
+}
 
 // K/V from a contiguous f32 view
 extern "C" int biased_attention_f32(const float* q, const float* k, const float* v, const float* table,
@@ -531,7 +618,8 @@ extern "C" int biased_attention_f32(const float* q, const float* k, const float*
                 {k, k_batch, k_head, nullptr, 0, 0, 0, 0},
                 {v, v_batch, v_head, nullptr, 0, 0, 0, 0},
                 table, sinks, out, p.heads, p.kv_heads, p.t, p.past_lens, p.past_sub, p.past, p.extent, p.window,
-                p.scale, p.log_alpha, p.log_floor};
+                p.scale, p.log_alpha, p.log_floor, p.partials, p.arrived,
+                decode_splits(int64_t(p.batch) * p.t * p.heads)};
   return dispatch(a, p.batch, p.head_dim, p.t <= p.decode_rows, reinterpret_cast<cudaStream_t>(stream));
 }
 
@@ -550,7 +638,8 @@ extern "C" int biased_attention_paged(const float* q, const void* k_cache, const
               {(const T*)k_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads},                \
               {(const T*)v_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads},                \
               table, sinks, out, p.heads, p.kv_heads, p.t, p.past_lens, p.past_sub, p.past, p.extent, p.window,    \
-              p.scale, p.log_alpha, p.log_floor};                                                                  \
+              p.scale, p.log_alpha, p.log_floor, p.partials, p.arrived,                                          \
+              decode_splits(int64_t(p.batch) * p.t * p.heads)};                                                   \
     return dispatch(a, p.batch, p.head_dim, decode, s);                                                            \
   }
   switch (cache_dtype) {

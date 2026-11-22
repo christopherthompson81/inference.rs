@@ -17,6 +17,39 @@ const DECODE_ROWS: i32 = 4;
 const CACHE_F32: i32 = 0;
 const CACHE_F16: i32 = 1;
 const CACHE_BF16: i32 = 2;
+// rows (batch x queries x heads) a split decode counts its finished splits for; more take one block a row
+const MAX_SPLIT_ROWS: usize = 4096;
+
+// each device's split-decode counts, zeroed once and left zeroed by the kernel, kept for the process (a captured graph
+// holds the pointer)
+static ARRIVED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<inference_tensor::cuda_backend::DeviceId, u64>>,
+> = std::sync::OnceLock::new();
+
+// the device's counts, made on its first eager use; none while a stream captures (the allocation would be the graph's)
+fn arrived_counts(dev: &inference_tensor::CudaDevice, stream: &CudaStream) -> Result<Option<u64>> {
+    let mut map = ARRIVED
+        .get_or_init(Default::default)
+        .lock()
+        .expect("biased attention counts poisoned");
+    if let Some(&ptr) = map.get(&dev.id()) {
+        return Ok(Some(ptr));
+    }
+    if stream.capture_status()
+        == Ok(inference_tensor::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE)
+    {
+        return Ok(None);
+    }
+    let counts = dev.alloc_zeros::<u32>(MAX_SPLIT_ROWS)?;
+    let ptr = {
+        let (ptr, _guard) = counts.device_ptr(stream);
+        ptr
+    };
+    // the process keeps the counts: graphs captured later read them
+    std::mem::forget(counts);
+    map.insert(dev.id(), ptr);
+    Ok(Some(ptr))
+}
 
 /// Where the keys and values are.
 pub enum Keys<'a> {
@@ -76,6 +109,9 @@ struct LaunchShape {
     past_sub: i32,
     past: i32,
     decode_rows: i32,
+    // a split decode's partials and its rows' counts, or null
+    partials: *mut f32,
+    arrived: *mut u32,
 }
 
 fn i32_of(v: usize) -> Result<i32> {
@@ -191,6 +227,30 @@ pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
             .as_ref()
             .map(|(g, l)| device_ptr(g, l, &stream))
             .transpose()?;
+        let arrived = if t <= DECODE_ROWS as usize && b * t * heads <= MAX_SPLIT_ROWS {
+            arrived_counts(dev, &stream)?
+        } else {
+            None
+        };
+        // SAFETY: a size query
+        let partial_len = if arrived.is_some() {
+            usize::try_from(unsafe {
+                super::ffi::biased_attention_decode_partials(
+                    i32_of(b)?,
+                    i32_of(t)?,
+                    i32_of(heads)?,
+                    i32_of(d)?,
+                )
+            })
+            .map_err(inference_tensor::Error::wrap)?
+        } else {
+            0
+        };
+        // SAFETY: each split writes its partials before the combine reads them
+        let mut partials = (partial_len > 0)
+            .then(|| unsafe { dev.alloc::<f32>(partial_len) })
+            .transpose()?;
+        let partials_guard = partials.as_mut().map(|p| p.device_ptr_mut(&stream));
         let (o_ptr, _o) = out.device_ptr_mut(&stream);
         let shape = LaunchShape {
             batch: i32_of(b)?,
@@ -209,6 +269,10 @@ pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
             past_sub: i32_of(past_sub)?,
             past: i32_of(past)?,
             decode_rows: DECODE_ROWS,
+            partials: partials_guard
+                .as_ref()
+                .map_or(std::ptr::null_mut(), |(p, _)| *p as *mut f32),
+            arrived: arrived.map_or(std::ptr::null_mut(), |p| p as *mut u32),
         };
         let cu = stream.cu_stream() as i64;
         let code = match &op.keys {
@@ -561,6 +625,18 @@ mod tests {
         run(&shape((2, 8, 2, 1, 700, 128, 256, 0)), None)
     }
 
+    // rows over several DECODE_SPLIT_KEYS of keys split them over blocks: verify rows and a decode row, windowed, from
+    // a view and a paged cache
+    fn cuda_split_decode_over_long_pasts_matches_the_reference() -> Result<()> {
+        for t in [4, 1] {
+            let mut c = shape((2, 8, 2, t, 2000, 128, 256, 1500));
+            c.log_scale = Some((0.1, 64.0));
+            run(&c, None)?;
+            run(&c, Some(DType::BF16))?;
+        }
+        Ok(())
+    }
+
     fn cuda_windowed_decode_matches_the_reference() -> Result<()> {
         run(&shape((1, 4, 1, 1, 300, 32, 64, 100)), None)
     }
@@ -623,6 +699,7 @@ mod tests {
             cuda_prefill_after_a_past_matches_the_reference,
             cuda_prefill_matches_the_reference,
             cuda_short_decode_rows_match_the_reference,
+            cuda_split_decode_over_long_pasts_matches_the_reference,
             cuda_tensor_core_paged_bf16_prefill_matches_the_reference,
             cuda_tensor_core_tiny_shapes_match_the_reference,
             cuda_tensor_core_prefill_after_a_past_matches_the_reference,
