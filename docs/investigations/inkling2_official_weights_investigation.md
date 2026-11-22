@@ -250,3 +250,24 @@ recipe B              15.79 GiB   0.00381    0.0377   97.53%     1531    81.7
 
 Recipe B: 0.62 GiB under IQ4_NL at 2.6x lower KLD, within 0.0007 of the floor; the dense Q8_0 is most of what is
 left (0.0006, 1.37 GiB to remove).
+
+## Run 10 - 2026-11-22 06:00
+
+The dense weights' bits, by KLD and speed (after the speed work of #1043-#1045). Variants of recipe B from the
+lossless GGUF (Run 7's, rebuilt), each changing one group from Q8_0, layers 20-23's experts as recipe B's:
+
+```
+                                 size        mean KLD   same top   pp512   tg128
+all Q8_0 (= recipe B)            15.79 GiB   0.00368    97.45%     1852    98.8
+attention (q k v gate o) Q6_K    15.65 GiB   0.00463    97.10%     1833    95.0
+attention Q5_K                   15.58 GiB   0.00737    96.30%     1838    98.7
+head Q6_K                        15.69 GiB   0.00380    97.25%     1854    99.5
+embedding Q6_K                   15.69 GiB   0.00374    97.42%     1860    98.8
+embedding Q4_K                   15.58 GiB   0.00485    97.06%     1857    98.6
+head + embedding Q6_K (C)        15.58 GiB   0.00387    97.27%     1863    99.2
+```
+
+The attention stays Q8_0: Q6_K costs 0.001 and decodes slower (its matvec at these shapes is not bound by the bytes
+it saves), Q5_K doubles the excess KLD for no speed. The head and the embedding take Q6_K at the noise's edge
+(+0.0002 together) for 0.21 GiB and +0.4 tok/s: recipe C (`Inkling-2-Mini-NVFP4-C.gguf`), recipe B's rules plus
+`--tensor-type '^(output|token_embd)\.weight$=q6_k'` from a source whose head and embedding are BF16.
