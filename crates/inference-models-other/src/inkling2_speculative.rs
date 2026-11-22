@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use inference_drafters::dflash::DFlashLoadTarget;
 use inference_drafters::host::{DrafterAttach, DrafterTarget, ExternalDrafter};
 use inference_quant::QuantMethod;
-use inference_tensor::{Module, Result, Tensor};
+use inference_tensor::{DType, Module, Result, Tensor};
 
 use crate::kv_cache::HybridLayerCache;
 use crate::speculative::{
@@ -246,7 +246,7 @@ impl Model {
                 let window = Tensor::cat(
                     &[
                         &pick(&replay.state)?.transpose(1, 2)?,
-                        &pick(&replay.inputs)?,
+                        &pick(&replay.inputs)?.to_dtype(DType::F32)?,
                     ],
                     1,
                 )?

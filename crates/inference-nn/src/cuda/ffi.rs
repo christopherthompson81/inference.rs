@@ -322,6 +322,7 @@ inference_tensor::kernel_library! {
             t: i32,
             c: i32,
             hist: i32,
+            inputs_dtype: i32,
             stream: i64,
         ) -> i32;
         pub fn inkling_short_conv(
@@ -342,6 +343,45 @@ inference_tensor::kernel_library! {
             width: i32,
             stream: i64,
         ) -> i32;
+        pub fn inkling_markov_pick_scratch(b: i32) -> i64;
+        pub fn inkling_markov_pick(
+            logits: *const c_void,
+            logits_dtype: i32,
+            logits_batch: i64,
+            fold_w: *const c_void,
+            fold_b: *const f32,
+            latent: *const f32,
+            b: i32,
+            rank: i32,
+            vocab: i32,
+            part_v: *mut f32,
+            part_i: *mut i32,
+            out: *mut u32,
+            stream: i64,
+        ) -> i32;
+        pub fn inkling_short_conv_pool_max_hist() -> i32;
+        pub fn inkling_short_conv_pool(
+            x: *const c_void,
+            x_dtype: i32,
+            pool: *mut f32,
+            slots: *const u32,
+            pool_rows: i32,
+            pool_c: i32,
+            channel_off: i32,
+            weight: *const f32,
+            taps: *const f32,
+            heads: i32,
+            out: *mut c_void,
+            out_like_x: i32,
+            before: *mut f32,
+            stash: *mut c_void,
+            b: i32,
+            t: i32,
+            c: i32,
+            width: i32,
+            stream: i64,
+        ) -> i32;
+        pub fn biased_attention_decode_partials(batch: i32, t: i32, heads: i32, head_dim: i32) -> i64;
         pub fn biased_attention_f32(
             q: *const f32,
             k: *const f32,

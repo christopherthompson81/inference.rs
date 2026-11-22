@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <math.h>
+#include <limits.h>
 #include <stdint.h>
 
 namespace {
@@ -23,6 +24,9 @@ constexpr int MIX_SUMS = MAX_STATES * (1 + MAX_QUERIES);
 constexpr int64_t CONTROLLER_MAX_ROWS = 16;
 constexpr int CONTROLLER_MAX_RANK = 128;
 constexpr int CONTROLLER_THREADS = 256;
+// a Markov pick's blocks a batch row (each a slice of the vocabulary) and its block
+constexpr int PICK_BLOCKS = 256;
+constexpr int PICK_THREADS = 256;
 // the down projection's dots split over this many slices of the hidden dim, their partial sums the up kernel's to add
 constexpr int CONTROLLER_DOWN_CHUNKS = 4;
 // a down block's partials: the x half's dot, the message half's, and their sums of squares
@@ -424,17 +428,143 @@ __global__ void short_conv_kernel(const X* x, const S* state, int64_t state_batc
   }
 }
 
+// the larger value, the lower index on a tie; NaN loses
+__device__ __forceinline__ void pick_better(float& v, int& i, float ov, int oi) {
+  if (ov != ov) return;
+  if (v != v || ov > v || (ov == v && oi < i)) {
+    v = ov;
+    i = oi;
+  }
+}
+
+__device__ __forceinline__ void pick_block(float& v, int& i) {
+  __shared__ float vs[PICK_THREADS / WARP];
+  __shared__ int is[PICK_THREADS / WARP];
+  for (int off = WARP / 2; off > 0; off /= 2) pick_better(v, i, __shfl_down_sync(0xffffffff, v, off), __shfl_down_sync(0xffffffff, i, off));
+  const int warp = threadIdx.x / WARP, lane = threadIdx.x % WARP;
+  if (lane == 0) {
+    vs[warp] = v;
+    is[warp] = i;
+  }
+  __syncthreads();
+  if (warp == 0) {
+    v = lane < PICK_THREADS / WARP ? vs[lane] : NAN;
+    i = lane < PICK_THREADS / WARP ? is[lane] : INT_MAX;
+    for (int off = WARP / 2; off > 0; off /= 2) pick_better(v, i, __shfl_down_sync(0xffffffff, v, off), __shfl_down_sync(0xffffffff, i, off));
+  }
+}
+
+// a slice of the vocabulary: each row's `logits[v] + fold_b[v] + fold_w[v] . latent`, a warp a row, its best kept
+template <typename L>
+__global__ void markov_pick_partial_kernel(const L* logits, int64_t logits_batch, const __nv_bfloat16* fold_w,
+                                           const float* fold_b, const float* latent, int rank, int vocab,
+                                           float* part_v, int* part_i) {
+  extern __shared__ float lat[];
+  const int bi = blockIdx.y;
+  for (int r = threadIdx.x; r < rank; r += blockDim.x) lat[r] = latent[int64_t(bi) * rank + r];
+  __syncthreads();
+  const int warp = threadIdx.x / WARP, lane = threadIdx.x % WARP;
+  const int per = (vocab + gridDim.x - 1) / gridDim.x;
+  const int lo = blockIdx.x * per, hi = min(vocab, lo + per);
+  float best = NAN;
+  int at = INT_MAX;
+  for (int v = lo + warp; v < hi; v += PICK_THREADS / WARP) {
+    const __nv_bfloat16* w = fold_w + int64_t(v) * rank;
+    float dot = 0.0f;
+    for (int r = lane * 8; r < rank; r += WARP * 8) {
+      const uint4 raw = *reinterpret_cast<const uint4*>(w + r);
+      const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&raw);
+#pragma unroll
+      for (int k = 0; k < 4; k++) {
+        const float2 f = __bfloat1622float2(h[k]);
+        dot += f.x * lat[r + 2 * k] + f.y * lat[r + 2 * k + 1];
+      }
+    }
+    for (int off = WARP / 2; off > 0; off /= 2) dot += __shfl_xor_sync(0xffffffff, dot, off);
+    if (lane == 0) pick_better(best, at, load(logits, int64_t(bi) * logits_batch + v) + fold_b[v] + dot, v);
+  }
+  pick_block(best, at);
+  if (threadIdx.x == 0) {
+    part_v[bi * gridDim.x + blockIdx.x] = best;
+    part_i[bi * gridDim.x + blockIdx.x] = at;
+  }
+}
+
+__global__ void markov_pick_final_kernel(const float* part_v, const int* part_i, int parts, uint32_t* out) {
+  const int bi = blockIdx.x;
+  float best = NAN;
+  int at = INT_MAX;
+  for (int p = threadIdx.x; p < parts; p += blockDim.x) pick_better(best, at, part_v[bi * parts + p], part_i[bi * parts + p]);
+  pick_block(best, at);
+  if (threadIdx.x == 0) out[bi] = at == INT_MAX ? 0u : uint32_t(at);
+}
+
+// the state window a thread keeps in registers
+constexpr int CONV_MAX_HIST = 8;
+
+// short_conv_kernel over a slot pool `[pool_rows, pool_c, hist]`, a thread a (row, channel): the state read from the
+// row's slot at `channel_off`, the rows run through the window, the new state written back in place. A slot past
+// the pool (a padded row) reads zeros and writes nothing. `before` and `stash` (when given) take the state as read
+// `[b, pool_c, hist]` and the inputs `[b, t, pool_c]`, a verify's rollback.
+template <typename X, typename O>
+__global__ void short_conv_pool_kernel(const X* x, float* pool, const uint32_t* slots, int pool_rows, int pool_c,
+                                       int channel_off, const float* weight, const float* taps, int heads, O* out,
+                                       float* before, X* stash, int b, int t, int c, int width) {
+  const int64_t e = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (e >= int64_t(b) * c) return;
+  const int ci = e % c;
+  const int bi = e / c;
+  const int hist = width - 1;
+  const uint32_t slot = slots[bi];
+  const bool live = slot < uint32_t(pool_rows);
+  float* row = pool + (int64_t(live ? slot : 0) * pool_c + channel_off + ci) * hist;
+  float win[CONV_MAX_HIST];
+#pragma unroll
+  for (int j = 0; j < CONV_MAX_HIST; j++) win[j] = j < hist && live ? row[j] : 0.0f;
+  if (before) {
+    float* dst = before + (int64_t(bi) * pool_c + channel_off + ci) * hist;
+    for (int j = 0; j < hist; j++) dst[j] = win[j];
+  }
+  const int terms = 1 + width + (taps ? width : 0);
+  const float scale = rsqrtf((float)terms);
+  const int head = ci / (c / heads);
+  for (int ti = 0; ti < t; ti++) {
+    const int64_t at = (int64_t(bi) * t + ti) * c + ci;
+    const float xv = load(x, at);
+    if (stash) stash[(int64_t(bi) * t + ti) * pool_c + channel_off + ci] = x[at];
+    float acc = xv + weight[ci * width + hist] * xv;
+#pragma unroll
+    for (int k = 0; k < CONV_MAX_HIST; k++)
+      if (k < hist) acc += weight[ci * width + k] * win[k];
+    if (taps) {
+      const float* tap = taps + ((int64_t(bi) * t + ti) * heads + head) * width;
+      acc += xv * tap[0];
+#pragma unroll
+      for (int lag = 1; lag < CONV_MAX_HIST + 1; lag++)
+        if (lag < width) acc += win[hist - lag] * tap[lag];
+    }
+    store(out, at, acc * scale);
+#pragma unroll
+    for (int j = 0; j + 1 < CONV_MAX_HIST; j++)
+      if (j + 1 < hist) win[j] = win[j + 1];
+    win[hist - 1] = xv;
+  }
+  if (live)
+    for (int j = 0; j < hist; j++) row[j] = win[j];
+}
+
 // a slot of a verify step's convolution rollback: its pool `[slots, c, hist]`, the batch's pool rows, its state
 // before the step `[b, c, hist]` and the conv inputs over the step `[b, t, c]`
 struct ConvRollbackSlot {
   float* pool;
   const uint32_t* rows;
   const float* state;
-  const float* inputs;
+  const void* inputs;
 };
 
 // each batch row that kept `keep[row]` of the step's rows takes the window of `[state, inputs]` ending at its last kept
 // row; a negative `keep` leaves the row as the step wrote it
+template <typename I>
 __global__ void conv_rollback_kernel(const ConvRollbackSlot* slots, const int32_t* keep, int b, int t, int c,
                                      int hist) {
   const ConvRollbackSlot s = slots[blockIdx.y];
@@ -447,7 +577,7 @@ __global__ void conv_rollback_kernel(const ConvRollbackSlot* slots, const int32_
   if (k < 0) return;
   const int src = k + j;
   const float v = src < hist ? s.state[(int64_t(bi) * c + ci) * hist + src]
-                             : s.inputs[(int64_t(bi) * t + (src - hist)) * c + ci];
+                             : load((const I*)s.inputs, (int64_t(bi) * t + (src - hist)) * c + ci);
   s.pool[(int64_t(s.rows[bi]) * c + ci) * hist + j] = v;
 }
 
@@ -616,10 +746,66 @@ extern "C" int inkling_sigmoid_gate(const float* x, const void* gate, int gate_d
   return (int)cudaGetLastError();
 }
 
+// the f32 + i32 partials a Markov pick over `b` rows takes
+extern "C" int64_t inkling_markov_pick_scratch(int b) { return int64_t(b) * PICK_BLOCKS; }
+
+// each batch row's argmax over `v < vocab` of `logits[v] + fold_b[v] + fold_w[v] . latent` (fold_w bf16
+// `[>= vocab, rank]`, rank a multiple of 8 and its rows 16-byte aligned), `part_v`/`part_i` of the scratch's size
+extern "C" int inkling_markov_pick(const void* logits, int logits_dtype, int64_t logits_batch, const void* fold_w,
+                                   const float* fold_b, const float* latent, int b, int rank, int vocab,
+                                   float* part_v, int* part_i, uint32_t* out, int64_t stream) {
+  if (rank % 8 != 0) return -1;
+  const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+  const dim3 grid(PICK_BLOCKS, b);
+  const size_t smem = size_t(rank) * sizeof(float);
+  if (logits_dtype == 0) {
+    markov_pick_partial_kernel<<<grid, PICK_THREADS, smem, s>>>((const float*)logits, logits_batch,
+                                                                (const __nv_bfloat16*)fold_w, fold_b, latent, rank,
+                                                                vocab, part_v, part_i);
+  } else {
+    markov_pick_partial_kernel<<<grid, PICK_THREADS, smem, s>>>((const __nv_bfloat16*)logits, logits_batch,
+                                                                (const __nv_bfloat16*)fold_w, fold_b, latent, rank,
+                                                                vocab, part_v, part_i);
+  }
+  markov_pick_final_kernel<<<b, PICK_THREADS, 0, s>>>(part_v, part_i, PICK_BLOCKS, out);
+  return (int)cudaGetLastError();
+}
+
+// the widest state the pool kernel keeps (inkling_short_conv_pool refuses wider)
+extern "C" int inkling_short_conv_pool_max_hist() { return CONV_MAX_HIST; }
+
+extern "C" int inkling_short_conv_pool(const void* x, int x_dtype, float* pool, const uint32_t* slots, int pool_rows,
+                                       int pool_c, int channel_off, const float* weight, const float* taps, int heads,
+                                       void* out, int out_like_x, float* before, void* stash, int b, int t, int c,
+                                       int width, int64_t stream) {
+  if (width - 1 > CONV_MAX_HIST || width < 2) return -1;
+  const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+  const int64_t grid = blocks_for(int64_t(b) * c);
+#define POOL_OUT(X, O)                                                                                        \
+  short_conv_pool_kernel<<<grid, ROW_THREADS, 0, s>>>((const X*)x, pool, slots, pool_rows, pool_c, channel_off, \
+                                                      weight, taps, heads, (O*)out, before, (X*)stash, b, t, c,   \
+                                                      width)
+  if (x_dtype == 0) {
+    POOL_OUT(float, float);
+  } else if (out_like_x) {
+    POOL_OUT(__nv_bfloat16, __nv_bfloat16);
+  } else {
+    POOL_OUT(__nv_bfloat16, float);
+  }
+#undef POOL_OUT
+  return (int)cudaGetLastError();
+}
+
+// inputs_dtype 0 f32, 1 bf16
 extern "C" int inkling_conv_rollback(const void* slots, const int32_t* keep, int n_slots, int b, int t, int c,
-                                     int hist, int64_t stream) {
+                                     int hist, int inputs_dtype, int64_t stream) {
   const dim3 grid(blocks_for(int64_t(b) * c * hist), n_slots);
-  conv_rollback_kernel<<<grid, ROW_THREADS, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-      (const ConvRollbackSlot*)slots, keep, b, t, c, hist);
+  const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+  if (inputs_dtype == 0) {
+    conv_rollback_kernel<float><<<grid, ROW_THREADS, 0, s>>>((const ConvRollbackSlot*)slots, keep, b, t, c, hist);
+  } else {
+    conv_rollback_kernel<__nv_bfloat16>
+        <<<grid, ROW_THREADS, 0, s>>>((const ConvRollbackSlot*)slots, keep, b, t, c, hist);
+  }
   return (int)cudaGetLastError();
 }

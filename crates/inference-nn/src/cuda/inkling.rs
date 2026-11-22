@@ -369,6 +369,236 @@ pub fn short_conv(
     )))
 }
 
+/// Each row's greedy pick under a recurrent Markov head: the argmax over `v < vocab` of
+/// `logits[v] + fold_b[v] + fold_w[v] . latent` (`logits` `(b, >= vocab)` f32 or bf16 with its last axis contiguous,
+/// `fold_w` `(>= vocab, rank)` BF16, `fold_b` F32, `latent` `(b, rank)` F32), as U32 `(b,)`; `None` for a layout the
+/// kernel does not take.
+pub fn markov_pick(
+    logits: &Tensor,
+    fold_w: &Tensor,
+    fold_b: &Tensor,
+    latent: &Tensor,
+    vocab: usize,
+) -> Result<Option<Tensor>> {
+    let Device::Cuda(dev) = logits.device() else {
+        return Ok(None);
+    };
+    let (b, width) = logits.dims2()?;
+    let (rows, rank) = fold_w.dims2()?;
+    let stride = logits.stride();
+    if !takes(logits)
+        || stride[1] != 1
+        || fold_w.dtype() != DType::BF16
+        || !fold_w.is_contiguous()
+        || !fold_w.layout().start_offset().is_multiple_of(8)
+        || !rank.is_multiple_of(8)
+        || rows < vocab
+        || width < vocab
+        || fold_b.dtype() != DType::F32
+        || fold_b.dims1()? < vocab
+        || latent.dtype() != DType::F32
+        || latent.dims2()? != (b, rank)
+    {
+        return Ok(None);
+    }
+    let fold_b = fold_b.contiguous()?;
+    let latent = latent.contiguous()?;
+    let stream = dev.cuda_stream();
+    // SAFETY: a size query
+    let parts = usize::try_from(unsafe { super::ffi::inkling_markov_pick_scratch(i32_of(b)?) })
+        .map_err(inference_tensor::Error::wrap)?;
+    // SAFETY: the partial kernel writes every partial before the final one reads them
+    let mut part_v = unsafe { dev.alloc::<f32>(parts)? };
+    let mut part_i = unsafe { dev.alloc::<i32>(parts)? };
+    let mut out = unsafe { dev.alloc::<u32>(b)? };
+    let (lg, ll) = logits.storage_and_layout();
+    let (lp, l_dtype, _l) = device_ptr(&lg, ll, &stream)?;
+    let (wg, wl) = fold_w.storage_and_layout();
+    let (wp, _, _w) = device_ptr(&wg, wl, &stream)?;
+    let (bg, bl) = fold_b.storage_and_layout();
+    let (bp, _, _b) = device_ptr(&bg, bl, &stream)?;
+    let (ag, al) = latent.storage_and_layout();
+    let (ap, _, _a) = device_ptr(&ag, al, &stream)?;
+    {
+        let (vp, _v) = part_v.device_ptr_mut(&stream);
+        let (ip, _i) = part_i.device_ptr_mut(&stream);
+        let (op, _o) = out.device_ptr_mut(&stream);
+        // SAFETY: the buffers cover the shapes checked above, on this stream
+        status(
+            unsafe {
+                super::ffi::inkling_markov_pick(
+                    lp as *const core::ffi::c_void,
+                    l_dtype,
+                    i64_of(stride[0])?,
+                    wp as *const core::ffi::c_void,
+                    bp as *const f32,
+                    ap as *const f32,
+                    i32_of(b)?,
+                    i32_of(rank)?,
+                    i32_of(vocab)?,
+                    vp as *mut f32,
+                    ip as *mut i32,
+                    op as *mut u32,
+                    stream.cu_stream() as i64,
+                )
+            },
+            "Markov pick",
+        )?;
+    }
+    Ok(Some(Tensor::from((
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+        Shape::from(b),
+    ))))
+}
+
+/// [`short_conv`] over a slot pool in place: one conv's channels of each batch row's slot.
+pub struct ShortConvPool<'a> {
+    // `(b, t, c)` f32 or bf16
+    pub x: &'a Tensor,
+    // `[pool rows, pool channels, width - 1]` F32, updated in place
+    pub pool: &'a Tensor,
+    // each batch row's slot `[b]` U32; a slot past the pool reads zeros and writes nothing
+    pub slots: &'a Tensor,
+    // this conv's first channel in the pool
+    pub channel_off: usize,
+    pub weight: &'a Tensor,
+    pub taps: Option<(&'a Tensor, usize)>,
+    pub out_like_x: bool,
+    // a verify's rollback: the states as read `(b, pool channels, width - 1)` F32 and the inputs
+    // `(b, t, pool channels)` in x's dtype, this conv's channels of each
+    pub before: Option<&'a Tensor>,
+    pub stash: Option<&'a Tensor>,
+}
+
+/// The convolution's output, its state updated in the pool; `None` where the layout is not the kernel's.
+pub fn short_conv_pool(op: &ShortConvPool<'_>) -> Result<Option<Tensor>> {
+    let Device::Cuda(dev) = op.x.device() else {
+        return Ok(None);
+    };
+    let (b, t, c) = op.x.dims3()?;
+    let width = op.weight.dim(1)?;
+    let (pool_rows, pool_c, hist) = op.pool.dims3()?;
+    // SAFETY: a constant query
+    let max_hist = unsafe { super::ffi::inkling_short_conv_pool_max_hist() } as usize;
+    if !takes(op.x)
+        || op.pool.dtype() != DType::F32
+        || !op.pool.is_contiguous()
+        || op.slots.dtype() != DType::U32
+        || op.slots.dims1()? != b
+        || op.weight.dtype() != DType::F32
+        || width < 2
+        || hist != width - 1
+        || hist > max_hist
+        || op.channel_off + c > pool_c
+        || op.taps.is_some_and(|(taps, heads)| {
+            taps.dtype() != DType::F32 || heads == 0 || !c.is_multiple_of(heads)
+        })
+        || op.before.is_some_and(|before| {
+            before.dtype() != DType::F32
+                || !before.is_contiguous()
+                || before.dims() != [b, pool_c, hist]
+        })
+        || op.stash.is_some_and(|stash| {
+            stash.dtype() != op.x.dtype()
+                || !stash.is_contiguous()
+                || stash.dims() != [b, t, pool_c]
+        })
+    {
+        return Ok(None);
+    }
+    let x = op.x.contiguous()?;
+    let slots = op.slots.contiguous()?;
+    let weight = op.weight.contiguous()?;
+    let taps = op
+        .taps
+        .map(|(taps, heads)| -> Result<_> { Ok((taps.contiguous()?, heads)) })
+        .transpose()?;
+    let stream = dev.cuda_stream();
+    let (xg, xl) = x.storage_and_layout();
+    let (xp, x_dtype, _x) = device_ptr(&xg, xl, &stream)?;
+    let (pg, pl) = op.pool.storage_and_layout();
+    let (pp, _, _p) = device_ptr(&pg, pl, &stream)?;
+    let (sg, sl) = slots.storage_and_layout();
+    let Storage::Cuda(slot_storage) = &*sg else {
+        inference_tensor::bail!("Inkling kernels need CUDA storage");
+    };
+    let (slot_base, _s) = slot_storage.as_cuda_slice::<u32>()?.device_ptr(&stream);
+    let slot_ptr = slot_base + sl.start_offset() as u64 * 4;
+    let (wg, wl) = weight.storage_and_layout();
+    let (wp, _, _w) = device_ptr(&wg, wl, &stream)?;
+    let tap_guard = taps.as_ref().map(|(t, _)| t.storage_and_layout());
+    let tap_ptr = tap_guard
+        .as_ref()
+        .map(|(g, l)| device_ptr(g, l, &stream))
+        .transpose()?;
+    let heads = taps.as_ref().map_or(1, |(_, h)| *h);
+    let before_guard = op.before.map(|t| t.storage_and_layout());
+    let before_ptr = before_guard
+        .as_ref()
+        .map(|(g, l)| device_ptr(g, l, &stream))
+        .transpose()?;
+    let stash_guard = op.stash.map(|t| t.storage_and_layout());
+    let stash_ptr = stash_guard
+        .as_ref()
+        .map(|(g, l)| device_ptr(g, l, &stream))
+        .transpose()?;
+    let shape = Shape::from((b, t, c));
+    macro_rules! run {
+        ($ty:ty) => {{
+            // SAFETY: the kernel writes every element
+            let mut out = unsafe { dev.alloc::<$ty>(b * t * c)? };
+            {
+                let (op_ptr, _o) = out.device_ptr_mut(&stream);
+                // SAFETY: the buffers cover the shapes checked above, on this stream; the pool's rows are written
+                // only by this launch's threads, one (row, channel) each
+                status(
+                    unsafe {
+                        super::ffi::inkling_short_conv_pool(
+                            xp as *const core::ffi::c_void,
+                            x_dtype,
+                            pp as *mut f32,
+                            slot_ptr as *const u32,
+                            i32_of(pool_rows)?,
+                            i32_of(pool_c)?,
+                            i32_of(op.channel_off)?,
+                            wp as *const f32,
+                            tap_ptr
+                                .as_ref()
+                                .map_or(std::ptr::null(), |(p, _, _)| *p as *const f32),
+                            i32_of(heads)?,
+                            op_ptr as *mut core::ffi::c_void,
+                            i32::from(op.out_like_x),
+                            before_ptr
+                                .as_ref()
+                                .map_or(std::ptr::null_mut(), |(p, _, _)| *p as *mut f32),
+                            stash_ptr
+                                .as_ref()
+                                .map_or(std::ptr::null_mut(), |(p, _, _)| {
+                                    *p as *mut core::ffi::c_void
+                                }),
+                            i32_of(b)?,
+                            i32_of(t)?,
+                            i32_of(c)?,
+                            i32_of(width)?,
+                            stream.cu_stream() as i64,
+                        )
+                    },
+                    "short convolution over the pool",
+                )?;
+            }
+            Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+                shape,
+            ))
+        }};
+    }
+    Ok(Some(if op.out_like_x && x_dtype == BF16_CODE {
+        run!(half::bf16)
+    } else {
+        run!(f32)
+    }))
+}
+
 /// A loop controller's input: `x` and `message` (`(.., hidden)`) each unit-normed (`eps`), side by side
 /// on the last axis, f32.
 pub fn controller_in(x: &Tensor, message: &Tensor, eps: f32) -> Result<Option<Tensor>> {
@@ -713,7 +943,7 @@ pub struct ConvRollbackSlot<'a> {
     pub pool: &'a Tensor,
     // the batch rows' pool rows `[b]` U32
     pub rows: &'a Tensor,
-    // `[b, c, hist]` and `[b, t, c]` F32
+    // `[b, c, hist]` F32 and `[b, t, c]` F32 or BF16
     pub state: &'a Tensor,
     pub inputs: &'a Tensor,
 }
@@ -729,6 +959,7 @@ pub fn conv_rollback(slots: &[ConvRollbackSlot<'_>], keep: &[i32]) -> Result<boo
     };
     let (b, t, c) = first.inputs.dims3()?;
     let hist = first.state.dim(2)?;
+    let inputs_dtype = first.inputs.dtype();
     let fits = |s: &ConvRollbackSlot<'_>| -> Result<bool> {
         Ok(s.pool.dtype() == DType::F32
             && s.pool.is_contiguous()
@@ -739,7 +970,8 @@ pub fn conv_rollback(slots: &[ConvRollbackSlot<'_>], keep: &[i32]) -> Result<boo
             && s.state.dtype() == DType::F32
             && s.state.is_contiguous()
             && s.state.dims3()? == (b, c, hist)
-            && s.inputs.dtype() == DType::F32
+            && s.inputs.dtype() == inputs_dtype
+            && matches!(inputs_dtype, DType::F32 | DType::BF16)
             && s.inputs.is_contiguous()
             && s.inputs.dims3()? == (b, t, c))
     };
@@ -773,6 +1005,10 @@ pub fn conv_rollback(slots: &[ConvRollbackSlot<'_>], keep: &[i32]) -> Result<boo
                     let (p, g) = cuda.as_cuda_slice::<u32>()?.device_ptr(&stream);
                     (p + layout.start_offset() as u64 * 4, g)
                 }
+                DType::BF16 => {
+                    let (p, g) = cuda.as_cuda_slice::<half::bf16>()?.device_ptr(&stream);
+                    (p + layout.start_offset() as u64 * 2, g)
+                }
                 _ => return Ok(false),
             };
             table.push(ptr);
@@ -798,6 +1034,7 @@ pub fn conv_rollback(slots: &[ConvRollbackSlot<'_>], keep: &[i32]) -> Result<boo
                 i32_of(t)?,
                 i32_of(c)?,
                 i32_of(hist)?,
+                i32::from(inputs_dtype == DType::BF16),
                 stream.cu_stream() as i64,
             )
         },
@@ -809,7 +1046,7 @@ pub fn conv_rollback(slots: &[ConvRollbackSlot<'_>], keep: &[i32]) -> Result<boo
 
 #[cfg(test)]
 mod tests {
-    use inference_tensor::{D, DType, Device, Result, Tensor};
+    use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
     const HIDDEN: usize = 576;
     // sqrt(HIDDEN), the scores' scale
@@ -866,6 +1103,195 @@ mod tests {
         Ok(())
     }
 
+    // the fused pick against the bias through a matmul, the sum's argmax over the unpadded vocabulary; logits a
+    // strided step of `[b, steps, padded]`, and a padded row larger than every real one
+    fn cuda_markov_pick_takes_the_biased_argmax() -> Result<()> {
+        const B: usize = 3;
+        const STEPS: usize = 2;
+        const VOCAB: usize = 5000;
+        const PADDED: usize = 5056;
+        const RANK: usize = 64;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let fold_w = Tensor::randn(0f32, 1f32, (PADDED, RANK), &cuda)?.to_dtype(DType::BF16)?;
+        let fold_b = Tensor::randn(0f32, 1f32, PADDED, &cuda)?;
+        let latent = Tensor::randn(0f32, 1f32, (B, RANK), &cuda)?;
+        let padding = Tensor::full(1e4f32, (B, STEPS, PADDED - VOCAB), &cuda)?;
+        for dtype in [DType::F32, DType::BF16] {
+            let logits = Tensor::cat(
+                &[
+                    &Tensor::randn(0f32, 4f32, (B, STEPS, VOCAB), &cuda)?,
+                    &padding,
+                ],
+                2,
+            )?
+            .to_dtype(dtype)?;
+            let step = logits.i((.., 1))?;
+            let bias = latent
+                .matmul(&fold_w.to_dtype(DType::F32)?.t()?)?
+                .broadcast_add(&fold_b)?;
+            let expected = (step.to_dtype(DType::F32)? + bias)?
+                .narrow(1, 0, VOCAB)?
+                .argmax(D::Minus1)?
+                .to_vec1::<u32>()?;
+            let picked = super::markov_pick(&step, &fold_w, &fold_b, &latent, VOCAB)?
+                .expect("the kernel takes the layout")
+                .to_vec1::<u32>()?;
+            assert_eq!(picked, expected, "{dtype:?}");
+        }
+        Ok(())
+    }
+
+    // the in-place pool conv against the gathered rows' kernel: outputs, the slots' new states, the states as read and
+    // the inputs it stashes, a padded row's slot left; with and without taps, a decode's row and a verify's
+    fn cuda_pool_conv_matches_the_gathered_rows() -> Result<()> {
+        const C: usize = 48;
+        const POOL_C: usize = 80;
+        const OFF: usize = 16;
+        const WIDTH: usize = 4;
+        const HIST: usize = WIDTH - 1;
+        const POOL_ROWS: usize = 5;
+        const HEADS: usize = 4;
+        // past the pool: a padded row
+        const PAD: u32 = u32::MAX;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let host_slots = [3u32, PAD, 1];
+        let b = host_slots.len();
+        for (t, with_taps) in [(1, false), (1, true), (4, true)] {
+            let pool = Tensor::randn(0f32, 1f32, (POOL_ROWS, POOL_C, HIST), &cuda)?;
+            let x = Tensor::randn(0f32, 1f32, (b, t, C), &cuda)?.to_dtype(DType::BF16)?;
+            let weight = Tensor::randn(0f32, 0.5f32, (C, WIDTH), &cuda)?;
+            let taps = Tensor::randn(0f32, 0.5f32, (b, t, HEADS, WIDTH), &cuda)?;
+            let taps = with_taps.then_some((&taps, HEADS));
+            let state = Tensor::stack(
+                &host_slots
+                    .iter()
+                    .map(|&s| match s {
+                        PAD => Tensor::zeros((C, HIST), DType::F32, &cuda),
+                        s => pool.get(s as usize)?.narrow(0, OFF, C),
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                0,
+            )?;
+            let (expected, new_state) =
+                super::short_conv(&x, &state, &weight, taps, true)?.expect("the rows kernel");
+            let in_place = pool.copy()?;
+            let before = Tensor::zeros((b, POOL_C, HIST), DType::F32, &cuda)?;
+            let stash = Tensor::zeros((b, t, POOL_C), DType::BF16, &cuda)?;
+            let out = super::short_conv_pool(&super::ShortConvPool {
+                x: &x,
+                pool: &in_place,
+                slots: &Tensor::new(&host_slots, &cuda)?,
+                channel_off: OFF,
+                weight: &weight,
+                taps,
+                out_like_x: true,
+                before: Some(&before),
+                stash: Some(&stash),
+            })?
+            .expect("the pool kernel");
+            let max = |a: &Tensor, e: &Tensor| -> Result<f32> {
+                (a.to_dtype(DType::F32)? - e.to_dtype(DType::F32)?)?
+                    .abs()?
+                    .max_all()?
+                    .to_scalar::<f32>()
+            };
+            let label = format!("t {t} taps {with_taps}");
+            assert!(max(&out, &expected)? < TOLERANCE, "{label}: out");
+            assert_eq!(max(&stash.narrow(2, OFF, C)?, &x)?, 0.0, "{label}: stash");
+            for (bi, &s) in host_slots.iter().enumerate() {
+                if s == PAD {
+                    continue;
+                }
+                let row = in_place.get(s as usize)?;
+                assert!(
+                    max(&row.narrow(0, OFF, C)?, &new_state.get(bi)?)? < TOLERANCE,
+                    "{label}: state"
+                );
+                assert_eq!(
+                    max(&before.get(bi)?.narrow(0, OFF, C)?, &state.get(bi)?)?,
+                    0.0,
+                    "{label}: before"
+                );
+                let others = |p: &Tensor| -> Result<Tensor> {
+                    Tensor::cat(
+                        &[
+                            p.narrow(0, 0, OFF)?,
+                            p.narrow(0, OFF + C, POOL_C - OFF - C)?,
+                        ],
+                        0,
+                    )
+                };
+                assert_eq!(
+                    max(&others(&row)?, &others(&pool.get(s as usize)?)?)?,
+                    0.0,
+                    "{label}: others"
+                );
+            }
+            let untouched = [0usize, 2, 4];
+            for r in untouched {
+                assert_eq!(
+                    max(&in_place.get(r)?, &pool.get(r)?)?,
+                    0.0,
+                    "{label}: row {r}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // each kept row's pool row is the window of `[state, inputs]` ending at it, from a BF16 stash as from its F32
+    // widening; a row that kept everything is left
+    fn cuda_conv_rollback_takes_either_stash_dtype() -> Result<()> {
+        const B: usize = 3;
+        const T: usize = 4;
+        const C: usize = 40;
+        const HIST: usize = 3;
+        const POOL_ROWS: usize = 6;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let state = Tensor::randn(0f32, 1f32, (B, C, HIST), &cuda)?;
+        let inputs = Tensor::randn(0f32, 1f32, (B, T, C), &cuda)?.to_dtype(DType::BF16)?;
+        let rows = Tensor::new(&[4u32, 0, 2], &cuda)?;
+        let keep = [1i32, -1, 3];
+        let window = Tensor::cat(&[&state.transpose(1, 2)?, &inputs.to_dtype(DType::F32)?], 1)?;
+        let mut pools = Vec::new();
+        for stash in [inputs.clone(), inputs.to_dtype(DType::F32)?] {
+            let pool = Tensor::zeros((POOL_ROWS, C, HIST), DType::F32, &cuda)?;
+            let slot = super::ConvRollbackSlot {
+                pool: &pool,
+                rows: &rows,
+                state: &state,
+                inputs: &stash,
+            };
+            assert!(super::conv_rollback(&[slot], &keep)?);
+            pools.push(pool.to_device(&Device::Cpu)?);
+        }
+        for (bi, (&row, &kept)) in [4usize, 0, 2].iter().zip(&keep).enumerate() {
+            let expected = if kept < 0 {
+                Tensor::zeros((C, HIST), DType::F32, &Device::Cpu)?
+            } else {
+                window
+                    .get(bi)?
+                    .narrow(0, kept as usize, HIST)?
+                    .t()?
+                    .to_device(&Device::Cpu)?
+            };
+            for pool in &pools {
+                let error = (pool.get(row)? - &expected)?
+                    .abs()?
+                    .max_all()?
+                    .to_scalar::<f32>()?;
+                assert!(error == 0.0, "row {bi}: error {error}");
+            }
+        }
+        Ok(())
+    }
+
     // the fused controller of a few rows: the unit-normed pair through the bottleneck, the gated sum, in x's dtype
     fn cuda_fused_controller_matches_the_reference() -> Result<()> {
         const RANK: usize = 24;
@@ -876,7 +1302,13 @@ mod tests {
             let rms = (t.sqr()?.mean_keepdim(D::Minus1)? + f64::from(EPS))?.sqrt()?;
             t.broadcast_div(&rms)
         };
-        for (rows, dtype, tolerance) in [(1, DType::F32, 1e-4f32), (4, DType::BF16, 2e-2)] {
+        // a BF16 output within two of its steps (2^-8 of the value each) of the f32 reference, past 1e-4
+        const BF16_ROUNDING: f64 = 2.0 / 256.0;
+        for (rows, dtype, relative) in [
+            (1, DType::F32, 0.0),
+            (4, DType::BF16, BF16_ROUNDING),
+            (7, DType::F32, 0.0),
+        ] {
             let x = Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu)?.to_dtype(dtype)?;
             let message = Tensor::randn(0f32, 1f32, (1, rows, HIDDEN), &Device::Cpu)?;
             let down = Tensor::randn(0f32, 0.05f32, (RANK, 2 * HIDDEN), &Device::Cpu)?;
@@ -898,11 +1330,15 @@ mod tests {
             )?
             .expect("a few rows of a narrow rank fuse");
             assert_eq!(fused.dtype(), dtype);
-            let error = (fused.to_device(&Device::Cpu)?.to_dtype(DType::F32)? - &expected)?
+            let error = ((fused.to_device(&Device::Cpu)?.to_dtype(DType::F32)? - &expected)?
                 .abs()?
+                - (expected.abs()? * relative)?)?
                 .max_all()?
                 .to_scalar::<f32>()?;
-            assert!(error < tolerance, "{rows} rows {dtype:?}: error {error}");
+            assert!(
+                error < 1e-4,
+                "{rows} rows {dtype:?}: error {error} past the rounding"
+            );
         }
         Ok(())
     }
@@ -911,7 +1347,10 @@ mod tests {
         cuda_cases,
         [
             cuda_depth_mix_matches_the_reference,
-            cuda_fused_controller_matches_the_reference
+            cuda_fused_controller_matches_the_reference,
+            cuda_conv_rollback_takes_either_stash_dtype,
+            cuda_pool_conv_matches_the_gathered_rows,
+            cuda_markov_pick_takes_the_biased_argmax
         ]
     );
 }

@@ -322,6 +322,19 @@ impl RnnMarkovHead {
             let keep = (&gate * &state)?;
             state = (keep + ((1.0 - &gate)? * cand)?)?;
             let latent = raw.narrow(1, 2 * r, r)?.tanh()?;
+            // the softcap keeps the order, so the fused pick skips it
+            #[cfg(feature = "cuda")]
+            if let Some(pick) = inference_nn::cuda::inkling::markov_pick(
+                &logits.i((.., s))?,
+                &fold_w,
+                &fold_b,
+                &latent,
+                self.vocab,
+            )? {
+                prev = pick;
+                picks.push(prev.clone());
+                continue;
+            }
             let bias = latent
                 .to_dtype(self.dtype)?
                 .matmul(&fold_w.t()?)?

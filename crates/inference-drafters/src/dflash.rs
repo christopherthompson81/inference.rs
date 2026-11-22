@@ -4922,8 +4922,13 @@ impl DFlashDraftModel {
             Some(selector) => selector.select_greedy_batch(hidden, &logits, anchors)?,
             None => {
                 let anchors = Tensor::from_vec(anchors.to_vec(), (batch,), logits.device())?;
-                self.pick_greedy(drafted, &logits, &anchors, &**lm_head)?
-                    .to_vec2::<u32>()?
+                let picks = self.pick_greedy(drafted, &logits, &anchors, &**lm_head)?;
+                // CUDA drafts stay on the device: the verify packs them into its input, so the step needs no readback
+                #[cfg(all(feature = "cuda", target_family = "unix"))]
+                if picks.device().is_cuda() {
+                    return Ok(DFlashProposalBatch::DeviceTokens(picks.contiguous()?));
+                }
+                picks.to_vec2::<u32>()?
             }
         };
         Ok(DFlashProposalBatch::Tokens(tokens_per_seq))

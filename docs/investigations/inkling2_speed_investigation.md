@@ -250,3 +250,210 @@ Test `nvfp4_mmq_folds_each_scale_pair_into_one` takes 33 rows through mmq agains
 (per-16, unfolded), with F32 in and out (BF16 output rounding alone is 2e-3). Equal pairs give 2.2e-4, the same as the
 unfolded kernel on either weight, so that's the two kernels' own difference. Unequal pairs give 3.3e-3 relative, the
 fold's rounding.
+
+## Run 10 - 2026-11-22 11:30
+
+Recipe C on master after #1046-#1047, serving with Run 3's method (`inference serve`, greedy, 256 tokens a
+completion, wall time a request including its prompt; the official drafter, `--mtp-model`):
+
+```
+recipe C (tok/s)       prose   code    story   explainer
+plain                  96.7    96.7    96.3    96.3
+drafts 1               87.1    110.0   88.6    95.1
+drafts 2               85.1    127.1   80.9    93.5
+drafts 3               76.0    127.8   74.1    85.6
+
+recipe B, Run 5        (plain ~95.6)
+drafts 3               78.8    126.7   77.0    88.2
+```
+
+Plain is up ~1 tok/s from B (the smaller head) and the prompts' prefill. Speculation is where Run 5 left it: it pays
+only on code (+32% at drafts 2-3) and loses elsewhere at every depth, even at one draft (-10% on prose). The prefill
+work doesn't reach the verify, which runs the 4-row grouped matvec (Run 5: ~3.6x a decode step's expert bytes).
+
+## Run 11 - 2026-11-22 12:30
+
+Where a speculative cycle goes (recipe C, drafts 3, the prose prompt, one served request of 256 tokens under nsys
+`--cuda-graph-trace=node`; 131 cycles, 1.97 tokens a cycle, accepted per position 88 / 35 / 18 of 146):
+
+```
+a cycle                         ms      (a plain decode step: 10.1)
+wall                            28.4
+GPU busy                        24.1
+  verify graph                  21.4
+    NVFP4 expert matvec (4 rows)  8.55   (89 launches, 96 us; decode ~2.5)
+    Q6_K / Q8_0 experts 20-23     1.14
+    Q8_0 dense matvec (4 rows)    2.21
+    loop controllers              1.56   (decode 0.81)
+    cast_bf16_f32                 1.38   (307 launches)
+    copies (copy2d, ucopy)        1.33   (~670 launches)
+    attention (decode_kernel)     0.86
+    depth mix                     0.84
+    head (mmvq_tc_k)              0.52
+  drafter, eager                2.75   (206 launches: head 0.52, argmax 3 x 134 us, cuBLAS gemv 3 x 122 us, gemms 0.68)
+host gaps                       4.3    (3.3 before the verify graph's launch)
+```
+
+The experts (9.7 ms) are the floor: 4 rows x 8 routes reach ~29 distinct experts. The rest (~7-8 ms: the gaps, the
+drafter's eager pass, the casts and copies, the controllers past one row) doesn't follow the bytes.
+
+The published setup (vLLM `models/inkling2/nvidia/dspark.py`, `v1/worker/gpu/spec_decode/dspark/speculator.py`) is
+a linear chain: one argmax a position, `num_speculative_tokens` forced to `block_size - 1` (7), every step, rejection
+sampling in the target's vocabulary. No tree, no confidence stop (the generic DSpark speculator stores a confidence
+head's scores, but this checkpoint has none: `mtp.safetensors` holds `fuse_weight`, `mask_embed`, `norm`, the layers
+and the `markov_head`). It suits batched serving, where a step reads most experts anyway and draft rows come nearly
+free. At one sequence each row brings its own experts.
+
+## Run 12 - 2026-11-22 13:15
+
+Run 11's host gap was mostly the profiler: node-level graph tracing inflates `cuGraphLaunch` (2.95 ms a launch).
+Graph-level tracing (`--cuda-graph-trace=graph`) gives the real cycle: 25.7 ms (3.46 s for 131 cycles, the
+unprofiled run's 3.37 s): verify graph 21.3, drafter 2.8, GPU idle 1.9 (1.08 of it from the drafts' readback to the
+verify graph's start, a launch costing ~0.9 ms of host for ~3,200 nodes). Plain decode's launch (0.44 ms host) overlaps
+the previous step: 0.07 ms idle a step. A verify can't launch until the host has the drafts, so its launch is exposed.
+
+Per kernel, the verify graph (4 rows) against a plain decode graph (1 row), us a step (node-level, GPU times):
+
+```
+                                 plain    verify   ratio
+NVFP4 expert matvec              2530     8551     3.4   (expert bytes)
+Q6_K / Q8_0 experts 20-23         303     1136     3.7   (expert bytes)
+cast_bf16_f32                     184     1380     7.5   (113 -> 307 launches)
+copies (copy2d, ucopy f32/bf16)   260     1333     5.1   (new in verify: ucopy_bf16 185, ucopy_f32 98 a step)
+loop controllers                  748     1556     2.1
+attention (decode_kernel)         461      861     1.9
+depth mix, conv, norms, router   ~2.5 ms  ~2.5 ms  1.0
+graph total                     10524    21358
+```
+
+Not bytes, ~3.5 ms: the casts, the copies (likely the rollback's stash of each layer's conv inputs and the taps), the
+controllers and attention past one row. The drafter's 2.8 ms: its three dense layers' BF16 weights (~0.64 GB a pass,
+cuBLAS gemms 0.68 ms), the target head over the draft rows (0.52), the recurrent head's fold (`[201024, 256]` BF16,
+103 MB, 122 us a draft) and an argmax over the one 201K row (134 us a draft where 0.8 MB should take a few us).
+
+## Run 13 - 2026-11-22 14:30
+
+The verify's conv stash and the conv states' round trip.
+
+Step 1: the stash kept each conv input as its BF16 (no cast to F32), and the rollback kernel (`conv_rollback_kernel<I>`)
+widens it, which is exact. Casts went from 1460 to 562 us a cycle (322 to 129 launches, plain's level). Drafts 3 prose
+went 76.0 to 77.5, the others within noise. Test `cuda_conv_rollback_takes_either_stash_dtype`.
+
+Step 2: per layer visit, decode and verify gathered the slot's states (`index_select`, with a clamp), ran four convs
+on the copy, concatenated their four new states (4 `copy2d_f32`), and scattered them back (`indexed_row_copy`). A verify
+also concatenated its stash (4 `copy2d_bf16`). These are ~1.4 us kernels, mostly launch cost. The CUDA pool kernel
+(`short_conv_pool_kernel`, like Vulkan's in-place step) takes a thread per (row, channel): it reads the state from the
+row's slot at the conv's channel offset into a register window, runs the rows, and writes the new state back into the
+slot. In a verify it also writes the state as read and the inputs into the rollback's buffers (`ConvRollback`). A slot
+past the pool (a padded row) reads zeros and writes nothing. Decode and verify now take the pool on CUDA. Test
+`cuda_pool_conv_matches_the_gathered_rows` (outputs, new states, before, stash, the other channels and slots left; t 1
+and 4, with and without taps, a padded row). The tiny model's decode-against-prefill and drafter tests pass.
+
+```
+recipe C                         tg128   served plain   drafts 3: prose   code    story   explainer
+Run 10                           99.0    ~96.5                    76.0    127.8   74.1    85.6
+step 1 (BF16 stash)                                               77.5    128.8   73.3    84.4
+step 2 (pool kernel)             103.0   ~99.2                    75.7    136.0   76.2    89.2
+```
+
+Plain decode +4% (each visit loses its gather, concatenation and scatter). Speculation gains on code (+6%), story and
+explainer; prose is level (its greedy text and drafts moved: accepted 280 / 156 / 101 against 286 / 163 / 102).
+
+## Run 14 - 2026-11-22 15:30
+
+The drafter's recurrent head ran, a draft, a cuBLAS gemv over the fold (`[201024, 256]` BF16, 103 MB, 156 us), a
+generic one-block argmax over the 201K row (`fast_argmax_f32`, 137 us), and ~8 vocabulary-wide elementwise kernels
+(the casts, the bias, the softcap). One fused pick (`inkling_markov_pick`) does it in two stages: a warp a vocabulary
+row takes `logits[v] + fold_b[v] + fold_w[v] . latent` (the latent in shared memory, one 16-byte load a lane), each
+block keeps its best, then one block a batch row reduces the partials. Ties go to the lower index, as the argmax.
+The softcap keeps the order, so the pick skips it. The bias sums in f32 where the matmul rounded it to BF16, so a
+draft may differ at a near tie. Test `cuda_markov_pick_takes_the_biased_argmax` (f32 and BF16 logits, a strided
+step, padded rows above every real one).
+
+A cycle, graph-level trace, the prose request at drafts 3:
+
+```
+                         cycle   verify graph   drafter   idle   cycles for 256 tokens
+Run 12                   25.73   21.28          2.82      1.89   132
+Runs 13-14               23.72   20.20          2.29      1.45   143
+```
+
+Prose tok/s hides the cycle's 8%: its greedy text moved (a verify's rows change with the drafts and flip near ties),
+so it took 143 cycles. Served (tok/s):
+
+```
+                 prose   code    story   explainer
+drafts 3         74.0    136.5   77.0    89.9     (281 / 155 / 100 accepted)
+drafts 2         86.1    135.1   85.5    101.8    (317 / 177)
+plain            ~99.2
+```
+
+At drafts 2 the explainer passes plain and code keeps drafts 3's speed.
+
+The drafter's pass stays eager: the DFlash host graphs a drafter only over its bounded windowed KV pool
+(`enable_windowed_kv`), which Inkling's doesn't take (layer 1 is global), so it runs the paged path with no graph. Its
+~200 launches leave gaps, and the verify's launch (0.54 ms of host for ~2,650 nodes) waits on the drafts' readback.
+
+## Run 15 - 2026-11-22 16:45
+
+Loop controllers at 4 rows (1.64 ms a verify against decode's 0.75): a down kernel summing 4 rows a pass over its
+weights (one sync pair a tile) and an up kernel of 8-lane groups a row (3 shuffles a reduction). Per launch, node
+trace:
+
+```
+                      decode down / up (us)   verify down / up
+before                3.46 / 4.43             7.86 / 8.96
+row tiles + groups    3.90 / 4.64             6.92 / 8.55
+```
+
+A verify saves ~0.13 ms and decode loses ~0.06 ms a token, so I reverted it. The controllers are 192 small launches a
+token, bound by launch latency more than by their loops. The test gained a 7-row case (a second tile, a part-filled
+group), which the kernels as they are pass.
+
+Long context. `inference bench` decodes at depth 4 whatever the prompt ("@ d4"), so served requests measure it
+(`avg_compl_tok_per_sec`, 256 tokens, `--pa-context-len 16384`):
+
+```
+plain, context (tokens)      8       5689    9824
+before                       109.6   82.2    75.6
+key splits, a combine        100.3   89.1    84.9
+adaptive splits              109.5   89.6    89.1
+drafts 2 (adaptive)          91.5    93.8    116.3    (summaries copy the text: 161 / 182 accepted at 9824)
+```
+
+The decode attention ran a 1,024-thread block a (query, head): 24 blocks a decode step on 82 SMs whatever the context.
+Splitting the keys over blocks (`decode_splits`: 2 blocks an SM's worth of rows, at most 8, from the shapes alone so a
+captured graph keeps it) with a combine kernel helped long contexts but cost short ones ~9% (a launch a visit and
+near-empty splits). Now a row takes a split per 512 of its keys (`DECODE_SPLIT_KEYS`), the grid's other blocks
+exiting at once. A row of one split writes its output as before. Several splits write (max, sum, values) partials,
+and the last to finish (a per-row count, zeroed once per device and reset by that block; `__threadfence` and
+`__syncwarp` before the count, `__ldcg` reads) merges them. No combine launch. `__launch_bounds__` keeps the
+1,024-thread kernel within its registers (without it, CUDA status 701). Test
+`cuda_split_decode_over_long_pasts_matches_the_reference` (2,000 past keys, a 1,500-key window, the log scale, 4 rows
+and 1, view and paged BF16).
+
+At 9,824 tokens the attention is 47 us a call (2.2 ms a token): a global layer's BF16 K/V at that depth is ~40 MB a
+token (9824 x 8 KV heads x 128 x 2 x 2 bytes), the 3090's bandwidth for 47 us. What's left is the read itself: a
+quantized KV cache would halve it.
+
+## Run 16 - 2026-11-22 17:45
+
+The verify's launch waited on the drafts. A CUDA API backtrace on the readbacks (`nsys --cudabacktrace=memory:10`,
+`CUDA_CALLCHAINS`) put 14 of a request's DtoH copies in `DFlashDraftModel::finish_proposals`. Its greedy branch with no
+selector read the picks to the host (`to_vec2`), so the host waited out the drafter before staging the tokens and
+launching the verify graph. The engine already packs device draft rows into a verify's input (`pack_completion_input`,
+which the graphed DFlash path's `DeviceTokens` takes). That branch now returns `DeviceTokens` on CUDA, so the host
+stages them and launches without waiting:
+
+```
+drafts 3, prose, graph-level   cycle   verify graph   drafter   idle
+Run 14                         23.72   20.20          2.29      1.45
+device drafts                  22.94   20.16          2.30      0.70
+```
+
+Served: drafts 2 87.0 / 136.4 / 86.2 / 102.8, drafts 3 77.4 / 139.7 / 78.3 / 91.4 (prose / code / story / explainer).
+
+On the way: `cuda_fused_controller_matches_the_reference` failed once at 4 BF16 rows (0.027 against a 2e-2 bound) on
+unseeded random inputs. The kernel's BF16 output lands within a step of the f32 reference, and a step at the draw's
+tails (|v| ~5-7) is ~0.02-0.03. The bound is now two BF16 steps of each element (2^-8 of the value each) plus 1e-4.
+It passed six runs in a row.
