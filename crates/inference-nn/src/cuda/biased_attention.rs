@@ -321,6 +321,10 @@ mod tests {
 
     // shuffled blocks a paged case's sequences take, as the engine's block tables hand them out
     const TEST_BLOCK_SIZE: usize = 16;
+    // biased_attention.cu's MMA_MIN_QUERIES: prompts from this many queries run on tensor cores (sm80+)
+    const TENSOR_CORE_QUERIES: usize = 32;
+    const F32_TOLERANCE: f32 = 1e-4;
+    const TENSOR_CORE_TOLERANCE: f32 = 1e-3;
 
     struct Case {
         b: usize,
@@ -497,8 +501,15 @@ mod tests {
         };
         let err = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
         let mag = want.abs()?.max_all()?.to_scalar::<f32>()?;
+        // the tensor-core prefill (half-precision caches) sums f16 products of q and the probabilities in two parts
+        let tolerance =
+            if c.t >= TENSOR_CORE_QUERIES && paged_dtype.is_some_and(|d| d != DType::F32) {
+                TENSOR_CORE_TOLERANCE
+            } else {
+                F32_TOLERANCE
+            };
         assert!(
-            err <= 1e-4 * mag.max(1.0),
+            err <= tolerance * mag.max(1.0),
             "b {} h {} t {} past {} d {} paged {paged_dtype:?}: max error {err} of {mag}",
             c.b,
             c.h,
@@ -576,6 +587,27 @@ mod tests {
         run(&c, Some(DType::F32))
     }
 
+    fn cuda_tensor_core_prefill_after_a_past_matches_the_reference() -> Result<()> {
+        let mut c = shape((1, 8, 2, 100, 50, 64, 40, 0));
+        c.log_scale = Some((0.1, 8.0));
+        run(&c, Some(DType::BF16))?;
+        run(&shape((2, 4, 1, 40, 7, 32, 16, 0)), Some(DType::BF16))
+    }
+
+    fn cuda_tensor_core_paged_bf16_prefill_matches_the_reference() -> Result<()> {
+        run(&shape((2, 8, 2, 77, 33, 128, 64, 60)), Some(DType::BF16))
+    }
+
+    fn cuda_tensor_core_tiny_shapes_match_the_reference() -> Result<()> {
+        for window in [0, 4] {
+            let mut c = shape((3, 2, 1, 40, 0, 64, 8, window));
+            c.log_scale = Some((0.1, 8.0));
+            run(&c, Some(DType::BF16))?;
+            run(&c, None)?;
+        }
+        Ok(())
+    }
+
     fn cuda_paged_bf16_decode_matches_the_reference() -> Result<()> {
         run(&shape((2, 4, 1, 1, 77, 64, 32, 0)), Some(DType::BF16))
     }
@@ -591,6 +623,9 @@ mod tests {
             cuda_prefill_after_a_past_matches_the_reference,
             cuda_prefill_matches_the_reference,
             cuda_short_decode_rows_match_the_reference,
+            cuda_tensor_core_paged_bf16_prefill_matches_the_reference,
+            cuda_tensor_core_tiny_shapes_match_the_reference,
+            cuda_tensor_core_prefill_after_a_past_matches_the_reference,
             cuda_windowed_decode_matches_the_reference,
             cuda_windowed_prefill_matches_the_reference
         ]

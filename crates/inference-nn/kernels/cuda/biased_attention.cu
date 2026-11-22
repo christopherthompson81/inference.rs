@@ -12,6 +12,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <type_traits>
+
 namespace {
 
 constexpr int WARP = 32;
@@ -20,6 +22,13 @@ constexpr int DECODE_WARPS = 32;
 constexpr int KEY_TILE = WARP;
 // keys a decode warp loads before it folds them
 constexpr int DECODE_KEYS = 4;
+// the tensor-core prefill: a warp 16 queries, a block 4 warps, keys a tile at a time; prompts from this many queries
+constexpr int MMA_WARPS = 4;
+constexpr int MMA_ROWS = 16;
+constexpr int MMA_KEYS = 64;
+constexpr int MMA_MIN_QUERIES = 32;
+// shared rows padded by 8 halves against bank conflicts
+constexpr int MMA_PAD = 8;
 
 __device__ __forceinline__ float load(const float* p, int64_t i) { return p[i]; }
 __device__ __forceinline__ float load(const __half* p, int64_t i) { return __half2float(p[i]); }
@@ -177,6 +186,193 @@ __global__ void prefill_kernel(Args<T> a) {
   for (int r = 0; r < R; r++) o[lane + r * WARP] = acc[r] * inv;
 }
 
+// a = A (16x16 f16, row-major) fragment regs, b = B (16x8, k-major) regs, c = the f32 accumulators
+__device__ __forceinline__ void mma_f16(float (&c)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+#if __CUDA_ARCH__ >= 800
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#endif
+}
+
+__device__ __forceinline__ uint32_t pack_half2(float lo, float hi) {
+  const __half2 h = __floats2half2_rn(lo, hi);
+  return *reinterpret_cast<const uint32_t*>(&h);
+}
+
+// a pair of f32 values as f16 and its remainder in f16: the two together carry ~21 bits
+__device__ __forceinline__ void split_half2(float x, float y, uint32_t& hi, uint32_t& lo) {
+  const __half2 h = __floats2half2_rn(x, y);
+  const float2 back = __half22float2(h);
+  hi = *reinterpret_cast<const uint32_t*>(&h);
+  lo = pack_half2(x - back.x, y - back.y);
+}
+
+// prefill on tensor cores (sm80+): a block 64 queries of one head, a warp 16 of them; each key tile's K and V^T in
+// shared memory as f16 (a BF16 cache's values exactly), S = Q K^T and O += P V by mma with f32 sums, q and the
+// probabilities each as an f16 part and its f16 remainder (two mma) so the products keep ~f32 precision; the scores take the scalar kernel's bias, log
+// scale, causal and window masks and sink, softmax online. Fragment layout (m16n8k16): lane g = lane / 4 holds rows g
+// and g + 8, t = lane % 4 the column pairs 2t and 2t + 8 of A and 2t of C.
+template <int R, typename T>
+__global__ void __launch_bounds__(MMA_WARPS * WARP) prefill_mma_kernel(Args<T> a) {
+#if __CUDA_ARCH__ >= 800
+  constexpr int HD = R * WARP;
+  constexpr int KSTEPS = HD / 16;
+  constexpr int SN = MMA_KEYS / 8;
+  constexpr int ON = HD / 8;
+  __shared__ __half ks[MMA_KEYS][HD + MMA_PAD];
+  __shared__ __half vt[HD][MMA_KEYS + MMA_PAD];
+  const int warp = threadIdx.x / WARP;
+  const int lane = threadIdx.x % WARP;
+  const int g = lane / 4;
+  const int t4 = lane % 4;
+  const int head = blockIdx.y;
+  const int batch = blockIdx.z;
+  const int kvh = head / (a.heads / a.kv_heads);
+  const int past = past_of(a, batch);
+  const int keys = past + a.t;
+  const int q0 = blockIdx.x * MMA_WARPS * MMA_ROWS;
+  // this lane's two query rows
+  int qi[2], pos[2], first[2];
+  bool valid[2];
+  float tau[2];
+  const float* bias[2];
+#pragma unroll
+  for (int h = 0; h < 2; h++) {
+    qi[h] = q0 + warp * MMA_ROWS + g + 8 * h;
+    valid[h] = qi[h] < a.t;
+    pos[h] = past + qi[h];
+    first[h] = first_key(a.window, pos[h]);
+    tau[h] = tau_of(a, pos[h]);
+    bias[h] = a.table + ((int64_t(batch) * a.t + min(qi[h], a.t - 1)) * a.heads + head) * (a.extent + 1);
+  }
+  auto q_at = [&](int h, int d) -> float {
+    return valid[h] ? a.q[((int64_t(batch) * a.t + qi[h]) * a.heads + head) * HD + d] * a.scale : 0.0f;
+  };
+  uint32_t qf[KSTEPS][4], qr[KSTEPS][4];
+#pragma unroll
+  for (int kk = 0; kk < KSTEPS; kk++) {
+    const int d = kk * 16 + 2 * t4;
+    split_half2(q_at(0, d), q_at(0, d + 1), qf[kk][0], qr[kk][0]);
+    split_half2(q_at(1, d), q_at(1, d + 1), qf[kk][1], qr[kk][1]);
+    split_half2(q_at(0, d + 8), q_at(0, d + 9), qf[kk][2], qr[kk][2]);
+    split_half2(q_at(1, d + 8), q_at(1, d + 9), qf[kk][3], qr[kk][3]);
+  }
+  float m[2], l[2];
+#pragma unroll
+  for (int h = 0; h < 2; h++) {
+    m[h] = valid[h] ? a.sinks[(int64_t(batch) * a.t + qi[h]) * a.heads + head] : 0.0f;
+    l[h] = 1.0f;
+  }
+  float o[ON][4];
+#pragma unroll
+  for (int n = 0; n < ON; n++) o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.0f;
+  const int last = min(q0 + MMA_WARPS * MMA_ROWS, a.t) - 1;
+  const int lo = first_key(a.window, past + q0) / MMA_KEYS * MMA_KEYS;
+  const int hi = past + last;
+  for (int base = lo; base <= hi; base += MMA_KEYS) {
+    __syncthreads();
+    for (int e = threadIdx.x; e < MMA_KEYS * HD; e += blockDim.x) {
+      const int j = e / HD;
+      const int d = e % HD;
+      const int key = base + j;
+      const bool in = key < keys;
+      ks[j][d] = __float2half(in ? load(a.k.row(batch, kvh, key, HD), d) : 0.0f);
+      vt[d][j] = __float2half(in ? load(a.v.row(batch, kvh, key, HD), d) : 0.0f);
+    }
+    __syncthreads();
+    float sc[SN][4];
+#pragma unroll
+    for (int n = 0; n < SN; n++) {
+      sc[n][0] = sc[n][1] = sc[n][2] = sc[n][3] = 0.0f;
+#pragma unroll
+      for (int kk = 0; kk < KSTEPS; kk++) {
+        const __half* krow = &ks[n * 8 + g][kk * 16 + 2 * t4];
+        const uint32_t k0 = *reinterpret_cast<const uint32_t*>(krow);
+        const uint32_t k1 = *reinterpret_cast<const uint32_t*>(krow + 8);
+        mma_f16(sc[n], qf[kk], k0, k1);
+        mma_f16(sc[n], qr[kk], k0, k1);
+      }
+    }
+    // the scores: bias by distance, the log scale, the masks; each row's max over the tile
+    float tile_max[2] = {-INFINITY, -INFINITY};
+#pragma unroll
+    for (int n = 0; n < SN; n++) {
+#pragma unroll
+      for (int c = 0; c < 4; c++) {
+        const int h = c / 2;
+        const int key = base + n * 8 + 2 * t4 + c % 2;
+        const int dist = pos[h] - key;
+        const bool visible = valid[h] && key <= pos[h] && key >= first[h] && key < keys;
+        const float b = dist >= 0 && dist < a.extent ? bias[h][dist] : 0.0f;
+        sc[n][c] = visible ? (sc[n][c] + b) * tau[h] : -INFINITY;
+        tile_max[h] = fmaxf(tile_max[h], sc[n][c]);
+      }
+    }
+    float alpha[2], rowsum[2] = {0.0f, 0.0f};
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      tile_max[h] = fmaxf(tile_max[h], __shfl_xor_sync(0xffffffffu, tile_max[h], 1));
+      tile_max[h] = fmaxf(tile_max[h], __shfl_xor_sync(0xffffffffu, tile_max[h], 2));
+      const float m_new = fmaxf(m[h], tile_max[h]);
+      alpha[h] = __expf(m[h] - m_new);
+      m[h] = m_new;
+    }
+#pragma unroll
+    for (int n = 0; n < SN; n++) {
+#pragma unroll
+      for (int c = 0; c < 4; c++) {
+        const int h = c / 2;
+        sc[n][c] = sc[n][c] == -INFINITY ? 0.0f : __expf(sc[n][c] - m[h]);
+        rowsum[h] += sc[n][c];
+      }
+    }
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      rowsum[h] += __shfl_xor_sync(0xffffffffu, rowsum[h], 1);
+      rowsum[h] += __shfl_xor_sync(0xffffffffu, rowsum[h], 2);
+      l[h] = l[h] * alpha[h] + rowsum[h];
+    }
+#pragma unroll
+    for (int n = 0; n < ON; n++) {
+      o[n][0] *= alpha[0];
+      o[n][1] *= alpha[0];
+      o[n][2] *= alpha[1];
+      o[n][3] *= alpha[1];
+    }
+    // O += P V: two score tiles (16 keys) are an A fragment
+#pragma unroll
+    for (int kk = 0; kk < MMA_KEYS / 16; kk++) {
+      uint32_t pf[4], pr[4];
+      split_half2(sc[2 * kk][0], sc[2 * kk][1], pf[0], pr[0]);
+      split_half2(sc[2 * kk][2], sc[2 * kk][3], pf[1], pr[1]);
+      split_half2(sc[2 * kk + 1][0], sc[2 * kk + 1][1], pf[2], pr[2]);
+      split_half2(sc[2 * kk + 1][2], sc[2 * kk + 1][3], pf[3], pr[3]);
+#pragma unroll
+      for (int n = 0; n < ON; n++) {
+        const __half* vrow = &vt[n * 8 + g][kk * 16 + 2 * t4];
+        const uint32_t v0 = *reinterpret_cast<const uint32_t*>(vrow);
+        const uint32_t v1 = *reinterpret_cast<const uint32_t*>(vrow + 8);
+        mma_f16(o[n], pf, v0, v1);
+        mma_f16(o[n], pr, v0, v1);
+      }
+    }
+  }
+#pragma unroll
+  for (int h = 0; h < 2; h++) {
+    if (!valid[h]) continue;
+    float* out = a.out + ((int64_t(batch) * a.t + qi[h]) * a.heads + head) * HD;
+    const float inv = 1.0f / l[h];
+#pragma unroll
+    for (int n = 0; n < ON; n++) {
+      out[n * 8 + 2 * t4] = o[n][2 * h] * inv;
+      out[n * 8 + 2 * t4 + 1] = o[n][2 * h + 1] * inv;
+    }
+  }
+#endif
+}
+
 // a block a query of one head, its warps splitting the keys, a lane R of the head's dims (so a key's K and V rows load
 // coalesced), DECODE_KEYS keys a step to keep loads in flight; the warps merged in shared memory at the end
 template <int R, typename T>
@@ -265,10 +461,25 @@ __global__ void decode_kernel(Args<T> a) {
   for (int r = 0; r < R; r++) o[lane * R + r] = out[r] * inv;
 }
 
+// whether the device runs the tensor-core prefill (sm80+), asked once
+bool mma_device() {
+  static const bool mma = [] {
+    int dev = 0, major = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+    return major >= 8;
+  }();
+  return mma;
+}
+
 template <int R, typename T>
 cudaError_t launch(const Args<T>& a, int batch, bool decode, cudaStream_t stream) {
   if (decode) {
     decode_kernel<R, T><<<dim3(a.t, a.heads, batch), DECODE_WARPS * WARP, 0, stream>>>(a);
+  } else if (!std::is_same<T, float>::value && a.t >= MMA_MIN_QUERIES && mma_device()) {
+    // a half-precision cache's values are exact in f16; an f32 one takes the f32 kernel
+    const int tiles = (a.t + MMA_WARPS * MMA_ROWS - 1) / (MMA_WARPS * MMA_ROWS);
+    prefill_mma_kernel<R, T><<<dim3(tiles, a.heads, batch), MMA_WARPS * WARP, 0, stream>>>(a);
   } else {
     const int tiles = (a.t + PREFILL_WARPS - 1) / PREFILL_WARPS;
     prefill_kernel<R, T><<<dim3(tiles, a.heads, batch), PREFILL_WARPS * WARP, 0, stream>>>(a);
