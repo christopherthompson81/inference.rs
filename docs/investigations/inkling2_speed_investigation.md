@@ -657,3 +657,28 @@ Kernels a step 2212 -> 1925. What's left, us a step (launches): depth mix 803 (2
 controllers 712 (192), rms norm 316 (153), activation quantization 388 (292), router cast + gemv + top-k 456 (144).
 A single-launch depth mix needs either the last block to apply all 2304 values (slower than 18 blocks' apply) or a
 grid-wide wait (correct only while every block is resident), ~0.2 ms for the risk.
+
+## Run 25 - 2026-11-23 02:30
+
+Two more decode attempts, both reverted.
+
+k and v short convs in one launch: the pool conv kernel took a table of convs over disjoint channels (the layer's k
+and v, run after both projections), and a test matched it to each conv alone. Conv launches went from 191 to 143 a
+step and conv time from 520 to 485 us, but GPU busy (9.53 ms) and wall (9.87 ms) didn't move, and tg128 was 107.2
+against 107.4. Inside a graph, back-to-back small kernels overlap their launch costs. A fusion pays only where the
+kernels it merges did redundant work, as the 7 attention-row kernels did (Run 24).
+
+The matvecs, nsight-compute at base clocks: the q-group projection reads 16 MB in 23.6 us (763 GB/s, 84% of DRAM).
+The k and v projections (1024 rows) reach ~400 GB/s in 6.3 us, too small to pass their ramp. The NVFP4 gate-up expert
+matvec reaches 80%, the down one 54% (rows of 1152 leave 92 of 128 threads idle). Other shapes for the MoE matvec:
+
+```
+warps x rows a block   tg128   expert matvecs (us a step)
+4 x 2 (current)        106.7   2518
+2 x 4                  104.0   2749
+4 x 4                  103.7   2771
+8 x 2                  95.7    3717
+8 x 1                  94.2    3969
+```
+
+The current shape is best: the idle lanes are not what limits the down projection.
