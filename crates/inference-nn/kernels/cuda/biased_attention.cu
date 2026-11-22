@@ -40,6 +40,42 @@ __device__ __forceinline__ float load(const float* p, int64_t i) { return p[i]; 
 __device__ __forceinline__ float load(const __half* p, int64_t i) { return __half2float(p[i]); }
 __device__ __forceinline__ float load(const __nv_bfloat16* p, int64_t i) { return __bfloat162float(p[i]); }
 
+// an E4M3 cache byte (the writer's scale 1): its bits placed as f16 are 2^-8 of the value (bias 7 against 15), exact
+// for every byte, subnormals too; sm86 has no fp8 conversion
+struct E4m3 {
+  uint8_t bits;
+};
+constexpr float E4M3_BIAS_GAP = 256.0f;
+__device__ __forceinline__ float load(const E4m3* p, int64_t i) {
+  const unsigned b = p[i].bits;
+  return __half2float(__ushort_as_half((unsigned short)(((b & 0x80u) << 8) | ((b & 0x7Fu) << 7)))) * E4M3_BIAS_GAP;
+}
+
+// a lane's R values of a row in one load where the type packs them (rows are R-aligned: lane * R of a head dim)
+template <int R, typename T>
+__device__ __forceinline__ void load_row(const T* p, float (&o)[R]) {
+#pragma unroll
+  for (int r = 0; r < R; r++) o[r] = load(p, r);
+}
+
+template <>
+__device__ __forceinline__ void load_row<4, __nv_bfloat16>(const __nv_bfloat16* p, float (&o)[4]) {
+  const uint2 raw = *reinterpret_cast<const uint2*>(p);
+  const float2 a = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.x));
+  const float2 b = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.y));
+  o[0] = a.x, o[1] = a.y, o[2] = b.x, o[3] = b.y;
+}
+
+template <>
+__device__ __forceinline__ void load_row<4, E4m3>(const E4m3* p, float (&o)[4]) {
+  const uint32_t raw = *reinterpret_cast<const uint32_t*>(p);
+#pragma unroll
+  for (int r = 0; r < 4; r++) {
+    const unsigned b = (raw >> (8 * r)) & 0xFFu;
+    o[r] = __half2float(__ushort_as_half((unsigned short)(((b & 0x80u) << 8) | ((b & 0x7Fu) << 7)))) * E4M3_BIAS_GAP;
+  }
+}
+
 // where a (batch, kv head, key)'s row of K or V sits
 template <typename T>
 struct Kv {
@@ -427,14 +463,12 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
 #pragma unroll
     for (int j = 0; j < DECODE_KEYS; j++) {
       const int key = min(base + j, last);
-      const T* kr = a.k.row(batch, kvh, key, HD) + lane * R;
-      const T* vrow = a.v.row(batch, kvh, key, HD) + lane * R;
+      float kv[R];
+      load_row<R>(a.k.row(batch, kvh, key, HD) + lane * R, kv);
+      load_row<R>(a.v.row(batch, kvh, key, HD) + lane * R, vr[j]);
       float part = 0.0f;
 #pragma unroll
-      for (int r = 0; r < R; r++) {
-        part += qr[r] * load(kr, r);
-        vr[j][r] = load(vrow, r);
-      }
+      for (int r = 0; r < R; r++) part += qr[r] * kv[r];
       s[j] = part;
     }
 #pragma unroll
@@ -624,7 +658,7 @@ extern "C" int biased_attention_f32(const float* q, const float* k, const float*
 }
 
 // K/V from a paged cache [blocks, kv_heads, block_size, head_dim] through block tables (batch, table_width) u32;
-// cache_dtype 0 f32, 1 f16, 2 bf16
+// cache_dtype 0 f32, 1 f16, 2 bf16, 3 e4m3
 extern "C" int biased_attention_paged(const float* q, const void* k_cache, const void* v_cache, int cache_dtype,
                                       const uint32_t* tables, int64_t table_stride, int table_width, int block_size,
                                       const float* table, const float* sinks, float* out,
@@ -646,6 +680,7 @@ extern "C" int biased_attention_paged(const float* q, const void* k_cache, const
     case 0: PAGED(float)
     case 1: PAGED(__half)
     case 2: PAGED(__nv_bfloat16)
+    case 3: PAGED(E4m3)
     default: return -1;
   }
 #undef PAGED

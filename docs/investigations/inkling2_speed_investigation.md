@@ -483,3 +483,43 @@ q8_0            77.9  141.8  79.4  93.7      280 / 156 / 101
 
 Q8_0 gains 1-2 tok/s at the same acceptance. Below 6 bits acceptance slips on prose, and the 8-row k-quant matvecs are
 no faster. Recommended: `--mtp-draft-isq q8_0` (drafts 2).
+
+## Run 18 - 2026-11-22 20:30
+
+Two experiments on the weights and the cache.
+
+NVFP4 experts to IQ4_NL from their values. `quantize gguf --checkpoint` now requantizes an NVFP4 stack its rule names
+another type for (each expert's blocks dequantized times its scale), dropping the source's `.scale` for it (test
+`a_rule_requantizes_an_nvfp4_stack_from_its_values`). IQ4_NL can't hold E2M1 exactly (its 16 levels have no zero and
+other ratios, and one scale per 32 to NVFP4's 16), so it's a requantization. From recipe C,
+`--tensor-type '^blk\.(1?[0-9])\.ffn_(gate_up|down)_exps\.weight$=iq4_nl'`, no imatrix (13.6 min):
+
+```
+                          KLD       same top   pp512   tg128
+recipe C (NVFP4)          0.00389   97.32%     2346    103.1
+NVFP4 -> IQ4_NL           0.00992   95.75%     2425    103.6
+ggml-org IQ4_NL           0.00995              2425    102.8
+```
+
+Unweighted, it is no better than ggml-org's quantization from BF16: 2.6x the KLD for +3.4% prefill. An imatrix or
+GPTQ weighting is the only way it narrows. Online imatrix collection takes an ISQ load of the official checkpoint
+with a calibration file (not run).
+
+f8e4m3 KV. Inkling cast K/V to the cache's dtype before the writer, which takes half precision and quantizes itself,
+so a quantized cache failed every request (HTTP 500: `reshape_and_cache_quant only supports f16, bf16, f32 (got
+U8)`). The rows now go to the writer in BF16 for a quantized cache. The attention kernels read an E4M3 cache (dtype
+code 3): a byte's bits placed as f16 are 2^-8 of its value (the writer's scale is 1), exact for every byte. Test
+`cuda_paged_e4m3_matches_the_reference` (decode, a split long-past decode, the tensor-core prefill). The decode
+kernel loads a lane's 4 values in one load (BF16 64-bit, E4M3 32-bit).
+
+```
+served decode tok/s, context (tokens)   8       5689    9824
+bf16 KV                                 108.8   89.5    88.5
+f8e4m3 KV                               104.8   89.7    82.8
+decode_kernel at 9824 (us a step)       bf16 2520, f8e4m3 2664
+```
+
+No gain: the decode attention is not bound by its bytes. A warp a key reduces each key's dot product over 32 lanes (5
+shuffles) and folds it with an exp, so at 9.8K keys it is bound by instruction issue. Halving the K/V bytes moves
+nothing until the kernel takes several keys a warp at once (lane groups a key, fewer shuffles a key). The q-types
+(q8, q4) still have no attention read path.
