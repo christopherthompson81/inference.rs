@@ -369,6 +369,206 @@ pub fn short_conv(
     )))
 }
 
+// the kernel's `RowsOp` / `RowsOps`
+const ROWS_OPS: usize = 5;
+const ROWS_CLIP: i32 = 0;
+const ROWS_RMS: i32 = 1;
+const ROWS_CAST: i32 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RowsOp {
+    x: *const core::ffi::c_void,
+    out: *mut core::ffi::c_void,
+    scale: *const f32,
+    rows: i64,
+    n: i32,
+    scale_rows: i32,
+    x_dtype: i32,
+    out_dtype: i32,
+    mode: i32,
+    param: f32,
+}
+
+#[repr(C)]
+struct RowsOps {
+    op: [RowsOp; ROWS_OPS],
+    count: i32,
+}
+
+/// A paged attention step's rows before the cache write: `q` `(.., heads, hd)` and `r` `(.., heads, d_rel)` each
+/// times its per-head scale (`(heads, n)` f32) and L2-clipped, `k` `(.., kv_heads, hd)` L2-clipped, `v` unit-RMSed,
+/// `sinks` cast; all in one launch.
+pub struct AttentionRows<'a> {
+    pub q: &'a Tensor,
+    pub q_scale: &'a Tensor,
+    pub r: &'a Tensor,
+    pub r_scale: &'a Tensor,
+    pub k: &'a Tensor,
+    pub v: &'a Tensor,
+    pub sinks: &'a Tensor,
+    pub qk_threshold: f32,
+    pub rel_threshold: f32,
+    pub clip_eps: f32,
+    pub rms_eps: f32,
+    /// k's and v's output dtype (the cache writer's), f32 or bf16
+    pub kv_dtype: DType,
+}
+
+/// `(q, r, sinks)` f32 and `(k, v)` in `kv_dtype`; `None` where a dtype or layout is not the kernel's.
+pub fn attention_rows(op: &AttentionRows<'_>) -> Result<Option<[Tensor; 5]>> {
+    let Device::Cuda(dev) = op.q.device() else {
+        return Ok(None);
+    };
+    let kv_code = match op.kv_dtype {
+        DType::F32 => F32_CODE,
+        DType::BF16 => BF16_CODE,
+        _ => return Ok(None),
+    };
+    let inputs = [op.q, op.r, op.k, op.v, op.sinks];
+    if !inputs.iter().all(|x| takes(x))
+        || op.q_scale.dtype() != DType::F32
+        || op.r_scale.dtype() != DType::F32
+    {
+        return Ok(None);
+    }
+    let [q, r, k, v, sinks] = inputs.map(|x| x.contiguous());
+    let (q, r, k, v, sinks) = (q?, r?, k?, v?, sinks?);
+    let (q_scale, r_scale) = (op.q_scale.contiguous()?, op.r_scale.contiguous()?);
+    let last = |x: &Tensor| x.dim(inference_tensor::D::Minus1);
+    let (heads, hd, d_rel) = (q_scale.dim(0)?, last(&q)?, last(&r)?);
+    if q_scale.dims2()? != (heads, hd) || r_scale.dims2()? != (heads, d_rel) || last(&k)? != hd {
+        return Ok(None);
+    }
+    let stream = dev.cuda_stream();
+    let alloc = |n: usize, code: i32| -> Result<Tensor> {
+        let dtype = if code == F32_CODE {
+            DType::F32
+        } else {
+            DType::BF16
+        };
+        // SAFETY: the kernel writes every element
+        unsafe { Tensor::empty(n, dtype, op.q.device()) }
+    };
+    let outs = [
+        alloc(q.elem_count(), F32_CODE)?,
+        alloc(r.elem_count(), F32_CODE)?,
+        alloc(k.elem_count(), kv_code)?,
+        alloc(v.elem_count(), kv_code)?,
+        alloc(sinks.elem_count(), F32_CODE)?,
+    ];
+    let srcs = [&q, &r, &k, &v, &sinks];
+    let src_guards = srcs.map(|t| t.storage_and_layout());
+    let out_guards = outs.each_ref().map(|t| t.storage_and_layout());
+    let (qs_g, qs_l) = q_scale.storage_and_layout();
+    let (rs_g, rs_l) = r_scale.storage_and_layout();
+    let (qs_p, _, _qs) = device_ptr(&qs_g, qs_l, &stream)?;
+    let (rs_p, _, _rs) = device_ptr(&rs_g, rs_l, &stream)?;
+    let mut ptrs = Vec::with_capacity(ROWS_OPS);
+    let mut keep = Vec::with_capacity(2 * ROWS_OPS);
+    for ((sg, sl), (og, ol)) in src_guards.iter().zip(&out_guards) {
+        let (sp, sc, sguard) = device_ptr(sg, sl, &stream)?;
+        let (op_, _, oguard) = device_ptr(og, ol, &stream)?;
+        ptrs.push((sp, sc, op_));
+        keep.push(sguard);
+        keep.push(oguard);
+    }
+    let rows_of = |x: &Tensor, n: usize| -> Result<i64> { i64_of(x.elem_count() / n) };
+    let entry = |i: usize,
+                 n: usize,
+                 rows: i64,
+                 scale: *const f32,
+                 out_dtype: i32,
+                 mode: i32,
+                 param: f32| {
+        Ok::<RowsOp, inference_tensor::Error>(RowsOp {
+            x: ptrs[i].0 as *const core::ffi::c_void,
+            out: ptrs[i].2 as *mut core::ffi::c_void,
+            scale,
+            rows,
+            n: i32_of(n)?,
+            scale_rows: i32_of(heads)?,
+            x_dtype: ptrs[i].1,
+            out_dtype,
+            mode,
+            param,
+        })
+    };
+    let table = RowsOps {
+        op: [
+            entry(
+                0,
+                hd,
+                rows_of(&q, hd)?,
+                qs_p as *const f32,
+                F32_CODE,
+                ROWS_CLIP,
+                op.qk_threshold,
+            )?,
+            entry(
+                1,
+                d_rel,
+                rows_of(&r, d_rel)?,
+                rs_p as *const f32,
+                F32_CODE,
+                ROWS_CLIP,
+                op.rel_threshold,
+            )?,
+            entry(
+                2,
+                hd,
+                rows_of(&k, hd)?,
+                std::ptr::null(),
+                kv_code,
+                ROWS_CLIP,
+                op.qk_threshold,
+            )?,
+            entry(
+                3,
+                hd,
+                rows_of(&v, hd)?,
+                std::ptr::null(),
+                kv_code,
+                ROWS_RMS,
+                op.rms_eps,
+            )?,
+            entry(
+                4,
+                1,
+                i64_of(sinks.elem_count())?,
+                std::ptr::null(),
+                F32_CODE,
+                ROWS_CAST,
+                0.0,
+            )?,
+        ],
+        count: i32_of(ROWS_OPS)?,
+    };
+    let total = table.op.iter().map(|o| o.rows).sum::<i64>();
+    // SAFETY: the table's pointers cover the contiguous inputs and outputs checked above, on this stream
+    status(
+        unsafe {
+            super::ffi::inkling_attention_rows(
+                (&raw const table).cast(),
+                total,
+                op.clip_eps,
+                stream.cu_stream() as i64,
+            )
+        },
+        "attention rows",
+    )?;
+    drop(keep);
+    drop((src_guards, out_guards));
+    let [oq, or, ok, ov, os] = outs;
+    Ok(Some([
+        oq.reshape(q.shape())?,
+        or.reshape(r.shape())?,
+        ok.reshape(k.shape())?,
+        ov.reshape(v.shape())?,
+        os.reshape(sinks.shape())?,
+    ]))
+}
+
 /// Each row's greedy pick under a recurrent Markov head: the argmax over `v < vocab` of
 /// `logits[v] + fold_b[v] + fold_w[v] . latent` (`logits` `(b, >= vocab)` f32 or bf16 with its last axis contiguous,
 /// `fold_w` `(>= vocab, rank)` BF16, `fold_b` F32, `latent` `(b, rank)` F32), as U32 `(b,)`; `None` for a layout the
@@ -1103,6 +1303,69 @@ mod tests {
         Ok(())
     }
 
+    // the one-launch rows against the clip, RMS and cast kernels each alone: q and r with their scales, k clipped and
+    // v normed into bf16, the sinks cast
+    fn cuda_attention_rows_match_their_kernels() -> Result<()> {
+        const B_T: usize = 3;
+        const HEADS: usize = 4;
+        const KV_HEADS: usize = 2;
+        const HD: usize = 64;
+        const D_REL: usize = 16;
+        const QK: f32 = 1.5;
+        const REL: f32 = 0.8;
+        const CLIP_EPS: f32 = 1e-6;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let rand = |dims: (usize, usize, usize), scale: f32| -> Result<Tensor> {
+            Tensor::randn(0f32, scale, dims, &cuda)
+        };
+        let q = rand((B_T, HEADS, HD), 1.0)?.to_dtype(DType::BF16)?;
+        let r = rand((B_T, HEADS, D_REL), 1.0)?.to_dtype(DType::BF16)?;
+        let (k, v) = (
+            rand((B_T, KV_HEADS, HD), 1.0)?,
+            rand((B_T, KV_HEADS, HD), 2.0)?,
+        );
+        let sinks = Tensor::randn(0f32, 1f32, (B_T, HEADS), &cuda)?.to_dtype(DType::BF16)?;
+        let q_scale = Tensor::randn(1f32, 0.2f32, (HEADS, HD), &cuda)?;
+        let r_scale = Tensor::randn(1f32, 0.2f32, (HEADS, D_REL), &cuda)?;
+        let [oq, or, ok, ov, os] = super::attention_rows(&super::AttentionRows {
+            q: &q,
+            q_scale: &q_scale,
+            r: &r,
+            r_scale: &r_scale,
+            k: &k,
+            v: &v,
+            sinks: &sinks,
+            qk_threshold: QK,
+            rel_threshold: REL,
+            clip_eps: CLIP_EPS,
+            rms_eps: EPS,
+            kv_dtype: DType::BF16,
+        })?
+        .expect("the kernel takes these");
+        let want = [
+            super::l2_clip(&q, Some(&q_scale), QK, CLIP_EPS)?.expect("clip"),
+            super::l2_clip(&r, Some(&r_scale), REL, CLIP_EPS)?.expect("clip"),
+            super::l2_clip(&k, None, QK, CLIP_EPS)?
+                .expect("clip")
+                .to_dtype(DType::BF16)?,
+            super::unit_rms(&v, EPS)?
+                .expect("rms")
+                .to_dtype(DType::BF16)?,
+            sinks.to_dtype(DType::F32)?,
+        ];
+        for (i, (got, want)) in [oq, or, ok, ov, os].iter().zip(&want).enumerate() {
+            assert_eq!(got.dtype(), want.dtype(), "output {i}");
+            let error = (got.to_dtype(DType::F32)? - want.to_dtype(DType::F32)?)?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            assert!(error < TOLERANCE, "output {i}: error {error}");
+        }
+        Ok(())
+    }
+
     // the fused pick against the bias through a matmul, the sum's argmax over the unpadded vocabulary; logits a
     // strided step of `[b, steps, padded]`, and a padded row larger than every real one
     fn cuda_markov_pick_takes_the_biased_argmax() -> Result<()> {
@@ -1350,7 +1613,8 @@ mod tests {
             cuda_fused_controller_matches_the_reference,
             cuda_conv_rollback_takes_either_stash_dtype,
             cuda_pool_conv_matches_the_gathered_rows,
-            cuda_markov_pick_takes_the_biased_argmax
+            cuda_markov_pick_takes_the_biased_argmax,
+            cuda_attention_rows_match_their_kernels
         ]
     );
 }

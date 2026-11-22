@@ -164,6 +164,16 @@ fn unit_rms(x: &Tensor, eps: f64) -> Result<Tensor> {
     x.broadcast_div(&norm)
 }
 
+// the dtype a paged cache's writer takes its rows in: the cache's, or half precision for a quantized one, which the
+// writer quantizes itself
+#[cfg(feature = "cuda")]
+fn paged_rows_dtype(cache: DType) -> DType {
+    match cache {
+        DType::F32 | DType::F16 | DType::BF16 => cache,
+        _ => DType::BF16,
+    }
+}
+
 // each last-axis row (after the optional per-row scale) down to an L2 norm of at most `threshold`
 fn l2_clip(x: &Tensor, scale: Option<&Tensor>, threshold: f64) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
@@ -740,12 +750,43 @@ impl Attention {
         let r = r.reshape((b, t, h, self.d_rel))?;
         let raw_gate = raw_gate.contiguous()?;
         let gate = || raw_gate.to_dtype(DType::F32);
-        let sinks = sinks.to_dtype(DType::F32)?;
-
-        let mut q = l2_clip(&q, Some(&self.q_clip), cfg.qk_l2_clip_threshold)?;
-        let k = l2_clip(&k.reshape((b, t, hkv, hd))?, None, cfg.qk_l2_clip_threshold)?;
-        let v = unit_rms(&v.reshape((b, t, hkv, hd))?, cfg.rms_norm_eps)?;
-        let mut r = l2_clip(&r, Some(&self.rel_clip), cfg.rel_l2_clip_threshold)?;
+        let (k, v) = (k.reshape((b, t, hkv, hd))?, v.reshape((b, t, hkv, hd))?);
+        // a paged CUDA step whose log scale the attention applies: the clips, the norm and the casts in one launch,
+        // k and v in the cache writer's dtype
+        #[cfg(feature = "cuda")]
+        let rows = match paged {
+            Some(step) if self.sliding || inputs.tau.is_none() => {
+                inference_nn::cuda::inkling::attention_rows(
+                    &inference_nn::cuda::inkling::AttentionRows {
+                        q: &q,
+                        q_scale: &self.q_clip,
+                        r: &r,
+                        r_scale: &self.rel_clip,
+                        k: &k,
+                        v: &v,
+                        sinks: &sinks,
+                        qk_threshold: cfg.qk_l2_clip_threshold as f32,
+                        rel_threshold: cfg.rel_l2_clip_threshold as f32,
+                        clip_eps: CLIP_EPS as f32,
+                        rms_eps: cfg.rms_norm_eps as f32,
+                        kv_dtype: paged_rows_dtype(step.k_cache.dtype()),
+                    },
+                )?
+            }
+            _ => None,
+        };
+        #[cfg(not(feature = "cuda"))]
+        let rows: Option<[Tensor; 5]> = None;
+        let (mut q, k, v, mut r, sinks) = match rows {
+            Some([q, r, k, v, sinks]) => (q, k, v, r, sinks),
+            None => (
+                l2_clip(&q, Some(&self.q_clip), cfg.qk_l2_clip_threshold)?,
+                l2_clip(&k, None, cfg.qk_l2_clip_threshold)?,
+                unit_rms(&v, cfg.rms_norm_eps)?,
+                l2_clip(&r, Some(&self.rel_clip), cfg.rel_l2_clip_threshold)?,
+                sinks.to_dtype(DType::F32)?,
+            ),
+        };
         // the log scale of q and r is the score's (bar the sink's), which the fused CUDA attention applies itself
         if !self.sliding
             && let Some(tau) = inputs.tau
@@ -784,11 +825,7 @@ impl Attention {
             {
                 use inference_nn::cuda::biased_attention::{Keys, Past};
                 let dtype = step.k_cache.dtype();
-                // the writer quantizes a quantized cache's rows itself, from half precision
-                let rows_dtype = match dtype {
-                    DType::F32 | DType::F16 | DType::BF16 => dtype,
-                    _ => DType::BF16,
-                };
+                let rows_dtype = paged_rows_dtype(dtype);
                 step.writer.write_rows(
                     &k.to_dtype(rows_dtype)?.transpose(1, 2)?,
                     &v.to_dtype(rows_dtype)?.transpose(1, 2)?,

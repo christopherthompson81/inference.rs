@@ -3674,7 +3674,8 @@ mod tests {
     // its f64 sums: a large product's threads and their split are the pool's
     #[test]
     fn a_large_f32_product_on_the_smt_pool_matches_its_sums() -> Result<()> {
-        const TOLERANCE: f64 = 1e-4;
+        // f32 sums of 700 unit products (values ~26) round past 1e-4 now and then; a wrong split is off by O(1)
+        const TOLERANCE: f64 = 1e-3;
         let dev = Device::Cpu;
         let (m, n, k) = (300, 520, 700);
         assert!(m * n * k >= super::REST_POOL_MIN_WORK);

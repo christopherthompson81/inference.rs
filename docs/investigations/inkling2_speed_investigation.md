@@ -636,3 +636,24 @@ IQ4_NL both, GPTQ (Run 22)                0.00840   95.78%     ~2425        ~103
 
 IQ4_K follows E2M1 more closely than IQ4_NL (the gate-up stacks alone cost 0.0024 of KLD, where IQ4_NL's two cost
 0.0045 with GPTQ), but it is no faster than NVFP4 (its mmq requantizes past a tile width). Recipe C stays.
+
+## Run 24 - 2026-11-23 01:30
+
+Decode's small kernels. A layer visit was 39 kernels in ~200 us: the expert matvecs (57 us) and the dense projections
+(40 us) are their reads, the rest ~100 us of 1.2-4 us kernels. The run from the k/v convs to the cache write was a
+cast (the sinks), three L2 clips (q and r with their per-head scales, k), v's unit RMS and two casts (k and v to the
+cache's dtype): 7 launches, ~12 us. `attention_rows_kernel` takes a table of row ops (clip, RMS, cast), a warp a row
+over all of them in one launch, and writes k and v in the cache writer's dtype. It's used on the paged CUDA path when
+the attention applies the log scale (decode, verify, paged prefill). Test `cuda_attention_rows_match_their_kernels`
+(against the clip, RMS and cast kernels alone).
+
+```
+                                 tg128    paged KLD   drafts 2 (prose / code / story / explainer)
+before                           103.0    0.00382     93.1 / 134.2 / 91.7 / 107.8
+one launch for the rows          107.4    0.00382     96.1 / 141.2 / 94.7 / 109.7
+```
+
+Kernels a step 2212 -> 1925. What's left, us a step (launches): depth mix 803 (239), short convs 520 (191), loop
+controllers 712 (192), rms norm 316 (153), activation quantization 388 (292), router cast + gemv + top-k 456 (144).
+A single-launch depth mix needs either the last block to apply all 2304 values (slower than 18 blocks' apply) or a
+grid-wide wait (correct only while every block is resident), ~0.2 ms for the risk.
