@@ -166,6 +166,7 @@ fn unit_rms(x: &Tensor, eps: f64) -> Result<Tensor> {
 
 // the dtype a paged cache's writer takes its rows in: the cache's, or half precision for a quantized one, which the
 // writer quantizes itself
+#[cfg(feature = "cuda")]
 fn paged_rows_dtype(cache: DType) -> DType {
     match cache {
         DType::F32 | DType::F16 | DType::BF16 => cache,
