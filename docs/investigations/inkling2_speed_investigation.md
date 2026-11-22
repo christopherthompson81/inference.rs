@@ -250,3 +250,23 @@ Test `nvfp4_mmq_folds_each_scale_pair_into_one` takes 33 rows through mmq agains
 (per-16, unfolded), with F32 in and out (BF16 output rounding alone is 2e-3). Equal pairs give 2.2e-4, the same as the
 unfolded kernel on either weight, so that's the two kernels' own difference. Unequal pairs give 3.3e-3 relative, the
 fold's rounding.
+
+## Run 10 - 2026-11-22 11:30
+
+Recipe C on master after #1046-#1047, serving with Run 3's method (`inference serve`, greedy, 256 tokens a
+completion, wall time a request including its prompt; the official drafter, `--mtp-model`):
+
+```
+recipe C (tok/s)       prose   code    story   explainer
+plain                  96.7    96.7    96.3    96.3
+drafts 1               87.1    110.0   88.6    95.1
+drafts 2               85.1    127.1   80.9    93.5
+drafts 3               76.0    127.8   74.1    85.6
+
+recipe B, Run 5        (plain ~95.6)
+drafts 3               78.8    126.7   77.0    88.2
+```
+
+Plain is up ~1 tok/s from B (the smaller head) and the prompts' prefill. Speculation is where Run 5 left it: it pays
+only on code (+32% at drafts 2-3) and loses elsewhere at every depth, even at one draft (-10% on prose). The prefill
+work doesn't reach the verify, which runs the 4-row grouped matvec (Run 5: ~3.6x a decode step's expert bytes).
