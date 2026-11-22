@@ -343,6 +343,12 @@ inference_tensor::kernel_library! {
             width: i32,
             stream: i64,
         ) -> i32;
+        pub fn inkling_attention_rows(
+            ops: *const c_void,
+            total_rows: i64,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
         pub fn inkling_markov_pick_scratch(b: i32) -> i64;
         pub fn inkling_markov_pick(
             logits: *const c_void,

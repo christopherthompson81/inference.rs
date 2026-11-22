@@ -75,6 +75,73 @@ __global__ void unit_rms_kernel(const T* x, float* out, int64_t rows, int n, flo
   for (int i = lane; i < n; i += WARP) out[row * n + i] = load(x, row * n + i) * inv;
 }
 
+// one of a paged attention step's row operations: rows of `n` read in `x_dtype`, written f32 or bf16 (`out_dtype`):
+// an L2 clip (after the optional per-row scale, `scale_rows` of them), a unit RMS, or a cast (n 1)
+constexpr int ROWS_OPS = 5;
+enum RowsMode : int { ROWS_CLIP = 0, ROWS_RMS = 1, ROWS_CAST = 2 };
+struct RowsOp {
+  const void* x;
+  void* out;
+  const float* scale;
+  int64_t rows;
+  int n;
+  int scale_rows;
+  int x_dtype;
+  int out_dtype;
+  int mode;
+  float param;
+};
+struct RowsOps {
+  RowsOp op[ROWS_OPS];
+  int count;
+};
+
+__device__ __forceinline__ void rows_store(void* out, int dtype, int64_t i, float v) {
+  if (dtype == 0) {
+    static_cast<float*>(out)[i] = v;
+  } else {
+    static_cast<__nv_bfloat16*>(out)[i] = __float2bfloat16(v);
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void rows_op(const RowsOp& o, int64_t row, int lane, float eps) {
+  const T* x = static_cast<const T*>(o.x);
+  if (o.mode == ROWS_CAST) {
+    if (lane == 0) rows_store(o.out, o.out_dtype, row, load(x, row));
+    return;
+  }
+  const float* s = o.scale ? o.scale + (row % o.scale_rows) * o.n : nullptr;
+  float sq = 0.0f;
+  for (int i = lane; i < o.n; i += WARP) {
+    const float v = load(x, row * o.n + i) * (s ? s[i] : 1.0f);
+    sq += v * v;
+  }
+  const float total = warp_sum(sq);
+  const float factor = o.mode == ROWS_CLIP ? fminf(fmaxf(o.param / (sqrtf(total) + eps), 0.0f), 1.0f)
+                                           : rsqrtf(total / o.n + o.param);
+  for (int i = lane; i < o.n; i += WARP)
+    rows_store(o.out, o.out_dtype, row * o.n + i, load(x, row * o.n + i) * (s ? s[i] : 1.0f) * factor);
+}
+
+// a warp a row over every op's rows in turn: one launch for a step's q, k, v, r and sinks
+__global__ void attention_rows_kernel(RowsOps ops, float eps) {
+  int64_t row = (int64_t(blockIdx.x) * blockDim.x + threadIdx.x) / WARP;
+  const int lane = threadIdx.x % WARP;
+  for (int k = 0; k < ops.count; k++) {
+    const RowsOp& o = ops.op[k];
+    if (row < o.rows) {
+      if (o.x_dtype == 0) {
+        rows_op<float>(o, row, lane, eps);
+      } else {
+        rows_op<__nv_bfloat16>(o, row, lane, eps);
+      }
+      return;
+    }
+    row -= o.rows;
+  }
+}
+
 // a block a row: the states (`blocks` (s - 1, rows, hidden) then `current` (rows, hidden)) unit-normed, each query's
 // softmax over them (scores over sqrt(hidden)), out (rows, queries, hidden) the weighted sum of the normed states.
 // Each thread takes a few hidden indices of every state at once, its partial sums reduced across the block once.
@@ -597,6 +664,15 @@ int64_t blocks_for(int64_t threads) { return (threads + ROW_THREADS - 1) / ROW_T
   } else {                                                       \
     CALL(__nv_bfloat16, __nv_bfloat16);                          \
   }
+
+// the ops (`RowsOps`, up to ROWS_OPS) in one launch; `eps` the clips' norm epsilon
+extern "C" int inkling_attention_rows(const void* ops, int64_t total_rows, float eps, int64_t stream) {
+  const RowsOps& o = *static_cast<const RowsOps*>(ops);
+  if (o.count > ROWS_OPS) return -1;
+  attention_rows_kernel<<<blocks_for(total_rows * WARP), ROW_THREADS, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      o, eps);
+  return (int)cudaGetLastError();
+}
 
 extern "C" int inkling_l2_clip(const void* x, int dtype, const float* scale, float* out, int64_t rows, int n,
                                int scale_rows, float threshold, float eps, int64_t stream) {
