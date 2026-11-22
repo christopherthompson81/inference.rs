@@ -133,3 +133,33 @@ rows in the blocks  99.0    78.8    126.7   77.0    88.2
 
 No speculative gain: the verify is bound by its expert reads, which follow the routing, not the kernels. Drafting
 pays on this MoE only where acceptance is high (code).
+
+## Run 6 - 2026-11-22 05:00
+
+The NVFP4 prefill matmul: per launch ours 1.031 ms, llama.cpp's 0.989 (official weights Run 6), at different tile
+widths: our grouped mmq chose its width (`mmq_x`) from `ncols_max`, the token count (512: the 128-wide tile), where an
+expert sees 512 x 8 / 128 = 32 routes on average; llama.cpp takes the average (J 32). Ours pads each expert to whole
+tiles (llama.cpp packs experts' rows into shared tiles), so each extra tile rereads the expert's weights. The width
+as a multiple of the average routes an expert sees (the grid still covers `ncols_max`):
+
+```
+pp512                     Qwen3.6-35B-A3B recipe-v2   Inkling 2 recipe B
+ncols_max (before)        4486                        1749
+1x average                3718                        1893
+1.5x                      4449                        1827
+2x                        4868                        1858
+3x                        4639                        1801
+4x                        4743                        1745
+8x                        4486                        1746
+
+pp2048                    2x 4762 (before 4400)       2x 1265 (before 1230)
+```
+
+Twice the average taken (`MMQ_MOE_TILE_AVERAGES`): Qwen pp512 +9%, Inkling 2 recipe B +7% (1868), its IQ4_NL +5%
+(2023); KLD unchanged. NVFP4 trails IQ4_NL by 8% at prefill.
+
+A test found on the way (`grouped_mmq_spans_experts_over_several_tiles`: 40 tokens over 2-8 experts, every route as
+when its token runs alone): every type's sums are width-independent but ik_llama's IQ2_K, IQ3_K, IQ4_K and IQ5_K,
+which requantize their weights to Q8_0 rows past a width (`mmq_requant`, 48/40/32/48): ~0.4% off the narrow tiles'
+sums, both 0.6-0.7% from the dequantized weights. The offload test's staged path (fewer experts a pass, so wider
+tiles) crossed IQ3_K's 40 against the resident path's 16; both tests bound those types by the requantization.

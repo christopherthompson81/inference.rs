@@ -1383,9 +1383,16 @@ mod tests {
             if inference_quant::supports_mmq(ty) {
                 let expected = grouped_ungated_with(resident, &run.forward(), config, false)?
                     .expect("the type runs the grouped mmq");
+                // the staged passes see fewer experts, so wider tiles, which some types requantize past
+                let bound = if inference_quant::mmq_requantizes_past_a_width(ty) {
+                    1e-2
+                } else {
+                    1e-5
+                };
+                let err = relative_error(&actual, &expected)?;
                 assert!(
-                    relative_error(&actual, &expected)? < 1e-5,
-                    "{ty:?}: the staged prompt path runs the same kernels"
+                    err < bound,
+                    "{ty:?}: the staged prompt path runs the same kernels, relative error {err}"
                 );
             } else {
                 // without grouped kernels the prompt goes through the split path, a split batch at a time

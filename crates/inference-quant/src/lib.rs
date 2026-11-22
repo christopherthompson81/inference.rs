@@ -253,7 +253,8 @@ pub use gguf::fast_mmq::{
     GluExpertScales, grouped as grouped_moe_mmq,
     grouped_from_glu_packed as grouped_moe_mmq_from_glu_packed,
     grouped_from_glu_pair as grouped_moe_mmq_from_glu_pair, grouped_pair as grouped_moe_mmq_pair,
-    grouped_pair_packed as grouped_moe_mmq_pair_packed, supports as supports_mmq,
+    grouped_pair_packed as grouped_moe_mmq_pair_packed,
+    requantizes_past_a_width as mmq_requantizes_past_a_width, supports as supports_mmq,
     supports_weight as supports_mmq_weight,
 };
 #[cfg(feature = "cuda")]
