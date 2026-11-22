@@ -2128,15 +2128,15 @@ fn indexed_mmvq_scaled(
         {
             return Ok(None);
         }
-        let routed = match glu_activation(config.act) {
-            Some(activation) => inference_quant::indexed_moe_mmvq(
+        let routed = match moe_glu(config.act) {
+            Some(glu) => inference_quant::indexed_moe_mmvq(
                 gate,
                 up,
                 down,
                 forward.xs_flat,
                 forward.topk_ids,
                 config.num_experts_per_tok,
-                activation,
+                glu,
                 scales,
             )?,
             // an activation the matvec does not fuse runs over the gate's and up's rows between the launches
@@ -2304,7 +2304,7 @@ fn grouped_routes_with(
             None
         };
 
-        let glu_activation = glu_activation(config.act);
+        let glu_activation = moe_glu(config.act);
         let row_experts = gate_up_scales
             .map(|_| forward.topk_ids.flatten_all())
             .transpose()?;
@@ -2330,7 +2330,7 @@ fn grouped_routes_with(
                     total_assignments,
                     forward.shape.num_tokens,
                     num_experts,
-                    glu_activation as i32,
+                    glu_activation,
                     glu_scales,
                     dev,
                 )?,
@@ -2344,7 +2344,7 @@ fn grouped_routes_with(
                     total_assignments,
                     forward.shape.num_tokens,
                     num_experts,
-                    glu_activation as i32,
+                    glu_activation,
                     glu_scales,
                     dev,
                 )?,
@@ -2418,6 +2418,20 @@ fn grouped_routes_with(
         } else {
             Ok(Some(down.to_dtype(forward.original_dtype)?))
         }
+    }
+}
+
+// the GLU the expert matvec and the grouped GLU quantize fuse: `glu_activation`'s, and the softcapped SwiGLU (its
+// caps small constants, exact in f32)
+#[cfg(feature = "cuda")]
+#[allow(clippy::cast_possible_truncation)]
+fn moe_glu(act: Activation) -> Option<inference_quant::MoeGlu> {
+    match act {
+        Activation::SoftcapSilu(gate, up) => Some(inference_quant::MoeGlu::SoftcapSilu {
+            gate_cap: gate as f32,
+            up_cap: up as f32,
+        }),
+        act => glu_activation(act).map(inference_quant::MoeGlu::Act),
     }
 }
 

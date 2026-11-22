@@ -1,7 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use inference_quant::{
-    GluActivationType, GluExpertScales, grouped_moe_mmq, grouped_moe_mmq_from_glu_packed,
+    GluActivationType, GluExpertScales, MoeGlu, grouped_moe_mmq, grouped_moe_mmq_from_glu_packed,
     grouped_moe_mmq_from_glu_pair, grouped_moe_mmq_pair_packed, moe_dispatch_build,
 };
 use inference_tensor::{
@@ -160,7 +160,7 @@ fn packed_and_split_gate_up_glu_preserve_route_order() -> Result<()> {
         TOTAL_ASSIGNMENTS,
         NUM_TOKENS,
         NUM_EXPERTS,
-        GluActivationType::Silu as i32,
+        MoeGlu::Act(GluActivationType::Silu),
         None,
         dev,
     )?;
@@ -174,7 +174,7 @@ fn packed_and_split_gate_up_glu_preserve_route_order() -> Result<()> {
         TOTAL_ASSIGNMENTS,
         NUM_TOKENS,
         NUM_EXPERTS,
-        GluActivationType::Silu as i32,
+        MoeGlu::Act(GluActivationType::Silu),
         None,
         dev,
     )?;
@@ -192,7 +192,7 @@ fn packed_and_split_gate_up_glu_preserve_route_order() -> Result<()> {
         TOTAL_ASSIGNMENTS,
         NUM_TOKENS,
         NUM_EXPERTS,
-        GluActivationType::Silu as i32,
+        MoeGlu::Act(GluActivationType::Silu),
         Some(GluExpertScales {
             row_experts: &topk_ids,
             gate: &gate_scales,
@@ -212,9 +212,45 @@ fn packed_and_split_gate_up_glu_preserve_route_order() -> Result<()> {
         TOTAL_ASSIGNMENTS,
         NUM_TOKENS,
         NUM_EXPERTS,
-        GluActivationType::Silu as i32,
+        MoeGlu::Act(GluActivationType::Silu),
         None,
         dev,
     )?;
-    assert_close(&scaled, &prescaled)
+    assert_close(&scaled, &prescaled)?;
+
+    // the softcapped SwiGLU fused into the quantize, as the down projection of its rows computed apart
+    let (gate_cap, up_cap) = (0.05f32, 0.04f32);
+    let fused = grouped_moe_mmq_from_glu_packed(
+        &down,
+        &packed,
+        &sorted_token_ids,
+        &sorted_token_ids,
+        &expert_bounds,
+        TOTAL_ASSIGNMENTS,
+        NUM_TOKENS,
+        NUM_EXPERTS,
+        MoeGlu::SoftcapSilu { gate_cap, up_cap },
+        None,
+        dev,
+    )?;
+    let cap = |x: &Tensor, c: f32| -> Result<Tensor> {
+        x.affine(1.0 / f64::from(c), 0.)?
+            .tanh()?
+            .affine(f64::from(c), 0.)
+    };
+    let activated = ((cap(&gate_flat, gate_cap)?
+        * inference_tensor::nn::ops::sigmoid(&gate_flat)?)?
+        * cap(&up_flat, up_cap)?)?;
+    let apart = grouped_moe_mmq(
+        &down,
+        &activated,
+        &sorted_token_ids,
+        &sorted_token_ids,
+        &expert_bounds,
+        TOTAL_ASSIGNMENTS,
+        NUM_TOKENS,
+        NUM_EXPERTS,
+        dev,
+    )?;
+    assert_close(&fused, &apart)
 }

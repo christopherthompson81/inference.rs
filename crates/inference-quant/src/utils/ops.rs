@@ -1838,6 +1838,27 @@ pub enum GluActivationType {
     Sigmoid = 4,
 }
 
+/// The GLU an expert matvec or the grouped GLU quantize fuses: an activation of the gate times the up, or the
+/// softcapped SwiGLU, `gate_cap tanh(g / gate_cap) sigmoid(g)` times `up_cap tanh(u / up_cap)`.
+#[derive(Clone, Copy, Debug)]
+pub enum MoeGlu {
+    Act(GluActivationType),
+    SoftcapSilu { gate_cap: f32, up_cap: f32 },
+}
+
+// the kernels' code of the softcapped SwiGLU (glu_activation.cuh), past GluActivationType's
+const GLU_SOFTCAP_SILU: i32 = 5;
+
+impl MoeGlu {
+    /// The kernels' activation code and the two caps they read beside it.
+    pub fn code_and_caps(self) -> (i32, f32, f32) {
+        match self {
+            Self::Act(act) => (act as i32, 0.0, 0.0),
+            Self::SoftcapSilu { gate_cap, up_cap } => (GLU_SOFTCAP_SILU, gate_cap, up_cap),
+        }
+    }
+}
+
 // CPU activation functions for fused GLU
 fn cpu_silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())

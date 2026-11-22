@@ -572,14 +572,7 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
     return result;
 }
 
-static __device__ __forceinline__ float ggml_cuda_ue4m3_to_fp32(uint8_t x) {
-    if (x == 0 || (x == 0x7F && x != 0xFF)) { return 0.0f; }
-    const int exp = (x >> 3) & 0xF;
-    const int man = x & 0x7;
-    float raw;
-    if (exp == 0) { raw = ldexpf((float) man, -9); } else { raw = ldexpf(1.0f + (float) man / 8.0f, exp - 7); }
-    return static_cast<float>(raw / 2);
-}
+#include "../ue4m3.cuh"
 
 // ggml-common.h's codebooks for the IQ and MXFP4 types
 static const __device__ int8_t  kvalues_mxfp4[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};

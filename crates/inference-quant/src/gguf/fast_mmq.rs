@@ -229,6 +229,8 @@ type QuantizeGluF32Launcher = unsafe extern "C" fn(
     ne1: i64,
     activation: i32,
     stream: *mut std::ffi::c_void,
+    gate_cap: f32,
+    up_cap: f32,
     row_experts: *const u32,
     gate_scales: *const f32,
     up_scales: *const f32,
@@ -1102,7 +1104,7 @@ struct GroupedGluRun<'a> {
     total_assignments: usize,
     ncols_max: usize,
     num_experts: usize,
-    activation: i32,
+    glu: crate::MoeGlu,
     scales: Option<GluExpertScales<'a>>,
     dev: &'a CudaDevice,
 }
@@ -1128,7 +1130,7 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
         total_assignments,
         ncols_max,
         num_experts,
-        activation,
+        glu,
         scales,
         dev,
     } = run;
@@ -1256,6 +1258,7 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
         _scale_guards.push(guard);
     }
     let [row_experts_ptr, gate_scales_ptr, up_scales_ptr] = scale_ptrs;
+    let (activation, gate_cap, up_cap) = glu.code_and_caps();
 
     unsafe {
         quantize(
@@ -1269,6 +1272,8 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
             total_assignments as i64,
             activation,
             stream_ptr,
+            gate_cap,
+            up_cap,
             row_experts_ptr as *const u32,
             gate_scales_ptr as *const f32,
             up_scales_ptr as *const f32,
@@ -1323,7 +1328,7 @@ pub fn grouped_from_glu_pair(
     total_assignments: usize,
     ncols_max: usize,
     num_experts: usize,
-    activation: i32,
+    glu: crate::MoeGlu,
     scales: Option<GluExpertScales<'_>>,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
@@ -1341,7 +1346,7 @@ pub fn grouped_from_glu_pair(
         total_assignments,
         ncols_max,
         num_experts,
-        activation,
+        glu,
         scales,
         dev,
     })
@@ -1357,7 +1362,7 @@ pub fn grouped_from_glu_packed(
     total_assignments: usize,
     ncols_max: usize,
     num_experts: usize,
-    activation: i32,
+    glu: crate::MoeGlu,
     scales: Option<GluExpertScales<'_>>,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
@@ -1379,7 +1384,7 @@ pub fn grouped_from_glu_packed(
         total_assignments,
         ncols_max,
         num_experts,
-        activation,
+        glu,
         scales,
         dev,
     })

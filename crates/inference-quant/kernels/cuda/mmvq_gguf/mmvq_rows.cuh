@@ -166,7 +166,7 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
                          const void *__restrict__ vy, const uint32_t *__restrict__ ids, const float *__restrict__ scales,
                          const float *__restrict__ scales_up, float *__restrict__ dst,
                          const int ncols_x, const int nrows_x, const int stride_col_y, const int y_div,
-                         const int activation) {
+                         const int activation, const float gate_cap, const float up_cap) {
   constexpr int qk = QK_K;
   constexpr int qi = QI4_XS;
   constexpr int vdr = MMVQ_ROWS_VDR;
@@ -253,7 +253,7 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
     float out = tmp[0][threadIdx.x] * (scales ? scales[ids[pair]] : 1.0f);
     if constexpr (glu) {
       const float up = tmp[nsums - 1][threadIdx.x] * (scales_up ? scales_up[ids[pair]] : 1.0f);
-      out = apply_glu_activation(out, activation) * up;
+      out = apply_glu(out, up, activation, gate_cap, up_cap);
     }
     dst[row0 + threadIdx.x] = out;
   }
@@ -265,7 +265,8 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
                                                const void *vy, const void *ids, const float *scales,       \
                                                const float *scales_up, float *dst, int ncols_x,       \
                                                int nrows_x, int stride_col_y, int y_div, int n_pairs,          \
-                                               int activation, int grouped, void *stream) {                    \
+                                               int activation, float gate_cap, float up_cap, int grouped, \
+                                               void *stream) {                    \
     const int row_blocks = (nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE;                  \
     const dim3 block(WARP_SIZE, MMVQ_ROWS_NWARPS_MOE, 1);                                                      \
     cudaStream_t s = static_cast<cudaStream_t>(stream);                                                        \
@@ -275,22 +276,22 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
       if (vx_up) {                                                                                             \
         mmvq_rows_moe_kernel<traits, true, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up,  \
                                                                        dst, ncols_x, nrows_x, stride_col_y,   \
-                                                                       y_div, activation);                    \
+                                                                       y_div, activation, gate_cap, up_cap);                    \
       } else {                                                                                                 \
         mmvq_rows_moe_kernel<traits, false, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up, \
                                                                         dst, ncols_x, nrows_x, stride_col_y,  \
-                                                                        y_div, activation);                   \
+                                                                        y_div, activation, gate_cap, up_cap);                   \
       }                                                                                                        \
     } else {                                                                                                   \
       const dim3 grid(row_blocks, n_pairs, 1);                                                                 \
       if (vx_up) {                                                                                             \
         mmvq_rows_moe_kernel<traits, true, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, scales, scales_up, \
                                                                         dst, ncols_x, nrows_x, stride_col_y,  \
-                                                                        y_div, activation);                   \
+                                                                        y_div, activation, gate_cap, up_cap);                   \
       } else {                                                                                                 \
         mmvq_rows_moe_kernel<traits, false, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,    \
                                                                          id, scales, scales_up, dst, ncols_x, nrows_x, \
-                                                                         stride_col_y, y_div, activation);    \
+                                                                         stride_col_y, y_div, activation, gate_cap, up_cap);    \
       }                                                                                                        \
     }                                                                                                          \
   }

@@ -1151,6 +1151,8 @@ type MoeLauncher = unsafe extern "C" fn(
     y_div: i32,
     n_pairs: i32,
     activation: i32,
+    gate_cap: f32,
+    up_cap: f32,
     grouped: i32,
     stream: *mut std::ffi::c_void,
 );
@@ -1292,7 +1294,7 @@ pub fn moe_decode(
     xs: &Tensor,
     ids: &Tensor,
     topk: usize,
-    activation: GluActivationType,
+    glu: crate::MoeGlu,
     scales: ExpertScales<'_>,
 ) -> Result<Tensor> {
     if !supports_moe(gate, up, down) {
@@ -1310,18 +1312,7 @@ pub fn moe_decode(
             up.kernel_shape()
         );
     }
-    moe_decode_with(
-        MoeFirst::Glu {
-            gate,
-            up,
-            activation,
-        },
-        down,
-        xs,
-        ids,
-        topk,
-        scales,
-    )
+    moe_decode_with(MoeFirst::Glu { gate, up, glu }, down, xs, ids, topk, scales)
 }
 
 /// Whether `moe_decode_ungated` reads these stacked experts.
@@ -1396,7 +1387,7 @@ enum MoeFirst<'a> {
     Glu {
         gate: &'a dyn KernelWeight,
         up: &'a dyn KernelWeight,
-        activation: GluActivationType,
+        glu: crate::MoeGlu,
     },
     Plain {
         up: &'a dyn KernelWeight,
@@ -1533,17 +1524,17 @@ fn moe_decode_with(
         let (lead_ptr, _lead_guard) = lead.kernel_ptr(&stream)?;
         let (mid_ptr, _mid_guard) = slice_ptr_mut_on_stream(&mut hidden_rows, 0, &stream);
         let launch = moe_launcher(lead.gguf_type()).expect("supports_moe checked");
-        let (up_ptr, _up_guard, activation) = match first {
-            MoeFirst::Glu { up, activation, .. } => {
+        let (up_ptr, _up_guard, (activation, gate_cap, up_cap)) = match first {
+            MoeFirst::Glu { up, glu, .. } => {
                 let (ptr, guard) = up.kernel_ptr(&stream)?;
                 (
                     ptr as *const std::ffi::c_void,
                     Some(guard),
-                    activation as i32,
+                    glu.code_and_caps(),
                 )
             }
             MoeFirst::Plain { .. } | MoeFirst::Pair { .. } => {
-                (std::ptr::null(), None, MOE_NO_ACTIVATION)
+                (std::ptr::null(), None, (MOE_NO_ACTIVATION, 0.0, 0.0))
             }
         };
         unsafe {
@@ -1562,6 +1553,8 @@ fn moe_decode_with(
                 topk as i32,
                 pairs as i32,
                 activation,
+                gate_cap,
+                up_cap,
                 grouped,
                 stream_ptr,
             );
@@ -1597,6 +1590,8 @@ fn moe_decode_with(
                         topk as i32,
                         pairs as i32,
                         MOE_NO_ACTIVATION,
+                        0.0,
+                        0.0,
                         grouped,
                         stream_ptr,
                     );
@@ -1647,6 +1642,8 @@ fn moe_decode_with(
                 MOE_DOWN_Y_DIV,
                 pairs as i32,
                 MOE_NO_ACTIVATION,
+                0.0,
+                0.0,
                 grouped,
                 stream_ptr,
             );
