@@ -457,3 +457,116 @@ On the way: `cuda_fused_controller_matches_the_reference` failed once at 4 BF16 
 unseeded random inputs. The kernel's BF16 output lands within a step of the f32 reference, and a step at the draw's
 tails (|v| ~5-7) is ~0.02-0.03. The bound is now two BF16 steps of each element (2^-8 of the value each) plus 1e-4.
 It passed six runs in a row.
+
+## Run 17 - 2026-11-22 18:45
+
+A drafter graph's ceiling first, from a node trace: one cycle's eager drafter pass spans 2.53 ms with 2.01 ms of
+kernels, so a graph could save at most the 0.52 ms of gaps (~2% of a 22.9 ms cycle). Most of the gaps are in the
+context append (projecting the accepted rows' taps into the drafter's KV: ~30 small kernels, 8-10 us of host dispatch
+between each), whose row count changes every step. The block forward and the recurrent head already run GPU-bound
+(1-3 us gaps). Busy time: the three layers' BF16 weights ~0.75 ms (the FFN gemms 112 + 61 us a layer for ~85 + 42 MB),
+the target head over the rows 0.53 ms, the head's picks 0.38 ms.
+
+The drafter's weights at `--mtp-draft-isq` (served, 256 tokens, prose / code / story / explainer):
+
+```
+drafts 2        tok/s                        accepted
+bf16            87.9  137.7  86.9  103.5     317 / 177
+q8_0            89.6  139.3  87.9  105.8     317 / 179
+q6k             88.4  139.4  87.5  105.9     314 / 181
+q5k             84.9  136.1  87.8  105.4     313 / 179
+q4k             85.8  135.4  88.3  103.6     313 / 178
+drafts 3
+bf16            78.0  140.2  78.6  92.1      281 / 155 / 100
+q8_0            77.9  141.8  79.4  93.7      280 / 156 / 101
+```
+
+Q8_0 gains 1-2 tok/s at the same acceptance. Below 6 bits acceptance slips on prose, and the 8-row k-quant matvecs are
+no faster. Recommended: `--mtp-draft-isq q8_0` (drafts 2).
+
+## Run 18 - 2026-11-22 20:30
+
+Two experiments on the weights and the cache.
+
+NVFP4 experts to IQ4_NL from their values. `quantize gguf --checkpoint` now requantizes an NVFP4 stack its rule names
+another type for (each expert's blocks dequantized times its scale), dropping the source's `.scale` for it (test
+`a_rule_requantizes_an_nvfp4_stack_from_its_values`). IQ4_NL can't hold E2M1 exactly (its 16 levels have no zero and
+other ratios, and one scale per 32 to NVFP4's 16), so it's a requantization. From recipe C,
+`--tensor-type '^blk\.(1?[0-9])\.ffn_(gate_up|down)_exps\.weight$=iq4_nl'`, no imatrix (13.6 min):
+
+```
+                          KLD       same top   pp512   tg128
+recipe C (NVFP4)          0.00389   97.32%     2346    103.1
+NVFP4 -> IQ4_NL           0.00992   95.75%     2425    103.6
+ggml-org IQ4_NL           0.00995              2425    102.8
+```
+
+Unweighted, it is no better than ggml-org's quantization from BF16: 2.6x the KLD for +3.4% prefill. An imatrix or
+GPTQ weighting is the only way it narrows. Online imatrix collection takes an ISQ load of the official checkpoint
+with a calibration file (not run).
+
+f8e4m3 KV. Inkling cast K/V to the cache's dtype before the writer, which takes half precision and quantizes itself,
+so a quantized cache failed every request (HTTP 500: `reshape_and_cache_quant only supports f16, bf16, f32 (got
+U8)`). The rows now go to the writer in BF16 for a quantized cache. The attention kernels read an E4M3 cache (dtype
+code 3): a byte's bits placed as f16 are 2^-8 of its value (the writer's scale is 1), exact for every byte. Test
+`cuda_paged_e4m3_matches_the_reference` (decode, a split long-past decode, the tensor-core prefill). The decode
+kernel loads a lane's 4 values in one load (BF16 64-bit, E4M3 32-bit).
+
+```
+served decode tok/s, context (tokens)   8       5689    9824
+bf16 KV                                 108.8   89.5    88.5
+f8e4m3 KV                               104.8   89.7    82.8
+decode_kernel at 9824 (us a step)       bf16 2520, f8e4m3 2664
+```
+
+No gain: the decode attention is not bound by its bytes. A warp a key reduces each key's dot product over 32 lanes (5
+shuffles) and folds it with an exp, so at 9.8K keys it is bound by instruction issue. Halving the K/V bytes moves
+nothing until the kernel takes several keys a warp at once (lane groups a key, fewer shuffles a key). The q-types
+(q8, q4) still have no attention read path.
+
+## Run 19 - 2026-11-22 21:15
+
+The decode attention by lane groups. Each warp splits into 4 groups of 8 lanes, a group taking a key and a lane 1/8
+of the head's dims (`KEY_LANES`), so a key's dot reduces over 8 lanes in 3 shuffles and a warp folds 4 keys at once
+where it folded 1 (DECODE_KEYS 2 a group a step). The warp steps as one, a group masking keys past its split; the
+groups merge by shuffles, the warps in shared memory as before. A lane's 16 dims of q, accumulator and two keys' K/V
+need ~100 registers, so the block went from 32 warps to 8 (no spills) and the key splits make up the blocks (at most
+16 a row, 6 blocks an SM's worth of rows).
+
+```
+served decode tok/s, context (tokens)   8       5689    9824
+Run 18 bf16 KV                          108.8   89.5    88.5
+lane groups, bf16                       110.5   98.2    89.8
++ splits 16, 6 blocks an SM, bf16       110.7   98.6    89.9
++ splits 16, f8e4m3                     108.8   98.1    89.8
+
+decode_kernel at 9824 (us a step, node trace)
+Run 18                                  2520    (52.5 us a call, 7 splits x 24 heads)
+lane groups                             1869    (38.9, 8 x 24)
+splits 16                               1737    (36.5, 16 x 24; 24-95 us a call)
+short context (8)                        450
+```
+
+All of the long context's extra time is this kernel (the other graph kernels are within 1%). At 95 us a global layer
+reads ~40 MB, ~420 GB/s of the 3090's ~936, so it is still short of bandwidth. FP8's half bytes gain nothing yet:
+its widening costs what the bytes save. The 24 query heads share 8 KV heads, so three blocks read each K/V. A block
+a KV head serving its 3 query heads would read each key once for three queries.
+
+## Run 20 - 2026-11-22 22:00
+
+nsight-compute on long-context decode attention calls (9.8K context, `--set full`): 30 us, 4.3 MB from DRAM (~145
+GB/s), 23% of warp slots active, stalls mostly long scoreboard (memory latency). A split per 512 keys left a layer of
+~2K visible keys (a windowed one) on 4 of its 16 splits: 75% of the grid exited at once, and too few warps stayed to
+hide the loads. A split per 64 keys (`DECODE_SPLIT_KEYS`) puts a row on every split from ~1K keys:
+
+```
+served tok/s, context (tokens)      8       5689    9824
+plain bf16, Run 19                  110.7   98.6    89.9
+plain bf16, 64 keys a split         111.5   98.5    97.4
+plain f8e4m3                        110.2   98.5    94.1
+drafts 2, Run 17 (q8_0 drafter)     88.1 / 140.3 / 88.6 / 106.5     95.0    118.9
+drafts 2, now                       93.1 / 134.2 / 91.7 / 107.8     100.9   127.1
+```
+
+(drafts 2 at 8 tokens: prose / code / story / explainer.) Decode at 9.8K is now within 1 tok/s of 5.7K's. FP8 KV
+stays behind BF16: on this kernel a quantized cache buys context room, not speed.

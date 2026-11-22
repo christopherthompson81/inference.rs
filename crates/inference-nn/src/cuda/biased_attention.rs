@@ -17,6 +17,7 @@ const DECODE_ROWS: i32 = 4;
 const CACHE_F32: i32 = 0;
 const CACHE_F16: i32 = 1;
 const CACHE_BF16: i32 = 2;
+const CACHE_E4M3: i32 = 3;
 // rows (batch x queries x heads) a split decode counts its finished splits for; more take one block a row
 const MAX_SPLIT_ROWS: usize = 4096;
 
@@ -160,6 +161,10 @@ fn device_ptr<'a>(
         DType::U32 => {
             let (p, g) = s.as_cuda_slice::<u32>()?.device_ptr(stream);
             (p + offset * 4, g)
+        }
+        DType::F8E4M3 => {
+            let (p, g) = s.as_cuda_slice::<float8::F8E4M3>()?.device_ptr(stream);
+            (p + offset, g)
         }
         dtype => inference_tensor::bail!("biased attention does not take {dtype:?}"),
     })
@@ -323,6 +328,7 @@ pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
                     DType::F32 => CACHE_F32,
                     DType::F16 => CACHE_F16,
                     DType::BF16 => CACHE_BF16,
+                    DType::F8E4M3 => CACHE_E4M3,
                     _ => return Ok(None),
                 };
                 let tables_l = block_tables.layout();
@@ -637,6 +643,21 @@ mod tests {
         Ok(())
     }
 
+    // an E4M3 cache's bytes widened in every kernel: decode, a split long-past decode, the tensor-core prefill
+    fn cuda_paged_e4m3_matches_the_reference() -> Result<()> {
+        let mut long = shape((2, 8, 2, 1, 2000, 128, 256, 1500));
+        long.log_scale = Some((0.1, 64.0));
+        for c in [
+            shape((2, 8, 2, 1, 700, 128, 256, 0)),
+            long,
+            shape((1, 8, 2, 100, 50, 64, 40, 0)),
+            shape((2, 8, 2, 23, 41, 128, 32, 0)),
+        ] {
+            run(&c, Some(DType::F8E4M3))?;
+        }
+        Ok(())
+    }
+
     fn cuda_windowed_decode_matches_the_reference() -> Result<()> {
         run(&shape((1, 4, 1, 1, 300, 32, 64, 100)), None)
     }
@@ -700,6 +721,7 @@ mod tests {
             cuda_prefill_matches_the_reference,
             cuda_short_decode_rows_match_the_reference,
             cuda_split_decode_over_long_pasts_matches_the_reference,
+            cuda_paged_e4m3_matches_the_reference,
             cuda_tensor_core_paged_bf16_prefill_matches_the_reference,
             cuda_tensor_core_tiny_shapes_match_the_reference,
             cuda_tensor_core_prefill_after_a_past_matches_the_reference,

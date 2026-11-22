@@ -784,9 +784,14 @@ impl Attention {
             {
                 use inference_nn::cuda::biased_attention::{Keys, Past};
                 let dtype = step.k_cache.dtype();
+                // the writer quantizes a quantized cache's rows itself, from half precision
+                let rows_dtype = match dtype {
+                    DType::F32 | DType::F16 | DType::BF16 => dtype,
+                    _ => DType::BF16,
+                };
                 step.writer.write_rows(
-                    &k.to_dtype(dtype)?.transpose(1, 2)?,
-                    &v.to_dtype(dtype)?.transpose(1, 2)?,
+                    &k.to_dtype(rows_dtype)?.transpose(1, 2)?,
+                    &v.to_dtype(rows_dtype)?.transpose(1, 2)?,
                     step.k_cache,
                     step.v_cache,
                     &step.positions.slots,

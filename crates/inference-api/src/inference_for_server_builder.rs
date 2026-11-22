@@ -5,10 +5,10 @@ use std::{num::NonZeroUsize, sync::Arc};
 use anyhow::{Context, Result};
 use inference_core::{
     AutoDeviceMapParams, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
-    HfConfigOverrides, InferenceRs, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
-    ModelLoaderConfig, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig, PagedCacheLayers,
-    PagedCacheType, SchedulerConfig, SchedulerLimits, SearchCallback, SearchEmbeddingModel,
-    TokenSource, ToolCallbackWithTool, paged_attn_supported, parse_isq_value,
+    HfConfigOverrides, InferenceRs, InferenceRsBuilder, IsqType, Loader, McpClientConfig,
+    MemoryGpuConfig, ModelLoaderConfig, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig,
+    PagedCacheLayers, PagedCacheType, SchedulerConfig, SchedulerLimits, SearchCallback,
+    SearchEmbeddingModel, TokenSource, ToolCallbackWithTool, paged_attn_supported, parse_isq_value,
     reserve_external_mtp_memory_with_runtime,
 };
 use inference_selection::{
@@ -19,6 +19,24 @@ use tracing::{debug, info, warn};
 
 use crate::types::{LoadedPipeline, SharedInferenceRsState};
 use std::collections::{HashMap, HashSet};
+
+// an external drafter beside a GGUF target, unless set: the same acceptance as its BF16 for half the weight reads
+const GGUF_DRAFTER_ISQ: IsqType = IsqType::Q8_0;
+
+// the MTP config with a GGUF target's external drafter at GGUF_DRAFTER_ISQ when it names no weight type
+fn with_gguf_drafter_default(mtp: Option<MtpConfig>, model: &ModelSelected) -> Option<MtpConfig> {
+    gguf_drafter_default(mtp, matches!(model, ModelSelected::GGUF { .. }))
+}
+
+fn gguf_drafter_default(mtp: Option<MtpConfig>, gguf_target: bool) -> Option<MtpConfig> {
+    mtp.map(|mtp| {
+        if gguf_target && mtp.model.is_some() && mtp.drafter_isq.is_none() {
+            mtp.with_drafter_isq(Some(GGUF_DRAFTER_ISQ))
+        } else {
+            mtp
+        }
+    })
+}
 
 /// Configuration for a single model in a multi-model setup
 #[derive(Clone, inference_json::FromJson)]
@@ -937,6 +955,7 @@ impl InferenceRsForServerBuilder {
         let limits = self.scheduler_limits();
         let host_backed_gpu_prefixes = self.host_backed_gpu_prefixes();
         let model = self.model.context("Model was None")?;
+        let mtp_config = with_gguf_drafter_default(self.mtp_config.clone(), &model);
 
         let dtype = get_model_dtype(&model)?;
         let auto_device_map_params = get_auto_device_map_params(&model)?;
@@ -970,7 +989,7 @@ impl InferenceRsForServerBuilder {
                     .with_serving_capacity(self.max_seqs)
             })
             .transpose()?,
-            self.mtp_config.as_ref(),
+            mtp_config.as_ref(),
             mtp_runtime,
             &dtype,
             &device,
@@ -996,7 +1015,7 @@ impl InferenceRsForServerBuilder {
             jinja_explicit: self.jinja_explicit,
             max_model_len: self.max_model_len,
             hf_config_overrides: self.hf_config_overrides,
-            mtp_config: self.mtp_config.clone(),
+            mtp_config: mtp_config.clone(),
             encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
             embeddings_on_host: self.embeddings_on_host,
             moe_expert_cache: self.moe_expert_cache,
@@ -1092,10 +1111,13 @@ impl InferenceRsForServerBuilder {
                 );
             }
             // the global MTP setting and its memory reservation belong to the first model only
-            let mtp_config = model_config
-                .mtp
-                .clone()
-                .or_else(|| self.mtp_config.clone().filter(|_| model_index == 0));
+            let mtp_config = with_gguf_drafter_default(
+                model_config
+                    .mtp
+                    .clone()
+                    .or_else(|| self.mtp_config.clone().filter(|_| model_index == 0)),
+                &model_config.model,
+            );
             let paged_attn = settings.model_cache(
                 model_config,
                 paged_kv_plan.paged_attn[plan_index],
@@ -1640,4 +1662,24 @@ fn register_alias(
         info!("Model `{model_id}` loaded (from config key: {config_key})");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod drafter_default_tests {
+    use super::*;
+
+    // a GGUF target's assistant model takes q8_0 unless set; a built-in head and other targets keep theirs
+    #[test]
+    fn a_gguf_targets_assistant_defaults_to_q8_0() {
+        let external = || Some(MtpConfig::new("assistant".to_string(), Some(2)));
+        let isq = |mtp: Option<MtpConfig>, gguf| {
+            gguf_drafter_default(mtp, gguf).and_then(|m| m.drafter_isq)
+        };
+        assert_eq!(isq(external(), true), Some(IsqType::Q8_0));
+        assert_eq!(isq(external(), false), None);
+        assert_eq!(isq(Some(MtpConfig::builtin(Some(2))), true), None);
+        let set = external().map(|m| m.with_drafter_isq(Some(IsqType::Q4K)));
+        assert_eq!(isq(set, true), Some(IsqType::Q4K));
+        assert!(gguf_drafter_default(None, true).is_none());
+    }
 }

@@ -1281,7 +1281,8 @@ pub struct RuntimeOptions {
     pub mtp_draft_sampling: MtpDraftSamplingArg,
 
     /// Weight type of the MTP assistant model, or of a built-in MTP head's draft-only lm_head copy, e.g. q5_0 or q8_0;
-    /// unset, the model's ISQ (a GGUF's drafter stays BF16) and the built-in head drafts through the target's lm_head.
+    /// unset, the model's ISQ (q8_0 for a GGUF's assistant model) and the built-in head drafts through the target's
+    /// lm_head.
     #[arg(long)]
     #[serde(default)]
     pub mtp_draft_isq: Option<String>,
@@ -1482,7 +1483,8 @@ pub struct BenchRuntimeOptions {
     pub mtp_draft_sampling: MtpDraftSamplingArg,
 
     /// Weight type of the MTP assistant model, or of a built-in MTP head's draft-only lm_head copy, e.g. q5_0 or q8_0;
-    /// unset, the model's ISQ (a GGUF's drafter stays BF16) and the built-in head drafts through the target's lm_head.
+    /// unset, the model's ISQ (q8_0 for a GGUF's assistant model) and the built-in head drafts through the target's
+    /// lm_head.
     #[arg(long)]
     pub mtp_draft_isq: Option<String>,
 

@@ -187,8 +187,8 @@ pub struct GgufQuantizeOptions {
     pub tensor_types: Vec<String>,
 
     /// The checkpoint the GGUF was made from (Inkling 2's own), read in place of its expert stacks: NVFP4 ones written
-    /// as stored, in llama.cpp's NVFP4 blocks with their per-expert `<weight>.scale`, whatever the rules say; MXFP8
-    /// ones quantized by the rules from their values
+    /// as stored, in llama.cpp's NVFP4 blocks with their per-expert `<weight>.scale`, unless a rule names another type;
+    /// those and MXFP8 ones quantized by the rules from their values (the source's own scales for them dropped)
     #[arg(long)]
     pub checkpoint: Option<PathBuf>,
 
