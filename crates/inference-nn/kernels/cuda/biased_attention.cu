@@ -19,14 +19,17 @@ namespace {
 
 constexpr int WARP = 32;
 constexpr int PREFILL_WARPS = 8;
-constexpr int DECODE_WARPS = 32;
+constexpr int DECODE_WARPS = 8;
 constexpr int KEY_TILE = WARP;
-// keys a decode warp loads before it folds them
-constexpr int DECODE_KEYS = 4;
+// a decode warp's lane groups: KEY_LANES lanes a key, each lane HD / KEY_LANES of its dims, DECODE_KEYS keys a group
+// loaded before it folds them
+constexpr int KEY_LANES = 8;
+constexpr int KEY_GROUPS = WARP / KEY_LANES;
+constexpr int DECODE_KEYS = 2;
 // a decode's keys split over up to this many blocks a query, enough for 2 blocks an SM; a row takes a split a
 // DECODE_SPLIT_KEYS of its keys, the grid's other blocks exiting
-constexpr int DECODE_MAX_SPLITS = 8;
-constexpr int DECODE_BLOCKS_PER_SM = 2;
+constexpr int DECODE_MAX_SPLITS = 16;
+constexpr int DECODE_BLOCKS_PER_SM = 6;
 constexpr int DECODE_SPLIT_KEYS = 512;
 // the tensor-core prefill: a warp 16 queries, a block 4 warps, keys a tile at a time; prompts from this many queries
 constexpr int MMA_WARPS = 4;
@@ -74,6 +77,13 @@ __device__ __forceinline__ void load_row<4, E4m3>(const E4m3* p, float (&o)[4]) 
     const unsigned b = (raw >> (8 * r)) & 0xFFu;
     o[r] = __half2float(__ushort_as_half((unsigned short)(((b & 0x80u) << 8) | ((b & 0x7Fu) << 7)))) * E4M3_BIAS_GAP;
   }
+}
+
+// a lane's N values (N a multiple of 4), 4 a load
+template <int N, typename T>
+__device__ __forceinline__ void load_span(const T* p, float (&o)[N]) {
+#pragma unroll
+  for (int c = 0; c < N / 4; c++) load_row<4>(p + 4 * c, *reinterpret_cast<float(*)[4]>(o + 4 * c));
 }
 
 // where a (batch, kv head, key)'s row of K or V sits
@@ -420,16 +430,20 @@ __global__ void __launch_bounds__(MMA_WARPS * WARP) prefill_mma_kernel(Args<T> a
 #endif
 }
 
-// a block a query of one head, its warps splitting the keys, a lane R of the head's dims (so a key's K and V rows load
-// coalesced), DECODE_KEYS keys a step to keep loads in flight; the warps merged in shared memory at the end
+// a block a query of one head (or a split of its keys), its warps' lane groups each taking keys (a group a key, its
+// lanes splitting the head's dims, so a key's K and V rows load coalesced and its dot reduces over KEY_LANES lanes),
+// DECODE_KEYS keys a group a step to keep loads in flight; the groups merged by shuffles, the warps in shared memory
 template <int R, typename T>
 __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) {
   constexpr int HD = R * WARP;
+  constexpr int PER = HD / KEY_LANES;
   __shared__ float sm[DECODE_WARPS];
   __shared__ float sl[DECODE_WARPS];
   __shared__ float sacc[DECODE_WARPS][HD];
   const int warp = threadIdx.x / WARP;
   const int lane = threadIdx.x % WARP;
+  const int group = lane / KEY_LANES;
+  const int j = lane % KEY_LANES;
   const int splits = max(1, a.splits);
   const int i = blockIdx.x / splits;
   const int split = blockIdx.x % splits;
@@ -439,16 +453,17 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
   const int pos = past_of(a, batch) + i;
   const float tau = tau_of(a, pos);
   const int64_t row = (int64_t(batch) * a.t + i) * a.heads + head;
-  float qr[R];
+  float qr[PER];
 #pragma unroll
-  for (int r = 0; r < R; r++) qr[r] = a.q[row * HD + lane * R + r] * a.scale;
+  for (int r = 0; r < PER; r++) qr[r] = a.q[row * HD + j * PER + r] * a.scale;
   const float* bias = a.table + row * (a.extent + 1);
-  // the sink starts the first split's first warp's softmax: its weight and no value
-  float m = warp == 0 && split == 0 ? a.sinks[row] : -INFINITY;
-  float l = warp == 0 && split == 0 ? 1.0f : 0.0f;
-  float acc[R];
+  // the sink starts the first split's first group's softmax: its weight and no value
+  const bool sink = warp == 0 && group == 0 && split == 0;
+  float m = sink ? a.sinks[row] : -INFINITY;
+  float l = sink ? 1.0f : 0.0f;
+  float acc[PER];
 #pragma unroll
-  for (int r = 0; r < R; r++) acc[r] = 0.0f;
+  for (int r = 0; r < PER; r++) acc[r] = 0.0f;
   // this split's contiguous share of the visible keys, over the splits the row's keys need
   const int first = first_key(a.window, pos);
   const int keys = pos - first + 1;
@@ -457,43 +472,65 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
   const int per = (keys + used - 1) / used;
   const int lo = first + split * per;
   const int last = min(pos, lo + per - 1);
-  for (int base = lo + warp * DECODE_KEYS; base <= last; base += DECODE_WARPS * DECODE_KEYS) {
+  constexpr int WARP_KEYS = KEY_GROUPS * DECODE_KEYS;
+  // the warp steps as one (its shuffles stay converged), a group masking the keys past the split
+  for (int base = lo + warp * WARP_KEYS; base <= last; base += DECODE_WARPS * WARP_KEYS) {
     float s[DECODE_KEYS];
-    float vr[DECODE_KEYS][R];
+    float vr[DECODE_KEYS][PER];
 #pragma unroll
-    for (int j = 0; j < DECODE_KEYS; j++) {
-      const int key = min(base + j, last);
-      float kv[R];
-      load_row<R>(a.k.row(batch, kvh, key, HD) + lane * R, kv);
-      load_row<R>(a.v.row(batch, kvh, key, HD) + lane * R, vr[j]);
+    for (int k = 0; k < DECODE_KEYS; k++) {
+      const int key = min(base + group * DECODE_KEYS + k, last);
+      float kv[PER];
+      load_span<PER>(a.k.row(batch, kvh, key, HD) + j * PER, kv);
+      load_span<PER>(a.v.row(batch, kvh, key, HD) + j * PER, vr[k]);
       float part = 0.0f;
 #pragma unroll
-      for (int r = 0; r < R; r++) part += qr[r] * kv[r];
-      s[j] = part;
+      for (int r = 0; r < PER; r++) part += qr[r] * kv[r];
+      s[k] = part;
     }
 #pragma unroll
-    for (int j = 0; j < DECODE_KEYS; j++) s[j] = warp_sum(s[j]);
+    for (int k = 0; k < DECODE_KEYS; k++) {
 #pragma unroll
-    for (int j = 0; j < DECODE_KEYS; j++) {
-      const int key = base + j;
+      for (int o = KEY_LANES / 2; o > 0; o /= 2) s[k] += __shfl_xor_sync(0xffffffffu, s[k], o);
+    }
+#pragma unroll
+    for (int k = 0; k < DECODE_KEYS; k++) {
+      const int key = base + group * DECODE_KEYS + k;
       if (key > last) break;
       const int dist = pos - key;
-      const float score = (s[j] + (dist < a.extent ? bias[dist] : 0.0f)) * tau;
+      const float score = (s[k] + (dist < a.extent ? bias[dist] : 0.0f)) * tau;
       const float m_new = fmaxf(m, score);
       const float alpha = __expf(m - m_new);
       const float p = __expf(score - m_new);
       l = l * alpha + p;
 #pragma unroll
-      for (int r = 0; r < R; r++) acc[r] = acc[r] * alpha + p * vr[j][r];
+      for (int r = 0; r < PER; r++) acc[r] = acc[r] * alpha + p * vr[k][r];
       m = m_new;
     }
+  }
+  // the warp's groups merged: lanes of the same dims across the groups
+  float mw = m;
+#pragma unroll
+  for (int o = KEY_LANES; o < WARP; o *= 2) mw = fmaxf(mw, __shfl_xor_sync(0xffffffffu, mw, o));
+  const float wt = m == -INFINITY ? 0.0f : __expf(m - mw);
+  l *= wt;
+#pragma unroll
+  for (int r = 0; r < PER; r++) acc[r] *= wt;
+#pragma unroll
+  for (int o = KEY_LANES; o < WARP; o *= 2) {
+    l += __shfl_xor_sync(0xffffffffu, l, o);
+#pragma unroll
+    for (int r = 0; r < PER; r++) acc[r] += __shfl_xor_sync(0xffffffffu, acc[r], o);
+  }
+  m = mw;
+  if (group == 0) {
+#pragma unroll
+    for (int r = 0; r < PER; r++) sacc[warp][j * PER + r] = acc[r];
   }
   if (lane == 0) {
     sm[warp] = m;
     sl[warp] = l;
   }
-#pragma unroll
-  for (int r = 0; r < R; r++) sacc[warp][lane * R + r] = acc[r];
   __syncthreads();
   if (warp != 0) return;
   float mt = -INFINITY;

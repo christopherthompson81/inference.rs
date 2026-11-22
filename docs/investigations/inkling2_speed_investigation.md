@@ -523,3 +523,31 @@ No gain: the decode attention is not bound by its bytes. A warp a key reduces ea
 shuffles) and folds it with an exp, so at 9.8K keys it is bound by instruction issue. Halving the K/V bytes moves
 nothing until the kernel takes several keys a warp at once (lane groups a key, fewer shuffles a key). The q-types
 (q8, q4) still have no attention read path.
+
+## Run 19 - 2026-11-22 21:15
+
+The decode attention by lane groups. Each warp splits into 4 groups of 8 lanes, a group taking a key and a lane 1/8
+of the head's dims (`KEY_LANES`), so a key's dot reduces over 8 lanes in 3 shuffles and a warp folds 4 keys at once
+where it folded 1 (DECODE_KEYS 2 a group a step). The warp steps as one, a group masking keys past its split; the
+groups merge by shuffles, the warps in shared memory as before. A lane's 16 dims of q, accumulator and two keys' K/V
+need ~100 registers, so the block went from 32 warps to 8 (no spills) and the key splits make up the blocks (at most
+16 a row, 6 blocks an SM's worth of rows).
+
+```
+served decode tok/s, context (tokens)   8       5689    9824
+Run 18 bf16 KV                          108.8   89.5    88.5
+lane groups, bf16                       110.5   98.2    89.8
++ splits 16, 6 blocks an SM, bf16       110.7   98.6    89.9
++ splits 16, f8e4m3                     108.8   98.1    89.8
+
+decode_kernel at 9824 (us a step, node trace)
+Run 18                                  2520    (52.5 us a call, 7 splits x 24 heads)
+lane groups                             1869    (38.9, 8 x 24)
+splits 16                               1737    (36.5, 16 x 24; 24-95 us a call)
+short context (8)                        450
+```
+
+All of the long context's extra time is this kernel (the other graph kernels are within 1%). At 95 us a global layer
+reads ~40 MB, ~420 GB/s of the 3090's ~936, so it is still short of bandwidth. FP8's half bytes gain nothing yet:
+its widening costs what the bytes save. The 24 query heads share 8 KV heads, so three blocks read each K/V. A block
+a KV head serving its 3 query heads would read each key once for three queries.
