@@ -10,7 +10,7 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::{D, DType, Device, IndexOp, Module, Result, Tensor};
 
 pub(crate) const ARCHITECTURE: &str = "Inkling2DSpark";
-pub(crate) const WEIGHTS: &str = "mtp.safetensors";
+pub(crate) const WEIGHTS: &str = inference_nn::speculative::CHECKPOINT_DRAFTER_WEIGHTS;
 const RNN_HEAD: &str = "rnn_hidden";
 const LOCAL: &str = "sliding_attention";
 const GLOBAL: &str = "full_attention";
@@ -22,11 +22,11 @@ pub(crate) type MakeLinear<'a> = dyn FnMut(&str, Tensor) -> Result<Arc<dyn Quant
 /// The drafter config of an Inkling 2 checkpoint's `config.json` (its `mtp_config` beside the text model's), or
 /// `None` for another checkpoint.
 pub(crate) fn drafter_config(value: &serde_json::Value) -> Option<serde_json::Value> {
-    let mtp = value.get("mtp_config")?;
-    let text = value.get("text_config")?;
-    if !text.get("model_type")?.as_str()?.starts_with("inkling2") {
+    if !inference_nn::speculative::config_carries_drafter(value) {
         return None;
     }
+    let mtp = value.get("mtp_config")?;
+    let text = value.get("text_config")?;
     let layers = mtp.get("num_hidden_layers")?.as_u64()?;
     let local = mtp.get("local_layer_ids")?.as_array()?;
     let layer_types = (0..layers)

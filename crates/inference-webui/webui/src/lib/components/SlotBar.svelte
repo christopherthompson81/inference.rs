@@ -16,7 +16,6 @@
   // the select's value for a source the inventory does not list: a Hugging Face repository
   const REPO = "__repo__";
   const DRAFT_ISQ_TYPES = ["q4k", "q5k", "q6k", "q8_0"];
-  const DEFAULT_DRAFT_ISQ = "q4k";
   // the per-layer select's values: the profile or rule (the server's default), none, or typed overrides
   const LAYERS_UNIFORM = "uniform";
   const LAYERS_CUSTOM = "__custom__";
@@ -252,8 +251,6 @@
               value={form.mtpDrafter}
               onchange={(e) => {
                 form.mtpDrafter = e.currentTarget.value;
-                // a GGUF model's drafter would otherwise load at BF16; q4k keeps its acceptance at a quarter of the memory
-                if (form.mtpDrafter && !form.mtpDraftIsq) form.mtpDraftIsq = DEFAULT_DRAFT_ISQ;
                 managerStore.persistForms();
               }}
               disabled={activity.busy}
@@ -267,8 +264,12 @@
               {/if}
             </select>
           </label>
+          <label class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300" title="Each step drafts, or decodes plainly when the drafter's recent acceptance says that is faster">
+            <input type="checkbox" class="accent-blue-600" bind:checked={form.mtpAutoDepth} onchange={() => managerStore.persistForms()} disabled={activity.busy} />
+            Auto depth
+          </label>
           {#if form.mtpDrafter}
-            <label class="flex flex-col gap-1" title="The drafter's weight type; Model's takes the model's in-situ quantization (none for a GGUF, so BF16)">
+            <label class="flex flex-col gap-1" title="The drafter's weight type; Default is q8_0 beside a GGUF, else the model's in-situ quantization">
               <span class="text-[11px] text-gray-500 dark:text-gray-400">Drafter weights</span>
               <select
                 class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
@@ -276,7 +277,7 @@
                 onchange={() => managerStore.persistForms()}
                 disabled={activity.busy}
               >
-                <option value="">Model's</option>
+                <option value="">Default</option>
                 {#each DRAFT_ISQ_TYPES as isq (isq)}
                   <option value={isq}>{isq}</option>
                 {/each}

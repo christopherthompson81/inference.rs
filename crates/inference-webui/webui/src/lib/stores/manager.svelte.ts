@@ -84,8 +84,10 @@ export interface SlotForm {
   mtpDrafts: number;
   /** A drafter checkpoint (DFlash) to draft with; "" uses the model's own MTP head. */
   mtpDrafter: string;
-  /** The drafter's weight type (`q4k`, `q8_0`); "" takes the model's (BF16 beside a GGUF). */
+  /** The drafter's weight type (`q4k`, `q8_0`); "" takes the server's (q8_0 beside a GGUF, else the model's). */
   mtpDraftIsq: string;
+  /** Whether each step drafts or decodes plainly, whichever the drafter's recent acceptance says is faster. */
+  mtpAutoDepth?: boolean;
   mmproj: string;
   /** The voice activity model to load beside it: unset takes the first the inventory lists, "" none. */
   vad?: string;
@@ -243,6 +245,7 @@ class ManagerStore {
         mtpDrafts: request.mtp?.n_predict ?? 0,
         mtpDrafter: request.mtp?.model ?? "",
         mtpDraftIsq: request.mtp?.draft_isq ?? "",
+        mtpAutoDepth: request.mtp?.auto_depth ?? false,
         mmproj: request.mmproj ?? "",
         vad: (SLOTS[slot] as Slot).vad ? (request.vad ?? "") : form.vad,
         device: request.device ?? "auto",
@@ -268,6 +271,7 @@ class ManagerStore {
         if (form.mtpDrafts > 0) request.mtp.n_predict = form.mtpDrafts;
         if (form.mtpDrafter) request.mtp.model = form.mtpDrafter;
         if (form.mtpDrafter && form.mtpDraftIsq) request.mtp.draft_isq = form.mtpDraftIsq;
+        if (form.mtpAutoDepth) request.mtp.auto_depth = true;
       }
       if (form.mmproj) request.mmproj = form.mmproj;
       const cache = cacheType(form);
@@ -318,9 +322,9 @@ class ManagerStore {
   }
 
   /** The inventory's models a slot can load, by name. */
-  /** The drafters (DFlash) a chat load can draft with in place of its own MTP head. */
+  /** The drafters (DFlash, or a checkpoint carrying one) a chat load can draft with in place of its own MTP head. */
   get drafters(): InventoryModel[] {
-    return (this.inventory?.models ?? []).filter((model) => model.kind === "drafter");
+    return (this.inventory?.models ?? []).filter((model) => model.kind === "drafter" || model.carries_drafter);
   }
 
   /** The voice activity models a speech recognition load can cut its long recordings with. */

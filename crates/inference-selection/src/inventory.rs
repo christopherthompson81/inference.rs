@@ -117,6 +117,9 @@ pub struct InventoryModel {
     pub files: Vec<String>,
     /// For a text GGUF, the projector GGUFs beside it made for the same base model.
     pub projectors: Vec<String>,
+    /// A model directory whose checkpoint carries a drafter (Inkling 2's `mtp.safetensors`), which a load of the
+    /// model, its GGUFs included, names as its drafter.
+    pub carries_drafter: bool,
     /// Why it could not be fully inspected.
     pub error: Option<String>,
 }
@@ -727,6 +730,10 @@ fn dir_model(dir: &Path, origin: Origin<'_>) -> InventoryModel {
             model.kind = Some(InventoryKind::Layout);
             return model;
         }
+        model.carries_drafter = inference_nn::speculative::config_carries_drafter(&config)
+            && dir
+                .join(inference_nn::speculative::CHECKPOINT_DRAFTER_WEIGHTS)
+                .is_file();
         if model
             .architecture
             .as_deref()
@@ -774,6 +781,7 @@ fn base_model_entry(path: PathBuf, format: ModelFormat, origin: Origin<'_>) -> I
         modified: None,
         files: Vec::new(),
         projectors: Vec::new(),
+        carries_drafter: false,
         error: None,
     }
 }
@@ -983,6 +991,28 @@ mod tests {
                 "{architecture}"
             );
         }
+    }
+
+    #[test]
+    fn a_checkpoint_with_its_drafter_says_it_carries_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"{"architectures": ["Inkling2LoopForConditionalGeneration"],
+            "text_config": {"model_type": "inkling2_loop_text"}, "mtp_config": {"num_hidden_layers": 3}}"#;
+        for (name, weights) in [("with-drafter", true), ("without-drafter", false)] {
+            let checkpoint = dir.path().join(name);
+            fs::create_dir(&checkpoint).unwrap();
+            fs::write(checkpoint.join("config.json"), config).unwrap();
+            fs::write(checkpoint.join("model.safetensors"), b"").unwrap();
+            if weights {
+                fs::write(checkpoint.join("mtp.safetensors"), b"").unwrap();
+            }
+        }
+        let scan = scan_models(&ScanRequest {
+            folders: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        });
+        assert!(by_name(&scan, "with-drafter").carries_drafter);
+        assert!(!by_name(&scan, "without-drafter").carries_drafter);
     }
 
     #[test]
