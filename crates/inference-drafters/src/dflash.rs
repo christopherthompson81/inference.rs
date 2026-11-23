@@ -318,6 +318,19 @@ impl DFlashConfig {
         }
     }
 
+    /// What of the drafter's checkpoint stays in host memory once loaded (Inkling 2's `markov_w1` on CUDA), in bytes.
+    pub fn host_bytes(&self, dtype: DType, device: &Device) -> usize {
+        match self.markov_rank {
+            Some(rank)
+                if self.is_inkling()
+                    && crate::inkling::is_rnn_head(self.markov_head_type.as_deref()) =>
+            {
+                crate::inkling::host_table_bytes(self.vocab_size, rank, dtype, device)
+            }
+            _ => 0,
+        }
+    }
+
     /// Whether a safetensors file of the drafter's directory holds its weights (an Inkling 2 checkpoint keeps its
     /// drafter apart from the target's shards).
     pub fn reads_weight_file(&self, path: &std::path::Path) -> bool {
@@ -2980,6 +2993,7 @@ impl DFlashDraftModel {
                     })?;
                     return Ok(Markov::Recurrent(crate::inkling::RnnMarkovHead::load(
                         vb.pp("markov_head"),
+                        vb_host.pp("markov_head"),
                         crate::inkling::RnnShape {
                             dtype,
                             padded_vocab: cfg.vocab_size,

@@ -606,6 +606,19 @@ mod fence_tests {
             .max_all()?
             .to_scalar::<f32>()?;
         assert_eq!(diff, 0.0);
+        // the same table mapped straight from the host, never through VRAM
+        let from_host = table
+            .to_device(&Device::Cpu)?
+            .to_mapped_host_on(&device)?
+            .expect("a host tensor maps onto a CUDA device");
+        assert!(from_host.device().is_cuda());
+        let diff = (table.index_select(&ids, 0)? - from_host.index_select(&ids, 0)?)?
+            .to_dtype(DType::F32)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert_eq!(diff, 0.0);
+        assert!(table.to_mapped_host_on(&Device::Cpu)?.is_none());
         let quantized = QTensor::quantize_onto(
             &table.to_dtype(DType::F32)?.to_device(&Device::Cpu)?,
             GgmlDType::Q4K,

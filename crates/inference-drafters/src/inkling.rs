@@ -67,6 +67,21 @@ pub(crate) fn drafter_config(value: &serde_json::Value) -> Option<serde_json::Va
     Some(config)
 }
 
+/// The recurrent head's `markov_w1` (`[padded vocab, rank]` at `dtype`), which a CUDA drafter keeps in host memory, in
+/// bytes; 0 elsewhere.
+pub(crate) fn host_table_bytes(
+    padded_vocab: usize,
+    rank: usize,
+    dtype: DType,
+    device: &Device,
+) -> usize {
+    if device.is_cuda() && cfg!(feature = "cuda") {
+        padded_vocab * rank * dtype.size_in_bytes()
+    } else {
+        0
+    }
+}
+
 /// The recurrent head's fold of `hidden_out` into the head, `[padded vocab, rank]` at `dtype` and `[padded vocab]`
 /// F32, in bytes: made on the first draft, after the paged cache is sized.
 pub(crate) fn fold_bytes(padded_vocab: usize, rank: usize, dtype: DType, device: &Device) -> usize {
@@ -280,8 +295,31 @@ pub(crate) struct RnnShape {
     pub(crate) softcap: f64,
 }
 
+// A table each draft reads one row of: in pinned host memory over the bus on CUDA, so the drafter, loaded beside a
+// cache already sized to the device, holds it outside VRAM; elsewhere where the weights load.
+fn row_table(
+    vb: ShardedVarBuilder,
+    host: ShardedVarBuilder,
+    shape: (usize, usize),
+) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if vb.device().is_cuda()
+        && let Some(mapped) = host.get(shape, "weight")?.to_mapped_host_on(vb.device())?
+    {
+        return Ok(mapped);
+    }
+    #[cfg(not(feature = "cuda"))]
+    let _ = host;
+    vb.get(shape, "weight")
+}
+
 impl RnnMarkovHead {
-    pub(crate) fn load(vb: ShardedVarBuilder, shape: RnnShape) -> Result<Self> {
+    /// `host` reads the same weights on the host, for the tables a draft reads a row of.
+    pub(crate) fn load(
+        vb: ShardedVarBuilder,
+        host: ShardedVarBuilder,
+        shape: RnnShape,
+    ) -> Result<Self> {
         let RnnShape {
             dtype,
             padded_vocab,
@@ -297,7 +335,11 @@ impl RnnMarkovHead {
         let columns = |start: usize, len: usize| rnn_w.narrow(1, start, len)?.t()?.contiguous();
         Ok(Self {
             rank,
-            w1: vb.pp("markov_w1").get((padded_vocab, rank), "weight")?,
+            w1: row_table(
+                vb.pp("markov_w1"),
+                host.pp("markov_w1"),
+                (padded_vocab, rank),
+            )?,
             step_w: columns(0, 2 * rank)?,
             context_w: columns(2 * rank, 2 * hidden)?,
             rnn_b: f32(vb.pp("rnn_proj").get(3 * rank, "bias")?)?,
