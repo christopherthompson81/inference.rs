@@ -32,10 +32,15 @@ use crate::dspine::{BridgeStash, DSpineHead, DSpineKeys, DSpineSpec, SecondPass,
 use inference_nn::layers::{RmsNorm, YarnRopeConfig, yarn_inv_freq_and_attention_factor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_nn::paged_attention::AuxiliaryPagedLayers;
+
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+mod paged_graph;
 use inference_nn::speculative::{
     MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay, is_drafter_architecture,
 };
 use inference_nn::utils::varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors};
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+pub(crate) use paged_graph::PagedGraphRun;
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_nn::cuda::graph_capture::{
@@ -1509,6 +1514,26 @@ impl DFlashCudaGraphOutput {
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
+/// A paged draft's rows on the host: `[batch, width]` block tables, its rows' slots and each sequence's length.
+struct PagedDraftSlots {
+    tables: Vec<u32>,
+    width: usize,
+    slots: Vec<i64>,
+    kv_lens: Vec<u32>,
+}
+
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+/// A paged draft's attention inputs: `[batch, width]` block tables, its rows' slots, each sequence's length with its
+/// rows, and the packed rows' offsets.
+#[derive(Clone, Copy)]
+struct PagedDraftMeta<'a> {
+    block_tables: &'a Tensor,
+    slot_mapping: &'a Tensor,
+    seq_lens: &'a Tensor,
+    cumulative_query_lens: &'a Tensor,
+}
+
+#[cfg(all(feature = "cuda", target_family = "unix"))]
 struct DFlashWindowedForward<'a> {
     noise_embedding: &'a Tensor,
     anchors: Option<&'a Tensor>,
@@ -1530,6 +1555,8 @@ pub struct DFlashPagedCache<'a> {
 pub struct DFlashDraftModel {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     cuda_graphs: Mutex<DFlashCudaGraphState>,
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    paged_graphs: Mutex<paged_graph::PagedGraphState>,
     layers: Vec<DFlashLayer>,
     context: ContextProjection,
     #[cfg(feature = "cuda")]
@@ -2546,10 +2573,12 @@ impl DFlashDraftModel {
     pub fn evict_cuda_graphs_lru(&self, max_entries: usize) -> usize {
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         {
-            self.cuda_graphs
+            let windowed = self
+                .cuda_graphs
                 .lock()
                 .expect("dflash CUDA graph cache poisoned")
-                .evict_lru_for_memory_pressure(max_entries)
+                .evict_lru_for_memory_pressure(max_entries);
+            windowed + self.evict_paged_graphs(max_entries - windowed)
         }
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         {
@@ -2923,6 +2952,8 @@ impl DFlashDraftModel {
         Ok(Self {
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             cuda_graphs: Mutex::new(DFlashCudaGraphState::default()),
+            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            paged_graphs: Mutex::new(paged_graph::PagedGraphState::default()),
             layers,
             context,
             #[cfg(feature = "cuda")]
@@ -4051,38 +4082,12 @@ impl DFlashDraftModel {
         paged: DFlashPagedCache<'_>,
     ) -> Result<DraftHidden> {
         let (batch, block, _) = noise_embedding.dims3()?;
-        let (block_tables, width, slots, kv_lens) = {
-            let mut manager = inference_nn::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
-            let page = manager.block_size();
-            let width = start_positions
-                .iter()
-                .map(|start| (start + block).div_ceil(page))
-                .max()
-                .unwrap_or(1);
-            let mut tables = Vec::with_capacity(batch * width);
-            let mut slots = Vec::with_capacity(batch * block);
-            let mut kv_lens = Vec::with_capacity(batch);
-            for (seq_id, start) in seq_ids.iter().zip(start_positions) {
-                if manager
-                    .allocate_slots(*seq_id, start + block, &[])
-                    .is_none()
-                {
-                    inference_tensor::bail!("no paged blocks left for DFlash draft rows");
-                }
-                let mapping = manager
-                    .get_slot_mapping(*seq_id, *start, block)
-                    .ok_or_else(|| {
-                        inference_tensor::Error::msg("DFlash draft rows have no slots")
-                    })?;
-                slots.extend(mapping);
-                let table = manager.get_block_table(*seq_id, width).ok_or_else(|| {
-                    inference_tensor::Error::msg("DFlash draft has no block table")
-                })?;
-                tables.extend(table.into_iter().map(|block| block.max(0).unsigned_abs()));
-                kv_lens.push(u32::try_from(start + block).map_err(inference_tensor::Error::wrap)?);
-            }
-            (tables, width, slots, kv_lens)
-        };
+        let PagedDraftSlots {
+            tables: block_tables,
+            width,
+            slots,
+            kv_lens,
+        } = self.paged_draft_slots(seq_ids, start_positions, block, 0, paged)?;
         let block_tables = Tensor::from_vec(block_tables, (batch, width), &self.device)?;
         let slot_mapping = Tensor::from_vec(slots, (batch * block,), &self.device)?;
         let seq_lens = Tensor::from_vec(kv_lens, (batch,), &self.device)?;
@@ -4105,13 +4110,92 @@ impl DFlashDraftModel {
             }
             (Tensor::stack(&coss, 0)?, Tensor::stack(&sins, 0)?)
         };
+        self.draft_hidden_paged_tensors(
+            noise_embedding,
+            anchors,
+            (&q_cos, &q_sin),
+            &PagedDraftMeta {
+                block_tables: &block_tables,
+                slot_mapping: &slot_mapping,
+                seq_lens: &seq_lens,
+                cumulative_query_lens: &cumulative_query_lens,
+            },
+            paged,
+        )
+    }
+
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    /// Slots for each sequence's draft rows at `start..start + block` in the paged cache, and the attention's block
+    /// tables (at least `min_width` wide) and lengths.
+    fn paged_draft_slots(
+        &self,
+        seq_ids: &[usize],
+        start_positions: &[usize],
+        block: usize,
+        min_width: usize,
+        paged: DFlashPagedCache<'_>,
+    ) -> Result<PagedDraftSlots> {
+        let mut manager = inference_nn::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
+        let page = manager.block_size();
+        let width = start_positions
+            .iter()
+            .map(|start| (start + block).div_ceil(page))
+            .max()
+            .unwrap_or(1)
+            .max(min_width);
+        let batch = seq_ids.len();
+        let mut tables = Vec::with_capacity(batch * width);
+        let mut slots = Vec::with_capacity(batch * block);
+        let mut kv_lens = Vec::with_capacity(batch);
+        for (seq_id, start) in seq_ids.iter().zip(start_positions) {
+            if manager
+                .allocate_slots(*seq_id, start + block, &[])
+                .is_none()
+            {
+                inference_tensor::bail!("no paged blocks left for DFlash draft rows");
+            }
+            let mapping = manager
+                .get_slot_mapping(*seq_id, *start, block)
+                .ok_or_else(|| inference_tensor::Error::msg("DFlash draft rows have no slots"))?;
+            slots.extend(mapping);
+            let table = manager
+                .get_block_table(*seq_id, width)
+                .ok_or_else(|| inference_tensor::Error::msg("DFlash draft has no block table"))?;
+            tables.extend(table.into_iter().map(|block| block.max(0).unsigned_abs()));
+            kv_lens.push(u32::try_from(start + block).map_err(inference_tensor::Error::wrap)?);
+        }
+        Ok(PagedDraftSlots {
+            tables,
+            width,
+            slots,
+            kv_lens,
+        })
+    }
+
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    /// The paged draft from its attention inputs on the device, which a CUDA graph keeps in its own buffers.
+    fn draft_hidden_paged_tensors(
+        &self,
+        noise_embedding: &Tensor,
+        anchors: Option<&Tensor>,
+        (q_cos, q_sin): (&Tensor, &Tensor),
+        meta: &PagedDraftMeta<'_>,
+        paged: DFlashPagedCache<'_>,
+    ) -> Result<DraftHidden> {
+        let (batch, block, _) = noise_embedding.dims3()?;
+        let PagedDraftMeta {
+            block_tables,
+            slot_mapping,
+            seq_lens,
+            cumulative_query_lens,
+        } = *meta;
         #[allow(clippy::cast_precision_loss)]
         let scale = 1f32 / (self.head_dim as f32).sqrt();
         let hs = self.run_draft_layers(
             noise_embedding,
             anchors,
-            &q_cos,
-            &q_sin,
+            q_cos,
+            q_sin,
             DraftAttentionLayout::TokensFirst,
             |layer_idx, layer, q, k_noise, v_noise| {
                 let (key_cache, value_cache) = self.paged_layer(paged, layer_idx)?;
@@ -4120,7 +4204,7 @@ impl DFlashDraftModel {
                     v_noise,
                     &key_cache,
                     &value_cache,
-                    &slot_mapping,
+                    slot_mapping,
                     inference_paged_attn::DEFAULT_FP8_KV_CACHE_SCALES,
                 )?;
                 let q = q.reshape((batch * block, self.num_heads, self.head_dim))?;
@@ -4134,13 +4218,13 @@ impl DFlashDraftModel {
                 let kv = inference_fattn::PagedKv {
                     k_cache: &key_cache,
                     v_cache: &value_cache,
-                    block_table: &block_tables,
-                    seq_lens: &seq_lens,
+                    block_table: block_tables,
+                    seq_lens,
                     full_lens: None,
                     keep_lens: None,
                 };
                 let q_seqs = inference_fattn::Packed {
-                    cu_seqlens: &cumulative_query_lens,
+                    cu_seqlens: cumulative_query_lens,
                     max_len: block,
                 };
                 let out = inference_fattn::flash_attn_paged_varlen(&q, &q_seqs, &kv, &opts)?;

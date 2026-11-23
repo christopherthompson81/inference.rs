@@ -849,3 +849,33 @@ Two picks a cycle, so ~100 us a cycle (0.55%). Acceptance at drafts 2 over Run 2
 accepted a step with either fold, within 1-3 tokens a prompt. Served speed is up 0.5-1.9% a prompt, though the card
 drifts ~2% between runs. The drafter's `markov_w1` (another 103 MB BF16, one row read a draft) is the next one to
 shrink for context.
+
+## Run 31 - 2026-11-23 13:00
+
+The paged-context drafter's pass in a CUDA graph (`dflash/paged_graph.rs`). DFlash's graphs need a windowed pool,
+and Inkling's drafter keeps a global layer's context in the target's paged cache, so it ran eagerly: 177 launches a
+cycle. The graph's buffers hold the rows' ids and positions, the anchors, the slots, the block tables and lengths,
+and each row's Markov head context, refreshed from the host before each replay. The block table is padded to a power
+of two (at least 16 columns), so a growing context recaptures a few times. fattn bounds its key loop by the
+longest length on the device, so padding costs no attention. A shape's first pass runs eagerly under the host-vector
+cache guard (the first capture failed with "h2d param cache miss": the warm-up had run without it), and the next
+one captures. The anchor row embeds through the target's `embed_tokens` (Inkling's adds a norm), so the run takes
+it as a closure. The eager forward and the graph share `draft_hidden_paged_tensors` and `paged_draft_slots`.
+
+```
+graph-level nsys, the photosynthesis prompt, drafts 2     cycle     busy      idle    eager launches a cycle
+eager drafter (Run 29, bf16 fold)                         18.39 ms  17.72 ms  0.61    177
+graphed drafter (1.16 ms a replay)                        18.04     17.60     0.40     45
+```
+
+What's left idle is ~10 host round trips around verification (device-to-host reads, 10-30 us each).
+
+Served, Run 27's eight prompts (accepted counts equal to the 8-bit fold run's, prompt for prompt):
+
+```
+all, tok/s      bf16 fold, eager   8-bit fold, eager   8-bit fold, graph
+drafts 2        111.6              111.2               114.1
+auto            117.4 (Run 28)                         120.1
+```
+
+The tiny checkpoint's drafter tests replay it 42 times with greedy output unchanged.

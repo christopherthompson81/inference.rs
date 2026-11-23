@@ -520,6 +520,23 @@ impl ExternalDrafter {
                 uniforms,
             });
         let lm_head = target.draft_lm_head();
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if sampling.is_none()
+            && let Some(paged) = dflash_paged_cache(drafter, &ctx.cache)
+            && let Some(proposals) =
+                drafter.paged_proposals_cuda_graph(&crate::dflash::PagedGraphRun {
+                    seq_ids: ctx.seq_ids,
+                    anchors: ctx.sampled_tokens,
+                    start_positions: ctx.base_lens,
+                    n_predict,
+                    embed_tokens: &|ids| target.embed_tokens(ids),
+                    token_embedding: target.token_embedding(),
+                    lm_head: &lm_head,
+                    paged,
+                })?
+        {
+            return dflash_speculative_batch(proposals).map(Some);
+        }
         let graph_proposals = drafter.proposals_cuda_graph(&DFlashGraphProposalInputs {
             seq_ids: ctx.seq_ids,
             anchors: ctx.sampled_tokens,
