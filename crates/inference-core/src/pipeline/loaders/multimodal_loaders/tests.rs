@@ -728,6 +728,7 @@ fn llama4_processor_uses_defaults_without_processor_config() {
 #[test]
 fn direct_gguf_adjacent_rope_overrides_multimodal_defaults() {
     let metadata = NormalLoadingMetadata {
+        paged_kv: None,
         mapper: Box::new(DummyDeviceMapper {
             nm_device: Device::Cpu,
         }),
@@ -751,6 +752,7 @@ fn direct_gguf_adjacent_rope_overrides_multimodal_defaults() {
                 .is_gptx_for(
                     r#"{"_inference_qk_rope_layout":"adjacent"}"#,
                     &NormalLoadingMetadata {
+                        paged_kv: None,
                         mapper: Box::new(DummyDeviceMapper {
                             nm_device: Device::Cpu,
                         }),

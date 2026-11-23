@@ -40,6 +40,13 @@ pub enum PagedCacheType {
     },
 }
 
+/// A load's paged cache as a model lays its own state out beside it: the cache type and the tokens a block holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PagedKvLayout {
+    pub cache_type: PagedCacheType,
+    pub block_size: usize,
+}
+
 const QUANT_PREFIX: char = 'q';
 const KV_SEPARATOR: char = '/';
 
@@ -60,6 +67,19 @@ impl PagedCacheType {
             PagedCacheType::F8E4M3 => DType::F8E4M3,
             PagedCacheType::Quant { .. } => DType::U8,
             PagedCacheType::Auto | PagedCacheType::Unquantized => act_dtype,
+        }
+    }
+
+    /// A cached row of `head_dim` values as an HND cache stores it: its element type and length; `None` for K and
+    /// V of different widths.
+    pub fn row_shape(&self, head_dim: usize, act_dtype: DType) -> Option<(DType, usize)> {
+        match *self {
+            PagedCacheType::Quant { k, v } if k == v => Some((
+                DType::U8,
+                inference_paged_attn::kv_quant::row_bytes(head_dim, k),
+            )),
+            PagedCacheType::Quant { .. } => None,
+            _ => Some((self.to_dtype(act_dtype), head_dim)),
         }
     }
 

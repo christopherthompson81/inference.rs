@@ -216,6 +216,7 @@ impl RwkvModel {
             .collect::<Vec<_>>();
         let cache = HybridCache::new(
             HybridCacheConfig {
+                initial_capacity: None,
                 layer_types: vec![HybridLayerType::Recurrent; shape.layers],
                 max_seq_len: MAX_POSITIONS,
                 recurrent: RecurrentLayerConfig {

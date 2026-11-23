@@ -25,7 +25,9 @@ pub mod windowed_pool;
 pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use attention_backend::AttentionBackendKind;
-pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType, cache_activation_dtype};
+pub use cache_engine::{
+    CacheConfig, CacheEngine, PagedCacheType, PagedKvLayout, cache_activation_dtype,
+};
 pub use cache_layers::{
     CachePlan, KvFingerprint, PagedCacheLayers, plan as cache_plan, profile_name as kv_profile_name,
 };
@@ -317,6 +319,16 @@ impl PagedAttentionConfig {
     pub fn with_auxiliary_layers(mut self, layers: AuxiliaryPagedLayers) -> Self {
         self.auxiliary_layers = Some(layers);
         self
+    }
+
+    /// The cache's layout as a model lays its own state out beside it.
+    pub fn kv_layout(&self) -> PagedKvLayout {
+        PagedKvLayout {
+            cache_type: self.cache_type,
+            block_size: self
+                .block_size
+                .unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE),
+        }
     }
 
     /// The model's cache config as the cache engine and the planner size it: with the auxiliary layers appended.

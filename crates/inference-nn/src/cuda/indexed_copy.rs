@@ -73,6 +73,7 @@ impl InplaceOp3 for IndexedRowCopy {
             DType::BF16 => launch!(half::bf16, indexed_row_copy_bf16),
             DType::F16 => launch!(half::f16, indexed_row_copy_f16),
             DType::F32 => launch!(f32, indexed_row_copy_f32),
+            DType::U8 => launch!(u8, indexed_row_copy_u8),
             dtype => inference_tensor::bail!("indexed row copy does not support {dtype:?}"),
         }
         drop(rows_guard);

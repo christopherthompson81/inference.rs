@@ -131,22 +131,20 @@ impl DeviceMappedModelLoader for Inkling2Loader {
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = parse(config)?;
-        let slots = cfg.cache_slots();
-        let base = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: slots,
-            hidden_size: cfg.hidden_size,
-            num_kv_heads: cfg.num_key_value_heads,
-            num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None,
-            k_head_dim: cfg.head_dim,
-            v_head_dim: cfg.head_dim,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-        // every slot attends through the paged cache; each keeps an f32 convolution state beside it
+        Ok(Box::new(cfg.paged_cache_config(base_metadata(&cfg), None)))
+    }
+
+    // on CUDA the sliding slots keep window rings, which the planner counts per sequence rather than per token
+    fn model_config_for(
+        &self,
+        config: &str,
+        device: &inference_tensor::Device,
+        paged: Option<crate::paged_attention::PagedKvLayout>,
+    ) -> Result<Box<dyn ModelConfigLike>> {
+        let cfg = parse(config)?;
+        let ring = cfg.window_ring(paged, device, DType::BF16);
         Ok(Box::new(
-            inference_nn::paged_attention::HybridPagedKvCacheConfig::new(base, vec![true; slots])
-                .with_recurrent_state_bytes(cfg.conv_state_bytes()),
+            cfg.paged_cache_config(base_metadata(&cfg), ring.as_ref()),
         ))
     }
 }
@@ -162,5 +160,21 @@ fn parse(config: &str) -> Result<crate::inkling2::Config> {
             Ok(cfg)
         }
         None => Ok(crate::inkling2::Config::from_json(config)?),
+    }
+}
+
+// the slots as the paged cache sees them: one layer each, every visit's heads and head size
+fn base_metadata(cfg: &crate::inkling2::Config) -> ModelConfigMetadata {
+    let slots = cfg.cache_slots();
+    ModelConfigMetadata {
+        max_seq_len: cfg.max_position_embeddings,
+        num_layers: slots,
+        hidden_size: cfg.hidden_size,
+        num_kv_heads: cfg.num_key_value_heads,
+        num_attn_heads: cfg.num_attention_heads,
+        sliding_window: None,
+        k_head_dim: cfg.head_dim,
+        v_head_dim: cfg.head_dim,
+        kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
     }
 }

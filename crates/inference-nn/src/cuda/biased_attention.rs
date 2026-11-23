@@ -65,6 +65,9 @@ pub enum Keys<'a> {
         k_cache: &'a Tensor,
         v_cache: &'a Tensor,
         block_tables: &'a Tensor,
+        // with a ring of this many blocks a sequence: each table row `(b, 1)` holds its ring's first block, and key
+        // block k is block `first + k % ring` (a window within the ring); 0 for whole tables
+        ring: usize,
     },
 }
 
@@ -186,6 +189,7 @@ pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
         k_cache,
         v_cache,
         block_tables,
+        ring,
     } = &op.keys
         && k_cache.dtype() == DType::U8
     {
@@ -208,6 +212,7 @@ pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
                 k_cache,
                 v_cache,
                 block_tables,
+                ring: *ring,
             },
             past,
             table: op.table,
@@ -375,6 +380,7 @@ fn biased_attention_rows(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
                 k_cache,
                 v_cache,
                 block_tables,
+                ring,
             } => {
                 let (_, cache_heads, block_size, cache_d) = k_cache.dims4()?;
                 let (cache_dtype, row) = match k_cache.dtype() {
@@ -421,6 +427,7 @@ fn biased_attention_rows(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
                         i64_of(table_stride)?,
                         i32_of(width)?,
                         i32_of(block_size)?,
+                        i32_of(*ring)?,
                         t_ptr as *const f32,
                         s_ptr as *const f32,
                         o_ptr as *mut f32,
@@ -635,6 +642,7 @@ mod tests {
                 k_cache: &k_cache,
                 v_cache: &v_cache,
                 block_tables: &tables,
+                ring: 0,
             },
             past: Past::Lens {
                 lens: &lens,
@@ -723,6 +731,7 @@ mod tests {
                         k_cache: &k_cache,
                         v_cache: &v_cache,
                         block_tables: &block_tables,
+                        ring: 0,
                     },
                     past: Past::Lens {
                         lens: &lens,

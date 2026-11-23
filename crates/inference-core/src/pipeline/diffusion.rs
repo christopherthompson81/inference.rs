@@ -219,6 +219,7 @@ impl Loader for DiffusionLoader {
                     shapes,
                     text_encoders: paths.text_encoders.clone(),
                     metadata: crate::pipeline::NormalLoadingMetadata {
+                        paged_kv: None,
                         mapper,
                         loading_isq: false,
                         real_device: device.clone(),

@@ -485,7 +485,9 @@ pub fn prompt_prefill_workspace(
     model: Option<&(dyn ModelConfigLike + Send + Sync)>,
     input: PromptPrefillWorkspaceInput<'_>,
 ) -> Result<PromptPrefillWorkspace> {
-    if !input.requires_prefix_attention {
+    if !input.requires_prefix_attention
+        || model.is_some_and(|model| model.attends_paged_cache_in_place())
+    {
         return Ok(PromptPrefillWorkspace::default());
     }
     let Some(model) = model else {

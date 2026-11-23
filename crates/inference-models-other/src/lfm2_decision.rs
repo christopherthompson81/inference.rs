@@ -867,6 +867,7 @@ mod tests {
         let cfg = config();
         let vb = inference_quant::ShardedSafeTensors::wrap(weights(&cfg), DType::F32, Device::Cpu);
         let metadata = NormalLoadingMetadata {
+            paged_kv: None,
             mapper: Box::new(crate::device_map::DummyDeviceMapper {
                 nm_device: Device::Cpu,
             }),

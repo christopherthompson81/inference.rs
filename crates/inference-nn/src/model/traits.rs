@@ -145,12 +145,15 @@ pub struct NormalLoadingMetadata {
     // Optional Matryoshka Transformer slicing configuration
     pub matformer_slicing_config: Option<MatformerSliceConfig>,
     pub rope_pairing: Option<RopePairing>,
+    // the paged cache the model's KV goes into, when it attends through one
+    pub paged_kv: Option<crate::paged_attention::PagedKvLayout>,
 }
 
 impl NormalLoadingMetadata {
     /// Everything on `device`, unquantized: a model a pipeline builds itself (a speech decoder's stack).
     pub fn single_device(device: &Device) -> Self {
         Self {
+            paged_kv: None,
             mapper: Box::new(crate::device_map::DummyDeviceMapper {
                 nm_device: device.clone(),
             }),

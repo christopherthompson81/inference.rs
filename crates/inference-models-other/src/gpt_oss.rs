@@ -1201,6 +1201,7 @@ mod tests {
 
         let vb = inference_quant::ShardedSafeTensors::wrap(tensors, DType::F32, Device::Cpu);
         let metadata = NormalLoadingMetadata {
+            paged_kv: None,
             mapper: Box::new(crate::device_map::DummyDeviceMapper {
                 nm_device: Device::Cpu,
             }),

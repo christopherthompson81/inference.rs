@@ -57,3 +57,11 @@ extern "C" int indexed_row_copy_f32(const void *src, void *dst,
   return launch_indexed_row_copy<float>(src, dst, dst_rows, rows,
                                         row_elements, stream);
 }
+
+// byte rows: a quantized state (window rings over a q8 cache)
+extern "C" int indexed_row_copy_u8(const void *src, void *dst,
+                                     const uint32_t *dst_rows, int rows,
+                                     int64_t row_elements, int64_t stream) {
+  return launch_indexed_row_copy<uint8_t>(src, dst, dst_rows, rows,
+                                        row_elements, stream);
+}

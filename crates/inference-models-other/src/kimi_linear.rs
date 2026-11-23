@@ -337,6 +337,7 @@ impl Model {
             .collect::<Vec<_>>();
         let cache = HybridCache::new(
             HybridCacheConfig {
+                initial_capacity: None,
                 layer_types: paged_layers
                     .iter()
                     .map(|&full| {

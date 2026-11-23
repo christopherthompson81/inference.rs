@@ -238,6 +238,7 @@ pub fn names_digest<'a>(names: impl IntoIterator<Item = &'a String>) -> u64 {
 
 pub fn metadata() -> NormalLoadingMetadata {
     NormalLoadingMetadata {
+        paged_kv: None,
         mapper: Box::new(DummyDeviceMapper {
             nm_device: Device::Cpu,
         }),

@@ -156,6 +156,7 @@ fn record(
     }
     let weights = RecordingWeights::new(absent, shapes, seed_by_name);
     let metadata = NormalLoadingMetadata {
+        paged_kv: None,
         mapper: DeviceMapSetting::dummy().into_mapper(
             num_layers,
             &Device::Cpu,
