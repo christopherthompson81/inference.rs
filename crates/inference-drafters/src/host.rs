@@ -642,6 +642,8 @@ impl ExternalDrafter {
         if taps.len() != drafter.target_layer_ids.len() || drafter.has_dormant_seq(ctx.seq_ids) {
             return Ok(false);
         }
+        let SpeculativeKvCache::Paged { metadata, .. } = &ctx.cache;
+        let block_size = metadata.block_size;
         let mut full = Vec::new();
         {
             let mut following = self
@@ -674,7 +676,9 @@ impl ExternalDrafter {
                     );
                 }
                 entry.rows += needed;
-                if entry.rows >= FOLLOW_FLUSH_ROWS {
+                // a prefix snapshot at a block boundary captures the drafter's context, so it must be current there
+                let at_boundary = (entry.start_pos + entry.rows).is_multiple_of(block_size);
+                if entry.rows >= FOLLOW_FLUSH_ROWS || at_boundary {
                     full.push(*seq_id);
                 }
             }
