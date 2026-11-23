@@ -125,7 +125,8 @@ impl ThreadWorkspaces {
             match slots.get(&key).copied() {
                 Some(slot) => slot,
                 None => {
-                    let slice = unsafe { dev.alloc::<u8>(capacity)? };
+                    // kept for the thread's life, outlasting the model a thread may run: not in a model's pool chunks
+                    let slice = unsafe { dev.alloc_process_lifetime::<u8>(capacity)? };
                     let slot =
                         Box::leak(Box::new(Mutex::new(WorkspaceSlot { slice, holds: None })));
                     slots.insert(key, slot);

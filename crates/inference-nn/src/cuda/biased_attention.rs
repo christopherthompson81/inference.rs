@@ -45,7 +45,10 @@ fn arrived_counts(dev: &inference_tensor::CudaDevice, stream: &CudaStream) -> Re
     {
         return Ok(None);
     }
-    let counts = dev.alloc_zeros::<u32>(MAX_SPLIT_ROWS)?;
+    let mut counts = unsafe { dev.alloc_process_lifetime::<u32>(MAX_SPLIT_ROWS)? };
+    dev.cuda_stream()
+        .memset_zeros(&mut counts)
+        .map_err(inference_tensor::Error::wrap)?;
     let ptr = {
         let (ptr, _guard) = counts.device_ptr(stream);
         ptr

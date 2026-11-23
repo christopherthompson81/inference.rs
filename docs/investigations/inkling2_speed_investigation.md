@@ -1362,3 +1362,48 @@ fixed 7                           143.7   134.1   203.7      87.2
 
 Auto depth at drafts 7 (`[0, 2, 7]`) is now the best setting: +4-6% over drafts 3 on the mix, +10% on copying, and
 the slowest prompt (prose) up too. Fixed 7 copies fastest but takes prose under plain decode.
+
+## Run 46 - 2026-11-23 18:30
+
+The agentic workload: the web UI Code tab's scripted demo (an agent task of 5-11 rounds, short tool-call replies
+between prefix-cache-hit prefills, context growing past 10K) through the LAN server, the `chat` slot reloaded per
+setting in a fresh server process (reloading a slot in one process lost ~250 MB of free GPU memory a reload, so the
+third setting no longer fit). Decode tok/s over a task's rounds, weighted by tokens generated, two tasks a setting:
+
+```
+chat slot                 task 1 (tokens)     task 2 (tokens)     both
+plain                     94.0 (3056)         94.8 (4164)         94.5
+auto depth, drafts 2      111.2 (3410)        91.2 (184)          110.0
+auto depth, drafts 3      101.2 (3170)        79.4 (403)          98.2
+auto depth, drafts 7      113.7 (5582)        118.0 (4696)        115.6
+```
+
+Agent paths differ between runs (5 to 11 rounds, 184 to 5582 tokens), so a task with few tokens is mostly the tuner's
+12 drafting steps a new sequence explores; drafts 7 leads on the tasks with the most tokens. A Code-tab status line of
+88 tok/s at 10.6K with 1.59 drafts a step (the user's screenshot) is one such short turn. Open: the reload leak, and a
+new sequence starting from the population's preferred depth instead of drafting at full depth for its first steps.
+
+## Run 47 - 2026-11-23 19:30
+
+The model manager losing GPU headroom across reloads (Run 46). Load, use and unload the `chat` slot in one server
+process; GPU memory steady (19.7 GB loaded, 954 MB unloaded), and a failed load frees what it took. But available
+memory at the KV sizing (which synchronizes and trims the stream-ordered pool first) fell after each cycle: the pool
+kept 192-480 MB reserved with only 4-24 KB of it in use after an unload. Process-lifetime buffers came from the same
+pool as a model's tensors and pinned its chunks against the trim: biased attention's split-decode counts (forgotten
+on purpose: captured graphs read them), the cuBLASLt workspace (leaked with its handle), the GGUF MoE workspaces (leaked
+per device and stream) and the per-thread matmul workspaces (freed only as their thread ends, after an unload's trim).
+
+`CudaDevice::alloc_process_lifetime` takes such buffers from a pool of their own (one per device), so a model's pool
+trims back after it goes; a dropped slice frees to its own pool. Headroom (a fresh process's available MB at the KV
+sizing, minus the same after each of three load-use-unload cycles, Inkling C at drafts 7):
+
+```
+              fresh   after cycle 1   2      3      lost
+master        4577    4242            4207   4160   335, 370, 417 (grows ~40 MB a cycle)
+lifetime pool 4542    4175            4207   4197   367, 335, 345 (flat)
+```
+
+The growth is gone. The flat ~340 MB is mostly what a first request creates (cuBLAS state, the graph pool, the lifetime
+pool), which a fresh process pays after its sizing; one 256 MB chunk stays pinned by ~24 KB not traced, and the next
+model's weights reuse it (its pool ends 32 MB larger). The desktop's share of the card moved 770 -> 1270 MB during the
+session, which is why drafts 7 at 229,376 stopped fitting even fresh: that margin is ~100 MB.

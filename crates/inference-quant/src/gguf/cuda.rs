@@ -75,7 +75,7 @@ fn dispatch_workspace_ensure(
         match guard.get(&key).copied() {
             Some(mtx) => mtx,
             None => {
-                let slice = unsafe { dev.alloc::<u32>(len)? };
+                let slice = unsafe { dev.alloc_process_lifetime::<u32>(len)? };
                 let leaked = Box::leak(Box::new(Mutex::new(DispatchWorkspaceSlot {
                     slice,
                     cap: len,
@@ -87,7 +87,7 @@ fn dispatch_workspace_ensure(
     };
     let mut slot = device_mtx.lock().unwrap();
     if slot.cap < len {
-        slot.slice = unsafe { dev.alloc::<u32>(len)? };
+        slot.slice = unsafe { dev.alloc_process_lifetime::<u32>(len)? };
         slot.cap = len;
     }
     let ptr = slot.slice.device_ptr(slot.slice.stream()).0;
@@ -107,7 +107,7 @@ fn u8_workspace_ensure(
         match guard.get(&key).copied() {
             Some(mtx) => mtx,
             None => {
-                let slice = unsafe { dev.alloc::<u8>(len)? };
+                let slice = unsafe { dev.alloc_process_lifetime::<u8>(len)? };
                 let leaked = Box::leak(Box::new(Mutex::new(U8WorkspaceSlot { slice, cap: len })));
                 guard.insert(key, leaked);
                 leaked
@@ -116,7 +116,7 @@ fn u8_workspace_ensure(
     };
     let mut slot = device_mtx.lock().unwrap();
     if slot.cap < len {
-        slot.slice = unsafe { dev.alloc::<u8>(len)? };
+        slot.slice = unsafe { dev.alloc_process_lifetime::<u8>(len)? };
         slot.cap = len;
     }
     Ok(slot)
@@ -135,7 +135,7 @@ fn f32_workspace_ensure(
         match guard.get(&key).copied() {
             Some(mtx) => mtx,
             None => {
-                let slice = unsafe { dev.alloc::<f32>(len)? };
+                let slice = unsafe { dev.alloc_process_lifetime::<f32>(len)? };
                 let leaked = Box::leak(Box::new(Mutex::new(F32WorkspaceSlot { slice, cap: len })));
                 guard.insert(key, leaked);
                 leaked
@@ -144,7 +144,7 @@ fn f32_workspace_ensure(
     };
     let mut slot = device_mtx.lock().unwrap();
     if slot.cap < len {
-        slot.slice = unsafe { dev.alloc::<f32>(len)? };
+        slot.slice = unsafe { dev.alloc_process_lifetime::<f32>(len)? };
         slot.cap = len;
     }
     Ok(slot)

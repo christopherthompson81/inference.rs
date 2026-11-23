@@ -513,6 +513,30 @@ impl CudaDevice {
         self.id
     }
 
+    /// `len` elements for a buffer the process keeps across models (a static's workspace, counts a captured graph
+    /// reads), from a pool of their own: in the pool a model's tensors come from they would pin its chunks, so an
+    /// unloaded model's memory could not trim back to the device. Dropping the slice frees it to that pool.
+    ///
+    /// # Safety
+    /// The memory is uninitialized, as [`cudarc::driver::CudaStream::alloc`]'s.
+    pub unsafe fn alloc_process_lifetime<T: cudarc::driver::DeviceRepr>(
+        &self,
+        len: usize,
+    ) -> Result<cudarc::driver::CudaSlice<T>> {
+        let stream = self.cuda_stream();
+        if !stream.context().has_async_alloc() {
+            return unsafe { stream.alloc::<T>(len) }.w();
+        }
+        let pool = process_lifetime_pool(&stream)?;
+        stream.context().bind_to_thread().w()?;
+        let bytes = (len * std::mem::size_of::<T>()).max(1);
+        let ptr = unsafe {
+            cudarc::driver::result::mem_pool::alloc_async(pool as _, bytes, stream.cu_stream())
+        }
+        .w()?;
+        Ok(unsafe { stream.upgrade_device_ptr(ptr, len) })
+    }
+
     /// Compute capability as `major * 10 + minor` (86 for 8.6), queried once when the device is created.
     pub fn compute_cap(&self) -> usize {
         self.compute_cap
@@ -1090,6 +1114,33 @@ impl BackendDevice for CudaDevice {
     }
 }
 
+// each device's pool for process-lifetime buffers, made once and kept for the process
+fn process_lifetime_pool(stream: &cudarc::driver::CudaStream) -> Result<usize> {
+    use cudarc::driver::sys;
+    let ordinal = stream.context().ordinal();
+    let mut pools = static_pools()
+        .lock()
+        .expect("process-lifetime pools poisoned");
+    if let Some(&pool) = pools.get(&ordinal) {
+        return Ok(pool);
+    }
+    let mut props: sys::CUmemPoolProps = unsafe { std::mem::zeroed() };
+    props.allocType = sys::CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED;
+    props.handleTypes = sys::CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_NONE;
+    props.location.type_ = sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
+    props.location.id = ordinal as i32;
+    stream.context().bind_to_thread().w()?;
+    let pool = unsafe { cudarc::driver::result::mem_pool::create(&props) }.w()? as usize;
+    pools.insert(ordinal, pool);
+    Ok(pool)
+}
+
+fn static_pools() -> &'static std::sync::Mutex<std::collections::HashMap<usize, usize>> {
+    static POOLS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, usize>>> =
+        std::sync::OnceLock::new();
+    POOLS.get_or_init(Default::default)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{DType, Device, Result, Tensor};
@@ -1103,9 +1154,47 @@ mod tests {
             a_tensor_dropped_on_a_thread_without_a_context_frees_cleanly,
             selecting_no_rows_gives_an_empty_tensor,
             index_add_takes_a_destination_at_an_offset,
-            a_view_moves_between_devices_without_its_storage
+            a_view_moves_between_devices_without_its_storage,
+            process_lifetime_buffers_come_from_their_own_pool
         ]
     );
+
+    // a buffer kept across models must not sit in the pool a model's tensors come from, where it would pin a chunk the
+    // unloaded model's memory could not trim back past
+    fn process_lifetime_buffers_come_from_their_own_pool() -> Result<()> {
+        use cudarc::driver::{DevicePtr, sys};
+        let Ok(Device::Cuda(dev)) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let stream = dev.cuda_stream();
+        if !stream.context().has_async_alloc() {
+            return Ok(());
+        }
+        let pool_of = |ptr: u64| -> sys::CUmemoryPool {
+            let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
+            let status = unsafe {
+                sys::cuPointerGetAttribute(
+                    (&mut pool as *mut sys::CUmemoryPool).cast(),
+                    sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE,
+                    ptr,
+                )
+            };
+            assert_eq!(status, sys::CUresult::CUDA_SUCCESS);
+            pool
+        };
+        let model = unsafe { stream.alloc::<u8>(ELEMENTS) }.map_err(crate::Error::wrap)?;
+        let kept = unsafe { dev.alloc_process_lifetime::<u8>(ELEMENTS)? };
+        let (model_ptr, _m) = model.device_ptr(&stream);
+        let (kept_ptr, _k) = kept.device_ptr(&stream);
+        let (model_pool, kept_pool) = (pool_of(model_ptr), pool_of(kept_ptr));
+        assert!(!kept_pool.is_null());
+        assert_ne!(model_pool, kept_pool);
+        // a second buffer comes from the same lifetime pool
+        let again = unsafe { dev.alloc_process_lifetime::<u32>(16)? };
+        let (again_ptr, _a) = again.device_ptr(&stream);
+        assert_eq!(pool_of(again_ptr), kept_pool);
+        Ok(())
+    }
 
     // one matrix of a stack moves to the device and back as its own elements, not the stack's storage beside them
     fn a_view_moves_between_devices_without_its_storage() -> Result<()> {
