@@ -29,7 +29,7 @@ use crate::{
     layers::{Activation, RmsNorm, embedding_with_legacy_tied_uqff},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{
-        AttentionImplementation, ModelConfigMetadata, PagedAttention, PagedKvLayout,
+        AttentionImplementation, ModelConfigMetadata, PagedAttention, PagedCacheType, PagedKvLayout,
     },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -38,6 +38,8 @@ use crate::{
 serde_default_fn!(usize, default_max_position_embeddings, 1_048_576);
 
 // the unweighted norms of the depth mix and the loop controllers
+// the one quantized cache width the CUDA attention reads
+const QUANT_CACHE_BITS: u32 = 8;
 const UNIT_NORM_EPS: f64 = 1e-6;
 // the L2 clip's guard against a zero norm
 const CLIP_EPS: f64 = 1e-6;
@@ -1659,6 +1661,18 @@ impl Model {
         let layer_devices = (0..2 * slots)
             .map(|i| device_of(i % slots))
             .collect::<Vec<_>>();
+        // the CUDA attention reads q8 rows only; other widths would load and then fail every request
+        if let Some(PagedKvLayout {
+            cache_type: PagedCacheType::Quant { k, v },
+            ..
+        }) = normal_loading_metadata.paged_kv
+            && normal_loading_metadata.real_device.is_cuda()
+            && (k, v) != (QUANT_CACHE_BITS, QUANT_CACHE_BITS)
+        {
+            inference_tensor::bail!(
+                "Inkling 2 on CUDA reads an auto, f8e4m3 or q8 paged cache, not q{k}/q{v}; pass --pa-cache-type q8"
+            );
+        }
         // on CUDA a sliding slot keeps its window in a ring beside the convolution states, after them in the cache
         let ring = matches!(attention_mechanism, AttentionImplementation::PagedAttention)
             .then(|| {

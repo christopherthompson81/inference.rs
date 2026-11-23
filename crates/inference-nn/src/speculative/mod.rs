@@ -9,8 +9,8 @@ pub mod proposer;
 pub mod target;
 
 pub use config::{
-    DSPINE_ARCHITECTURE, MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig,
-    is_drafter_architecture,
+    CHECKPOINT_DRAFTER_WEIGHTS, DSPINE_ARCHITECTURE, MtpConfig, MtpDraftSamplingMethod,
+    MtpRuntimeConfig, SpeculativeConfig, config_carries_drafter, is_drafter_architecture,
 };
 pub use logging::{SpeculativeAttachInfo, SpeculativeAttachKind};
 pub use policy::{

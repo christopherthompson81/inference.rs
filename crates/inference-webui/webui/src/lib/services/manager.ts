@@ -34,6 +34,8 @@ export interface InventoryModel {
   modified: number | null;
   files: string[];
   projectors: string[];
+  /** A model directory whose checkpoint carries a drafter (Inkling 2's `mtp.safetensors`), named as a load's drafter. */
+  carries_drafter: boolean;
   error: string | null;
 }
 
@@ -63,7 +65,7 @@ export interface LoadRequest {
   /** Per-layer storage on top of it: `layers=type` items (`0=q8,20-27=q6`) or `uniform`. */
   paged_cache_layers?: string;
   max_seqs?: number;
-  mtp?: { n_predict?: number; model?: string; draft_isq?: string };
+  mtp?: { n_predict?: number; model?: string; draft_isq?: string; auto_depth?: boolean };
   mmproj?: string;
   vad?: string;
   device?: string;

@@ -12,6 +12,19 @@ pub fn is_drafter_architecture(name: &str) -> bool {
         || name.contains(DSPINE_ARCHITECTURE)
 }
 
+/// The weights file of a drafter a model's own checkpoint carries beside it (Inkling 2's).
+pub const CHECKPOINT_DRAFTER_WEIGHTS: &str = "mtp.safetensors";
+const CHECKPOINT_DRAFTER_MODEL_TYPE: &str = "inkling2";
+
+/// Whether a checkpoint's `config.json` describes a drafter it carries (its `mtp_config` beside an Inkling 2 text
+/// model), which loads from the checkpoint's directory as an external drafter.
+pub fn config_carries_drafter(config: &serde_json::Value) -> bool {
+    config.get("mtp_config").is_some()
+        && config["text_config"]["model_type"]
+            .as_str()
+            .is_some_and(|model_type| model_type.starts_with(CHECKPOINT_DRAFTER_MODEL_TYPE))
+}
+
 #[derive(Clone, Debug)]
 pub enum SpeculativeConfig {
     Off,

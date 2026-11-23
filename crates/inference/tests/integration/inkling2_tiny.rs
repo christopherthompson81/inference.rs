@@ -1154,6 +1154,21 @@ async fn the_checkpoint_drafter_keeps_greedy_output_on_a_q8_cache_on_cuda() -> a
     ensure_same_greedy(&drafted, &plain)
 }
 
+// a cache width the CUDA attention can't read fails the load, not every request after it
+#[tokio::test]
+async fn a_q3_cache_fails_the_load_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = drafter_checkpoint()?;
+    let q3 = inference::PagedCacheType::Quant { k: 3, v: 3 };
+    let error = paged_trace_on(&dir, Drafting::Off, chat("hi"), 1, q3)
+        .await
+        .expect_err("a q3 cache loads");
+    anyhow::ensure!(format!("{error:#}").contains("not q3/q3"), "{error:#}");
+    Ok(())
+}
+
 // choosing between drafting and plain decode each step keeps the greedy output: the random drafter's misses switch
 // it to plain steps, whose rows the drafter buffers, and probes draft again from them
 #[tokio::test]
