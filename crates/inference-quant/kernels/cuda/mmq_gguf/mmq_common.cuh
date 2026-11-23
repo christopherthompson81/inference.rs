@@ -71,6 +71,8 @@ enum ggml_type {
     GGML_TYPE_IQ1_KT  = 158,
     // IQ4_KS in 16-row tile order (mmvq_tc.cuh), never in a file
     GGML_TYPE_IQ4_KS_TILED = 240,
+    // NVFP4 in 16-row tile order (mmvq_tc_nvfp4.cuh), never in a file
+    GGML_TYPE_NVFP4_TILED = 241,
 };
 
 // ik_llama.cpp's types: rows are addressed by byte stride, since some start with a row scale
@@ -79,7 +81,7 @@ static constexpr __host__ __device__ bool mmq_byte_rows(ggml_type type) {
         case GGML_TYPE_IQ1_KT: case GGML_TYPE_IQ2_KT: case GGML_TYPE_IQ3_KT: case GGML_TYPE_IQ4_KT:
         case GGML_TYPE_IQ2_K: case GGML_TYPE_IQ3_K: case GGML_TYPE_IQ4_K: case GGML_TYPE_IQ5_K: case GGML_TYPE_IQ6_K:
         case GGML_TYPE_IQ2_KS: case GGML_TYPE_IQ3_KS: case GGML_TYPE_IQ4_KS: case GGML_TYPE_IQ4_KSS:
-        case GGML_TYPE_IQ5_KS: case GGML_TYPE_IQ2_KL: case GGML_TYPE_IQ4_KS_TILED:
+        case GGML_TYPE_IQ5_KS: case GGML_TYPE_IQ2_KL: case GGML_TYPE_IQ4_KS_TILED: case GGML_TYPE_NVFP4_TILED:
             return true;
         default:
             return false;
@@ -493,6 +495,7 @@ template<> struct ggml_cuda_type_traits<GGML_TYPE_Q5_K>    { static constexpr in
 template<> struct ggml_cuda_type_traits<GGML_TYPE_Q6_K>    { static constexpr int qk = QK_K;   static constexpr int qr = QR6_K;  static constexpr int qi = QI6_K; };
 template<> struct ggml_cuda_type_traits<GGML_TYPE_MXFP4>   { static constexpr int qk = QK_MXFP4; static constexpr int qr = QR_MXFP4; static constexpr int qi = QI_MXFP4; };
 template<> struct ggml_cuda_type_traits<GGML_TYPE_NVFP4>   { static constexpr int qk = QK_NVFP4; static constexpr int qr = QR_NVFP4; static constexpr int qi = QI_NVFP4; };
+template<> struct ggml_cuda_type_traits<GGML_TYPE_NVFP4_TILED> { static constexpr int qk = QK_NVFP4; static constexpr int qr = QR_NVFP4; static constexpr int qi = QI_NVFP4; };
 template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ2_XXS> { static constexpr int qk = QK_K;   static constexpr int qr = QR2_XXS; static constexpr int qi = QI2_XXS; };
 template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ2_XS>  { static constexpr int qk = QK_K;   static constexpr int qr = QR2_XS;  static constexpr int qi = QI2_XS; };
 template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ2_S>   { static constexpr int qk = QK_K;   static constexpr int qr = QR2_S;   static constexpr int qi = QI2_S; };

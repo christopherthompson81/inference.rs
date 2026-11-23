@@ -48,6 +48,8 @@ pub mod kernel;
 mod kt_dequant;
 mod kt_quantize;
 pub mod mapped;
+#[cfg(any(feature = "cuda", test))]
+mod nvfp4_tiled;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
 #[cfg(feature = "cuda")]

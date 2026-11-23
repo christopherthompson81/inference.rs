@@ -28,6 +28,8 @@
 #define MMVQ_FUSED_QKV_PACKED_MIN_ROW_RATIO 2
 #define MMVQ_NWARPS_MOE 4
 #define MMVQ_ROWS_PER_BLOCK_MOE 2
+// the most experts `mmvq_moe_group_pairs` counts (one block, the counts in shared memory)
+#define MMVQ_MOE_GROUP_MAX_EXPERTS 1024
 
 // Matches candle's MATRIX_ROW_PADDING.
 #define MATRIX_ROW_PADDING 512

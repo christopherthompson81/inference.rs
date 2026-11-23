@@ -145,6 +145,80 @@ extern "C" void launch_mmvq_gguf_quantize_q8_1_f32(const void *x, void *vy,
                                                      kx_padded);
 }
 
+// A grouped MoE matvec's plan from its pairs' expert ids: groups[0] distinct experts, then the experts (ascending),
+// each one's start in the pair list and the end, then the pairs by expert (ascending within one).
+extern "C" __global__ void mmvq_moe_group_pairs(const uint32_t *__restrict__ ids, const int n_pairs,
+                                                const int n_experts, int *__restrict__ groups) {
+  __shared__ int counts[MMVQ_MOE_GROUP_MAX_EXPERTS];
+  __shared__ int start[MMVQ_MOE_GROUP_MAX_EXPERTS];
+  for (int e = threadIdx.x; e < n_experts; e += blockDim.x) {
+    counts[e] = 0;
+  }
+  __syncthreads();
+  for (int p = threadIdx.x; p < n_pairs; p += blockDim.x) {
+    atomicAdd(&counts[ids[p]], 1);
+  }
+  __syncthreads();
+  int *experts = groups + 1;
+  int *offsets = groups + 1 + n_pairs;
+  int *pairs = groups + 2 + 2 * n_pairs;
+  // the first warp scans the experts in order, each lane a contiguous run of them
+  if (threadIdx.x < WARP_SIZE) {
+    const int lane = threadIdx.x;
+    const int per = (n_experts + WARP_SIZE - 1) / WARP_SIZE;
+    const int e0 = min(n_experts, lane * per);
+    const int e1 = min(n_experts, e0 + per);
+    int used = 0;
+    int rows = 0;
+    for (int e = e0; e < e1; ++e) {
+      used += counts[e] > 0;
+      rows += counts[e];
+    }
+    int slot = used;
+    int at = rows;
+#pragma unroll
+    for (int d = 1; d < WARP_SIZE; d <<= 1) {
+      const int s = __shfl_up_sync(0xffffffffu, slot, d);
+      const int a = __shfl_up_sync(0xffffffffu, at, d);
+      if (lane >= d) {
+        slot += s;
+        at += a;
+      }
+    }
+    slot -= used;
+    at -= rows;
+    for (int e = e0; e < e1; ++e) {
+      if (counts[e] > 0) {
+        experts[slot] = e;
+        offsets[slot] = at;
+        start[e] = at;
+        ++slot;
+        at += counts[e];
+      }
+    }
+    if (lane == WARP_SIZE - 1) {
+      offsets[slot] = at;
+      groups[0] = slot;
+    }
+  }
+  __syncthreads();
+  // a pair's place among its expert's: the earlier pairs on that expert
+  for (int p = threadIdx.x; p < n_pairs; p += blockDim.x) {
+    const uint32_t e = ids[p];
+    int rank = 0;
+    for (int q = 0; q < p; ++q) {
+      rank += ids[q] == e;
+    }
+    pairs[start[e] + rank] = p;
+  }
+}
+
+extern "C" void launch_mmvq_moe_group_pairs(const void *ids, int n_pairs, int n_experts, int *groups,
+                                            void *stream) {
+  cudaStream_t s = static_cast<cudaStream_t>(stream);
+  mmvq_moe_group_pairs<<<1, CUDA_QUANTIZE_BLOCK_SIZE, 0, s>>>((const uint32_t *)ids, n_pairs, n_experts, groups);
+}
+
 // mmvq_tc.cuh's activation layout, the mma's B side ready to load: for each 32-value block, an int2 per lane (lane
 // 4r + t holds input row r's values 4t..4t+3 and 16+4t..16+4t+3), then after every block the 8 rows' scales, so a
 // warp reads a block's fragments as 256 contiguous bytes. Rows past num_rows are zero.

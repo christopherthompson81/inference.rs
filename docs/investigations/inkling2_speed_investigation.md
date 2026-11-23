@@ -1038,3 +1038,161 @@ set at drafts 2; a 9.8K prompt twice (cold, then prefix hit).
   test runs the mixed path.
 
 Next: the drafter now costs one layer per position; the rest of the context is the target's 8 global visits.
+
+## Run 37 - 2026-11-23 07:20
+
+How many distinct experts does a verify step of k rows read? Run 5 assumed uniform routing (4 rows x 8 routes ->
+~29 of 128). HyperInkling (vLLM + Marlin MoE on a 3090 Ti) reports a 7-draft verify step at 2.0x a plain step with
+expert time 6.5 vs 2.3 ms at 1 row, which uniform routing can't give. Measured here: a temporary dump of the router's
+top-8 ids (prefill steps of 128+ rows only), recipe C on CUDA, teacher-forcing four of the model's own replies (greedy,
+from the `chat` slot: prose, code, story, explainer; reasoning + content as plain text, 448-512 rows each, all 48
+visits). Distinct experts over every window of k consecutive rows, mean over the visits:
+
+```
+rows  uniform  prose  code  story  explainer  all   x one row
+1       8.0     8.0   8.0    8.0     8.0      8.0   1.00
+2      15.5    12.5  12.7   12.5    12.5     12.5   1.57
+3      22.5    16.1  16.5   16.1    16.0     16.2   2.02
+4      29.1    19.2  19.7   19.1    19.1     19.3   2.41
+5      35.3    21.9  22.6   21.7    21.7     22.0   2.75
+6      41.1    24.3  25.2   24.0    24.0     24.4   3.05
+7      46.5    26.5  27.5   26.1    26.1     26.6   3.32
+8      51.6    28.5  29.7   28.0    28.1     28.6   3.57
+```
+
+Consecutive tokens share experts heavily and alike across kinds of text. At 4 rows the bytes floor is 2.41x a plain
+step's experts, but Run 12 measured our NVFP4 expert matvec at 3.38x (8551 vs 2530 us): ~40% over the floor, ~2.4 ms
+of a 4-row verify. `mmvq_moe_impl` runs a block per (row, expert) pair and leans on L2 for pairs that share an expert
+(an expert is ~4 MB against the 3090's 6 MB L2). At 8 rows the floor is 3.57x.
+
+Next: a grouped small-batch MoE kernel that reads each distinct expert once for all its rows (Run 38).
+
+## Run 38 - 2026-11-23 08:30
+
+A grouped expert matvec for verify rows, after Run 37. `mmvq_moe_group_pairs` (one block) planned the distinct
+experts and each one's pairs; the matvec's block took one expert's rows for all its pairs. Three shapes, each A/B'd
+against the per-pair kernel in one binary (an env switch), recipe C, drafts 2, Run 27's eight prompts, greedy, 768
+tokens. Grouped and per-pair outputs were bitwise equal in the kernel test for every type.
+
+```
+tok/s, drafts 2                 prose  code   story  explainer  email  howto  rust   json
+per-pair (master)               94.1   127.7  101.8  108.0      120.3  106.0  137.8  153.9
+8 accumulator sets, runtime     50.9    68.7   55.4   58.9       65.1   57.6   74.9   81.4
+1-4 sets, templated per pass    76.2   103.1   82.7   87.6       97.8   86.1  112.1  124.1
+pairs in turn, rows from L1     88.1   121.0   96.3  102.0      114.1  100.6  130.7  145.7
+```
+
+The first two spilled (stack 64-128 bytes, 131 registers: half the blocks an SM). The third keeps the per-pair
+kernel's registers (62/79) and still loses 5-6%. ncu (3-row verify, the NVFP4 visits, base clocks) shows why:
+
+```
+                           DRAM read   L2 hit   time
+per-pair gate-up           35.9 MB     64%      105.5 us
+grouped gate-up            35.9 MB     11%      115.2 us
+per-pair down              18.0 MB     72%       94.0 us
+grouped down               18.0 MB     23%      112.4 us
+```
+
+The per-pair kernel already reads each distinct expert from DRAM once: pairs sharing an expert run side by side
+(`pairs_fast`) and L2 serves the rest. Run 5's "redundant expert bytes" was wrong; grouping only serializes the
+pairs. At ~35.9 MB in ~83 us (nsys clocks) the per-pair kernel runs ~430 GB/s, under the card's ~900: at several
+rows it is bound by work a byte (each pair decodes the NVFP4 rows and issues its own loads), not by bytes. Reverted;
+the attempt is in the scratchpad (`grouped_moe_attempt.patch`).
+
+What would cut a verify's expert time is decoding a weight once for every row that shares it, as Marlin's MMA tiles
+do (HyperInkling: 8 rows at 2.8x one row). With ~1.5 pairs a distinct expert at 3 rows (24 / 16.2) and ~2.2 at 8,
+the decode saved is a third at drafts 2 and more at 7, on top of whatever a tensor-core path gains over dp4a.
+
+## Run 39 - 2026-11-23 09:30
+
+A tensor-core MoE matvec for NVFP4 experts over the GGUF blocks as stored (`mmvq_tc_nvfp4.cuh`, branch
+perf/inkling2-tc-moe): Run 38's plan of distinct experts, a block per expert and 16-row tile, the pairs routed to the
+expert as the 8 columns of an int8 `mma.m16n8k16` per 16-value sub-block (one mma per UE4M3 scale), each weight
+decoded once for every pair. Lane t of a quad holds sub-block values {0-3, 8-11, 4-7, 12-15}[t], the order
+vec_dot_nvfp4_q8_1 pairs nibbles with activation ints. The kernel test passes (cosine to the dequantized experts for
+1, 3 and 6 tokens, a token routed twice, 9 pairs on one expert). nsys, drafts 2, one prose request, per launch:
+
+```
+us a launch                         gate-up (glu)   down    sum
+per-pair mmvq (master)              83.7            74.0    157.7
+tc, first cut                       191.8           48.5    240.3
++ next block's words loaded ahead   149.8           51.7    201.5
++ FP4 table in byte_perm immediates 123.3           50.4    173.7
++ 8 K-split warps for gate-up       107.7           49.1    156.8
+```
+
+Down (1152 columns) wins at once; gate-up (2304 columns, two weights) is latency-bound: ncu showed DRAM at 49% and
+long-scoreboard stalls dominating, occupancy capped at 50% by registers. The GGUF layout is the limit: a 36-byte
+block per row puts a lane's fragment in scattered 4-byte words (20 loads a block a warp for gate-up, half of them
+duplicates within a quad) and the table decode ran from memory. vLLM's Marlin (HyperInkling's MoE kernel) repacks
+NVFP4 at load so a thread's fragment is one 16-byte load, staged ahead of the math. Next: one repacked NVFP4 expert
+layout that decode, verify and prefill all read.
+
+## Run 40 - 2026-11-23 10:30
+
+One NVFP4 form for every CUDA kernel reading experts: `GgufType::Nvfp4Tiled` (`gguf/nvfp4_tiled.rs`), chosen at
+upload for any rank-3 NVFP4 stack on an sm80+ GPU whose rows and columns tile (Inkling's do). Run 39 showed the GGUF
+block order, not the math, holding the tensor-core matvec back. A tile is every 16 rows' 64-value block, 576 bytes
+(the same bytes 16 GGUF blocks take): 8 entries of row e's and row e + 8's four UE4M3 scales, then 32 lanes' 16
+bytes, lane 4 g + t's word s holding sub-block s values 4 t .. 4 t + 3 of rows g (low nibbles) and g + 8 (high). A
+lane reads its mma.m16n8k16 A fragment (both row halves) with one 16-byte load, its rows' scales with one 8-byte
+load, and one table decode gives both A registers. Tiles run along K within a 16-row group, so a warp's K range is
+contiguous memory. Readers:
+
+- decode and verify, 1-8 tokens: `mmvq_tc_nvfp4_moe_kernel`. One token runs each pair on its own expert (no plan);
+  more take `mmvq_moe_group_pairs`'s plan (now a warp scan, 5.4 -> 2.6 us). The block stages its activation
+  columns in shared memory in B-fragment order (an int4 a lane a tile) with their q8_1 scales, and a 128-entry
+  UE4M3 table; weights stream two tiles ahead. Gate-up takes 6 warps over K, down 4 (4-12 measured within 2 us).
+- prefill (mmq, 9+ tokens): `load_tiles_nvfp4_tiled`, the same fold and Q8_0 tile as `load_tiles_nvfp4`.
+- gather fallbacks (stats, imatrix, LoRA): `nvfp4_untile_rows`; `bytes()` and `to_device` untile on the host.
+MoE offload never holds NVFP4 (the CPU expert kernels don't take it), so no host copy needs the row-major form.
+
+nsys, one prose request, us a launch (gate-up / down):
+
+```
+                                one token        drafts 2 (mixed 1- and 3-token launches)
+per-pair mmvq (master)          32.3 / 25.4      83.7 / 74.0 at 3 tokens
+tiles, tensor cores             45.4 / 22.4      75.6 / 37.1
++ activations, scale table      35.5 / 18.4
+  in shared memory
++ 6 / 4 warps over K            34.6 / 18.4      62.0 / 33.4
+```
+
+At one token gate-up reads ~730 GB/s against the per-pair kernel's ~790 and down ~650 against ~470. Served, recipe
+C, Run 27's eight prompts, greedy, 768 tokens, AB in one binary (an env switch kept the row-major form):
+
+```
+tok/s            prose  code   story  explainer  email  howto  rust   json
+plain   master   111.0  111.0  111.0  111.0      110.9  111.0  110.8  111.1
+        tiles    111.2  111.1  111.1  111.1      111.0  111.1  111.1  111.1
+d2      master    91.4  123.5   98.4  104.3      118.3  103.0  133.8  151.8
+        tiles    107.8  140.5  118.8  119.5      134.0  114.7  162.0  172.7
+d3      master    84.4  124.7   88.2   95.3      110.4   95.1  140.5  150.9
+        tiles     96.6  152.5  114.1  119.9      126.9  113.9  172.9  180.1
+d7      master    41.6   91.7   46.7   48.1       59.8   51.3   99.5  127.9
+        tiles     58.2  102.0   63.8   56.9       80.8   57.8  127.9  155.0
+```
+
+Greedy text moves with summation order, so a prompt's acceptance can shift between the forms; plain is level and
+every drafting configuration gains 11-29% at drafts 2-3.
+
+Prefill (bench pp512 / pp2048, the same binary each way, alternating) went through four loaders for the tiles:
+
+```
+tok/s                                                         pp512   pp2048
+row-major `load_tiles_nvfp4` (master)                         2307    1932
+thread a row a 32 (4 scattered words, half of each decode)    2121    1808
+thread a row pair and t, two folds each (tables by pointer)   1580    1411   tables spilled to local memory
+  tables in registers                                         2007    1730   registers 198 / 254 vs 128 / 168
+  pairs one after the other, unroll 2                         1850    1612   registers level, still slower
+thread a row pair a 32 over the four t lanes                  2266    1882
+```
+
+The fold (a divide and eight conversions) is the expensive part: the pair-and-t thread computed it four times a
+value. A thread a row pair a 32-value group reads the four t lanes' 8-byte halves, folds once a row a group and
+uses every decode, as the row-major loader does; it stays ~2% under it. KLD against the official base, both forms:
+mean 0.00389, median 0.00160, p99 0.0371, same top 97.32%, PPL 6.7630 (Run 9's figure): the tiles change no value.
+`bench` decode (tg128 at d4): 105.8 -> 108.6.
+
+Left: the ~2% prefill gap; the Q6_K / Q8_0 experts of layers 20-23 still take the per-pair matvec in a verify (Run
+12: 1.1 ms of a 4-row verify); a verify length chosen per step from 0, 2, 4 and 7 now that wider verifies pay.

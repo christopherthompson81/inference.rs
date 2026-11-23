@@ -618,6 +618,15 @@ inference_tensor::kernel_library! {
             stream: *mut c_void,
         );
 
+        /// A grouped MoE matvec's plan: the distinct experts of `n_pairs` ids and each one's pairs, `3 n_pairs + 2` ints
+        pub fn launch_mmvq_moe_group_pairs(
+            ids: *const c_void,
+            n_pairs: i32,
+            n_experts: i32,
+            groups: *mut i32,
+            stream: *mut c_void,
+        );
+
         /// F32 -> Q8_1 quantize
         pub fn launch_mmvq_gguf_quantize_q8_1_f32(
             x: *const c_void,
@@ -1304,8 +1313,98 @@ gguf_iq_types!(
     (iq5_ks, "IQ5_KS"),
     (iq3_ks, "IQ3_KS"),
     (iq2_kl, "IQ2_KL"),
-    (nvfp4, "NVFP4"),
 );
+
+// NVFP4 adds its tile order's prompt kernels and tensor-core MoE matvec (mmvq_tc_nvfp4.cuh)
+gguf_mmq_type_library! {
+    nvfp4, "NVFP4";
+    pub fn launch_mmq_gguf_nvfp4_tiled(
+        tmp_fixup: *mut c_void,
+        x: *const c_void,
+        y: *const c_void,
+        dst: *mut c_void,
+        ncols_x: i64,
+        nrows_x: i64,
+        ncols_y: i64,
+        stride_row_x: i64,
+        stride_col_dst: i64,
+        cc: i32,
+        nsm: i32,
+        smpbo: i64,
+        warp_size: i32,
+        type_dst: i32,
+        stream: *mut c_void,
+    );
+    pub fn launch_mmq_gguf_nvfp4_tiled_moe(
+        tmp_fixup: *mut c_void,
+        x: *const c_void,
+        y: *const c_void,
+        ids_dst: *const i32,
+        expert_bounds: *const i32,
+        dst: *mut c_void,
+        ncols_x: i64,
+        nrows_x: i64,
+        ncols_dst: i64,
+        stride_row_x: i64,
+        stride_col_dst: i64,
+        num_experts: i64,
+        ncols_max: i64,
+        cc: i32,
+        nsm: i32,
+        smpbo: i64,
+        warp_size: i32,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_nvfp4_bf16(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nrows: i64,
+        ncols: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_nvfp4_f16(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nrows: i64,
+        ncols: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_nvfp4_f32(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nrows: i64,
+        ncols: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_nvfp4_untile_rows(
+        src: *const c_void,
+        ids: *const c_void,
+        dst: *mut c_void,
+        n: i64,
+        ncols: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_mmvq_tc_nvfp4_moe(
+        vx_gate: *const c_void,
+        vx_up: *const c_void,
+        expert_stride: i64,
+        vy: *const c_void,
+        ids: *const c_void,
+        groups: *const i32,
+        n_pairs: i32,
+        scales: *const f32,
+        scales_up: *const f32,
+        dst: *mut f32,
+        ncols_x: i32,
+        nrows_x: i32,
+        stride_col_y: i32,
+        y_div: i32,
+        activation: i32,
+        gate_cap: f32,
+        up_cap: f32,
+        stream: *mut c_void,
+    );
+}
 
 // IQ1_M has no prompt kernel
 gguf_type_library! {

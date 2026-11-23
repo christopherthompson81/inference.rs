@@ -82,10 +82,11 @@ impl RawGgufTensor {
         #[cfg(feature = "cuda")]
         if let Device::Cuda(cuda) = device {
             Self::check_len(ty, dims, bytes.len())?;
+            let (ty, storage) = Self::cuda_upload(ty, dims, &bytes, cuda)?;
             return Ok(Self {
                 ty,
                 shape: Shape::from(dims),
-                storage: Self::cuda_storage(ty, &bytes, cuda)?,
+                storage,
             });
         }
         Self::new(ty, dims, bytes.into_owned(), device)
@@ -106,6 +107,27 @@ impl RawGgufTensor {
             len: bytes.len(),
             device: device.clone(),
         })
+    }
+
+    /// The form `ty` blocks of `dims` take on `device`: an NVFP4 expert stack on a GPU with int8 tensor cores is
+    /// regrouped into `nvfp4_tiled`'s tiles, which every CUDA kernel reading NVFP4 experts takes.
+    #[cfg(feature = "cuda")]
+    fn cuda_upload(
+        ty: GgufType,
+        dims: &[usize],
+        bytes: &[u8],
+        device: &inference_tensor::cuda_backend::CudaDevice,
+    ) -> Result<(GgufType, RawStorage)> {
+        if let [experts, rows, cols] = *dims
+            && ty == GgufType::Nvfp4
+            && super::nvfp4_tiled::tiles(rows, cols)
+            && super::fast_mmvq::tensor_core_capable(device)
+        {
+            let tiled = super::nvfp4_tiled::to_tiled(bytes, experts, rows, cols);
+            let storage = Self::cuda_storage(ty, &tiled, device)?;
+            return Ok((GgufType::Nvfp4Tiled, storage));
+        }
+        Ok((ty, Self::cuda_storage(ty, bytes, device)?))
     }
 
     fn check_len(ty: GgufType, dims: &[usize], len: usize) -> Result<()> {
@@ -135,6 +157,7 @@ impl RawGgufTensor {
     pub fn file_type(&self) -> GgufType {
         match self.ty {
             GgufType::Iq4KsTiled => GgufType::Iq4Ks,
+            GgufType::Nvfp4Tiled => GgufType::Nvfp4,
             ty => ty,
         }
     }
@@ -217,6 +240,10 @@ impl RawGgufTensor {
                     let (rows, cols) = self.shape.dims2()?;
                     return Ok(super::fast_mmvq::iq4_ks_from_tiled(&bytes, rows, cols));
                 }
+                if self.ty == GgufType::Nvfp4Tiled {
+                    let (experts, rows, cols) = self.shape.dims3()?;
+                    return Ok(super::nvfp4_tiled::from_tiled(&bytes, experts, rows, cols));
+                }
                 Ok(bytes)
             }
             #[cfg(feature = "metal")]
@@ -265,10 +292,22 @@ impl RawGgufTensor {
         let storage = match device {
             Device::Cpu => RawStorage::Cpu(Arc::new(self.bytes()?)),
             #[cfg(feature = "cuda")]
-            Device::Cuda(device) => match &self.storage {
-                RawStorage::Cpu(bytes) => Self::cuda_storage(self.ty, bytes, device)?,
-                _ => Self::cuda_storage(self.ty, &self.bytes()?, device)?,
-            },
+            Device::Cuda(device) => {
+                let owned;
+                let bytes = match &self.storage {
+                    RawStorage::Cpu(bytes) => bytes.as_slice(),
+                    _ => {
+                        owned = self.bytes()?;
+                        owned.as_slice()
+                    }
+                };
+                let (ty, storage) = Self::cuda_upload(self.ty, self.shape.dims(), bytes, device)?;
+                return Ok(Self {
+                    ty,
+                    shape: self.shape.clone(),
+                    storage,
+                });
+            }
             #[cfg(feature = "metal")]
             Device::Metal(_) => {
                 let bytes = match &self.storage {
@@ -394,6 +433,15 @@ impl RawGgufTensor {
             unsafe {
                 if self.ty == GgufType::Iq4KsTiled {
                     super::ffi::launch_iq4_ks_untile_rows(
+                        src,
+                        ids,
+                        dst,
+                        n as i64,
+                        ncols as i64,
+                        stream_ptr,
+                    )
+                } else if self.ty == GgufType::Nvfp4Tiled {
+                    super::ffi::launch_nvfp4_untile_rows(
                         src,
                         ids,
                         dst,
@@ -1330,9 +1378,28 @@ mod tests {
             a_tall_q6k_weight_past_eight_rows_takes_mmq,
             row_major_tensor_core_matvecs_match_a_dense_matmul,
             tiled_iq4_ks_matches_the_row_major_weight,
-            tiled_matvecs_share_one_inputs_quantized_activations
+            tiled_matvecs_share_one_inputs_quantized_activations,
+            an_nvfp4_expert_stack_tiles_on_cuda_and_reads_back_as_its_blocks
         ]
     );
+
+    // the tiled form is CUDA's alone: read back and moved off the GPU, a stack is its GGUF blocks again
+    #[cfg(feature = "cuda")]
+    fn an_nvfp4_expert_stack_tiles_on_cuda_and_reads_back_as_its_blocks() -> Result<()> {
+        const DIMS: [usize; 3] = [3, 32, 192];
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let bytes = random_rows(GgufType::Nvfp4, DIMS[0] * DIMS[1], DIMS[2], 7);
+        let stack = RawGgufTensor::new(GgufType::Nvfp4, &DIMS, bytes.clone(), &cuda)?;
+        assert_eq!(stack.ty, GgufType::Nvfp4Tiled);
+        assert_eq!(stack.file_type(), GgufType::Nvfp4);
+        assert_eq!(stack.bytes()?, bytes);
+        let cpu = stack.to_device(&Device::Cpu)?;
+        assert_eq!((cpu.ty, cpu.bytes()?), (GgufType::Nvfp4, bytes));
+        Ok(())
+    }
 
     // Batches up to 8 take mmvq, larger ones mmq or IQ1_M's dense matmul; Q8_1 activations make it a cosine bound.
     #[cfg(feature = "cuda")]
