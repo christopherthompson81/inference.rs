@@ -801,3 +801,32 @@ Tests: tuner cases for plain winning at low acceptance, a new sequence drafting 
 tokens, EOS ignored. It drafts, goes plain, flushes 31 buffered rows at each probe and drafts again, and its greedy
 output matches plain decode. What's left: plain stretches 1.5-2% under a plain server, until a step that may draft
 can take the lookahead path.
+
+## Run 29 - 2026-11-23 10:30
+
+Is the Q8_0 drafter as fast as it can be, and does the drafter's host work overlap the step? nsys of a served
+drafts-2 request (recipe C, the photosynthesis prompt, 256 tokens). Kernel-level (`node`) for the drafter's
+kernels, and the graph-level trace from Run 28 for idle time, since node tracing inflates graph launches.
+
+A cycle's eager work (130 cycles), us a cycle:
+
+```
+457  Q6_K target head over the 2 draft rows (380 MB, ~830 GB/s)
+343  Q8_0 drafter matvecs, 13 launches at 3 rows: qkv 17.2 us (~730 GB/s), gate-up 54.2 (~830), down 28.4 (~790),
+     o 11.4 (~490), context k/v 9 us x3
+250  Markov picks, 2 x 125 us: each reads the whole fold table (201024 x rank 256, BF16, 103 MB) at ~825 GB/s
+~600 small ops (casts, copies, norms, attention, cache writes), 177 launches a cycle in all
+```
+
+The Q8_0 weights read at 730-830 GB/s except the o projection. By bytes, at most ~50 us a cycle is left in them
+(0.3%), and below 6 bits acceptance slips (the drafter-ISQ table above). Q8_0 stays.
+
+The Markov fold table is bandwidth-bound at BF16. 8 bits a value would halve both picks (~125 us a cycle) and free
+51 MB of VRAM. Untested for acceptance.
+
+Overlap: node tracing showed a 1.6 ms gap before each verify graph, but its launch call took 2.1 ms under that
+tracing. At graph level the call takes 385 us and is issued while the drafter runs, and the GPU waits 16 us for the
+graph. So the drafter's host work does overlap the step. A drafting cycle is 18.39 ms: verify graph 16.21, GPU
+busy 17.72, idle 0.61 ms (3.3%). The idle sits inside the eager drafter pass (177 launches, many shorter than
+their launch cost). A CUDA graph for that pass is the way to recover it. Plain stretches lose 1.5-2% separately, to
+the lookahead being off (Run 28).
