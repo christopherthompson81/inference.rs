@@ -79,6 +79,14 @@ inference_tensor::kernel_library! {
             row_elements: i64,
             stream: i64,
         ) -> i32;
+        pub fn indexed_row_copy_u8(
+            src: *const c_void,
+            dst: *mut c_void,
+            dst_rows: *const u32,
+            rows: i32,
+            row_elements: i64,
+            stream: i64,
+        ) -> i32;
         pub fn pack_completion_input_u32(
             host: *const c_void,
             staged_rows: *const *const c_void,
