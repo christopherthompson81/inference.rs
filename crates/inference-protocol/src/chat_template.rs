@@ -295,6 +295,8 @@ fn template_tool_call_format(template: &str) -> Option<ToolCallFormat> {
         Some(ToolCallFormat::Atem)
     } else if crate::reasoning_parsers::harmony::is_harmony_template(template) {
         Some(ToolCallFormat::Harmony)
+    } else if template.contains("<|content_invoke_tool_json|>") {
+        Some(ToolCallFormat::Inkling)
     } else if is_gemma4_tool_template(template) {
         Some(ToolCallFormat::Gemma4)
     } else if is_liquid_tool_template(template) {
@@ -911,6 +913,10 @@ mod tests {
             (
                 "<|start|>assistant to=tool<|message|><atem:function_calls><atem:invoke",
                 ToolCallFormat::Atem,
+            ),
+            (
+                "<|message_model|>{{ fn.name }}<|content_invoke_tool_json|>",
+                ToolCallFormat::Inkling,
             ),
         ];
 

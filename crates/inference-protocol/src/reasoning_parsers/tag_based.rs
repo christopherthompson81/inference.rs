@@ -42,6 +42,13 @@ pub const INKLING_THINKING_TAG: &str = "<|content_thinking|>";
 pub const INKLING_END_TAG: &str = "<|end_message|>";
 // a block's header tokens, which carry no text of the answer
 const INKLING_BLOCK_MARKERS: &[&str] = &["<|message_model|>", "<|content_text|>"];
+const INKLING_MESSAGE_MODEL: &str = "<|message_model|>";
+// a block header ends at its content marker; a tool call's header is the tool's name, which its JSON repeats
+const INKLING_HEADER_ENDS: &[&str] = &[
+    "<|content_text|>",
+    INKLING_THINKING_TAG,
+    "<|content_invoke_tool_json|>",
+];
 
 /// Context for tracking tag-delimited reasoning parsing state within a sequence.
 ///
@@ -74,6 +81,10 @@ pub struct TagReasoningContext {
     utf8_buffer: Vec<u8>,
     /// Special tokens dropped wherever they appear (each arrives whole, as one token's text)
     dropped_markers: &'static [&'static str],
+    // text from this marker to the first of `header_ends` is dropped (Inkling's tool name before its JSON)
+    header_open: Option<&'static str>,
+    header_ends: &'static [&'static str],
+    in_header: bool,
 }
 
 impl TagReasoningContext {
@@ -127,6 +138,8 @@ impl TagReasoningContext {
     pub fn new_inkling() -> Self {
         let mut ctx = Self::with_tags(INKLING_THINKING_TAG, INKLING_END_TAG);
         ctx.dropped_markers = INKLING_BLOCK_MARKERS;
+        ctx.header_open = Some(INKLING_MESSAGE_MODEL);
+        ctx.header_ends = INKLING_HEADER_ENDS;
         ctx
     }
 
@@ -156,6 +169,9 @@ impl TagReasoningContext {
             sent_reasoning_len: 0,
             utf8_buffer: Vec::new(),
             dropped_markers: &[],
+            header_open: None,
+            header_ends: &[],
+            in_header: false,
         }
     }
 
@@ -191,12 +207,43 @@ impl TagReasoningContext {
         self.utf8_buffer = buffer[valid_up_to..].to_vec();
     }
 
+    fn drop_headers(&mut self, text: &str) -> String {
+        let Some(open) = self.header_open else {
+            return text.to_string();
+        };
+        let mut out = String::new();
+        let mut rest = text;
+        loop {
+            if self.in_header {
+                let end = self
+                    .header_ends
+                    .iter()
+                    .filter_map(|marker| rest.find(marker))
+                    .min();
+                let Some(end) = end else {
+                    return out;
+                };
+                self.in_header = false;
+                rest = &rest[end..];
+            } else {
+                let Some(start) = rest.find(open) else {
+                    out.push_str(rest);
+                    return out;
+                };
+                out.push_str(&rest[..start + open.len()]);
+                self.in_header = true;
+                rest = &rest[start + open.len()..];
+            }
+        }
+    }
+
     /// Process incremental text from the model output.
     ///
     /// This method handles text that may contain partial tags split across
     /// token boundaries by buffering potentially incomplete tags.
     pub fn process_text(&mut self, text: &str) {
-        let mut text = std::borrow::Cow::Borrowed(text);
+        let text = self.drop_headers(text);
+        let mut text = std::borrow::Cow::Borrowed(text.as_str());
         for marker in self.dropped_markers {
             if text.contains(marker) {
                 text = std::borrow::Cow::Owned(text.replace(marker, ""));
@@ -502,6 +549,30 @@ mod tests {
             Some("Need one sentence.")
         );
         assert_eq!(ctx.content().as_deref(), Some("Rayleigh scattering."));
+    }
+
+    #[test]
+    fn inkling_tool_headers_leave_the_text() {
+        let mut ctx = TagReasoningContext::new_inkling();
+        for chunk in [
+            "<|message_model|>",
+            "<|content_text|>",
+            "Checking.",
+            "<|end_message|>",
+            "<|message_model|>",
+            "ba",
+            "sh",
+            "<|content_invoke_tool_json|>",
+            r#"{"name":"bash","args":{}}"#,
+            "<|end_message|>",
+        ] {
+            ctx.process_bytes(chunk.as_bytes());
+        }
+        ctx.finalize();
+        assert_eq!(
+            ctx.content().as_deref(),
+            Some(r#"Checking.<|content_invoke_tool_json|>{"name":"bash","args":{}}"#)
+        );
     }
 
     #[test]
