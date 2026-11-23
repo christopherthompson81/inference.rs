@@ -290,11 +290,16 @@ fn normalize_minijinja_compatibility(template: &str) -> String {
     )
 }
 
+const INKLING_NO_EFFORT: &str = "none";
+const INKLING_TEXT_REPLY: &str = "<|message_model|><|content_text|>";
+
 fn template_tool_call_format(template: &str) -> Option<ToolCallFormat> {
     if is_atem_tool_template(template) {
         Some(ToolCallFormat::Atem)
     } else if crate::reasoning_parsers::harmony::is_harmony_template(template) {
         Some(ToolCallFormat::Harmony)
+    } else if template.contains("<|content_invoke_tool_json|>") {
+        Some(ToolCallFormat::Inkling)
     } else if is_gemma4_tool_template(template) {
         Some(ToolCallFormat::Gemma4)
     } else if is_liquid_tool_template(template) {
@@ -657,10 +662,16 @@ pub fn apply_chat_template_to(
     let tmpl = env.get_template("chat_template")?;
 
     let reasoning_controls = resolve_reasoning_controls(enable_thinking, reasoning_effort)?;
-    let reasoning_effort_value = reasoning_controls
-        .reasoning_effort
-        .map(|effort| Value::from(effort.as_str()))
-        .unwrap_or(Value::UNDEFINED);
+    let inkling = crate::reasoning_parsers::tag_based::is_inkling_template(&resolved_template);
+    // Inkling reads only an effort, where off is `none`; unset it defaults to thinking
+    let reasoning_effort_value = if inkling && !reasoning_controls.enable_thinking {
+        Value::from(INKLING_NO_EFFORT)
+    } else {
+        reasoning_controls
+            .reasoning_effort
+            .map(|effort| Value::from(effort.as_str()))
+            .unwrap_or(Value::UNDEFINED)
+    };
     // Seed-OSS reads thinking off as a zero budget; left undefined, its template thinks without one
     let thinking_budget = if reasoning_controls.enable_thinking {
         Value::UNDEFINED
@@ -730,6 +741,10 @@ pub fn apply_chat_template_to(
     // Append it when the template left it out.
     if is_gemma4 && add_generation_prompt && rendered.ends_with("<tool_response|>") {
         rendered.push_str("<|turn>model\n");
+    }
+    // Inkling opens a thinking block even at effort 0, so a reply without thinking starts in its text block
+    if inkling && add_generation_prompt && !reasoning_controls.enable_thinking {
+        rendered.push_str(INKLING_TEXT_REPLY);
     }
 
     Ok(rendered)
@@ -911,6 +926,10 @@ mod tests {
             (
                 "<|start|>assistant to=tool<|message|><atem:function_calls><atem:invoke",
                 ToolCallFormat::Atem,
+            ),
+            (
+                "<|message_model|>{{ fn.name }}<|content_invoke_tool_json|>",
+                ToolCallFormat::Inkling,
             ),
         ];
 
@@ -1094,6 +1113,45 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "no-effort:no-strength:enabled");
+    }
+
+    #[test]
+    fn inkling_without_thinking_takes_no_effort_and_replies_in_text() {
+        let template = ChatTemplateValue(Either::Left(
+            "<|message_user|><|content_thinking|>{{ reasoning_effort | default('0.9') }}"
+                .to_string(),
+        ));
+        let render = |enable_thinking, effort| {
+            apply_chat_template_to(
+                vec![user_text_message("hello")],
+                true,
+                enable_thinking,
+                effort,
+                &template,
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .unwrap()
+        };
+        let reply = "<|message_model|><|content_text|>";
+        assert_eq!(
+            render(Some(false), None),
+            format!("<|message_user|><|content_thinking|>none{reply}")
+        );
+        assert_eq!(
+            render(None, Some(ReasoningEffort::Off)),
+            format!("<|message_user|><|content_thinking|>none{reply}")
+        );
+        assert_eq!(
+            render(None, None),
+            "<|message_user|><|content_thinking|>0.9"
+        );
+        assert_eq!(
+            render(None, Some(ReasoningEffort::Low)),
+            "<|message_user|><|content_thinking|>low"
+        );
     }
 
     #[test]

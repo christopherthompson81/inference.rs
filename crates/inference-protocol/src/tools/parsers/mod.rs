@@ -9,6 +9,7 @@ mod gemma4;
 mod gemma4_strict;
 pub(crate) mod harmony;
 mod hunyuan;
+mod inkling;
 mod liquid;
 mod llama;
 mod mistral_nemo;
@@ -33,6 +34,9 @@ const REQUIRED_TOOL_CALL_CONTROL_TOKENS: &[&str] = &[
     "<|message|>",
     "<|eom|>",
     "<|start|>",
+    inkling::MESSAGE_MODEL,
+    inkling::INVOKE,
+    inkling::END_MESSAGE,
 ];
 
 /// Identifies the detected tool call format so that the correct grammar
@@ -59,6 +63,8 @@ pub enum ToolCallFormat {
     Gemma4,
     /// Harmony commentary channel tool call with `to=...` recipient.
     Harmony,
+    /// `<|message_model|>NAME<|content_invoke_tool_json|>{"name":"...","args":{...}}<|end_message|>`
+    Inkling,
 }
 
 /// A parser that can detect and extract tool calls from model output.
@@ -105,6 +111,7 @@ static PARSERS: std::sync::LazyLock<Vec<Box<dyn ToolFormatParser>>> =
     std::sync::LazyLock::new(|| {
         vec![
             Box::new(atem::AtemParser),
+            Box::new(inkling::InklingParser),
             Box::new(gemma4::Gemma4Parser),
             Box::new(liquid::LiquidParser),
             Box::new(llama::LlamaParser),
@@ -218,6 +225,7 @@ fn strip_tool_call_segments(message: &str, format: ToolCallFormat) -> String {
             strip_delimited_segments(message, "<atem:function_calls>", "</atem:function_calls>")
         }
         ToolCallFormat::Harmony => message.to_string(),
+        ToolCallFormat::Inkling => inkling::strip_calls(message),
     }
 }
 
