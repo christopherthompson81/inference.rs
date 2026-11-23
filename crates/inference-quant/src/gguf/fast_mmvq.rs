@@ -23,6 +23,8 @@ const WORKSPACE_ALIGN: usize = 256;
 // Down reads one activation row per routed pair, and fuses no activation
 const MOE_DOWN_Y_DIV: i32 = 1;
 const MOE_NO_ACTIVATION: i32 = 0;
+// mmvq_gguf.cuh's MMVQ_MOE_GROUP_MAX_EXPERTS
+const MOE_GROUP_MAX_EXPERTS: usize = 1024;
 
 #[inline]
 fn pad(p: usize, q: usize) -> usize {
@@ -1208,7 +1210,12 @@ pub fn supports_moe(
     gate.gguf_type() == up.gguf_type()
         && [gate, up, down]
             .into_iter()
-            .all(|w| moe_launcher(w.gguf_type()).is_some() && w.kernel_shape().rank() == 3)
+            .all(|w| moe_matvec_reads(w.gguf_type()) && w.kernel_shape().rank() == 3)
+}
+
+// whether an expert-indexed matvec reads this type: a per-pair kernel, or the tensor-core one for tiled NVFP4
+fn moe_matvec_reads(ty: GgufType) -> bool {
+    ty == GgufType::Nvfp4Tiled || moe_launcher(ty).is_some()
 }
 
 // Quantizes `rows` rows of `xs` (row length k) to Q8_1 rows of `k_padded`, as the matvec kernels read them
@@ -1319,7 +1326,7 @@ pub fn moe_decode(
 pub fn supports_moe_ungated(up: &dyn KernelWeight, down: &dyn KernelWeight) -> bool {
     [up, down]
         .into_iter()
-        .all(|w| moe_launcher(w.gguf_type()).is_some() && w.kernel_shape().rank() == 3)
+        .all(|w| moe_matvec_reads(w.gguf_type()) && w.kernel_shape().rank() == 3)
 }
 
 /// [`moe_decode`] for experts with no gate, `down(act(up(x)))`: `act` runs on the up rows (F32, `[pairs, inter]`).
@@ -1398,6 +1405,87 @@ enum MoeFirst<'a> {
         up: &'a dyn KernelWeight,
         act: &'a dyn Fn(&Tensor, &Tensor) -> Result<Tensor>,
     },
+}
+
+// what a MoE matvec launch shares across its projections: the routed pairs and, for the tensor-core matvec, their plan
+struct MoePlan {
+    ids: *const std::ffi::c_void,
+    groups: *const i32,
+    pairs: i32,
+    grouped: i32,
+    stream: *mut std::ffi::c_void,
+}
+
+// one projection of a MoE matvec; `vx_up` fuses the GLU
+struct MoeLaunch {
+    vx_gate: *const std::ffi::c_void,
+    vx_up: *const std::ffi::c_void,
+    expert_stride: i64,
+    vy: *const std::ffi::c_void,
+    scales: *const f32,
+    scales_up: *const f32,
+    dst: *mut f32,
+    ncols_x: i32,
+    nrows_x: i32,
+    stride_col_y: i32,
+    y_div: i32,
+    activation: i32,
+    gate_cap: f32,
+    up_cap: f32,
+}
+
+impl MoeLaunch {
+    // Safety: the pointers are live device buffers of the shapes given, on the plan's stream
+    unsafe fn run(&self, ty: GgufType, plan: &MoePlan) {
+        if ty == GgufType::Nvfp4Tiled {
+            unsafe {
+                ffi::launch_mmvq_tc_nvfp4_moe(
+                    self.vx_gate,
+                    self.vx_up,
+                    self.expert_stride,
+                    self.vy,
+                    plan.ids,
+                    plan.groups,
+                    plan.pairs,
+                    self.scales,
+                    self.scales_up,
+                    self.dst,
+                    self.ncols_x,
+                    self.nrows_x,
+                    self.stride_col_y,
+                    self.y_div,
+                    self.activation,
+                    self.gate_cap,
+                    self.up_cap,
+                    plan.stream,
+                )
+            };
+            return;
+        }
+        let launch = moe_launcher(ty).expect("supports_moe checked");
+        unsafe {
+            launch(
+                self.vx_gate,
+                self.vx_up,
+                self.expert_stride,
+                self.vy,
+                plan.ids,
+                self.scales,
+                self.scales_up,
+                self.dst,
+                self.ncols_x,
+                self.nrows_x,
+                self.stride_col_y,
+                self.y_div,
+                plan.pairs,
+                self.activation,
+                self.gate_cap,
+                self.up_cap,
+                plan.grouped,
+                plan.stream,
+            )
+        };
+    }
 }
 
 fn moe_decode_with(
@@ -1518,12 +1606,46 @@ fn moe_decode_with(
     }
     let [gate_scales, up_scales, down_scales] = scale_ptrs;
 
+    // tiled NVFP4 experts take the tensor-core matvec, which runs several tokens over a plan of the distinct experts
+    let tiled = [lead.gguf_type(), down.gguf_type()].contains(&GgufType::Nvfp4Tiled);
+    if tiled && experts > MOE_GROUP_MAX_EXPERTS {
+        inference_tensor::bail!(
+            "fast_mmvq: a plan holds {MOE_GROUP_MAX_EXPERTS} experts, not {experts}"
+        );
+    }
+    let tc = tiled && tokens > 1;
+    let mut groups = tc
+        .then(|| unsafe { dev.alloc::<i32>(3 * pairs + 2) })
+        .transpose()?;
+    let (groups_ptr, _groups_guard) = match groups.as_mut() {
+        Some(buf) => {
+            let (ptr, guard) = slice_ptr_mut_on_stream(buf, 0, &stream);
+            unsafe {
+                ffi::launch_mmvq_moe_group_pairs(
+                    ids_ptr,
+                    pairs as i32,
+                    experts as i32,
+                    ptr as *mut i32,
+                    stream_ptr,
+                );
+            }
+            (ptr as *const i32, Some(guard))
+        }
+        None => (std::ptr::null(), None),
+    };
+    let plan = MoePlan {
+        ids: ids_ptr,
+        groups: groups_ptr,
+        pairs: pairs as i32,
+        grouped,
+        stream: stream_ptr,
+    };
+
     let mut hidden_rows = unsafe { dev.alloc::<f32>(pairs * intermediate)? };
     let mut out = unsafe { dev.alloc::<f32>(pairs * hidden)? };
     {
         let (lead_ptr, _lead_guard) = lead.kernel_ptr(&stream)?;
         let (mid_ptr, _mid_guard) = slice_ptr_mut_on_stream(&mut hidden_rows, 0, &stream);
-        let launch = moe_launcher(lead.gguf_type()).expect("supports_moe checked");
         let (up_ptr, _up_guard, (activation, gate_cap, up_cap)) = match first {
             MoeFirst::Glu { up, glu, .. } => {
                 let (ptr, guard) = up.kernel_ptr(&stream)?;
@@ -1537,28 +1659,23 @@ fn moe_decode_with(
                 (std::ptr::null(), None, (MOE_NO_ACTIVATION, 0.0, 0.0))
             }
         };
-        unsafe {
-            launch(
-                lead_ptr as *const _,
-                up_ptr,
-                lead_stride,
-                x_q8,
-                ids_ptr,
-                gate_scales,
-                up_scales,
-                mid_ptr as *mut f32,
-                hidden as i32,
-                intermediate as i32,
-                (x_padded / Q8_1_BLOCK_SIZE) as i32,
-                topk as i32,
-                pairs as i32,
-                activation,
-                gate_cap,
-                up_cap,
-                grouped,
-                stream_ptr,
-            );
-        }
+        let launch = MoeLaunch {
+            vx_gate: lead_ptr as *const _,
+            vx_up: up_ptr,
+            expert_stride: lead_stride,
+            vy: x_q8,
+            scales: gate_scales,
+            scales_up: up_scales,
+            dst: mid_ptr as *mut f32,
+            ncols_x: hidden as i32,
+            nrows_x: intermediate as i32,
+            stride_col_y: (x_padded / Q8_1_BLOCK_SIZE) as i32,
+            y_div: topk as i32,
+            activation,
+            gate_cap,
+            up_cap,
+        };
+        unsafe { launch.run(lead.gguf_type(), &plan) };
     }
     // the hidden rows down reads: the fused GLU's as the kernel wrote them, an ungated expert's after `act`
     let rows = Tensor::from((
@@ -1573,29 +1690,23 @@ fn moe_decode_with(
             {
                 let (up_ptr, _up_guard) = up.kernel_ptr(&stream)?;
                 let (rows_ptr, _rows_guard) = slice_ptr_mut_on_stream(&mut up_rows, 0, &stream);
-                let launch = moe_launcher(up.gguf_type()).expect("supports_moe checked");
-                unsafe {
-                    launch(
-                        up_ptr as *const _,
-                        std::ptr::null(),
-                        lead_stride,
-                        x_q8,
-                        ids_ptr,
-                        up_scales,
-                        std::ptr::null(),
-                        rows_ptr as *mut f32,
-                        hidden as i32,
-                        intermediate as i32,
-                        (x_padded / Q8_1_BLOCK_SIZE) as i32,
-                        topk as i32,
-                        pairs as i32,
-                        MOE_NO_ACTIVATION,
-                        0.0,
-                        0.0,
-                        grouped,
-                        stream_ptr,
-                    );
-                }
+                let launch = MoeLaunch {
+                    vx_gate: up_ptr as *const _,
+                    vx_up: std::ptr::null(),
+                    expert_stride: lead_stride,
+                    vy: x_q8,
+                    scales: up_scales,
+                    scales_up: std::ptr::null(),
+                    dst: rows_ptr as *mut f32,
+                    ncols_x: hidden as i32,
+                    nrows_x: intermediate as i32,
+                    stride_col_y: (x_padded / Q8_1_BLOCK_SIZE) as i32,
+                    y_div: topk as i32,
+                    activation: MOE_NO_ACTIVATION,
+                    gate_cap: 0.0,
+                    up_cap: 0.0,
+                };
+                unsafe { launch.run(up.gguf_type(), &plan) };
             }
             let up_rows = Tensor::from((
                 Storage::Cuda(CudaStorage::wrap_cuda_slice(up_rows, dev.clone())),
@@ -1625,29 +1736,23 @@ fn moe_decode_with(
     {
         let (down_ptr, _down_guard) = down.kernel_ptr(&stream)?;
         let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
-        let launch = moe_launcher(down.gguf_type()).expect("supports_moe checked");
-        unsafe {
-            launch(
-                down_ptr as *const _,
-                std::ptr::null(),
-                down_stride,
-                mid_q8,
-                ids_ptr,
-                down_scales,
-                std::ptr::null(),
-                out_ptr as *mut f32,
-                intermediate as i32,
-                hidden as i32,
-                (mid_padded / Q8_1_BLOCK_SIZE) as i32,
-                MOE_DOWN_Y_DIV,
-                pairs as i32,
-                MOE_NO_ACTIVATION,
-                0.0,
-                0.0,
-                grouped,
-                stream_ptr,
-            );
-        }
+        let launch = MoeLaunch {
+            vx_gate: down_ptr as *const _,
+            vx_up: std::ptr::null(),
+            expert_stride: down_stride,
+            vy: mid_q8,
+            scales: down_scales,
+            scales_up: std::ptr::null(),
+            dst: out_ptr as *mut f32,
+            ncols_x: intermediate as i32,
+            nrows_x: hidden as i32,
+            stride_col_y: (mid_padded / Q8_1_BLOCK_SIZE) as i32,
+            y_div: MOE_DOWN_Y_DIV,
+            activation: MOE_NO_ACTIVATION,
+            gate_cap: 0.0,
+            up_cap: 0.0,
+        };
+        unsafe { launch.run(down.gguf_type(), &plan) };
     }
     Ok(Tensor::from((
         Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),

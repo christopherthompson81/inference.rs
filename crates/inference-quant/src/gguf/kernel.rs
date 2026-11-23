@@ -8,6 +8,8 @@ use super::archive::GgufDType;
 const IQK_FIRST_ID: u32 = 137;
 /// `GgufType::Iq4KsTiled`'s id in the kernels (mmq_common.cuh `GGML_TYPE_IQ4_KS_TILED`), outside ggml's range.
 pub const IQ4_KS_TILED_ID: u32 = 240;
+/// `GgufType::Nvfp4Tiled`'s id in the kernels (mmq_common.cuh `GGML_TYPE_NVFP4_TILED`), outside ggml's range.
+pub const NVFP4_TILED_ID: u32 = 241;
 
 /// A ggml tensor type; Candle's variants keep their names so the kernel tables read the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +61,9 @@ pub enum GgufType {
     /// IQ4_KS regrouped into 16-row tiles for the multi-row matvec (`fast_mmvq::iq4_ks_to_tiled`): the same bytes
     /// in another order, held only on the GPU and never written to a file.
     Iq4KsTiled,
+    /// NVFP4 regrouped into 16-row tiles for the tensor-core kernels (`nvfp4_tiled`): the same bytes in another
+    /// order, held only on the GPU and never written to a file.
+    Nvfp4Tiled,
 }
 
 impl From<GgmlDType> for GgufType {
@@ -159,6 +164,7 @@ impl GgufType {
             Self::Iq3Ks => 156,
             Self::Iq2Kl => 157,
             Self::Iq4KsTiled => IQ4_KS_TILED_ID,
+            Self::Nvfp4Tiled => NVFP4_TILED_ID,
         }
     }
 
@@ -166,6 +172,7 @@ impl GgufType {
     fn layout_id(self) -> u32 {
         match self {
             Self::Iq4KsTiled => Self::Iq4Ks.id(),
+            Self::Nvfp4Tiled => Self::Nvfp4.id(),
             _ => self.id(),
         }
     }
@@ -226,7 +233,7 @@ impl GgufType {
 
     /// ik_llama.cpp's non-trellis types, dequantized a row at a time by `iqk_dequant`.
     pub fn is_iqk(self) -> bool {
-        self.id() >= IQK_FIRST_ID && !self.is_trellis()
+        self.id() >= IQK_FIRST_ID && !self.is_trellis() && self != Self::Nvfp4Tiled
     }
 
     /// The (elements, bytes) unit rows of `cols` elements are cut into: a block, or a whole row-scaled row.

@@ -74,6 +74,7 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Q6K
             | GgufType::Iq4Nl
             | GgufType::Nvfp4
+            | GgufType::Nvfp4Tiled
             | GgufType::Iq4Xs
             | GgufType::Iq2Xxs
             | GgufType::Iq2Xs
@@ -114,9 +115,10 @@ pub fn supports_weight(weight: &dyn KernelWeight) -> bool {
         .is_some_and(|&cols| supports_shape(weight.gguf_type(), cols))
 }
 
-// The row stride mmq takes: blocks for ggml's types, bytes for ik's (some of whose rows start with a scale)
+// The row stride mmq takes: blocks for ggml's types, bytes for ik's (some of whose rows start with a scale) and the
+// tile orders (whose loaders find a row's 16-row group by bytes)
 fn mmq_row_stride(dtype: GgufType, k: usize) -> i64 {
-    if dtype.is_trellis() || dtype.is_iqk() {
+    if dtype.is_trellis() || dtype.is_iqk() || dtype == GgufType::Nvfp4Tiled {
         dtype.row_bytes(k).expect("validated at construction") as i64
     } else {
         (k / qk_for(dtype)) as i64
@@ -132,7 +134,7 @@ fn qk_for(dtype: GgufType) -> usize {
         | GgufType::Q5_1
         | GgufType::Q8_0
         | GgufType::Iq4Nl => 32,
-        GgufType::Nvfp4 => 64,
+        GgufType::Nvfp4 | GgufType::Nvfp4Tiled => 64,
         GgufType::Q2K
         | GgufType::Q3K
         | GgufType::Q4K
@@ -185,6 +187,7 @@ fn ds_layout_for(dtype: GgufType) -> DsLayout {
         GgufType::Q6K
         | GgufType::Iq4Nl
         | GgufType::Nvfp4
+        | GgufType::Nvfp4Tiled
         | GgufType::Iq4Xs
         | GgufType::Iq2Xxs
         | GgufType::Iq2Xs
@@ -336,6 +339,7 @@ fn mmq_launcher(dtype: GgufType) -> Option<MmqLauncher> {
         GgufType::Q6K => ffi::launch_mmq_gguf_q6_k,
         GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl,
         GgufType::Nvfp4 => ffi::launch_mmq_gguf_nvfp4,
+        GgufType::Nvfp4Tiled => ffi::launch_mmq_gguf_nvfp4_tiled,
         GgufType::Iq4Xs => ffi::launch_mmq_gguf_iq4_xs,
         GgufType::Iq2Xxs => ffi::launch_mmq_gguf_iq2_xxs,
         GgufType::Iq2Xs => ffi::launch_mmq_gguf_iq2_xs,
@@ -378,6 +382,7 @@ fn mmq_moe_launcher(dtype: GgufType) -> Option<MmqMoeLauncher> {
         GgufType::Q6K => ffi::launch_mmq_gguf_q6_k_moe,
         GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl_moe,
         GgufType::Nvfp4 => ffi::launch_mmq_gguf_nvfp4_moe,
+        GgufType::Nvfp4Tiled => ffi::launch_mmq_gguf_nvfp4_tiled_moe,
         GgufType::Iq4Xs => ffi::launch_mmq_gguf_iq4_xs_moe,
         GgufType::Iq2Xxs => ffi::launch_mmq_gguf_iq2_xxs_moe,
         GgufType::Iq2Xs => ffi::launch_mmq_gguf_iq2_xs_moe,

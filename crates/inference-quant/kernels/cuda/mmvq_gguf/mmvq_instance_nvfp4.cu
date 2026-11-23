@@ -1,4 +1,5 @@
 #include "mmvq_gguf.cuh"
+#include "mmvq_tc_nvfp4.cuh"
 
 MMVQ_PLAIN_BATCH_SET(nvfp4, block_nvfp4, QK_NVFP4, QI_NVFP4, VDR_NVFP4_Q8_1_MMVQ,
                      vec_dot_nvfp4_q8_1)
