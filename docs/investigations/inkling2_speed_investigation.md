@@ -1196,3 +1196,39 @@ mean 0.00389, median 0.00160, p99 0.0371, same top 97.32%, PPL 6.7630 (Run 9's f
 
 Left: the ~2% prefill gap; the Q6_K / Q8_0 experts of layers 20-23 still take the per-pair matvec in a verify (Run
 12: 1.1 ms of a 4-row verify); a verify length chosen per step from 0, 2, 4 and 7 now that wider verifies pay.
+
+## Run 41 - 2026-11-23 12:30
+
+Verify lengths for auto depth now that a wider verify reads each shared expert once (Run 40). Inkling offered
+`[0, n]`; the tuner (per-position acceptance, scaled per sequence, over measured step costs, probing the other
+candidates) can weigh more. Served, recipe C, Run 27's prompts, 768 tokens, means over the eight (a run's noise is
+~2%: the same `[0, 2, 4]` gave 127.3 and 130.2):
+
+```
+auto depth candidates (drafts)     mean    geo     slowest   code    rust    json
+[0, 2] (2)                         127.6   125.9   104.1     136.9   150.6   170.0
+  again                            128.4   127.1   105.3     138.7   144.9   165.5
+  again                            128.0   126.6   103.1     135.5   153.0   160.9
+[0, 2, 3] (3)                      131.1   129.4   104.4     141.2   150.6   175.4
+  again                            129.7   127.9   105.7     144.5   157.6   164.8
+  again                            132.3   129.9   104.2     150.8   165.8   175.8
+[0, 2, 4] (4)                      127.3 / 130.2 (two runs)
+[0, 2, 4, 7] (7)                   126.8           107.1     129.0   147.5   160.4
+[0, 2, 3, 4, 7] (7)                124.0           104.8     132.8   158.0   144.6
+fixed 3                            132.9   130.0    96.1     147.6   171.9   179.0
+```
+
+Every candidate costs exploration steps, so larger sets lose. `[0, 2, 3]` at drafts 3 is +2.4% over `[0, 2]` in all
+three pairs and keeps the prose prompt over plain decode, where fixed 3 falls under it. Inkling now offers 0, 2 and
+the drafter's depth.
+
+The same profile (drafts 3, one request) showed layers 20-23 (Q6_K gate-up, Q8_0 down) took 35.4 ms of the
+request's expert time against 84.7 for the twenty NVFP4 layers: 4 of 48 visits. Their experts are Candle QTensors;
+the fused decode kernel declines Inkling's softcapped SiLU, and the expert-indexed matvec fallback was for raw
+experts only, so they ran the gather path (each projection through `indexed_moe_forward_*`, the activation apart) in
+decode and verify alike. Any experts with kernel weights now take the indexed matvec (then grouped mmq past 8
+tokens): the same request's layers 20-23 take 17.2 ms (`mmvq_gguf_q6_k_moe` with the fused GLU, `q8_0_moe`).
+
+Against master (`ccabab936`, the same card, alternating): plain 109.4 / 109.7 -> 109.8 / 110.7; auto depth at drafts 3
+130.9 -> 135.0 mean (code 142.9 -> 162.1, json 170.1 -> 179.3, rust 170.3 -> 162.6). Master's drafts-3 auto depth
+offers `[0, 3]`.

@@ -12,9 +12,14 @@ use inference_tensor::{DType, Module, Result, Tensor};
 use crate::kv_cache::HybridLayerCache;
 use crate::speculative::{
     MtpConfig, MtpRuntimeConfig, SpeculativeAttachInfo, SpeculativeCommitRow, SpeculativeConfig,
+    auto_depth_graph_plans, depths_up_to,
 };
 
 use super::Model;
+
+// the drafting depths auto depth weighs below the drafter's own (with a plain step, depth 0); each candidate costs
+// exploration steps, and 0 / 2 / 3 at drafts 3 beat 0 / 2 / 4 / 7 at drafts 7
+const INKLING_AUTO_DEPTHS: [usize; 1] = [2];
 
 /// A verify step's convolution state of one cache slot before the step, and the inputs its convs took over the
 /// step's rows: a row that keeps `k` of them keeps the last `width - 1` of `[state, inputs[..k]]`.
@@ -392,10 +397,19 @@ impl crate::speculative::SpeculativeTargetMixin for Model {
     }
 
     fn speculative_graph_plans(&self) -> Vec<crate::speculative::SpeculativeGraphPlan> {
-        self.spec
-            .drafter()
-            .map(|drafter| drafter.graph_plans(drafter.n_predict()))
-            .unwrap_or_default()
+        let Some(drafter) = self.spec.drafter() else {
+            return Vec::new();
+        };
+        if !self.spec.auto_depth {
+            return drafter.graph_plans(drafter.n_predict());
+        }
+        // a plain step (depth 0) runs the decode graphs, not a verify's
+        let drafting = self
+            .speculative_depth_candidates()
+            .into_iter()
+            .filter(|&depth| depth > 0)
+            .collect::<Vec<_>>();
+        auto_depth_graph_plans(&drafting, drafter.n_predict())
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -412,11 +426,13 @@ impl crate::speculative::SpeculativeTargetMixin for Model {
             .map_or(0, |drafter| drafter.evict_cuda_graphs_lru(max_entries))
     }
 
-    // a step either drafts the drafter's depth or none: on this MoE every verified row reads its own experts, so
-    // shallower depths lose to one of the two
+    // none, two, or the drafter's depth: a verify reads each expert its rows share once, so a wider one pays on
+    // predictable text and a narrower one elsewhere
     fn speculative_depth_candidates(&self) -> Vec<usize> {
         match self.spec.drafter() {
-            Some(drafter) if self.spec.auto_depth => vec![0, drafter.n_predict()],
+            Some(drafter) if self.spec.auto_depth => std::iter::once(0)
+                .chain(depths_up_to(&INKLING_AUTO_DEPTHS, drafter.n_predict()))
+                .collect(),
             _ => Vec::new(),
         }
     }
