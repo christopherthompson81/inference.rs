@@ -494,8 +494,8 @@ pub(super) fn indexed_mmvq_ungated_with(
     config: MoEForwardConfig,
 ) -> Result<Option<Tensor>> {
     if forward.lora.is_some()
-        || forward.shape.num_tokens > super::backends::INDEXED_MMVQ_MAX_TOKENS
         || !inference_quant::supports_indexed_moe_mmvq_ungated(up, down)
+        || forward.shape.num_tokens > inference_quant::indexed_moe_mmvq_max_tokens(&[up, down])
     {
         return Ok(None);
     }

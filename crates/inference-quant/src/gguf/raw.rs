@@ -2055,15 +2055,21 @@ mod tests {
         const INTERMEDIATE: usize = 256;
         // 5 whole 256-element blocks and a 128-element tail
         const TAIL_INTERMEDIATE: usize = 1408;
+        const WIDE_TOKENS: usize = 32;
         let Ok(cuda) = Device::new_cuda(0) else {
             eprintln!("SKIP: no CUDA device");
             return Ok(());
         };
         // tokens sharing an expert, a token routing to one twice, and more pairs on expert 2 than a group holds
-        let routes: [&[[u32; 2]]; 3] = [
+        // and the widest step the tensor-core matvec takes (a 4-sequence verify), its pairs over several column chunks
+        let wide = (0..WIDE_TOKENS as u32)
+            .map(|t| [t % EXPERTS as u32, (t * 3 + 1) % EXPERTS as u32])
+            .collect::<Vec<_>>();
+        let routes: [&[[u32; 2]]; 4] = [
             &[[2, 0]],
             &[[3, 2], [1, 1], [0, 3]],
             &[[2, 2], [2, 1], [2, 2], [0, 2], [2, 2], [2, 3]],
+            &wide,
         ];
         let check = |label: String, w: [&dyn KernelWeight; 3], dense: [Tensor; 3]| -> Result<()> {
             assert!(

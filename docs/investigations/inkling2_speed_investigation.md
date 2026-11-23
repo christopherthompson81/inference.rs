@@ -1446,3 +1446,60 @@ Desktop use swings ~50 MB between loads, so a context within ~100 MB of its limi
 Drafter weights below 8 bits (HyperInkling's INT4): Run 17 measured q4k accepting 313 / 178 against bf16's 317 / 177
 and no faster; the projections are under ~450 MB at BF16 (606 MiB drafter less `markov_w1` and the small tensors), so
 q4k over q8_0 frees ~100 MB, ~5K tokens, for a measured acceptance loss. Not pursued.
+
+## Run 49 - 2026-11-23 23:50
+
+Several requests at once (HyperInkling's headline: 6 requests at 686 tok/s with drafts against 267 for one). Recipe C
+on the LAN server (master e6e3ed9fb), `chat` at 237,568 with 4 sequences, greedy, 256 tokens a request, distinct
+prompts, the counters from `/metrics` as deltas over each run (scratchpad `conc.py`):
+
+```
+drafts 7 auto   agg tok/s   per request          target replays   drafts   accepted a draft
+1               173.3       186                  72               68       2.71
+2               135.1       184, 120             204              188      1.63
+3               126.9       182, 127, 115        323              307      1.45
+4               122.6       124, 114, 183, 121   441              421      1.38
+
+no drafter
+1               103.5       111                  255
+2               151.0       82, 82               256
+3               188.5       67 x3                256
+4               213.5       58 x4                257
+```
+
+Without a drafter the steps batch: 256 graph replays carry 4 x 256 tokens, and the aggregate doubles by 4 requests.
+With the drafter every step serves one sequence (replays track drafts, one each), so requests take turns: aggregate
+falls as they are added, each request near its alone speed while it runs, and at 4 requests plain decoding is 1.7x
+faster. Every step still replays a graph (eager 0). Next: why the speculative path steps sequences one at a time.
+
+## Run 50 - 2026-11-24 01:30
+
+Why Run 49's drafted steps took one sequence each. The paged scheduler batches completions only at one staged
+speculative width (`completion_batch_indices`), and auto depth picks a depth per batch size with periodic probes, so
+groups that draft apart can stay apart. A change that made a group drafting apart take the running sequences' depth
+was measured and dropped: every rerun on master batched without it, at 131,072 and 237,568, cold, after warm-up
+traffic, in Run 49's exact order, and with starts staggered 200 ms (4 separate prefills). Run 49's serialization did not
+recur; its cause stays unknown (that run's 4 requests did prefill separately, which the reruns mostly did not).
+
+On the same 4 prompts, run one after another and then together, acceptance a draft barely moves (fixed 7: 1.67 ->
+1.50; auto: 1.20 -> 1.14). Run 49's drop (3.06 -> 1.5) was the prompt mix: alone it only ran the code prompt.
+Greedy text alone and batched differ early (chars 133-322), as plain decoding does (133-265): batched numerics.
+
+What did cost: a 4-sequence verify is 32 rows, past the expert matvec's 8-token limit, so the experts ran grouped mmq.
+The tensor-core matvec walks an expert's pairs in 8-column chunks and takes any width; the limit (from the per-pair
+kernel) now stays 8 only where a projection lacks the tensor-core matvec, and is 32 where all have it
+(`moe_matvec_max_tokens`). Fresh process per build, 131,072, drafts 7 auto, q8_0 drafter, 256 tokens a request:
+
+```
+agg tok/s          1       2       3       4             4 prompts one after another
+limit 8 (master)   163.6   172.8   171.9   184.6 187.8   123.2 116.9
+limit 32           148.8*  192.9   199.7   221.9 228.8   120.4 120.3 123.1
+plain, no drafter  103.5   151.0   188.5   213.5
+```
+
+(*) The single-request run's text changes with the limit (its 20-token prompt now prefills on the matvec, different
+numerics), 143-149 tok/s at acceptance 1.51 against 2.15; over the 4 prompts single requests are level. Drafting now
+beats plain decoding at 4 requests (222-229 against 214), +19% over master there. Every drafted step replayed a CUDA
+graph (eager 0), batched verifies included: the vLLM failure HyperInkling hit does not occur. Test: the indexed matvec
+case gains a 32-token route. Still short of HyperInkling's scaling (686 at 6 requests); 6 needs a capacity past 4.
+
