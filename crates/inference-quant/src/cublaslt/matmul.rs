@@ -36,9 +36,10 @@ unsafe impl Sync for CudaBlasLT {}
 
 impl CudaBlasLT {
     /// Creates a new cublasLt handle.
-    pub fn new(stream: Arc<CudaStream>) -> Result<Self, CublasError> {
+    pub fn new(dev: &inference_tensor::CudaDevice) -> Result<Self, CublasError> {
+        let stream = dev.cuda_stream();
         let handle = result::create_handle()?;
-        let workspace = Workspace::new(stream.clone()).unwrap();
+        let workspace = Workspace::new(dev).unwrap();
 
         Ok(Self {
             handle,
@@ -70,7 +71,9 @@ pub struct Workspace {
 
 impl Workspace {
     /// Creates a CublasLt workspace buffer on the provided device
-    pub fn new(stream: Arc<CudaStream>) -> Result<Self, DriverError> {
+    /// The handle lives for the process, so its workspace comes from the process-lifetime pool.
+    pub fn new(dev: &inference_tensor::CudaDevice) -> Result<Self, DriverError> {
+        let stream = dev.cuda_stream();
         stream.context().bind_to_thread()?;
 
         let major = stream
@@ -82,7 +85,8 @@ impl Workspace {
             CUBLASLT_SMALL_WORKSPACE_BYTES
         };
 
-        let buffer = unsafe { stream.alloc::<u8>(workspace_size)? };
+        let buffer = unsafe { dev.alloc_process_lifetime::<u8>(workspace_size) }
+            .map_err(|_| DriverError(inference_tensor::cuda::cudarc::driver::sys::cudaError_enum::CUDA_ERROR_OUT_OF_MEMORY))?;
         Ok(Self {
             buffer,
             size: workspace_size,

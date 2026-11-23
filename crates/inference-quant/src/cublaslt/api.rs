@@ -25,7 +25,7 @@ impl CublasLt {
             _ => inference_tensor::bail!("`device` must be a `cuda` device"),
         };
 
-        let inner = CudaBlasLT::new(dev.cuda_stream()).unwrap();
+        let inner = CudaBlasLT::new(dev).unwrap();
 
         Ok(Self(Arc::new(inner)))
     }
