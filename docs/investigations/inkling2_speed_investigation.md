@@ -1288,3 +1288,77 @@ half-word lookup costs the same instructions a value. The A fragment fixes what 
 rows), so any tile word mixes two rows or two sub-blocks, and the fold's tables always split it; Run 9's per-16 path
 avoids the fold but runs half-K mma steps (2209 against 2361). The ~4.5% of this kernel (~1-2% of a prefill) is the
 price of one layout for the tensor-core matvec and folded prefill: decode and verify gain 3-29%. Left as is.
+
+## Run 44 - 2026-11-23 16:30
+
+Context lookup drafting after HyperInkling: the longest earlier occurrence (6-32 tokens) of a sequence's history
+suffix proposes what followed it; a match of 8 or more replaces the drafter's proposal as point masses and, when
+every sequence of the step has one, sets the full depth. Served, Run 27's prompts plus three copying ones (quote a
+paragraph verbatim, rename a variable through a module, change two settings in a config), greedy, an environment
+switch for the A/B, two rounds each:
+
+```
+mean tok/s (11 prompts / the 3 copying)    lookup off        lookup on
+auto depth, drafts 3                       148.3 / 175.5     147.0 / 172.2
+  again                                    148.6 / 175.6     147.5 / 175.5
+auto depth, drafts 7                       139.7 / 160.0     137.7 / 152.0
+  again                                    141.5 / 163.2     138.2 / 151.4
+```
+
+A long copy (a 3,700-token module returned with twenty functions renamed, 1536 tokens out):
+
+```
+                           tok/s    MTP accepted a step (acceptance)
+auto 3, lookup off         179.2    3.20 (78.6%)
+auto 3, lookup on          174.2    3.14 (78.9%)
+auto 7, lookup off         143.7    3.08
+auto 7, lookup on          101.4    7.20 (92.2%)
+fixed 7, lookup off         90.6    7.82 (97.4%)
+fixed 7, lookup on          86.7    7.31 (90.2%)
+```
+
+The drafter copies on its own: fixed at 7 it accepts 7.82 tokens a step on the long copy, better than the lookup's
+7.2, because Inkling's drafter keeps a global layer over the whole context (HyperInkling's lookup paid where a
+drafter saw a window). Lookup dropped; not merged.
+
+What the table shows instead: a 7-draft verify step costs ~90 ms (7.82 tokens a step at 90.6 tok/s) against ~21 at
+drafts 3. nsys of one prose request at fixed drafts 3 and 7 (node-level), the request's last 70%:
+
+```
+           wall     GPU busy        kernels   in graphs   eager
+drafts 3   330 ms   272 ms (82%)    31,986    27,495      4,491
+drafts 7   844 ms   381 ms (45%)    37,307    21,264      16,043
+```
+
+At drafts 7 whole target forwards run outside the graphs (the short convs, depth mixes, `mul_mat_q` 1369 times):
+the 8-row verify does not replay a graph and is bound by launches. With that fixed, copying (7.8 accepted a step)
+would run at the verify's GPU cost, several times today's. Next: why an 8-row verify falls out of its graph.
+
+## Run 45 - 2026-11-23 17:30
+
+Why a 7-draft verify costs ~90 ms (Run 44). The target's verify graph replays every step at both depths (the
+dispatch metrics: 139 replays at drafts 3, 117 at drafts 7, no skips past the prompt), and the large idle gaps of
+Run 44's trace were one-time captures and the request's end. nsys node-level on the long copy, in-graph kernel time
+a cycle: at drafts 3 attention is `decode_kernel` (0.22 ms), at drafts 7 `prefill_kernel` (3.1 ms, 14x). Biased
+attention took its split decode kernel (keys split over blocks, sized to fill the SMs) up to `DECODE_ROWS = 4`
+queries; a 3-draft verify is 4 rows, a 7-draft one 8, which fell to the scalar prefill kernel that walks a long past
+one block a row. `DECODE_ROWS` is now 8 (the split-decode test covers 8 rows over a 2000-key past).
+
+Long copy (3,700-token module, 1536 tokens out), fixed drafts 7: 90.6 -> 225.0 tok/s. Served, Run 27's prompts plus
+the three copying ones (11), means:
+
+```
+                                  mean    geo     copy (3)  slowest
+auto, drafts 3 (master)           148.3   145.2   175.5     106.8
+  again                           148.6   145.7   175.6     106.2
+auto, drafts 7 (master)           139.7   137.7   160.0     103.6
+auto, drafts 3 (DECODE_ROWS 8)    148.2   145.4   174.9     108.4
+  again                           147.5   144.8   174.1     108.3
+auto, drafts 7 (DECODE_ROWS 8)    157.5   152.8   195.1     113.3
+  again                           151.5   147.3   189.3     113.2
+auto, drafts 5                    153.5   149.1   179.8     109.7
+fixed 7                           143.7   134.1   203.7      87.2
+```
+
+Auto depth at drafts 7 (`[0, 2, 7]`) is now the best setting: +4-6% over drafts 3 on the mix, +10% on copying, and
+the slowest prompt (prose) up too. Fixed 7 copies fastest but takes prose under plain decode.

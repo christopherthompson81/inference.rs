@@ -11,8 +11,9 @@ use inference_tensor::{DType, Device, Layout, Result, Shape, Storage, Tensor};
 
 /// Head sizes the kernel is built for
 pub const HEAD_DIMS: [usize; 3] = [32, 64, 128];
-// queries up to this many take the kernel that splits the keys across warps (decode)
-const DECODE_ROWS: i32 = 4;
+// queries up to this many take the kernel that splits the keys across warps (decode): a speculative verify's rows,
+// up to 7 drafts and the token they follow (the scalar prefill kernel walks a long past one block a row)
+const DECODE_ROWS: i32 = 8;
 // the paged kernel's cache dtype codes
 const CACHE_F32: i32 = 0;
 const CACHE_F16: i32 = 1;
@@ -812,7 +813,8 @@ mod tests {
     // rows over several DECODE_SPLIT_KEYS of keys split them over blocks: verify rows and a decode row, windowed, from
     // a view and a paged cache
     fn cuda_split_decode_over_long_pasts_matches_the_reference() -> Result<()> {
-        for t in [4, 1] {
+        // a 7-draft verify's rows, a 3-draft one's, a decode row
+        for t in [DECODE_ROWS as usize, 4, 1] {
             let mut c = shape((2, 8, 2, t, 2000, 128, 256, 1500));
             c.log_scale = Some((0.1, 64.0));
             run(&c, None)?;
