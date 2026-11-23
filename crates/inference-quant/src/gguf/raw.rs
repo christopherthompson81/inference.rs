@@ -24,6 +24,9 @@ const IQ4_XS_QS: std::ops::Range<usize> = 8..136;
 // Zeroed blocks past the last row, as Candle pads its CUDA QTensors: mmq reads whole tiles of K
 #[cfg(feature = "cuda")]
 const MATRIX_ROW_PADDING: usize = 512;
+// the rows a tile order groups (`nvfp4_tiled`, `q8_0_tiled`, `q6k_tiled`)
+#[cfg(feature = "cuda")]
+const TILE_GROUP_ROWS: usize = 16;
 // Blocks per rayon task in the CPU dequantizers; one block is 32 to 256 values, too little work to schedule alone
 // ggml-common.h's kvalues_fp4: E2M1 doubled, which the UE4M3 scale halves back
 // 2^-128's f32 bits (a denormal), the halved scale of E8M0's 0
@@ -98,8 +101,20 @@ impl RawGgufTensor {
         bytes: &[u8],
         device: &inference_tensor::cuda_backend::CudaDevice,
     ) -> Result<RawStorage> {
+        Self::cuda_storage_padded(ty, bytes, device, 1)
+    }
+
+    // the blocks, then zeroed padding for `rows` rows' reads past K (a tile order's prompt kernels read a whole tile
+    // group's, so the last group's overrun stays in zeros)
+    #[cfg(feature = "cuda")]
+    fn cuda_storage_padded(
+        ty: GgufType,
+        bytes: &[u8],
+        device: &inference_tensor::cuda_backend::CudaDevice,
+        rows: usize,
+    ) -> Result<RawStorage> {
         super::ffi::ensure_type_loaded(ty).map_err(inference_tensor::Error::msg)?;
-        let padding = MATRIX_ROW_PADDING * ty.type_size() / ty.block_size();
+        let padding = rows * MATRIX_ROW_PADDING * ty.type_size() / ty.block_size();
         let mut blocks = device.alloc_zeros::<u8>(bytes.len() + padding)?;
         device.memcpy_htod(bytes, &mut blocks.slice_mut(..bytes.len()))?;
         Ok(RawStorage::Cuda {
@@ -109,8 +124,8 @@ impl RawGgufTensor {
         })
     }
 
-    /// The form `ty` blocks of `dims` take on `device`: an NVFP4 expert stack on a GPU with int8 tensor cores is
-    /// regrouped into `nvfp4_tiled`'s tiles, which every CUDA kernel reading NVFP4 experts takes.
+    /// The form `ty` blocks of `dims` take on `device`: an NVFP4, Q8_0 or Q6_K expert stack on a GPU with int8 tensor
+    /// cores is regrouped into its tile order (`expert_tiling`), which every CUDA kernel reading those experts takes.
     #[cfg(feature = "cuda")]
     fn cuda_upload(
         ty: GgufType,
@@ -119,15 +134,29 @@ impl RawGgufTensor {
         device: &inference_tensor::cuda_backend::CudaDevice,
     ) -> Result<(GgufType, RawStorage)> {
         if let [experts, rows, cols] = *dims
-            && ty == GgufType::Nvfp4
-            && super::nvfp4_tiled::tiles(rows, cols)
+            && let Some(tiled_ty) = Self::expert_tiling(ty, rows, cols)
             && super::fast_mmvq::tensor_core_capable(device)
         {
-            let tiled = super::nvfp4_tiled::to_tiled(bytes, experts, rows, cols);
-            let storage = Self::cuda_storage(ty, &tiled, device)?;
-            return Ok((GgufType::Nvfp4Tiled, storage));
+            let tiled = match tiled_ty {
+                GgufType::Nvfp4Tiled => super::nvfp4_tiled::to_tiled(bytes, experts, rows, cols),
+                GgufType::Q8_0Tiled => super::q8_0_tiled::to_tiled(bytes, experts, rows, cols),
+                _ => super::q6k_tiled::to_tiled(bytes, experts, rows, cols),
+            };
+            let storage = Self::cuda_storage_padded(ty, &tiled, device, TILE_GROUP_ROWS)?;
+            return Ok((tiled_ty, storage));
         }
         Ok((ty, Self::cuda_storage(ty, bytes, device)?))
+    }
+
+    /// The tile order a `ty` expert stack of `rows` x `cols` matrices takes on a GPU with int8 tensor cores.
+    #[cfg(feature = "cuda")]
+    pub fn expert_tiling(ty: GgufType, rows: usize, cols: usize) -> Option<GgufType> {
+        match ty {
+            GgufType::Nvfp4 if super::nvfp4_tiled::tiles(rows, cols) => Some(GgufType::Nvfp4Tiled),
+            GgufType::Q8_0 if super::q8_0_tiled::tiles(rows, cols) => Some(GgufType::Q8_0Tiled),
+            GgufType::Q6K if super::q6k_tiled::tiles(rows, cols) => Some(GgufType::Q6KTiled),
+            _ => None,
+        }
     }
 
     fn check_len(ty: GgufType, dims: &[usize], len: usize) -> Result<()> {
@@ -158,6 +187,8 @@ impl RawGgufTensor {
         match self.ty {
             GgufType::Iq4KsTiled => GgufType::Iq4Ks,
             GgufType::Nvfp4Tiled => GgufType::Nvfp4,
+            GgufType::Q8_0Tiled => GgufType::Q8_0,
+            GgufType::Q6KTiled => GgufType::Q6K,
             ty => ty,
         }
     }
@@ -240,9 +271,14 @@ impl RawGgufTensor {
                     let (rows, cols) = self.shape.dims2()?;
                     return Ok(super::fast_mmvq::iq4_ks_from_tiled(&bytes, rows, cols));
                 }
-                if self.ty == GgufType::Nvfp4Tiled {
+                if self.ty.is_expert_tiled() {
                     let (experts, rows, cols) = self.shape.dims3()?;
-                    return Ok(super::nvfp4_tiled::from_tiled(&bytes, experts, rows, cols));
+                    let untile = match self.ty {
+                        GgufType::Nvfp4Tiled => super::nvfp4_tiled::from_tiled,
+                        GgufType::Q8_0Tiled => super::q8_0_tiled::from_tiled,
+                        _ => super::q6k_tiled::from_tiled,
+                    };
+                    return Ok(untile(&bytes, experts, rows, cols));
                 }
                 Ok(bytes)
             }
@@ -440,15 +476,13 @@ impl RawGgufTensor {
                         ncols as i64,
                         stream_ptr,
                     )
-                } else if self.ty == GgufType::Nvfp4Tiled {
-                    super::ffi::launch_nvfp4_untile_rows(
-                        src,
-                        ids,
-                        dst,
-                        n as i64,
-                        ncols as i64,
-                        stream_ptr,
-                    )
+                } else if self.ty.is_expert_tiled() {
+                    let untile = match self.ty {
+                        GgufType::Nvfp4Tiled => super::ffi::launch_nvfp4_untile_rows,
+                        GgufType::Q8_0Tiled => super::ffi::launch_q8_0_untile_rows,
+                        _ => super::ffi::launch_q6_k_untile_rows,
+                    };
+                    untile(src, ids, dst, n as i64, ncols as i64, stream_ptr)
                 } else {
                     super::ffi::launch_gather_rows_u8(
                         src,
@@ -517,6 +551,24 @@ impl RawGgufTensor {
                 let n = row_ids.len();
                 let row_ids = Tensor::from_vec(row_ids, n, &Device::Cuda(device.clone()))?;
                 let gathered = self.gather_cuda(&row_ids, row_bytes)?;
+                // a Candle type's rows (an untiled expert stack's) take Candle's dequantizer
+                if let Some(ggml) = gathered.ty.candle() {
+                    let RawStorage::Cuda { blocks, .. } = &gathered.storage else {
+                        unreachable!("gathered on CUDA")
+                    };
+                    let storage = inference_tensor::quantized::QStorage::Cuda(
+                        inference_tensor::quantized::cuda::QCudaStorage::from_device_blocks(
+                            device,
+                            blocks,
+                            n * cols,
+                            ggml,
+                        )?,
+                    );
+                    return inference_tensor::quantized::QTensor::new(storage, (n, cols))?
+                        .dequantize(&Device::Cuda(device.clone()))?
+                        .to_dtype(dtype)?
+                        .reshape(dims);
+                }
                 let compute = if super::fast_mmvq::can_dequantize(gathered.ty, dtype) {
                     dtype
                 } else {
@@ -756,7 +808,7 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
         GgufType::Iq1M => super::iq_dequant::iq1_m,
         GgufType::Nvfp4 => dequantize_nvfp4,
         GgufType::Mxfp4 => dequantize_mxfp4,
-        other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
+        other => return dequantize_candle_rows(other, cols, bytes),
     };
     let mut out = vec![0f32; bytes.len() / size * block];
     bytes
@@ -765,6 +817,23 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
         .with_min_len(DEQUANT_MIN_BLOCKS_PER_TASK)
         .for_each(|(block_bytes, values)| dequantize_block(block_bytes, values));
     Ok(out)
+}
+
+// a Candle type's rows (an expert stack held as raw blocks to take a tile order) through Candle's dequantizer
+fn dequantize_candle_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f32>> {
+    let Some(dtype) = ty.candle() else {
+        inference_tensor::bail!("{ty:?} has no dequantizer");
+    };
+    let rows = bytes.len() / ty.row_bytes(cols).unwrap_or(1).max(1);
+    let storage = inference_tensor::quantized::QStorage::from_data(
+        std::borrow::Cow::Borrowed(bytes),
+        &Device::Cpu,
+        dtype,
+    )?;
+    inference_tensor::quantized::QTensor::new(storage, (rows, cols))?
+        .dequantize(&Device::Cpu)?
+        .flatten_all()?
+        .to_vec1::<f32>()
 }
 
 // block_nvfp4: a UE4M3 scale per 16 values, then 32 bytes; a sub-block's byte j holds its values j and j + 8
@@ -1298,6 +1367,14 @@ mod tests {
     }
 
     // Deterministic blocks with a small finite f16 scale; every other byte is arbitrary scale bits and indices.
+    // Candle's types that an expert stack on CUDA holds as raw blocks in a tile order
+    #[cfg(feature = "cuda")]
+    const TILED_CANDLE_TYPES: [GgufType; 2] = [GgufType::Q8_0, GgufType::Q6K];
+    const Q6K_TEST_D: usize = 208;
+    // the K step of the prompt kernels (mmq_gguf.cuh's MMQ_ITER_K)
+    #[cfg(feature = "cuda")]
+    const MMQ_ITER_K: usize = 256;
+
     fn random_blocks(ty: GgufType, blocks: usize, seed: u64) -> Vec<u8> {
         let mut state = seed;
         let mut next = move || {
@@ -1321,6 +1398,9 @@ mod tests {
                 } else if ty == GgufType::Mxfp4 {
                     // E8M0 scales of 2^-9 to 2^-6 (halved), the order of the others' f16 scales
                     block[0] = MXFP4_TEST_EXPONENT + (i % 4) as u8;
+                } else if ty == GgufType::Q6K {
+                    // Q6_K's f16 `d` closes the block, after the int8 sub-block scales
+                    block[Q6K_TEST_D..].copy_from_slice(&scale.to_le_bytes());
                 } else if ty == GgufType::Nvfp4 {
                     // UE4M3 scales of 2^-5 times 1 to 1.875, halved: the order of the others' f16 scales
                     for (k, scale) in block[..NVFP4_SCALES].iter_mut().enumerate() {
@@ -1379,25 +1459,39 @@ mod tests {
             row_major_tensor_core_matvecs_match_a_dense_matmul,
             tiled_iq4_ks_matches_the_row_major_weight,
             tiled_matvecs_share_one_inputs_quantized_activations,
-            an_nvfp4_expert_stack_tiles_on_cuda_and_reads_back_as_its_blocks
+            expert_stacks_tile_on_cuda_and_read_back_as_their_blocks
         ]
     );
 
     // the tiled form is CUDA's alone: read back and moved off the GPU, a stack is its GGUF blocks again
     #[cfg(feature = "cuda")]
-    fn an_nvfp4_expert_stack_tiles_on_cuda_and_reads_back_as_its_blocks() -> Result<()> {
-        const DIMS: [usize; 3] = [3, 32, 192];
+    fn expert_stacks_tile_on_cuda_and_read_back_as_their_blocks() -> Result<()> {
+        const DIMS: [usize; 3] = [3, 32, 512];
         let Ok(cuda) = Device::new_cuda(0) else {
             eprintln!("SKIP: no CUDA device");
             return Ok(());
         };
-        let bytes = random_rows(GgufType::Nvfp4, DIMS[0] * DIMS[1], DIMS[2], 7);
-        let stack = RawGgufTensor::new(GgufType::Nvfp4, &DIMS, bytes.clone(), &cuda)?;
-        assert_eq!(stack.ty, GgufType::Nvfp4Tiled);
-        assert_eq!(stack.file_type(), GgufType::Nvfp4);
-        assert_eq!(stack.bytes()?, bytes);
-        let cpu = stack.to_device(&Device::Cpu)?;
-        assert_eq!((cpu.ty, cpu.bytes()?), (GgufType::Nvfp4, bytes));
+        for (ty, tiled) in [
+            (GgufType::Nvfp4, GgufType::Nvfp4Tiled),
+            (GgufType::Q8_0, GgufType::Q8_0Tiled),
+            (GgufType::Q6K, GgufType::Q6KTiled),
+        ] {
+            let bytes = random_rows(ty, DIMS[0] * DIMS[1], DIMS[2], 7);
+            let stack = RawGgufTensor::new(ty, &DIMS, bytes.clone(), &cuda)?;
+            assert_eq!((stack.ty, stack.file_type()), (tiled, ty));
+            assert_eq!(stack.bytes()?, bytes, "{ty:?}");
+            // the prompt kernels read a K tail's tiles for every row of the last group: zeros, not past the end
+            let RawStorage::Cuda { blocks, len, .. } = &stack.storage else {
+                unreachable!("on CUDA")
+            };
+            let tail = MMQ_ITER_K / ty.block_size() * ty.type_size();
+            assert!(
+                blocks.len() - len >= TILE_GROUP_ROWS * tail,
+                "{ty:?} padding"
+            );
+            let cpu = stack.to_device(&Device::Cpu)?;
+            assert_eq!((cpu.ty, cpu.bytes()?), (ty, bytes));
+        }
         Ok(())
     }
 
@@ -1827,6 +1921,7 @@ mod tests {
         let xs = Tensor::randn(0f32, 1f32, (tokens, COLS), &cuda)?.to_dtype(DType::BF16)?;
         for ty in GgufType::RAW_BLOCKS
             .into_iter()
+            .chain(TILED_CANDLE_TYPES)
             .filter(|&ty| super::super::fast_mmq::supports_shape(ty, COLS))
         {
             let weight = RawGgufTensor::new(
@@ -1916,6 +2011,7 @@ mod tests {
                 };
             for ty in GgufType::RAW_BLOCKS
                 .into_iter()
+                .chain(TILED_CANDLE_TYPES)
                 .filter(|&ty| super::super::fast_mmq::supports_shape(ty, COLS))
             {
                 let weight = RawGgufTensor::new(
@@ -2013,6 +2109,7 @@ mod tests {
         // MXFP4 has only Vulkan's expert matvec; CUDA takes another path for its experts
         for ty in GgufType::RAW_BLOCKS
             .into_iter()
+            .chain(TILED_CANDLE_TYPES)
             .filter(|&ty| ty != GgufType::Mxfp4)
         {
             let intermediate = if ty.row_bytes(TAIL_INTERMEDIATE).is_some() && ty.is_trellis() {

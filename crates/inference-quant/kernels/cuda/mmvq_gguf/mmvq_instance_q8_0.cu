@@ -1,4 +1,5 @@
 #include "mmvq_gguf.cuh"
+#include "mmvq_tc_moe.cuh"
 
 MMVQ_PLAIN_BATCH_SET(q8_0, block_q8_0, QK8_0, QI8_0, VDR_Q8_0_Q8_1_MMVQ,
                      vec_dot_q8_0_q8_1)
@@ -144,3 +145,33 @@ static void q8_0_exact_launch(const block_q8_0 *w, const T *y, T *d, int ncols,
 
 Q8_0_EXACT_LAUNCHER(bf16, __nv_bfloat16)
 Q8_0_EXACT_LAUNCHER(f32, float)
+// Rows `ids` of a tiled Q8_0 stack (row id = expert * rows + row, rows a multiple of 16) back as GGUF's row-major
+// 34-byte blocks: a thread per output block.
+static __global__ void q8_0_untile_kernel(const uint8_t *__restrict__ src, const uint32_t *__restrict__ ids,
+                                          uint8_t *__restrict__ dst, const int64_t n, const int nb) {
+  const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n * nb) {
+    return;
+  }
+  const int64_t row = idx / nb;
+  const int kb = (int)(idx % nb);
+  const uint32_t id = ids[row];
+  const int r = id % MMVQ_TC_MOE_ROWS;
+  const int e = r % 8;
+  const int upper = r / 8;
+  const uint8_t *tile = src + ((int64_t)(id / MMVQ_TC_MOE_ROWS) * nb + kb) * TcQ8_0::TILE_BYTES;
+  uint8_t *out = dst + (row * nb + kb) * (TcQ8_0::TILE_BYTES / MMVQ_TC_MOE_ROWS);
+  out[0] = tile[e * 4 + upper * 2];
+  out[1] = tile[e * 4 + upper * 2 + 1];
+#pragma unroll
+  for (int s = 0; s < TcQ8_0::SUBS; ++s)
+#pragma unroll
+    for (int t = 0; t < 4; ++t)
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        out[2 + 16 * s + 4 * t + j] = tile[32 + (4 * e + t) * 16 + (2 * s + upper) * 4 + j];
+      }
+}
+
+MMVQ_TC_MOE_LAUNCHER(q8_0, TcQ8_0)
+MMVQ_TC_UNTILE_LAUNCHER(q8_0, q8_0_untile_kernel, QK8_0)

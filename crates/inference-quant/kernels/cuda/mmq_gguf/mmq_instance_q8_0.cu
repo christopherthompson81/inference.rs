@@ -1,3 +1,4 @@
 #include "mmq_instance.cuh"
 
 DEFINE_MMQ_GGUF_INSTANCE(q8_0, GGML_TYPE_Q8_0)
+DEFINE_MMQ_GGUF_INSTANCE(q8_0_tiled, GGML_TYPE_Q8_0_TILED)

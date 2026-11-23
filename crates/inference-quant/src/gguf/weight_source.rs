@@ -653,7 +653,9 @@ impl GgufWeightSource {
                 dims: dims.clone(),
                 data: bytes.into(),
             }
-        } else if info.dtype().candle_dtype().is_err() {
+        } else if info.dtype().candle_dtype().is_err()
+            || takes_expert_tiles(quant_type(info.dtype(), source_name)?, &dims, device)
+        {
             self.raw_tensor(source_name)?
         } else {
             let weight = self.archive.load_qtensor(source_name, device)?;
@@ -1244,6 +1246,21 @@ fn unscaled(key: &str, scale: Option<GgufScale>) -> Result<()> {
     Ok(())
 }
 
+// an expert stack Candle could hold stays raw blocks where a tile order serves its kernels on `device`
+fn takes_expert_tiles(dtype: GgufType, dims: &[usize], device: &Device) -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        matches!(device, Device::Cuda(dev) if super::fast_mmvq::tensor_core_capable(dev))
+            && matches!(*dims, [_, rows, cols]
+                if RawGgufTensor::expert_tiling(dtype, rows, cols).is_some())
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (dtype, dims, device);
+        false
+    }
+}
+
 fn quant_linear(
     weight: PackedBinding<'_>,
     bias: Option<Tensor>,
@@ -1251,15 +1268,16 @@ fn quant_linear(
     device: &Device,
     multi_row_decode: bool,
 ) -> Result<Arc<dyn QuantMethod>> {
+    let tile_experts = takes_expert_tiles(weight.dtype, &weight.dims, device);
     let layer = match weight.dtype.candle() {
-        Some(dtype) => {
+        Some(dtype) if !tile_experts => {
             unscaled("a linear", scale)?;
             return Ok(Arc::new(GgufMatMul::from_qtensor(
                 qtensor_from_gguf_data(dtype, &weight.data, weight.dims, device)?,
                 bias,
             )?));
         }
-        None => {
+        _ => {
             #[cfg(feature = "cuda")]
             let raw = if multi_row_decode
                 && RawGgufTensor::can_tile(weight.dtype, &weight.dims, device)

@@ -1215,7 +1215,38 @@ pub fn supports_moe(
 
 // whether an expert-indexed matvec reads this type: a per-pair kernel, or the tensor-core one for tiled NVFP4
 fn moe_matvec_reads(ty: GgufType) -> bool {
-    ty == GgufType::Nvfp4Tiled || moe_launcher(ty).is_some()
+    tc_moe_launcher(ty).is_some() || moe_launcher(ty).is_some()
+}
+
+type TcMoeLauncher = unsafe extern "C" fn(
+    vx_gate: *const std::ffi::c_void,
+    vx_up: *const std::ffi::c_void,
+    expert_stride: i64,
+    vy: *const std::ffi::c_void,
+    ids: *const std::ffi::c_void,
+    groups: *const i32,
+    n_pairs: i32,
+    scales: *const f32,
+    scales_up: *const f32,
+    dst: *mut f32,
+    ncols_x: i32,
+    nrows_x: i32,
+    stride_col_y: i32,
+    y_div: i32,
+    activation: i32,
+    gate_cap: f32,
+    up_cap: f32,
+    stream: *mut std::ffi::c_void,
+);
+
+// the tensor-core matvec of a tiled expert stack (mmvq_tc_moe.cuh)
+fn tc_moe_launcher(ty: GgufType) -> Option<TcMoeLauncher> {
+    match ty {
+        GgufType::Nvfp4Tiled => Some(ffi::launch_mmvq_tc_nvfp4_moe),
+        GgufType::Q8_0Tiled => Some(ffi::launch_mmvq_tc_q8_0_moe),
+        GgufType::Q6KTiled => Some(ffi::launch_mmvq_tc_q6_k_moe),
+        _ => None,
+    }
 }
 
 // Quantizes `rows` rows of `xs` (row length k) to Q8_1 rows of `k_padded`, as the matvec kernels read them
@@ -1437,9 +1468,9 @@ struct MoeLaunch {
 impl MoeLaunch {
     // Safety: the pointers are live device buffers of the shapes given, on the plan's stream
     unsafe fn run(&self, ty: GgufType, plan: &MoePlan) {
-        if ty == GgufType::Nvfp4Tiled {
+        if let Some(launch) = tc_moe_launcher(ty) {
             unsafe {
-                ffi::launch_mmvq_tc_nvfp4_moe(
+                launch(
                     self.vx_gate,
                     self.vx_up,
                     self.expert_stride,
@@ -1606,8 +1637,10 @@ fn moe_decode_with(
     }
     let [gate_scales, up_scales, down_scales] = scale_ptrs;
 
-    // tiled NVFP4 experts take the tensor-core matvec, which runs several tokens over a plan of the distinct experts
-    let tiled = [lead.gguf_type(), down.gguf_type()].contains(&GgufType::Nvfp4Tiled);
+    // tiled experts take the tensor-core matvec, which runs several tokens over a plan of the distinct experts
+    let tiled = [lead.gguf_type(), down.gguf_type()]
+        .into_iter()
+        .any(GgufType::is_expert_tiled);
     if tiled && experts > MOE_GROUP_MAX_EXPERTS {
         inference_tensor::bail!(
             "fast_mmvq: a plan holds {MOE_GROUP_MAX_EXPERTS} experts, not {experts}"

@@ -10,6 +10,9 @@ const IQK_FIRST_ID: u32 = 137;
 pub const IQ4_KS_TILED_ID: u32 = 240;
 /// `GgufType::Nvfp4Tiled`'s id in the kernels (mmq_common.cuh `GGML_TYPE_NVFP4_TILED`), outside ggml's range.
 pub const NVFP4_TILED_ID: u32 = 241;
+/// `GgufType::Q8_0Tiled`'s and `Q6KTiled`'s ids in the kernels (mmq_common.cuh), outside ggml's range.
+pub const Q8_0_TILED_ID: u32 = 242;
+pub const Q6K_TILED_ID: u32 = 243;
 
 /// A ggml tensor type; Candle's variants keep their names so the kernel tables read the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -64,6 +67,10 @@ pub enum GgufType {
     /// NVFP4 regrouped into 16-row tiles for the tensor-core kernels (`nvfp4_tiled`): the same bytes in another
     /// order, held only on the GPU and never written to a file.
     Nvfp4Tiled,
+    /// Q8_0 regrouped into 16-row tiles for the tensor-core kernels (`q8_0_tiled`), held only on the GPU.
+    Q8_0Tiled,
+    /// Q6_K regrouped into 16-row tiles for the tensor-core kernels (`q6k_tiled`), held only on the GPU.
+    Q6KTiled,
 }
 
 impl From<GgmlDType> for GgufType {
@@ -165,6 +172,8 @@ impl GgufType {
             Self::Iq2Kl => 157,
             Self::Iq4KsTiled => IQ4_KS_TILED_ID,
             Self::Nvfp4Tiled => NVFP4_TILED_ID,
+            Self::Q8_0Tiled => Q8_0_TILED_ID,
+            Self::Q6KTiled => Q6K_TILED_ID,
         }
     }
 
@@ -173,11 +182,17 @@ impl GgufType {
         match self {
             Self::Iq4KsTiled => Self::Iq4Ks.id(),
             Self::Nvfp4Tiled => Self::Nvfp4.id(),
+            Self::Q8_0Tiled => Self::Q8_0.id(),
+            Self::Q6KTiled => Self::Q6K.id(),
             _ => self.id(),
         }
     }
 
+    /// Candle's type for these blocks; a tile order is no Candle layout, whatever its file type.
     pub fn candle(self) -> Option<GgmlDType> {
+        if self.is_expert_tiled() {
+            return None;
+        }
         GgufDType::new(self.layout_id()).candle_dtype().ok()
     }
 
@@ -233,7 +248,12 @@ impl GgufType {
 
     /// ik_llama.cpp's non-trellis types, dequantized a row at a time by `iqk_dequant`.
     pub fn is_iqk(self) -> bool {
-        self.id() >= IQK_FIRST_ID && !self.is_trellis() && self != Self::Nvfp4Tiled
+        self.id() >= IQK_FIRST_ID && !self.is_trellis() && !self.is_expert_tiled()
+    }
+
+    /// The tile orders expert stacks take on the GPU for the tensor-core kernels (`*_tiled` modules).
+    pub fn is_expert_tiled(self) -> bool {
+        matches!(self, Self::Nvfp4Tiled | Self::Q8_0Tiled | Self::Q6KTiled)
     }
 
     /// The (elements, bytes) unit rows of `cols` elements are cut into: a block, or a whole row-scaled row.

@@ -1049,6 +1049,197 @@ macro_rules! gguf_standard_type {
             );
         }
     };
+    ($t:ident, $upper:literal; tc_tiled) => {
+        gguf_standard_type! {
+            @lib $t, $upper;
+            pub fn [<launch_mmvq_tc_gguf_ $t _bf16_plain>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                stride_col_dst: i32,
+                b_size: i32,
+                cfg: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmvq_tc_gguf_ $t _f16_plain>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                stride_col_dst: i32,
+                b_size: i32,
+                cfg: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmvq_tc_gguf_ $t _f32_plain>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                stride_col_dst: i32,
+                b_size: i32,
+                cfg: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmvq_tc_ $t _moe>](
+                vx_gate: *const c_void,
+                vx_up: *const c_void,
+                expert_stride: i64,
+                vy: *const c_void,
+                ids: *const c_void,
+                groups: *const i32,
+                n_pairs: i32,
+                scales: *const f32,
+                scales_up: *const f32,
+                dst: *mut f32,
+                ncols_x: i32,
+                nrows_x: i32,
+                stride_col_y: i32,
+                y_div: i32,
+                activation: i32,
+                gate_cap: f32,
+                up_cap: f32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_ $t _untile_rows>](
+                src: *const c_void,
+                ids: *const c_void,
+                dst: *mut c_void,
+                n: i64,
+                ncols: i64,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmq_gguf_ $t _tiled>](
+                tmp_fixup: *mut c_void,
+                x: *const c_void,
+                y: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i64,
+                nrows_x: i64,
+                ncols_y: i64,
+                stride_row_x: i64,
+                stride_col_dst: i64,
+                cc: i32,
+                nsm: i32,
+                smpbo: i64,
+                warp_size: i32,
+                type_dst: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmq_gguf_ $t _tiled_moe>](
+                tmp_fixup: *mut c_void,
+                x: *const c_void,
+                y: *const c_void,
+                ids_dst: *const i32,
+                expert_bounds: *const i32,
+                dst: *mut c_void,
+                ncols_x: i64,
+                nrows_x: i64,
+                ncols_dst: i64,
+                stride_row_x: i64,
+                stride_col_dst: i64,
+                num_experts: i64,
+                ncols_max: i64,
+                cc: i32,
+                nsm: i32,
+                smpbo: i64,
+                warp_size: i32,
+                stream: *mut c_void,
+            );
+        }
+    };
+    ($t:ident, $upper:literal; exact_tiled) => {
+        gguf_standard_type! {
+            @lib $t, $upper;
+            pub fn [<launch_mmvq_gguf_ $t _bf16_exact>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                b_size: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmvq_gguf_ $t _f32_exact>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                b_size: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmvq_tc_ $t _moe>](
+                vx_gate: *const c_void,
+                vx_up: *const c_void,
+                expert_stride: i64,
+                vy: *const c_void,
+                ids: *const c_void,
+                groups: *const i32,
+                n_pairs: i32,
+                scales: *const f32,
+                scales_up: *const f32,
+                dst: *mut f32,
+                ncols_x: i32,
+                nrows_x: i32,
+                stride_col_y: i32,
+                y_div: i32,
+                activation: i32,
+                gate_cap: f32,
+                up_cap: f32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_ $t _untile_rows>](
+                src: *const c_void,
+                ids: *const c_void,
+                dst: *mut c_void,
+                n: i64,
+                ncols: i64,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmq_gguf_ $t _tiled>](
+                tmp_fixup: *mut c_void,
+                x: *const c_void,
+                y: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i64,
+                nrows_x: i64,
+                ncols_y: i64,
+                stride_row_x: i64,
+                stride_col_dst: i64,
+                cc: i32,
+                nsm: i32,
+                smpbo: i64,
+                warp_size: i32,
+                type_dst: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmq_gguf_ $t _tiled_moe>](
+                tmp_fixup: *mut c_void,
+                x: *const c_void,
+                y: *const c_void,
+                ids_dst: *const i32,
+                expert_bounds: *const i32,
+                dst: *mut c_void,
+                ncols_x: i64,
+                nrows_x: i64,
+                ncols_dst: i64,
+                stride_row_x: i64,
+                stride_col_dst: i64,
+                num_experts: i64,
+                ncols_max: i64,
+                cc: i32,
+                nsm: i32,
+                smpbo: i64,
+                warp_size: i32,
+                stream: *mut c_void,
+            );
+        }
+    };
     ($t:ident, $upper:literal;) => {
         gguf_standard_type! { @lib $t, $upper; }
     };
@@ -1188,12 +1379,12 @@ gguf_standard_types!(
     (q4_1, "Q4_1"),
     (q5_0, "Q5_0"),
     (q5_1, "Q5_1"),
-    (q8_0, "Q8_0", exact),
+    (q8_0, "Q8_0", exact_tiled),
     (q2_k, "Q2_K"),
     (q3_k, "Q3_K"),
     (q4_k, "Q4_K", tc),
     (q5_k, "Q5_K"),
-    (q6_k, "Q6_K", tc),
+    (q6_k, "Q6_K", tc_tiled),
 );
 
 // The types with a tile-ordered layout for 1-8 row matvecs (mmvq_tc.cuh) and prefill (mmq) besides their own kernels
@@ -1318,6 +1509,55 @@ gguf_iq_types!(
 // NVFP4 adds its tile order's prompt kernels and tensor-core MoE matvec (mmvq_tc_nvfp4.cuh)
 gguf_mmq_type_library! {
     nvfp4, "NVFP4";
+    pub fn launch_dequantize_nvfp4_bf16(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nrows: i64,
+        ncols: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_nvfp4_f16(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nrows: i64,
+        ncols: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_nvfp4_f32(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nrows: i64,
+        ncols: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_mmvq_tc_nvfp4_moe(
+        vx_gate: *const c_void,
+        vx_up: *const c_void,
+        expert_stride: i64,
+        vy: *const c_void,
+        ids: *const c_void,
+        groups: *const i32,
+        n_pairs: i32,
+        scales: *const f32,
+        scales_up: *const f32,
+        dst: *mut f32,
+        ncols_x: i32,
+        nrows_x: i32,
+        stride_col_y: i32,
+        y_div: i32,
+        activation: i32,
+        gate_cap: f32,
+        up_cap: f32,
+        stream: *mut c_void,
+    );
+    pub fn launch_nvfp4_untile_rows(
+        src: *const c_void,
+        ids: *const c_void,
+        dst: *mut c_void,
+        n: i64,
+        ncols: i64,
+        stream: *mut c_void,
+    );
     pub fn launch_mmq_gguf_nvfp4_tiled(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1353,55 +1593,6 @@ gguf_mmq_type_library! {
         nsm: i32,
         smpbo: i64,
         warp_size: i32,
-        stream: *mut c_void,
-    );
-    pub fn launch_dequantize_nvfp4_bf16(
-        vx: *const c_void,
-        dst: *mut c_void,
-        nrows: i64,
-        ncols: i64,
-        stream: *mut c_void,
-    );
-    pub fn launch_dequantize_nvfp4_f16(
-        vx: *const c_void,
-        dst: *mut c_void,
-        nrows: i64,
-        ncols: i64,
-        stream: *mut c_void,
-    );
-    pub fn launch_dequantize_nvfp4_f32(
-        vx: *const c_void,
-        dst: *mut c_void,
-        nrows: i64,
-        ncols: i64,
-        stream: *mut c_void,
-    );
-    pub fn launch_nvfp4_untile_rows(
-        src: *const c_void,
-        ids: *const c_void,
-        dst: *mut c_void,
-        n: i64,
-        ncols: i64,
-        stream: *mut c_void,
-    );
-    pub fn launch_mmvq_tc_nvfp4_moe(
-        vx_gate: *const c_void,
-        vx_up: *const c_void,
-        expert_stride: i64,
-        vy: *const c_void,
-        ids: *const c_void,
-        groups: *const i32,
-        n_pairs: i32,
-        scales: *const f32,
-        scales_up: *const f32,
-        dst: *mut f32,
-        ncols_x: i32,
-        nrows_x: i32,
-        stride_col_y: i32,
-        y_div: i32,
-        activation: i32,
-        gate_cap: f32,
-        up_cap: f32,
         stream: *mut c_void,
     );
 }
