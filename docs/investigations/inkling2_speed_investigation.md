@@ -1008,3 +1008,33 @@ q8 KV (drafter q8)                     1.130             113.9
 
 Tiny checkpoint: `the_checkpoint_drafter_keeps_greedy_output_on_a_q8_cache_on_cuda`. Next: the drafter's two
 sliding layers still keep every position (4.4 KB a token at q8).
+
+## Run 36 - 2026-11-24 02:00
+
+Question: with the drafter's global layer in the target's paged blocks (q8, Run 35), do its two sliding layers (0 and 2,
+window 1024) fit in the drafter's windowed pool instead, so only one drafter layer grows with context?
+
+Change: a mixed drafter layout. `DFlashConfig::mixed_kv` (some layers take the pool, some don't) sizes the paged aux
+layers as the non-pooled count and the pool as the pooled layers; `enable_mixed_kv` builds the pool over the sliding
+layers and keeps the paged first layer. Each layer maps to a pool index or a paged index; context appends write both,
+draft attention picks per layer (pooled layers through the pool's tables, slots and windowed lengths), and the paged
+drafter graph carries the pool's graph batch beside its own buffers. A finished sequence's last rows arrive without the
+paged cache: those go to the pool only (first try failed `a paged DFlash drafter needs the target's paged cache` on
+every request end).
+
+Commands: `serve ... --pa-cache-type q8 --max-seqs {4,1} --mtp-n-predict 2 --mtp-auto-depth`; the 8-prompt acceptance
+set at drafts 2; a 9.8K prompt twice (cold, then prefix hit).
+
+| | q8 context, 4 seqs | q8 context, 1 seq |
+|---|---|---|
+| paged drafter (Run 35) | 193.7K | 215.7K |
+| mixed drafter | 233.1K | 261.4K |
+
+- Mode line: `paged and windowed context`.
+- Acceptance at drafts 2: mean accepted/step 1.131, 114.0 tok/s (Run 35 paged: 1.130, 113.9): level.
+- 9.8K prompt, drafts 2: cold 115.1 tok/s, prefix hit (9792 cached) 117.8, accepted/step 1.356 both. With auto depth:
+  107.2 / 113.5 (1.251 / 1.290); no errors after the terminal-append fix.
+- Tiny tests (`inkling2_tiny`, dflash, drafter filters) pass; the tiny drafter has a local layer 0, so its q8 drafter
+  test runs the mixed path.
+
+Next: the drafter now costs one layer per position; the rest of the context is the target's 8 global visits.
