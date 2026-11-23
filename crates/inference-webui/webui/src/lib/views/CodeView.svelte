@@ -25,6 +25,8 @@
   const DESCRIBE_KEY = "inference-rs-code-describe-activity";
   // the session last open, reopened when the tab comes back (or the page reloads) and attached to if still running
   const SESSION_KEY = "inference-rs-code-session";
+  // below this many read tokens a prefill's time is mostly its fixed per-step cost, so a rate would mislead
+  const PREFILL_RATE_MIN_TOKENS = 512;
   // the diff pane's share of the width, kept between these so neither side vanishes
   const MIN_DIFF_SHARE = 0.2;
   const MAX_DIFF_SHARE = 0.8;
@@ -515,11 +517,13 @@
     return parts.join(" · ");
   }
 
-  // prompt tokens the server read (not served from its cache) per second of prefill
-  function prefillRate(usage: Record<string, any>): number | null {
+  // the prompt tokens the server read (not served from its cache), and per second of prefill when there are enough
+  function prefillRead(usage: Record<string, any>): string | null {
     const time = Number(usage.total_prompt_time_sec ?? 0);
     const read = Number(usage.prompt_tokens ?? 0) - Number(usage.prompt_tokens_details?.cached_tokens ?? 0);
-    return time > 0 && read > 0 ? read / time : null;
+    if (read <= 0) return null;
+    const rate = time > 0 && read >= PREFILL_RATE_MIN_TOKENS ? `, ${count(Math.round(read / time))} tok/s` : "";
+    return `${count(read)} new${rate}`;
   }
 
   // draft tokens accepted per speculative step, and the share of proposed drafts that were
@@ -1341,10 +1345,10 @@
                 {#if live.tokPerSec > 0}<span>~{live.tokPerSec.toFixed(1)} tok/s</span>{/if}
                 {#if usage}<span>{count(usage.prompt_tokens_details?.cached_tokens ?? 0)} cached (last request)</span>{/if}
               {:else if usage}
-                {@const rate = prefillRate(usage)}
+                {@const read = prefillRead(usage)}
                 {@const drafted = drafts(usage)}
                 <span>{count(usage.prompt_tokens_details?.cached_tokens ?? 0)} cached</span>
-                <span>prefill {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s{rate ? ` (${count(Math.round(rate))} tok/s)` : ""}</span>
+                <span>prefill {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s{read ? ` (${read})` : ""}</span>
                 <span>{Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)} tok/s</span>
                 {#if drafted}<span title="Speculative decoding: draft tokens the model accepted per step, and the share of drafts accepted">{drafted}</span>{/if}
               {/if}
