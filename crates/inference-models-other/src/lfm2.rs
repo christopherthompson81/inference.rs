@@ -1129,6 +1129,7 @@ impl Model {
             .collect::<Vec<_>>();
         let cache = Arc::new(Mutex::new(HybridCache::new(
             HybridCacheConfig {
+                initial_capacity: None,
                 layer_types: hybrid_layer_types,
                 max_seq_len: cfg.max_position_embeddings,
                 recurrent: RecurrentLayerConfig {

@@ -928,3 +928,57 @@ position, at 2 x 8 KV heads x 128 x 2 bytes = 4 KB each. Only 8 visits attend gl
 last 1024 tokens, so they could keep just their window. No model here does that: the engine builds one KV cache
 manager, and sliding layers take the full-length table. With windowed sliding visits a token costs 9 x 4 KB =
 36 KB at bf16 (~18.5 KB at q8), against a fixed ring per sequence slot of ~40 x (1024 + slack) x 4 KB, ~180 MB.
+
+Prefix hits under windowed sliding KV: rebuilding a window "by recomputing the last 1024 tokens" is not exact.
+A sliding visit's keys at p come from its input at p, which depends on the earlier sliding visits' attention over
+the window before p, and so on through all 40, back to the sequence's start. The plan instead saves each
+sequence's windows (~82 MB at q8, ~160 MB at bf16) with its latest decode checkpoint and its prompt-end checkpoint,
+a few at a time, oldest evicted first.
+
+## Run 34 - 2026-11-23 22:00
+
+Windowed sliding KV for Inkling 2 on CUDA (phase 1 and 2).
+
+Design. Each sliding slot keeps a ring of `blocks = ceil((1024 + 512) / 32) + 1 = 50` paged-layout blocks a sequence
+for K, then as many for V. The ring is an auxiliary recurrent state (`HybridCacheConfig.auxiliary`), indexed by the
+sequence's recurrent slot, so the decode graphs, the scheduler and the prefix snapshots need nothing new. The biased
+attention kernel's `Kv::row` takes a ring mode (`block = table[b] + (key / bs) % ring`, the table one base a row),
+and `ring_slots_kernel` turns each row's slot and position into ring slots. A slot past the pool (a graph's padded
+row) reads the first ring and writes nothing; the first try faulted there (compute-sanitizer: `decode_kernel` read
+34 TB past an allocation). A sliding visit writes and attends in pieces of at most 512 rows, so a prefill chunk of
+any size fits a ring of the window plus a piece.
+
+The loader's `model_config_for(config, device, paged layout)` and the model's `model_config` share
+`Config::paged_cache_config`. On CUDA with paged attention, sliding slots take no paged blocks and their rings count
+in `recurrent_state_bytes_per_sequence`, so sizing and allocation agree. `NormalLoadingMetadata.paged_kv` tells the
+model the cache type and block size. Other changes: the pools start at 2 slots when a ring is there (the reservation
+sizes them), snapshots get as many slots as 256 MB holds, and Inkling's config says its attention reads the paged
+cache in place (`attends_paged_cache_in_place`). Without that, a 9.8K-token prompt was refused for 742-816 MB of
+gather workspace the biased attention never uses, with rings or without.
+
+Checks:
+- Tiny checkpoint, `windowed_paged_cuda_scores_as_on_the_cpu` (window 4, a 320-position ring). A ~1000-token prompt
+  scores as the CPU's whole context does (pieces and wraps), and 700 decode steps score as one paged prefill does.
+  Decode against the CPU differs at steps 115-118 by up to 0.1 nats, identically with or without rings, then
+  converges again: near-tied routes, not the window.
+- Real model, a temporary switch off: greedy text over 1500 tokens is identical with and without rings, for two
+  prompts.
+- A 9.8K-token prompt sent twice: the second hits 9792 cached tokens, takes 3.7 s against 10.3 s, and its text is
+  identical.
+
+```
+context (recipe C, drafter, 3090)   bf16 KV                    q8 KV
+before                              25,664                     45,952
+windowed, max-seqs 4                87,072                     155,840
+windowed, max-seqs 1                106,208                    173,568
+
+speed                               rings      without
+tg128 (bench)                       107.4      107.4
+pp4096 (bench, tok/s)               1808       1846     (256-row pieces: 1734; 1024: 1804)
+drafting cycle (nsys, 2 drafts)     18.15 ms   18.14 ms
+decode at 9.8K (nsys, busy/step)    10.76 ms   10.76 ms
+```
+
+Served runs move ±3% between runs either way (code at drafts 2: 121-123 with, 126-127 without, while the cycle
+times match). What's left per token at q8 with 4 sequences: 8 global visits at q8 (17.4 KB) and the drafter's 3
+layers at bf16 and full length (12 KB, 2 of them sliding). The drafter is the next lever.

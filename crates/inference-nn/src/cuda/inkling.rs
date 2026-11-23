@@ -61,6 +61,15 @@ fn device_ptr<'a>(
             let (p, g) = s.as_cuda_slice::<half::bf16>()?.device_ptr(stream);
             (p + offset * 2, BF16_CODE, g)
         }
+        // indices and slots, which no kernel takes as an element type either
+        DType::U32 => {
+            let (p, g) = s.as_cuda_slice::<u32>()?.device_ptr(stream);
+            (p + offset * 4, NO_DTYPE_CODE, g)
+        }
+        DType::I64 => {
+            let (p, g) = s.as_cuda_slice::<i64>()?.device_ptr(stream);
+            (p + offset * 8, NO_DTYPE_CODE, g)
+        }
         // the 8-bit Markov fold's values
         DType::U8 => {
             let (p, g) = s.as_cuda_slice::<u8>()?.device_ptr(stream);
@@ -579,6 +588,104 @@ pub fn attention_rows(op: &AttentionRows<'_>) -> Result<Option<[Tensor; 5]>> {
         ov.reshape(v.shape())?,
         os.reshape(sinks.shape())?,
     ]))
+}
+
+/// A step's rows in each sequence's window ring (`ring` blocks of `block_size` for K, then as many for V, from
+/// block `state * 2 * ring`): rows `offset..offset + rows` of each batch row, at positions `lens - minus + offset`
+/// on.
+pub struct RingSlots<'a> {
+    // each batch row's recurrent state slot, u32 `(b,)`: one past the pool's `capacity` is a padded row
+    pub states: &'a Tensor,
+    pub capacity: usize,
+    // u32 `(b,)`
+    pub lens: &'a Tensor,
+    pub minus: usize,
+    pub offset: usize,
+    // the step's paged slots, i64 `(b * stride,)`: a negative one marks a padded row
+    pub slots: &'a Tensor,
+    pub slot_stride: usize,
+    pub rows: usize,
+    pub ring: usize,
+    pub block_size: usize,
+}
+
+/// The ring slots of [`RingSlots`]' rows, i64 `(b * rows,)`, and with `bases` each batch row's first K ring block
+/// u32 `(b, 1)` (the attention's ring table).
+pub fn ring_slots(op: &RingSlots<'_>, bases: bool) -> Result<(Tensor, Option<Tensor>)> {
+    let Device::Cuda(dev) = op.states.device() else {
+        inference_tensor::bail!("window rings live on CUDA");
+    };
+    let b = op.states.dims1()?;
+    if op.states.dtype() != DType::U32
+        || op.lens.dtype() != DType::U32
+        || op.lens.dims1()? != b
+        || op.slots.dtype() != DType::I64
+        || op.slots.dims1()? < b * op.slot_stride
+        || op.offset + op.rows > op.slot_stride
+    {
+        inference_tensor::bail!(
+            "ring slots take u32 states and lengths of one batch, and i64 slots covering it"
+        );
+    }
+    let (states, lens, slots) = (
+        op.states.contiguous()?,
+        op.lens.contiguous()?,
+        op.slots.contiguous()?,
+    );
+    let stream = dev.cuda_stream();
+    // SAFETY: the kernel writes every row's slot and, when asked, every batch row's base
+    let mut out = unsafe { dev.alloc::<i64>((b * op.rows).max(1))? };
+    let mut first = if bases {
+        Some(unsafe { dev.alloc::<u32>(b.max(1))? })
+    } else {
+        None
+    };
+    let (sg, sl) = states.storage_and_layout();
+    let (sp, _, _s) = device_ptr(&sg, sl, &stream)?;
+    let (lg, ll) = lens.storage_and_layout();
+    let (lp, _, _l) = device_ptr(&lg, ll, &stream)?;
+    let (pg, pl) = slots.storage_and_layout();
+    let (pp, _, _p) = device_ptr(&pg, pl, &stream)?;
+    {
+        let (op_ptr, _o) = out.device_ptr_mut(&stream);
+        let base_ptr = first.as_mut().map(|first| first.device_ptr_mut(&stream));
+        let bp = base_ptr
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |(p, _)| *p as *mut u32);
+        // SAFETY: the buffers cover the shapes checked above, on this stream
+        status(
+            unsafe {
+                super::ffi::inkling_ring_slots(
+                    sp as *const u32,
+                    u32::try_from(op.capacity).map_err(inference_tensor::Error::wrap)?,
+                    lp as *const u32,
+                    i32_of(op.minus)?,
+                    i32_of(op.offset)?,
+                    pp as *const i64,
+                    i64_of(op.slot_stride)?,
+                    i32_of(b)?,
+                    i32_of(op.rows)?,
+                    i32_of(op.ring)?,
+                    i32_of(op.block_size)?,
+                    op_ptr as *mut i64,
+                    bp,
+                    stream.cu_stream() as i64,
+                )
+            },
+            "window ring slots",
+        )?;
+    }
+    let out = Tensor::from((
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+        Shape::from(b * op.rows),
+    ));
+    let first = first.map(|first| {
+        Tensor::from((
+            Storage::Cuda(CudaStorage::wrap_cuda_slice(first, dev.clone())),
+            Shape::from((b, 1)),
+        ))
+    });
+    Ok((out, first))
 }
 
 /// Whether the 8-bit pick takes a fold of this rank (whole groups filling a warp's lanes).

@@ -566,6 +566,8 @@ struct RecurrentStatePoolConfig<'a> {
     conv_dtype: DType,
     recurrent_dtype: DType,
     device: &'a Device,
+    // slots the pool starts with
+    capacity: usize,
 }
 
 // a decode graph's pad rows (`GDN_PAD_SLOT`) read the last slot of `states`; their outputs are dropped
@@ -592,8 +594,8 @@ impl RecurrentStatePool {
             conv_dtype,
             recurrent_dtype,
             device,
+            capacity,
         } = config;
-        let capacity = INITIAL_POOL_CAPACITY;
         let checkpoint_lanes = 1;
 
         let conv_state = Tensor::zeros((capacity, conv_dim, conv_width), conv_dtype, device)?;
@@ -1108,6 +1110,9 @@ pub struct HybridCacheConfig {
     pub recurrent: RecurrentLayerConfig,
     /// Cached at `layer_types.len()` on, in order.
     pub auxiliary: Vec<AuxiliaryRecurrent>,
+    /// Slots the pools start with and the reservation's floor, where a slot is too large for the graph batches'
+    /// default (window rings); `None` for that default.
+    pub initial_capacity: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1170,6 +1175,7 @@ impl HybridCache {
             );
         }
         let mut caches = Vec::with_capacity(config.layer_types.len());
+        let capacity = config.initial_capacity.unwrap_or(INITIAL_POOL_CAPACITY);
 
         let recurrent_pool = |recurrent: &RecurrentLayerConfig, device: &Device| -> Result<_> {
             let (state_dims, state_layout) = recurrent.state.physical_layout(dtype, device)?;
@@ -1182,6 +1188,7 @@ impl HybridCache {
                     conv_dtype: dtype,
                     recurrent_dtype: recurrent.recurrent_dtype.unwrap_or(dtype),
                     device,
+                    capacity,
                 },
             )?))
         };
@@ -1216,15 +1223,15 @@ impl HybridCache {
             device_state_indices: Vec::new(),
             checkpoint_lanes: 1,
             speculative_storage: RecurrentSpeculativeStorage::FullCheckpoints,
-            committed_lanes: vec![0; INITIAL_POOL_CAPACITY],
-            slot_owners: vec![None; INITIAL_POOL_CAPACITY],
-            initialized_slots: vec![false; INITIAL_POOL_CAPACITY],
-            pristine_zero_slots: vec![true; INITIAL_POOL_CAPACITY],
-            last_released_sequence_owners: vec![None; INITIAL_POOL_CAPACITY],
+            committed_lanes: vec![0; capacity],
+            slot_owners: vec![None; capacity],
+            initialized_slots: vec![false; capacity],
+            pristine_zero_slots: vec![true; capacity],
+            last_released_sequence_owners: vec![None; capacity],
             recurrent_storage_generation: 0,
             recurrent_storage_locked: false,
             fitted_serving_capacity: None,
-            recurrent_capacity_floor: INITIAL_POOL_CAPACITY,
+            recurrent_capacity_floor: capacity,
             graph_pad_slot: None,
             next_snapshot_id: 0,
             recurrent_captures: Vec::new(),
@@ -2873,6 +2880,7 @@ mod tests {
 
     fn config(layer_types: Vec<HybridLayerType>) -> HybridCacheConfig {
         HybridCacheConfig {
+            initial_capacity: None,
             layer_types,
             max_seq_len: 32,
             recurrent: RecurrentLayerConfig {
@@ -2887,6 +2895,7 @@ mod tests {
 
     fn gdn_config(layer_types: Vec<HybridLayerType>) -> HybridCacheConfig {
         HybridCacheConfig {
+            initial_capacity: None,
             layer_types,
             max_seq_len: 32,
             recurrent: RecurrentLayerConfig {

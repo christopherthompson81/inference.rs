@@ -2081,6 +2081,7 @@ mod tests {
     fn cpu_recurrent_reservation_does_not_allocate_checkpoint_lanes() {
         let hybrid = HybridCache::new(
             HybridCacheConfig {
+                initial_capacity: None,
                 layer_types: vec![HybridLayerType::Recurrent],
                 max_seq_len: 32,
                 recurrent: RecurrentLayerConfig {
@@ -2133,6 +2134,7 @@ mod tests {
     fn recurrent_transition_reservation_keeps_one_physical_lane() {
         let hybrid = HybridCache::new(
             HybridCacheConfig {
+                initial_capacity: None,
                 layer_types: vec![HybridLayerType::Recurrent],
                 max_seq_len: 32,
                 recurrent: RecurrentLayerConfig {
@@ -2188,6 +2190,7 @@ mod tests {
     fn one_lane_recurrent_reservation_omits_transition_log() {
         let hybrid = HybridCache::new(
             HybridCacheConfig {
+                initial_capacity: None,
                 layer_types: vec![HybridLayerType::Recurrent],
                 max_seq_len: 32,
                 recurrent: RecurrentLayerConfig {

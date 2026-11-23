@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 fn loading_metadata(rope_pairing: Option<RopePairing>) -> NormalLoadingMetadata {
     NormalLoadingMetadata {
+        paged_kv: None,
         mapper: Box::new(crate::device_map::DummyDeviceMapper {
             nm_device: Device::Cpu,
         }),

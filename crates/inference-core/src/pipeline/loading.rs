@@ -507,6 +507,8 @@ const MIN_PLANNED_PROMPT_CHUNK: usize = 1024;
 // Prefix snapshots a planned offload keeps in the recurrent pool: each holds a sequence's recurrent state (~111 MB on
 // Qwen3.8-Flash-Next), VRAM the expert cache would otherwise take
 const OFFLOAD_PREFIX_SNAPSHOTS: usize = 2;
+// the device memory prefix snapshots take by default, where a sequence's recurrent state is large
+const PREFIX_SNAPSHOT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 // GPU memory a context-sized cache leaves free for what prompts allocate beyond the counted staging and chunk
 // activations: the staging's per-projection maxima, a step's transients and allocations outside the pool (about
 // 1.15 GB at a 22K-token prompt on Flash-Next, qwen4exp investigation Run 37)
@@ -520,6 +522,35 @@ struct ExpertCachePlan<'a> {
     devices: &'a [Device],
     dtype: DType,
     paged_attn_config: &'a Option<PagedAttentionConfig>,
+}
+
+// Prefix snapshots take the set count of recurrent pool slots, or without one the pool's spare slots; a model whose
+// sequence state is large (window rings) takes at most as many as the budget holds, at least one
+fn cap_prefix_snapshots(
+    paged_attn_config: &mut Option<PagedAttentionConfig>,
+    sizing: &super::isq_flow::AutoDeviceMapSizingInputs<'_>,
+    device: &Device,
+) -> Result<()> {
+    let Some(cfg) = paged_attn_config.as_mut() else {
+        return Ok(());
+    };
+    let per_sequence = sizing
+        .loader
+        .model_config_for(sizing.config, device, Some(cfg.kv_layout()))?
+        .recurrent_state_bytes_per_sequence();
+    if per_sequence == 0 {
+        return Ok(());
+    }
+    let fits = (PREFIX_SNAPSHOT_BUDGET_BYTES / per_sequence).max(1);
+    let serving = cfg.serving_capacity.unwrap_or(1);
+    let slots = cfg.recurrent_snapshot_slots.unwrap_or_else(|| {
+        crate::kv_cache::recurrent_pool_capacity(serving, None)
+            .saturating_sub(serving + crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS)
+    });
+    if fits < slots {
+        cfg.recurrent_snapshot_slots = Some(fits);
+    }
+    Ok(())
 }
 
 // A hybrid model's recurrent pool, allocated after the map beside the paged cache, at the slots its reservation takes
@@ -563,8 +594,12 @@ impl ExpertCachePlan<'_> {
             },
             self.dtype,
         )?;
-        let model = loader.model_config(config)?;
         let primary = &self.devices[0];
+        let model = loader.model_config_for(
+            config,
+            primary,
+            self.paged_attn_config.as_ref().map(|cfg| cfg.kv_layout()),
+        )?;
         let cap = crate::paged_attention::device_memory_cap(
             crate::MemoryUsage.query(primary)?.available(),
             primary,
@@ -950,6 +985,7 @@ pub(crate) fn resolve_map_setting(
         });
     }
     let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
+    cap_prefix_snapshots(paged_attn_config, &sizing, &available_devices[0])?;
     need_sized_default_cache(paged_attn_config, &sizing, dtype, &available_devices[0])?;
     let DeviceMapSetting::Auto(params) = &setting else {
         return Ok(ResolvedMapSetting {
@@ -1121,6 +1157,7 @@ pub(crate) struct LoadMetadataParts {
     pub device: Device,
     pub multi_progress: Arc<indicatif::MultiProgress>,
     pub matformer: Option<MatformerSliceConfig>,
+    pub paged_kv: Option<inference_nn::paged_attention::PagedKvLayout>,
 }
 
 impl LoadMetadataParts {
@@ -1130,6 +1167,7 @@ impl LoadMetadataParts {
         rope_pairing: Option<crate::model::RopePairing>,
     ) -> crate::pipeline::NormalLoadingMetadata {
         crate::pipeline::NormalLoadingMetadata {
+            paged_kv: self.paged_kv,
             mapper,
             loading_isq: self.loading_isq,
             real_device: self.device.clone(),
@@ -1483,6 +1521,7 @@ pub(crate) fn open_load_session(
         device: device.clone(),
         multi_progress: Arc::new(crate::utils::progress::new_multi_progress()),
         matformer,
+        paged_kv: paged_attn_config.as_ref().map(|cfg| cfg.kv_layout()),
     };
 
     info!(

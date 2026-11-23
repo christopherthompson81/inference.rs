@@ -175,6 +175,17 @@ pub trait DeviceMappedModelLoader {
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>>;
 
+    /// [`Self::model_config`] for a load onto `device` with this paged cache, which a model may lay its cache out
+    /// for (Inkling 2's sliding layers keep a window of their own on CUDA).
+    fn model_config_for(
+        &self,
+        config: &str,
+        _device: &inference_tensor::Device,
+        _paged: Option<crate::paged_attention::PagedKvLayout>,
+    ) -> Result<Box<dyn ModelConfigLike>> {
+        self.model_config(config)
+    }
+
     fn checkpoint_layer_index(&self, _config: &str, tensor_name: &str) -> Option<usize> {
         standard_layer_index(tensor_name)
     }

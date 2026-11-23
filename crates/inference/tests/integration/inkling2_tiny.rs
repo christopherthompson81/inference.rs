@@ -69,6 +69,10 @@ const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
 // CUDA's matmuls and the fused attention sum in other orders too
 const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 const LONG_PROMPT_REPEATS: usize = 6;
+// a prompt and a decode past several of the tiny window's rings (its window and a 256-row prefill piece): ~1000
+// tokens of prompt
+const RING_PROMPT_REPEATS: usize = 40;
+const RING_DECODE_LEN: usize = 700;
 // decode steps a graph round takes a prompt
 const GRAPH_MAX_LEN: usize = 8;
 
@@ -435,6 +439,55 @@ async fn a_paged_cuda_decode_scores_as_one_prefill() -> anyhow::Result<()> {
         anyhow::ensure!(
             (decoded - prefilled).abs() < CUDA_LOGPROB_TOLERANCE,
             "step {step}: decoded {decoded}, one prefill {prefilled}"
+        );
+    }
+    Ok(())
+}
+
+// paged CUDA keeps each sliding slot's window in a ring of the window and a 256-row prefill piece: a prompt several
+// rings long scores as the CPU's whole context does (its prefill in pieces through the ring's wraps), and a decode
+// as long scores as one prefill of it does (the decode kernel through them). The CPU isn't the decode's reference:
+// near-tied routes flip between it and CUDA for a few positions of a long decode.
+#[tokio::test]
+async fn windowed_paged_cuda_scores_as_on_the_cpu() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
+    let (dir, paged) = paged_model(ModelDType::F32).await?;
+    let cpu = builder(&dir, None).build().await?;
+    let prompt = "say something long ".repeat(RING_PROMPT_REPEATS);
+    let tokens = cpu
+        .tokenize_chat(ChatRequest::from(chat(&prompt)).request)
+        .await?
+        .tokens;
+    let (on_cpu, on_cuda) = (
+        prompt_logprobs(&cpu, tokens.clone()).await?,
+        prompt_logprobs(&paged, tokens).await?,
+    );
+    for (position, (cpu, cuda)) in on_cpu.iter().zip(&on_cuda).enumerate().skip(1) {
+        anyhow::ensure!(
+            (cpu - cuda).abs() < CUDA_LOGPROB_TOLERANCE,
+            "prompt position {position}: CPU {cpu}, windowed CUDA {cuda}"
+        );
+    }
+    let request = || chat("say something long").set_sampler_ignore_eos(true);
+    let (decoded, _) = traces::greedy(&paged, request(), RING_DECODE_LEN).await?;
+    let mut tokens = paged
+        .tokenize_chat(ChatRequest::from(request()).request)
+        .await?
+        .tokens;
+    tokens.extend(decoded.iter().map(|(token, _)| *token));
+    let scored = prompt_logprobs(&paged, tokens).await?;
+    for (step, ((_, decoded), prefilled)) in decoded
+        .iter()
+        .zip(&scored[scored.len() - decoded.len()..])
+        .enumerate()
+    {
+        anyhow::ensure!(
+            (decoded - prefilled).abs() < CUDA_LOGPROB_TOLERANCE,
+            "decode step {step}: decoded {decoded}, one prefill {prefilled}"
         );
     }
     Ok(())

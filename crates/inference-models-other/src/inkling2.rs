@@ -19,8 +19,8 @@ use crate::gdn::RecurrentBatchKind;
 #[path = "inkling2_speculative.rs"]
 mod speculative;
 use crate::kv_cache::{
-    EitherCache, HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, KvCache,
-    RecurrentLayerConfig, RecurrentStateSpec,
+    AuxiliaryRecurrent, EitherCache, HybridCache, HybridCacheConfig, HybridLayerCache,
+    HybridLayerType, KvCache, RecurrentLayerConfig, RecurrentStateSpec,
 };
 use crate::model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel};
 use crate::{
@@ -28,7 +28,9 @@ use crate::{
     device_map::DeviceMapper,
     layers::{Activation, RmsNorm, embedding_with_legacy_tied_uqff},
     moe::{MoEExperts, MoEExpertsConfig},
-    paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
+    paged_attention::{
+        AttentionImplementation, ModelConfigMetadata, PagedAttention, PagedKvLayout,
+    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -47,6 +49,8 @@ const FFN_CONTROLLER: usize = 3;
 // the projections fused by their input where the checkpoint stores them so (as the GGUF bindings name them)
 const Q_GROUP: &str = "q_group";
 const K_GROUP: &str = "k_group";
+// prefill rows a sliding visit writes and attends at once: a longer chunk goes through in pieces of this
+const WINDOW_SUB_CHUNK: usize = 512;
 const V_GROUP: &str = "v_group";
 
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
@@ -103,6 +107,56 @@ impl Config {
     /// The cache slots: a layer's first pass in its own, each later pass of the looped core in one after them.
     pub fn cache_slots(&self) -> usize {
         self.num_hidden_layers + (self.loop_config.num_passes - 1) * self.core_len()
+    }
+
+    /// The slots whose visits attend over a sliding window.
+    pub fn sliding_slots(&self) -> Vec<usize> {
+        (0..self.cache_slots())
+            .filter(|&slot| self.is_sliding(physical_layer(self, slot)))
+            .collect()
+    }
+
+    /// Each sliding slot's window ring for a paged cache of this layout on `device`, or `None` where the windows stay
+    /// in the paged cache (off CUDA, without one, or a cache type the attention kernel doesn't read in a ring).
+    pub fn window_ring(
+        &self,
+        paged: Option<PagedKvLayout>,
+        device: &Device,
+        act_dtype: DType,
+    ) -> Option<WindowRing> {
+        let paged = paged.filter(|_| device.is_cuda())?;
+        let act = inference_nn::paged_attention::cache_activation_dtype(act_dtype, device);
+        let (dtype, row) = paged.cache_type.row_shape(self.head_dim, act)?;
+        // the window, a prefill sub-chunk written before it attends, and a block's slack for the window's start
+        let tokens = self.sliding_window_size + WINDOW_SUB_CHUNK;
+        Some(WindowRing {
+            blocks: tokens.div_ceil(paged.block_size) + 1,
+            block_size: paged.block_size,
+            kv_heads: self.num_key_value_heads,
+            dtype,
+            row,
+        })
+    }
+
+    /// A sequence's state beside its paged KV: the convolution states and any window rings, in bytes.
+    pub fn sequence_state_bytes(&self, ring: Option<&WindowRing>) -> usize {
+        self.conv_state_bytes() + ring.map_or(0, |ring| self.sliding_slots().len() * ring.bytes())
+    }
+
+    /// The paged cache's view of the model: every slot paged, but sliding ones when they keep rings.
+    pub fn paged_cache_config(
+        &self,
+        base: ModelConfigMetadata,
+        ring: Option<&WindowRing>,
+    ) -> inference_nn::paged_attention::HybridPagedKvCacheConfig {
+        let sliding = ring.map(|_| self.sliding_slots()).unwrap_or_default();
+        let paged = (0..self.cache_slots())
+            .map(|slot| !sliding.contains(&slot))
+            .collect();
+        // the biased attention reads the paged cache (or the rings) in place, through the block tables
+        inference_nn::paged_attention::HybridPagedKvCacheConfig::new(base, paged)
+            .with_recurrent_state_bytes(self.sequence_state_bytes(ring))
+            .with_attention_in_place()
     }
 
     /// A sequence's convolution states over every slot, in bytes (f32).
@@ -387,6 +441,29 @@ impl ProjGroup {
     }
 }
 
+/// A sliding slot's window on CUDA: each sequence's ring of `blocks` paged-cache blocks for K, then as many for V,
+/// kept as an auxiliary recurrent state so a prefix snapshot holds it. Key block k lives in ring block k % blocks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowRing {
+    pub blocks: usize,
+    pub block_size: usize,
+    pub kv_heads: usize,
+    pub dtype: DType,
+    // a row's elements (bytes for a quantized cache)
+    pub row: usize,
+}
+
+impl WindowRing {
+    /// A sequence's K and V rings as the state's dims: `[2 * blocks, kv_heads, block_size, row]`.
+    pub fn dims(&self) -> Vec<usize> {
+        vec![2 * self.blocks, self.kv_heads, self.block_size, self.row]
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.dims().iter().product::<usize>() * self.dtype.size_in_bytes()
+    }
+}
+
 /// A slot's convolution states: its rows gathered from the pool (`[b, channels, hist]`, a fresh copy), or the pool
 /// itself and the batch's rows of it, which a Vulkan decode step updates in place. A verify step's rows also collect
 /// each conv's input, in the states' channel order, for its rollback.
@@ -652,6 +729,77 @@ struct PagedStep<'a> {
     v_cache: &'a Tensor,
     positions: &'a PagedPositions,
     writer: &'a PagedAttention,
+    // a sliding slot's window ring in place of the paged cache: the caches above are its K and V views
+    ring: Option<(&'a RingRows, usize)>,
+}
+
+/// A step's rows in the window rings, alike for every sliding slot: each batch row's first K ring block (the
+/// attention's table) and, per prefill piece of at most WINDOW_SUB_CHUNK rows, its offset, rows, ring slots and the
+/// pasts its queries start from.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+struct RingRows {
+    bases: Tensor,
+    pieces: Vec<RingPiece>,
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+struct RingPiece {
+    offset: usize,
+    rows: usize,
+    slots: Tensor,
+    lens: Tensor,
+}
+
+#[cfg(feature = "cuda")]
+impl RingRows {
+    // `capacity`: the ring pools' rows, past which a state slot marks a padded row
+    fn new(
+        ring: &WindowRing,
+        positions: &PagedPositions,
+        states: &Tensor,
+        capacity: usize,
+        t: usize,
+    ) -> Result<Self> {
+        let states = states.to_dtype(DType::U32)?;
+        let mut bases = None;
+        let mut pieces = Vec::new();
+        for offset in (0..t).step_by(WINDOW_SUB_CHUNK) {
+            let rows = WINDOW_SUB_CHUNK.min(t - offset);
+            let (slots, first) = inference_nn::cuda::inkling::ring_slots(
+                &inference_nn::cuda::inkling::RingSlots {
+                    states: &states,
+                    capacity,
+                    lens: &positions.lens,
+                    minus: positions.minus,
+                    offset,
+                    slots: &positions.slots,
+                    slot_stride: t,
+                    rows,
+                    ring: ring.blocks,
+                    block_size: ring.block_size,
+                },
+                offset == 0,
+            )?;
+            bases = bases.or(first);
+            // a later piece's queries start that many rows on (only a prefill has more than one, and no minus)
+            let lens = if offset == 0 {
+                positions.lens.clone()
+            } else {
+                (positions.lens.to_dtype(DType::F32)? + offset as f64)?.to_dtype(DType::U32)?
+            };
+            pieces.push(RingPiece {
+                offset,
+                rows,
+                slots,
+                lens,
+            });
+        }
+        Ok(Self {
+            bases: bases
+                .ok_or_else(|| inference_tensor::Error::msg("Inkling 2: a step without rows"))?,
+            pieces,
+        })
+    }
 }
 
 impl Attention {
@@ -822,6 +970,58 @@ impl Attention {
         // paged: this step's rows into the cache, the queries over it through the block tables
         if let Some(step) = paged {
             #[cfg(feature = "cuda")]
+            if let Some((ring_rows, blocks)) = step.ring {
+                use inference_nn::cuda::biased_attention::{Keys, Past};
+                let dtype = step.k_cache.dtype();
+                let rows_dtype = paged_rows_dtype(dtype);
+                let (k, v) = (k.to_dtype(rows_dtype)?, v.to_dtype(rows_dtype)?);
+                let mut outs = Vec::with_capacity(ring_rows.pieces.len());
+                // each piece's rows go into the ring before its queries read it, so the ring holds a piece past the
+                // window, not a whole chunk
+                for piece in &ring_rows.pieces {
+                    let (o, n) = (piece.offset, piece.rows);
+                    step.writer.write_rows(
+                        &k.narrow(1, o, n)?.transpose(1, 2)?,
+                        &v.narrow(1, o, n)?.transpose(1, 2)?,
+                        step.k_cache,
+                        step.v_cache,
+                        &piece.slots,
+                    )?;
+                    let q = q.narrow(1, o, n)?.contiguous()?;
+                    let table = token_table.narrow(1, o, n)?.contiguous()?;
+                    let sinks = sinks.narrow(1, o, n)?.contiguous()?;
+                    let op = inference_nn::cuda::biased_attention::BiasedAttention {
+                        q: &q,
+                        keys: Keys::Paged {
+                            k_cache: step.k_cache,
+                            v_cache: step.v_cache,
+                            block_tables: &ring_rows.bases,
+                            ring: blocks,
+                        },
+                        past: Past::Lens {
+                            lens: &piece.lens,
+                            minus: step.positions.minus,
+                        },
+                        table: &table,
+                        sinks: &sinks,
+                        window,
+                        scale: scale as f32,
+                        log_scale,
+                    };
+                    outs.push(inference_nn::cuda::biased_attention::biased_attention(&op)?.ok_or_else(|| {
+                        inference_tensor::Error::msg(format!(
+                            "Inkling 2: the windowed attention does not take a {dtype:?} ring"
+                        ))
+                    })?);
+                }
+                let out = if outs.len() == 1 {
+                    outs.remove(0)
+                } else {
+                    Tensor::cat(&outs, 1)?
+                };
+                return Ok((output_gate(out)?, k_state, v_state));
+            }
+            #[cfg(feature = "cuda")]
             {
                 use inference_nn::cuda::biased_attention::{Keys, Past};
                 let dtype = step.k_cache.dtype();
@@ -839,6 +1039,7 @@ impl Attention {
                         k_cache: step.k_cache,
                         v_cache: step.v_cache,
                         block_tables: &step.positions.tables,
+                        ring: 0,
                     },
                     past: Past::Lens {
                         lens: &step.positions.lens,
@@ -1359,6 +1560,9 @@ pub struct Model {
     meta: ModelConfigMetadata,
     // under paged attention: what writes each step's K/V rows into the paged cache
     paged_writer: Option<PagedAttention>,
+    // the sliding slots' window rings, and each slot's ring state in the hybrid cache
+    ring: Option<WindowRing>,
+    ring_caches: Vec<Option<usize>>,
     spec: speculative::SpecState,
 }
 
@@ -1455,8 +1659,39 @@ impl Model {
         let layer_devices = (0..2 * slots)
             .map(|i| device_of(i % slots))
             .collect::<Vec<_>>();
+        // on CUDA a sliding slot keeps its window in a ring beside the convolution states, after them in the cache
+        let ring = matches!(attention_mechanism, AttentionImplementation::PagedAttention)
+            .then(|| {
+                cfg.window_ring(
+                    normal_loading_metadata.paged_kv,
+                    &normal_loading_metadata.real_device,
+                    dtype,
+                )
+            })
+            .flatten();
+        let mut ring_caches = vec![None; slots];
+        let mut auxiliary = Vec::new();
+        if let Some(ring) = &ring {
+            for slot in cfg.sliding_slots() {
+                ring_caches[slot] = Some(2 * slots + auxiliary.len());
+                auxiliary.push(AuxiliaryRecurrent {
+                    layer: slot,
+                    config: RecurrentLayerConfig {
+                        conv_dim: 0,
+                        conv_width: 1,
+                        state: RecurrentStateSpec::Opaque { dims: ring.dims() },
+                        recurrent_dtype: Some(ring.dtype),
+                    },
+                });
+            }
+        }
         let cache = HybridCache::new(
             HybridCacheConfig {
+                // a ring slot holds a window for every sliding slot: the load's reservation sizes the pool, which
+                // starts as small as a sequence and the graph pad
+                initial_capacity: ring
+                    .is_some()
+                    .then_some(1 + inference_nn::kv_cache::RECURRENT_GRAPH_PAD_SLOTS),
                 layer_types,
                 max_seq_len: cfg.max_position_embeddings,
                 recurrent: RecurrentLayerConfig {
@@ -1465,7 +1700,7 @@ impl Model {
                     state: RecurrentStateSpec::Opaque { dims: Vec::new() },
                     recurrent_dtype: None,
                 },
-                auxiliary: Vec::new(),
+                auxiliary,
             },
             DType::F32,
             &layer_devices,
@@ -1495,6 +1730,8 @@ impl Model {
             cfg: cfg.clone(),
             mapper,
             paged_writer,
+            ring,
+            ring_caches,
             spec: speculative::SpecState::default(),
         })
     }
@@ -1628,6 +1865,31 @@ impl Model {
         let in_place =
             (device.is_vulkan() && decode) || (device.is_cuda() && (decode || verifying));
         let replays = std::cell::RefCell::new(Vec::new());
+        #[cfg(feature = "cuda")]
+        let ring_rows = match (&self.ring, &paged) {
+            (Some(ring), Some((_, positions, Some(_)))) => {
+                if cache.checkpoint_lanes() != 1 {
+                    inference_tensor::bail!("Inkling 2's window rings keep one lane a sequence");
+                }
+                let states = cache.state_indices_for_layer(slots)?.ok_or_else(|| {
+                    inference_tensor::Error::msg("Inkling 2: missing recurrent state indices")
+                })?;
+                let capacity = match self
+                    .ring_caches
+                    .iter()
+                    .flatten()
+                    .next()
+                    .and_then(|&index| cache.get(index))
+                {
+                    Some(HybridLayerCache::Recurrent(pool)) => pool.recurrent_state.dim(0)?,
+                    _ => inference_tensor::bail!("Inkling 2: a window ring without its pool"),
+                };
+                Some(RingRows::new(ring, positions, &states, capacity, t)?)
+            }
+            _ => None,
+        };
+        #[cfg(not(feature = "cuda"))]
+        let ring_rows: Option<RingRows> = None;
         let mut run = |layer: usize,
                        slot: usize,
                        x: &Tensor,
@@ -1687,6 +1949,22 @@ impl Model {
                 _ => unreachable!("a slot's states are pooled or gathered"),
             };
             let x = self.mapper.map(x.clone(), layer)?;
+            // a sliding slot's ring: its pool's rows as cache blocks, V the K view shifted by a ring
+            let ring_views = match (&self.ring, self.ring_caches[slot], &ring_rows) {
+                (Some(ring), Some(index), Some(_)) => {
+                    let Some(HybridLayerCache::Recurrent(pool)) = cache.get(index) else {
+                        inference_tensor::bail!("Inkling 2: slot {slot} has no window ring");
+                    };
+                    let state = &pool.recurrent_state;
+                    let blocks = state.dim(0)? * 2 * ring.blocks;
+                    let all = state.reshape((blocks, ring.kv_heads, ring.block_size, ring.row))?;
+                    Some((
+                        all.narrow(0, 0, blocks - ring.blocks)?,
+                        all.narrow(0, ring.blocks, blocks - ring.blocks)?,
+                    ))
+                }
+                _ => None,
+            };
             let Some(HybridLayerCache::Attention(kv_cache)) = cache.get_mut(slot) else {
                 inference_tensor::bail!("Inkling 2: slot {slot} has no KV cache");
             };
@@ -1698,6 +1976,16 @@ impl Model {
                 }
             });
             let paged_step = match &paged {
+                Some((writer, positions, Some(_))) if ring_views.is_some() => {
+                    let (k_cache, v_cache) = ring_views.as_ref().expect("checked above");
+                    Some(PagedStep {
+                        k_cache,
+                        v_cache,
+                        positions,
+                        writer,
+                        ring: ring_rows.as_ref().zip(self.ring.map(|ring| ring.blocks)),
+                    })
+                }
                 Some((writer, positions, Some(caches))) => {
                     let (k_cache, v_cache) = &caches[slot];
                     Some(PagedStep {
@@ -1705,6 +1993,7 @@ impl Model {
                         v_cache,
                         positions,
                         writer,
+                        ring: None,
                     })
                 }
                 Some((_, _, None)) => {
@@ -1895,6 +2184,15 @@ impl NormalModel for Model {
 
     fn config(&self) -> &ModelConfigMetadata {
         &self.meta
+    }
+
+    fn model_config(
+        &self,
+    ) -> Arc<dyn inference_nn::paged_attention::ModelConfigLike + Send + Sync> {
+        Arc::new(
+            self.cfg
+                .paged_cache_config(self.meta.clone(), self.ring.as_ref()),
+        )
     }
 
     // a decode step reads its positions and lengths from the paged metadata's device tensors (a drafter's taps and

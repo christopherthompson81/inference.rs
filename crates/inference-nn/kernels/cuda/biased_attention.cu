@@ -146,11 +146,15 @@ struct Kv {
   int table_width;
   int block_size;
   int kv_heads;
+  // a ring of this many blocks a sequence (its table row holds the ring's first block): key block k sits at block
+  // k % ring, which only a window shorter than the ring reads back
+  int ring;
 
   __device__ __forceinline__ const T* row(int b, int h, int key, int hd) const {
     if (tables) {
-      const int slot = min(key / block_size, table_width - 1);
-      const int64_t block = tables[int64_t(b) * table_stride + slot];
+      const int64_t block =
+          ring > 0 ? int64_t(tables[int64_t(b) * table_stride]) + (key / block_size) % ring
+                   : tables[int64_t(b) * table_stride + min(key / block_size, table_width - 1)];
       return base + ((block * kv_heads + h) * block_size + key % block_size) * hd;
     }
     return base + b * batch_stride + h * head_stride + int64_t(key) * hd;
@@ -741,12 +745,13 @@ extern "C" int biased_attention_f32(const float* q, const float* k, const float*
   return dispatch(a, p.batch, p.head_dim, p.t <= p.decode_rows, reinterpret_cast<cudaStream_t>(stream));
 }
 
-// K/V from a paged cache [blocks, kv_heads, block_size, head_dim] through block tables (batch, table_width) u32;
+// K/V from a paged cache [blocks, kv_heads, block_size, head_dim] through block tables (batch, table_width) u32, or
+// with `ring` a ring of that many blocks a sequence from each table row's first block;
 // cache_dtype 0 f32, 1 f16, 2 bf16, 3 e4m3, 4 q8 (rows of head_dim + head_dim / 16 bytes; the caller rotates q and
 // the output)
 extern "C" int biased_attention_paged(const float* q, const void* k_cache, const void* v_cache, int cache_dtype,
                                       const uint32_t* tables, int64_t table_stride, int table_width, int block_size,
-                                      const float* table, const float* sinks, float* out,
+                                      int ring, const float* table, const float* sinks, float* out,
                                       const BiasedAttentionShape* shape, int64_t stream) {
   const BiasedAttentionShape& p = *shape;
   const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
@@ -754,8 +759,8 @@ extern "C" int biased_attention_paged(const float* q, const void* k_cache, const
 #define PAGED(T)                                                                                                   \
   {                                                                                                                \
     Args<T> a{q,                                                                                                   \
-              {(const T*)k_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads},                \
-              {(const T*)v_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads},                \
+              {(const T*)k_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads, ring},          \
+              {(const T*)v_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads, ring},          \
               table, sinks, out, p.heads, p.kv_heads, p.t, p.past_lens, p.past_sub, p.past, p.extent, p.window,    \
               p.scale, p.log_alpha, p.log_floor, p.partials, p.arrived,                                          \
               decode_splits(int64_t(p.batch) * p.t * p.heads)};                                                   \

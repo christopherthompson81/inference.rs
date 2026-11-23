@@ -3864,6 +3864,7 @@ impl GraniteMoeHybrid {
             .collect();
 
         let hybrid_cache_config = HybridCacheConfig {
+            initial_capacity: None,
             layer_types: pipeline_layer_types,
             max_seq_len: cfg.max_position_embeddings,
             recurrent: RecurrentLayerConfig {

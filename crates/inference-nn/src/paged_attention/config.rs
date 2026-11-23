@@ -178,6 +178,11 @@ pub trait ModelConfigLike {
     fn recurrent_state_bytes_per_sequence(&self) -> usize {
         0
     }
+    /// Whether the model's own attention reads its paged cache in place for a prompt over a cached prefix, so a
+    /// prefill needs no gathered K/V or backend workspace beside it.
+    fn attends_paged_cache_in_place(&self) -> bool {
+        false
+    }
     /// Paged KV elements per token for one layer, or `None` when the layer keeps no paged cache.
     fn layer_kv_cache_elements_per_token(&self, layer_idx: usize) -> Option<usize> {
         self.layer_has_paged_kv_cache(layer_idx)
@@ -317,6 +322,7 @@ pub struct HybridPagedKvCacheConfig {
     paged_layers: Vec<bool>,
     prefix_prefill_attention_features: Vec<Option<PrefixPrefillAttentionFeatures>>,
     recurrent_state_bytes: usize,
+    attends_in_place: bool,
 }
 
 impl HybridPagedKvCacheConfig {
@@ -327,11 +333,18 @@ impl HybridPagedKvCacheConfig {
             paged_layers,
             prefix_prefill_attention_features: vec![None; num_layers],
             recurrent_state_bytes: 0,
+            attends_in_place: false,
         }
     }
 
     pub fn with_recurrent_state_bytes(mut self, bytes: usize) -> Self {
         self.recurrent_state_bytes = bytes;
+        self
+    }
+
+    /// The model attends over its paged cache with its own kernel, in place.
+    pub fn with_attention_in_place(mut self) -> Self {
+        self.attends_in_place = true;
         self
     }
 
@@ -355,6 +368,10 @@ impl HybridPagedKvCacheConfig {
 impl ModelConfigLike for HybridPagedKvCacheConfig {
     fn recurrent_state_bytes_per_sequence(&self) -> usize {
         self.recurrent_state_bytes
+    }
+
+    fn attends_paged_cache_in_place(&self) -> bool {
+        self.attends_in_place
     }
 
     fn max_seq_len(&self) -> usize {
@@ -472,6 +489,9 @@ impl AuxiliaryPagedKvCacheConfig {
 impl ModelConfigLike for AuxiliaryPagedKvCacheConfig {
     fn max_seq_len(&self) -> usize {
         self.base.max_seq_len()
+    }
+    fn attends_paged_cache_in_place(&self) -> bool {
+        self.base.attends_paged_cache_in_place()
     }
     fn num_layers(&self) -> usize {
         self.base.num_layers() + self.auxiliary.count

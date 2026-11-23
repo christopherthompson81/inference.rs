@@ -696,6 +696,27 @@ __global__ void conv_rollback_kernel(const ConvRollbackSlot* slots, const int32_
 
 int64_t blocks_for(int64_t threads) { return (threads + ROW_THREADS - 1) / ROW_THREADS; }
 
+// a window ring's slots for rows `offset..offset + n` of each batch row (position lens - minus + offset + i), from
+// the row's recurrent slot: K ring blocks `[slot * 2 * ring, slot * 2 * ring + ring)`, V the next ring; a padded
+// row (a negative paged slot) stays padded. With `bases`, each row's first K ring block too.
+__global__ void ring_slots_kernel(const uint32_t* states, uint32_t capacity, const uint32_t* lens, int minus,
+                                  int offset, const int64_t* slots, int64_t slot_stride, int b, int n, int ring,
+                                  int block_size, int64_t* out, uint32_t* bases) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= b * n) return;
+  const int bi = idx / n, i = idx % n;
+  // a slot past the pool (a graph's padded row) reads the first ring and writes nothing
+  const bool padded = states[bi] >= capacity;
+  const int64_t first = padded ? 0 : int64_t(states[bi]) * 2 * ring;
+  if (bases && i == 0) bases[bi] = uint32_t(first);
+  if (padded || slots[int64_t(bi) * slot_stride + offset + i] < 0) {
+    out[idx] = -1;
+    return;
+  }
+  const int64_t pos = int64_t(lens[bi]) - minus + offset + i;
+  out[idx] = (first + (pos / block_size) % ring) * block_size + pos % block_size;
+}
+
 }  // namespace
 
 // dtype 0 f32, 1 bf16
@@ -939,5 +960,16 @@ extern "C" int inkling_conv_rollback(const void* slots, const int32_t* keep, int
     conv_rollback_kernel<__nv_bfloat16>
         <<<grid, ROW_THREADS, 0, s>>>((const ConvRollbackSlot*)slots, keep, b, t, c, hist);
   }
+  return (int)cudaGetLastError();
+}
+
+extern "C" int inkling_ring_slots(const uint32_t* states, uint32_t capacity, const uint32_t* lens, int minus,
+                                  int offset, const int64_t* slots, int64_t slot_stride, int b, int n, int ring,
+                                  int block_size, int64_t* out, uint32_t* bases, int64_t stream) {
+  const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+  const int total = b * n;
+  if (total == 0) return 0;
+  ring_slots_kernel<<<(total + ROW_THREADS - 1) / ROW_THREADS, ROW_THREADS, 0, s>>>(
+      states, capacity, lens, minus, offset, slots, slot_stride, b, n, ring, block_size, out, bases);
   return (int)cudaGetLastError();
 }

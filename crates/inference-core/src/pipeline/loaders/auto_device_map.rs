@@ -79,7 +79,11 @@ pub fn get_device_layers(
         | AutoDeviceMapParams::Multimodal { max_batch_size, .. } => *max_batch_size,
     };
 
-    let model_cfg = loader.model_config(config)?;
+    let model_cfg = loader.model_config_for(
+        config,
+        &devices[0],
+        paged_attn_config.as_ref().map(|cfg| cfg.kv_layout()),
+    )?;
     let has_paged_attn = paged_attn_config.is_some();
     let base_device_memory_reservation_bytes = paged_attn_config
         .as_ref()

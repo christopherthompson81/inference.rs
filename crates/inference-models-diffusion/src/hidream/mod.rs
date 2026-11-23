@@ -283,6 +283,7 @@ impl HiDreamO1Pipeline {
         let tokenizer =
             Tokenizer::from_file(dir.join(TOKENIZER_FILE)).map_err(|e| path_error(dir, &*e))?;
         let metadata = NormalLoadingMetadata {
+            paged_kv: None,
             mapper: Box::new(DummyDeviceMapper {
                 nm_device: device.clone(),
             }),

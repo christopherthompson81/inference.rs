@@ -351,6 +351,22 @@ inference_tensor::kernel_library! {
         ) -> i32;
         pub fn inkling_markov_pick_scratch(b: i32) -> i64;
         pub fn inkling_markov_q8_rank(rank: i32) -> i32;
+        pub fn inkling_ring_slots(
+            states: *const u32,
+            capacity: u32,
+            lens: *const u32,
+            minus: i32,
+            offset: i32,
+            slots: *const i64,
+            slot_stride: i64,
+            b: i32,
+            n: i32,
+            ring: i32,
+            block_size: i32,
+            out: *mut i64,
+            bases: *mut u32,
+            stream: i64,
+        ) -> i32;
         pub fn inkling_markov_pick(
             logits: *const c_void,
             logits_dtype: i32,
@@ -413,6 +429,7 @@ inference_tensor::kernel_library! {
             table_stride: i64,
             table_width: i32,
             block_size: i32,
+            ring: i32,
             table: *const f32,
             sinks: *const f32,
             out: *mut f32,

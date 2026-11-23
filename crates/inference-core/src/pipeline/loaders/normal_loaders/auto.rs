@@ -165,4 +165,13 @@ impl DeviceMappedModelLoader for AutoNormalLoader {
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         Self::get_loader(config)?.model_config(config)
     }
+
+    fn model_config_for(
+        &self,
+        config: &str,
+        device: &inference_tensor::Device,
+        paged: Option<crate::paged_attention::PagedKvLayout>,
+    ) -> Result<Box<dyn ModelConfigLike>> {
+        Self::get_loader(config)?.model_config_for(config, device, paged)
+    }
 }

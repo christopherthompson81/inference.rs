@@ -103,6 +103,14 @@ Each sequence holds a list of block pointers. On each decoding step, the schedul
 
 Sequences that begin with identical tokens share the blocks holding those tokens. A shared block is reference-counted rather than duplicated. This is the mechanism behind [prefix caching](/guides/perf/throughput-tuning/) when paged attention is on.
 
+Inkling 2's sliding-window layers keep only their window on CUDA. 40 of its 48 layer visits (the looped core runs
+three times) attend over the last 1024 tokens, so each sequence slot keeps a ring of their K and V (the window plus a
+512-row prefill piece) instead of paged blocks. The ring is part of the slot's recurrent state, so prefix snapshots
+save it and a cached prefix restores exactly. Only the 8 global visits and the drafter's layers take paged blocks.
+On a 24 GB card (recipe C, with the drafter) that's ~87K tokens at bf16 and ~156K at q8 with 4 sequences, or ~106K
+and ~174K with `--max-seqs 1`, against ~26K and ~46K before. The snapshots a ring makes are large (~260 MB a slot at
+bf16), so the pool keeps as many as 256 MB holds, at least one.
+
 MLA (Multi-head Latent Attention)'s latent cache is supported through a dedicated kernel path. On CUDA, other layers (with equal K and V head dims) use the HND cache layout (named for FlashInfer, NVIDIA's attention-kernel library; see [Flash attention vs FlashInfer](#flash-attention-vs-flashinfer) below); Metal and CPU use the Standard layout.
 
 ## CUDA fast paths
