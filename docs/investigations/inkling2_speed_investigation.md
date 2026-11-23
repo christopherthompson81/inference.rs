@@ -657,3 +657,147 @@ Kernels a step 2212 -> 1925. What's left, us a step (launches): depth mix 803 (2
 controllers 712 (192), rms norm 316 (153), activation quantization 388 (292), router cast + gemv + top-k 456 (144).
 A single-launch depth mix needs either the last block to apply all 2304 values (slower than 18 blocks' apply) or a
 grid-wide wait (correct only while every block is resident), ~0.2 ms for the risk.
+
+## Run 25 - 2026-11-23 02:30
+
+Two more decode attempts, both reverted.
+
+k and v short convs in one launch: the pool conv kernel took a table of convs over disjoint channels (the layer's k
+and v, run after both projections), and a test matched it to each conv alone. Conv launches went from 191 to 143 a
+step and conv time from 520 to 485 us, but GPU busy (9.53 ms) and wall (9.87 ms) didn't move, and tg128 was 107.2
+against 107.4. Inside a graph, back-to-back small kernels overlap their launch costs. A fusion pays only where the
+kernels it merges did redundant work, as the 7 attention-row kernels did (Run 24).
+
+The matvecs, nsight-compute at base clocks: the q-group projection reads 16 MB in 23.6 us (763 GB/s, 84% of DRAM).
+The k and v projections (1024 rows) reach ~400 GB/s in 6.3 us, too small to pass their ramp. The NVFP4 gate-up expert
+matvec reaches 80%, the down one 54% (rows of 1152 leave 92 of 128 threads idle). Other shapes for the MoE matvec:
+
+```
+warps x rows a block   tg128   expert matvecs (us a step)
+4 x 2 (current)        106.7   2518
+2 x 4                  104.0   2749
+4 x 4                  103.7   2771
+8 x 2                  95.7    3717
+8 x 1                  94.2    3969
+```
+
+The current shape is best: the idle lanes are not what limits the down projection.
+
+## Run 26 - 2026-11-23 04:10
+
+k and v projections in one launch. The fused QKV matvec took one quantized input for all three matrices. Here it
+takes one per matrix, and `fast_mmvq::fused_pair` runs two matrices over their own inputs (the third gets no rows).
+Inkling's k and v groups use it at decode on both layer kinds: concatenated groups on the global layers, and one
+projection each on the sliding ones. A case in `fast_mmq`'s CUDA tests matches it to each matrix alone.
+
+```
+                       launch                       us     a step   tg128
+before   k, v apart    2 x 1024 rows (sliding)      2x4.4  352 us   107.1
+         pair          2048 rows                    8.8    350 us   107.0
+```
+
+The pair saves nothing: 2048 rows take as long as two 1024-row launches. The launch ramp is not the cost; the kernel
+reads ~570 GB/s at this size, against ~790 for the 6552-row q group. A 2304-wide Q8_0 row is 72 blocks, and 8 warps
+cover 64 a pass, so the second pass has 8 of 64 slots busy. Single-token block shapes (plain and fused set together):
+
+```
+warps x rows   tg128   q8_0 matvec us a step
+8 x 2 (now)    107.0   1891 (with the pair)
+4 x 2          107.7   1891
+4 x 1          107.0   1949
+8 x 1          102.2   2384
+3 x 2          108.0   1852    72 blocks = 3 passes of 24
+fused 3, plain 8   107.6
+```
+
+3 warps fit this row width exactly, but the defines cover every model and type. For 4096-wide rows (128 blocks),
+8 warps divide evenly and 3 do not, so it would have to be picked per row width at launch. That gain is ~1% (0.1 ms
+a token). Restored to 8 x 2, and the pair dropped (no gain without the shape change).
+
+## Run 27 - 2026-11-23 05:30
+
+Does acceptance stay in one regime per reply, so drafting could switch on and off? A temporary trace printed each
+verify step's accepted drafts. `inference serve` at drafts 2 and plain, eight chat prompts (prose, code, story,
+explainer, email, how-to list, Rust, JSON reformat), greedy, 768 tokens. Scratchpad `acc/` holds the scripts and traces.
+
+A drafts-2 cycle costs 18.1 ms (17.9-18.3 across requests), a plain step 9.0 ms: drafting breaks even at 1.02
+accepted a step. Plain is 111.1-111.2 tok/s on every prompt.
+
+```
+tok/s        plain   always on   per-request best   per-16-cycle best   windows below / above break-even
+prose        111.2    93.4        111.2              111.9               26 / 3
+code         111.2   125.2        125.2              126.3                4 / 18
+story        111.2    99.6        111.2              113.1               21 / 6
+explainer    111.2   105.8        111.2              112.6               21 / 4
+email        111.2   117.5        117.5              122.0                4 / 8
+how-to       111.1   105.1        111.1              113.4               19 / 6
+rust         111.2   136.1        136.1              138.1                4 / 16
+json         111.2   150.9        150.9              150.9                0 / 9
+all          111.1   111.8        118.8              120.6
+```
+
+Unlike Qwen3.8 27B with DSpine (dspine investigation Runs 10-13: depth choices, a flat payoff around 7), this is an
+on/off choice with a wide gap, and replies mostly stay on one side of break-even. Choosing once per request takes
+most of what any window-level choice could (118.8 of 120.6).
+
+A rule, simulated over the traces: draft while an average of accepted drafts stays at or above break-even, with
+hysteresis 0.15. While off, run plain steps and one probe cycle every K tokens. A probe takes the acceptance the
+drafting trace had at that position, so the simulation is approximate.
+
+```
+K     alpha   all     worst   prose   code    explainer   rust    json
+128   0.05    118.1   109.8   110.5   125.0   109.8       135.9   150.9
+64    0.05    117.9   109.8   109.9   125.0   109.8       135.9   150.9
+32    0.20    114.9   110.1   110.2   117.4   110.2       125.6   129.7   (fast average: code and json switch off)
+none  0.20    111.8                   111.1                112.6   111.1   (no probes: off for good)
+```
+
+A slow average (0.05) matters, since a fast one switches off on code's short dips. The gain is about +6% over always
+on across the set, and up to +18% on prose. The worst request is 1.2% under plain (the explainer: the average takes
+a while to fall). Not modelled: keeping the drafter's context current while off (each plain step's hidden state, or
+the gap re-read at resume), sampled decoding's lower acceptance, and the eight prompts the parameters were picked on.
+
+## Run 28 - 2026-11-23 09:00
+
+Run 27's on/off choice, built into the speculative autotuner instead of a separate rule. Inkling's drafter offers
+depths `[0, n]` under `--mtp-auto-depth`. A step at depth 0 is a plain one. The driver times it from one plan to the
+next and asks the target to follow it (`speculative_follow`) instead of bypassing it. A bypassed sequence is dormant
+for good: the drafter refuses to propose once its context has a gap. Following buffers the step's taps (`[1, rows,
+hidden]` copies) and appends them to the drafter's paged context in one batch, at the next proposal or every 32 rows.
+The tuner's 3% switch margin and 32-decision probes stay as they were.
+
+First pass, 8 prompts greedy (Run 27's set, served): 115.5 against 111.6 always on. Two faults:
+
+- Code ran 118.8 against 125.2 always on: 1222 of 1362 decisions were plain. Prose ran first and pulled down the
+  shared population curve, so code started pessimistic. A probe is 2 trials against a 48-trial half-life, so it
+  barely moves a sequence's estimate. Fix: a sequence drafts for its first 12 verified steps before plain competes
+  (a first try counted predicted hits, which grow slowly at low acceptance, so it never stopped exploring).
+- Plain stretches ran ~3.5% under a plain server. The tuner measured a plain step at 9.6-10 ms against 9.0. Buffering
+  the appends (each was an eager context projection) didn't close it. nsys (graph trace, a prose request) shows the
+  same 9.38 ms decode graph in both. The gap between two plain graphs is 0.39 ms here against 0.04 ms plain: a
+  pipeline with a proposer turns off the CUDA one-token lookahead (`supports_batched_cuda_sampling`), so the host
+  prepares and launches each step after the last one ends. That's 21 host-to-device copies, 28 allocations, 3 event
+  syncs and the 0.29 ms launch call, where the plain server overlaps all of it with the step before. Follow and the
+  plan take ~35 us of it.
+
+```
+greedy, tok/s     plain   always on (2)   auto
+prose             111.2    92.6           109.3
+code              111.2   125.2           132.0
+story             111.2    99.5           109.3
+explainer         111.2   105.8           109.6
+email             111.2   119.1           116.6
+how-to            111.2   104.5           109.6
+rust              111.2   135.2           128.0
+json              111.2   152.3           147.6
+all               111.2   111.6           117.4
+
+sampled (0.7, seed 7)
+all               111.3   106.9           115.8    (prose 107.7, code 123.8, rust 133.5, json 143.3)
+```
+
+Tests: tuner cases for plain winning at low acceptance, a new sequence drafting first, and plain-step timing.
+`auto_depth_keeps_greedy_output_through_plain_steps_on_cuda` checks the tiny checkpoint's random drafter for 160
+tokens, EOS ignored. It drafts, goes plain, flushes 31 buffered rows at each probe and drafts again, and its greedy
+output matches plain decode. What's left: plain stretches 1.5-2% under a plain server, until a step that may draft
+can take the lookahead path.

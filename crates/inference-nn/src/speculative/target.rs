@@ -241,6 +241,12 @@ pub trait SpeculativeTargetMixin {
         self.flush_recurrent_speculative_transitions(seq_ids)
     }
 
+    /// Keeps a step's sequences ready to draft without drafting for them; `false` when this proposer can't, and
+    /// the step bypasses them instead.
+    fn speculative_follow(&mut self, _ctx: super::SpeculativeFollowCtx<'_>) -> Result<bool> {
+        Ok(false)
+    }
+
     fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> Result<()> {
         self.flush_recurrent_speculative_transitions(seq_ids)
     }
@@ -520,6 +526,13 @@ macro_rules! delegate_speculative_target {
                     &mut self.$field,
                     seq_ids,
                 )
+            }
+
+            fn speculative_follow(
+                &mut self,
+                ctx: $crate::speculative::SpeculativeFollowCtx<'_>,
+            ) -> ::inference_tensor::Result<bool> {
+                <$inner as $crate::speculative::SpeculativeTargetMixin>::speculative_follow(&mut self.$field, ctx)
             }
 
             fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> ::inference_tensor::Result<()> {

@@ -31,6 +31,8 @@ const BATCH_KEY_GRANULARITY: usize = 8;
 const SWITCH_MARGIN: f64 = 1.03;
 // Every this many decisions per batch size the stalest neighboring depth is measured once
 const PROBE_INTERVAL: u64 = 32;
+// A sequence drafts for this many verified steps before plain decode competes, so it is chosen on its acceptance
+const EXPLORE_STEPS: u32 = 12;
 // Sequences not seen for this many decisions are forgotten
 const STALE_DECISIONS: u64 = 4096;
 // Every candidate needs direct samples because graph and kernel boundaries can make costs non-monotonic
@@ -59,6 +61,7 @@ struct PositionRate {
 struct SequenceAcceptance {
     hits: f64,
     predicted: f64,
+    steps: u32,
     last_seen: u64,
 }
 
@@ -244,6 +247,7 @@ impl SpeculativeAutotuner {
         let population_decay = 0.5f64.powf(1.0 / POPULATION_HALF_LIFE_TRIALS);
         let sequence_decay = 0.5f64.powf(1.0 / SEQUENCE_HALF_LIFE_TRIALS);
         let sequence = self.sequences.entry(outcome.seq_id).or_default();
+        sequence.steps = sequence.steps.saturating_add(1);
         for (position, predicted) in predicted.iter().enumerate().take(tried) {
             let hit = if position < outcome.accepted {
                 1.0
@@ -354,11 +358,16 @@ impl SpeculativeAutotuner {
             self.sequences
                 .retain(|_, seq| clock - seq.last_seen < STALE_DECISIONS);
         }
+        let exploring = seq_ids.iter().any(|seq_id| {
+            self.sequences
+                .get(seq_id)
+                .is_none_or(|seq| seq.steps < EXPLORE_STEPS)
+        });
         let candidates = self
             .candidates
             .iter()
             .copied()
-            .filter(|depth| *depth <= max_depth)
+            .filter(|depth| *depth <= max_depth && (*depth > 0 || !exploring))
             .collect::<Vec<_>>();
         if candidates.is_empty() {
             return max_depth;
@@ -455,14 +464,30 @@ impl SpeculativeAutotuner {
         selected
     }
 
-    /// The sequences in `seq_ids` started drafting `depth` tokens at `started`.
+    /// The sequences in `seq_ids` started drafting `depth` tokens (0: a plain step) at `started`.
     pub fn begin_step(&mut self, seq_ids: &[usize], depth: usize, started: Instant) {
-        self.boundary = (depth > 0).then(|| StepBoundary {
+        self.boundary = Some(StepBoundary {
             seq_ids: seq_ids.to_vec(),
             depth,
             at: started,
             interruptions: interruptions(),
         });
+    }
+
+    /// A plain step of `seq_ids` begun with `begin_step` ends where the next step is planned, at `at`.
+    pub fn end_plain_step(&mut self, seq_ids: &[usize], at: Instant) {
+        let Some(boundary) = self.boundary.take_if(|boundary| boundary.depth == 0) else {
+            return;
+        };
+        if boundary.seq_ids == seq_ids && boundary.interruptions == interruptions() {
+            let secs = at.saturating_duration_since(boundary.at).as_secs_f64();
+            record_cost(
+                &mut self.step_cost,
+                (batch_key(seq_ids.len()), 0),
+                secs,
+                self.clock,
+            );
+        }
     }
 
     pub fn cancel_step(&mut self) {
@@ -540,6 +565,7 @@ impl SpeculativeAutotuner {
             SequenceAcceptance {
                 hits: rate / TEST_POPULATION_RATE * trials,
                 predicted: trials,
+                steps: EXPLORE_STEPS,
                 last_seen: 0,
             },
         );
@@ -581,6 +607,43 @@ mod tests {
         t.set_rate(0, 0.9);
         t.set_rate(1, 0.3);
         assert_eq!(t.choose(&[0, 1], 6), 6);
+    }
+
+    #[test]
+    fn plain_decode_wins_where_drafts_miss() {
+        let mut t = tuner(&[0, 2]);
+        t.set_costs(1, &[(0, 1.0), (2, 2.0)]);
+        t.set_rate(0, 0.3);
+        assert_eq!(t.choose(&[0], 2), 0);
+        let mut t = tuner(&[0, 2]);
+        t.set_costs(1, &[(0, 1.0), (2, 2.0)]);
+        t.set_rate(0, 0.9);
+        assert_eq!(t.choose(&[0], 2), 2);
+    }
+
+    #[test]
+    fn a_new_sequence_drafts_before_choosing_plain_decode() {
+        let mut t = tuner(&[0, 2]);
+        t.set_costs(1, &[(0, 1.0), (2, 2.0)]);
+        t.set_positions(&[0.1; 2]);
+        assert_eq!(t.choose(&[7], 2), 2);
+    }
+
+    #[test]
+    fn plain_steps_are_timed_to_the_next_plan() {
+        let mut t = tuner(&[0, 2]);
+        let start = Instant::now();
+        for step in 0..3 {
+            let at = start + Duration::from_millis(10 * step);
+            t.end_plain_step(&[0], at);
+            t.begin_step(&[0], 0, at);
+        }
+        let secs = t.cell(1, 0).expect("a plain step's cost");
+        assert!((secs - 0.01).abs() < 1e-6, "{secs}");
+        // a drafting step's boundary is the verification's to close
+        t.begin_step(&[0], 2, start);
+        t.end_plain_step(&[0], start + Duration::from_secs(1));
+        assert!(t.boundary.is_some());
     }
 
     #[test]

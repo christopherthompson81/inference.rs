@@ -93,6 +93,14 @@ already its best one the probes only cost time: on Qwen3.8-Flash-Next with offlo
 its DFlash 2 drafter it decodes 1-5% slower than the fixed default, so it is for a target or workload whose best depth
 is not known.
 
+Inkling 2's drafter chooses between `--mtp-n-predict` drafts and none. On this MoE every verified row reads its own
+experts, so drafting pays only where most drafts land (code, structured text) and loses ~15% elsewhere. A new
+sequence drafts for its first 12 steps before plain decode competes, so each request is judged by its own
+acceptance. While it decodes plain, the drafter buffers each step's taps and takes them into its context in one
+append, at the next probe or every 32 tokens, so drafting can resume. On eight chat prompts with recipe C
+(768 tokens each), it ran at 117.4 tok/s greedy and 115.8 sampled, against 111.6 and 106.9 always drafting 2 and 111
+plain. Plain stretches still run ~2% under a plain server, since a step that may draft does not pipeline its decode.
+
 A GGUF that leaves the head out can take it from a separate file, as llama.cpp's MTP heads ship (for example
 unsloth's `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`): list it after the model's files and pass `--mtp`. The head file's
 `nextn` block extends the model it is listed with and borrows its embeddings and `lm_head`:

@@ -2,12 +2,13 @@
 //! The target implements [`DrafterTarget`] (its last forward's taps, its embeddings and the head it drafts with) and
 //! keeps what is its own: tap capture, recurrent rollback and commit order.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use inference_nn::speculative::{
     MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeAttachInfo,
-    SpeculativeBatchPlan, SpeculativeCommitRow, SpeculativeGraphPlan, SpeculativeKvCache,
-    SpeculativePrefillCtx, SpeculativeProposal, SpeculativeProposalBatch,
+    SpeculativeBatchPlan, SpeculativeCommitRow, SpeculativeFollowCtx, SpeculativeGraphPlan,
+    SpeculativeKvCache, SpeculativePrefillCtx, SpeculativeProposal, SpeculativeProposalBatch,
     SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeProposePrepareCtx,
     SpeculativeTapRouting, depths_up_to,
 };
@@ -23,6 +24,9 @@ use crate::dflash::{
     DFlashLoadTarget, DFlashPagedCache, DFlashPreparedContext, DFlashProposalBatch,
     DFlashSamplingInputs, dflash_adaptive_requested, windowed_kv_capacities,
 };
+
+// rows plain steps buffer a sequence before they reach the drafter's context
+const FOLLOW_FLUSH_ROWS: usize = 32;
 
 /// What a target gives its external drafter.
 pub trait DrafterTarget {
@@ -54,6 +58,15 @@ pub struct DrafterAttach<'a> {
 pub struct ExternalDrafter {
     drafter: Arc<DFlashDraftModel>,
     n_predict: usize,
+    // rows of steps that drafted nothing, each tap's `[1, rows, hidden]` copies, appended to the context in one go
+    following: Mutex<HashMap<usize, Following>>,
+}
+
+/// A sequence's rows from `start_pos` that plain steps left for the drafter's context.
+struct Following {
+    start_pos: usize,
+    rows: usize,
+    taps: Vec<Vec<Tensor>>,
 }
 
 impl std::ops::Deref for ExternalDrafter {
@@ -122,6 +135,53 @@ fn dflash_paged_cache<'a>(
     drafter
         .uses_paged_kv()
         .then_some(DFlashPagedCache { kv_cache, metadata })
+}
+
+/// Appends each sequence's rows of the last target forward that its drafter context lacks, up to its committed
+/// length `base_len`; `false` when one lacks more than the forward's rows hold.
+fn catch_up_ctx(
+    drafter: &DFlashDraftModel,
+    taps: &[Tensor],
+    seq_ids: &[usize],
+    base_lens: &[usize],
+    target_rows: &[(usize, usize)],
+    cache: &SpeculativeKvCache<'_>,
+) -> Result<bool> {
+    let source_rows = taps[0].dim(1)?;
+    let mut appends = Vec::with_capacity(seq_ids.len());
+    let mut flat_row_indices = Vec::new();
+    for ((seq_id, &base_len), &(batch_idx, count)) in seq_ids.iter().zip(base_lens).zip(target_rows)
+    {
+        let needed = match drafter.ctx_next_pos(*seq_id) {
+            Some(next) if next <= base_len => base_len - next,
+            _ => count.min(base_len),
+        };
+        if needed == 0 {
+            continue;
+        }
+        if needed > count || source_rows < count {
+            return Ok(false);
+        }
+        let flat_start = batch_idx
+            .checked_mul(source_rows)
+            .and_then(|row| row.checked_add(count - needed))
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash tap row index overflow"))?;
+        for row in flat_start..flat_start + needed {
+            flat_row_indices.push(u32::try_from(row).map_err(inference_tensor::Error::wrap)?);
+        }
+        appends.push(CtxAppend {
+            seq_id: *seq_id,
+            rows: needed,
+            start_pos: base_len - needed,
+        });
+    }
+    drafter.append_ctx_batch(
+        taps,
+        flat_row_indices,
+        &appends,
+        dflash_paged_cache(drafter, cache),
+    )?;
+    Ok(true)
 }
 
 pub(crate) fn resolve_dflash_n_predict(
@@ -213,6 +273,7 @@ impl ExternalDrafter {
             Self {
                 drafter: Arc::new(drafter),
                 n_predict,
+                following: Mutex::new(HashMap::new()),
             },
             info,
         ))
@@ -355,6 +416,7 @@ impl ExternalDrafter {
         if drafter.has_dormant_seq(ctx.seq_ids) {
             return Ok(None);
         }
+        self.flush_following(ctx.seq_ids, &ctx.cache)?;
 
         let prepared = ctx.preparation.and_then(|preparation| {
             preparation
@@ -396,49 +458,15 @@ impl ExternalDrafter {
                 &appends,
                 dflash_paged_cache(drafter, &ctx.cache),
             )?;
-        } else {
-            let source_rows = taps[0].dim(1)?;
-            let mut appends = Vec::with_capacity(batch);
-            let mut flat_row_indices = Vec::new();
-            for (i, seq_id) in ctx.seq_ids.iter().enumerate() {
-                let (batch_idx, count) = ctx.target_rows[i];
-                let base_len = ctx.base_lens[i];
-                let ctx_next = drafter.ctx_next_pos(*seq_id);
-                let needed = match ctx_next {
-                    Some(next) if next <= base_len => base_len - next,
-                    _ => count.min(base_len),
-                };
-                if needed > 0 {
-                    if needed > count || source_rows < count {
-                        return Ok(None);
-                    }
-                    let start_row = count - needed;
-                    let flat_start = batch_idx
-                        .checked_mul(source_rows)
-                        .and_then(|row| row.checked_add(start_row))
-                        .ok_or_else(|| {
-                            inference_tensor::Error::msg("DFlash tap row index overflow")
-                        })?;
-                    let flat_end = flat_start.checked_add(needed).ok_or_else(|| {
-                        inference_tensor::Error::msg("DFlash tap row index overflow")
-                    })?;
-                    for row in flat_start..flat_end {
-                        flat_row_indices
-                            .push(u32::try_from(row).map_err(inference_tensor::Error::wrap)?);
-                    }
-                    appends.push(CtxAppend {
-                        seq_id: *seq_id,
-                        rows: needed,
-                        start_pos: base_len - needed,
-                    });
-                }
-            }
-            drafter.append_ctx_batch(
-                &taps,
-                flat_row_indices,
-                &appends,
-                dflash_paged_cache(drafter, &ctx.cache),
-            )?;
+        } else if !catch_up_ctx(
+            drafter,
+            &taps,
+            ctx.seq_ids,
+            ctx.base_lens,
+            ctx.target_rows,
+            &ctx.cache,
+        )? {
+            return Ok(None);
         }
         if !drafter.contexts_ready_for_draft(ctx.seq_ids) {
             return Ok(None);
@@ -573,6 +601,135 @@ impl ExternalDrafter {
             &appends,
             dflash_paged_cache(drafter, &ctx.cache),
         )
+    }
+
+    /// Takes a step that drafts nothing into the drafter's context, so a later step can draft: its rows wait in a
+    /// buffer that reaches the context in one append; `false` when a sequence is behind further than they reach.
+    pub fn follow(
+        &self,
+        target: &dyn DrafterTarget,
+        ctx: SpeculativeFollowCtx<'_>,
+    ) -> Result<bool> {
+        let drafter = &self.drafter;
+        let Some(taps) = target.spec_taps() else {
+            return Ok(false);
+        };
+        if taps.len() != drafter.target_layer_ids.len() || drafter.has_dormant_seq(ctx.seq_ids) {
+            return Ok(false);
+        }
+        let mut full = Vec::new();
+        {
+            let mut following = self
+                .following
+                .lock()
+                .expect("drafter follow buffer poisoned");
+            for ((seq_id, &base_len), &(batch_idx, count)) in
+                ctx.seq_ids.iter().zip(ctx.base_lens).zip(ctx.target_rows)
+            {
+                let Some(next) = drafter.ctx_next_pos(*seq_id) else {
+                    return Ok(false);
+                };
+                let entry = following.entry(*seq_id).or_insert_with(|| Following {
+                    start_pos: next,
+                    rows: 0,
+                    taps: vec![Vec::new(); taps.len()],
+                });
+                let needed = base_len.checked_sub(entry.start_pos + entry.rows);
+                let Some(needed) = needed.filter(|needed| *needed <= count) else {
+                    return Ok(false);
+                };
+                if needed == 0 {
+                    continue;
+                }
+                for (kept, tap) in entry.taps.iter_mut().zip(&taps) {
+                    kept.push(
+                        tap.narrow(0, batch_idx, 1)?
+                            .narrow(1, count - needed, needed)?
+                            .copy()?,
+                    );
+                }
+                entry.rows += needed;
+                if entry.rows >= FOLLOW_FLUSH_ROWS {
+                    full.push(*seq_id);
+                }
+            }
+        }
+        self.flush_following(&full, &ctx.cache)?;
+        Ok(true)
+    }
+
+    /// Appends the buffered rows of `seq_ids` to the drafter's context.
+    fn flush_following(&self, seq_ids: &[usize], cache: &SpeculativeKvCache<'_>) -> Result<()> {
+        let entries = {
+            let mut following = self
+                .following
+                .lock()
+                .expect("drafter follow buffer poisoned");
+            seq_ids
+                .iter()
+                .filter_map(|seq_id| Some((*seq_id, following.remove(seq_id)?)))
+                .filter(|(_, entry)| entry.rows > 0)
+                .collect::<Vec<_>>()
+        };
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let tap_count = entries[0].1.taps.len();
+        let taps = (0..tap_count)
+            .map(|tap| {
+                let rows = entries
+                    .iter()
+                    .flat_map(|(_, entry)| &entry.taps[tap])
+                    .collect::<Vec<_>>();
+                Tensor::cat(&rows, 1)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let appends = entries
+            .iter()
+            .map(|(seq_id, entry)| CtxAppend {
+                seq_id: *seq_id,
+                rows: entry.rows,
+                start_pos: entry.start_pos,
+            })
+            .collect::<Vec<_>>();
+        let total = appends.iter().map(|append| append.rows).sum::<usize>();
+        let rows = (0..total)
+            .map(|row| u32::try_from(row).map_err(inference_tensor::Error::wrap))
+            .collect::<Result<Vec<_>>>()?;
+        self.drafter.append_ctx_batch(
+            &taps,
+            rows,
+            &appends,
+            dflash_paged_cache(&self.drafter, cache),
+        )
+    }
+
+    pub fn mark_seqs_dormant(&self, seq_ids: &[usize]) {
+        self.drop_following(seq_ids);
+        self.drafter.mark_seqs_dormant(seq_ids);
+    }
+
+    pub fn release_seqs(&self, seq_ids: &[usize]) {
+        self.drop_following(seq_ids);
+        self.drafter.release_seqs(seq_ids);
+    }
+
+    pub fn clear(&self) {
+        self.following
+            .lock()
+            .expect("drafter follow buffer poisoned")
+            .clear();
+        self.drafter.clear();
+    }
+
+    fn drop_following(&self, seq_ids: &[usize]) {
+        let mut following = self
+            .following
+            .lock()
+            .expect("drafter follow buffer poisoned");
+        for seq_id in seq_ids {
+            following.remove(seq_id);
+        }
     }
 
     /// A finished sequence never drafts again, which is where its kept rows would reach the drafter's context; its
