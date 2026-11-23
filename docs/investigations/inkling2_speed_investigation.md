@@ -910,3 +910,21 @@ What broke is the tuner's plain-step cost, which it times on the host's clock:
 
 A sound version would time plain steps on the GPU (events around the decode graph) rather than on the host.
 The gain left is small, since prose already runs within 1-2% of a plain server, mostly from probes and exploring.
+## Run 33 - 2026-11-23 16:30
+
+Context on the 3090 (24 GiB), recipe C with the q8_0 drafter and auto depth. `inference serve --max-seq-len 1048576`
+reads its allocation from the log:
+
+```
+KV type   KV cache   blocks (32 tokens)   context      GPU in use
+bf16      5120 MB     803                  25,664       22.9 GiB
+q8        5120 MB    1437                  45,952       22.9 GiB
+```
+
+Reserved beside the weights: 1270 MB for post-load model components, 1318 MB for runtime components and
+activations, and 96 MB for the speculative verify rows in the captured graphs. That's ~200 KB a token at bf16:
+every layer visit (48: 24 layers with the looped core 6-17 three times) plus the drafter's layer stores every
+position, at 2 x 8 KV heads x 128 x 2 bytes = 4 KB each. Only 8 visits attend globally. The other 40 slide over the
+last 1024 tokens, so they could keep just their window. No model here does that: the engine builds one KV cache
+manager, and sliding layers take the full-length table. With windowed sliding visits a token costs 9 x 4 KB =
+36 KB at bf16 (~18.5 KB at q8), against a fixed ring per sequence slot of ~40 x (1024 + slack) x 4 KB, ~180 MB.
