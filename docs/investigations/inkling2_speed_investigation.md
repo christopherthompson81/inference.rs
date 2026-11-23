@@ -1196,3 +1196,95 @@ mean 0.00389, median 0.00160, p99 0.0371, same top 97.32%, PPL 6.7630 (Run 9's f
 
 Left: the ~2% prefill gap; the Q6_K / Q8_0 experts of layers 20-23 still take the per-pair matvec in a verify (Run
 12: 1.1 ms of a 4-row verify); a verify length chosen per step from 0, 2, 4 and 7 now that wider verifies pay.
+
+## Run 41 - 2026-11-23 12:30
+
+Verify lengths for auto depth now that a wider verify reads each shared expert once (Run 40). Inkling offered
+`[0, n]`; the tuner (per-position acceptance, scaled per sequence, over measured step costs, probing the other
+candidates) can weigh more. Served, recipe C, Run 27's prompts, 768 tokens, means over the eight (a run's noise is
+~2%: the same `[0, 2, 4]` gave 127.3 and 130.2):
+
+```
+auto depth candidates (drafts)     mean    geo     slowest   code    rust    json
+[0, 2] (2)                         127.6   125.9   104.1     136.9   150.6   170.0
+  again                            128.4   127.1   105.3     138.7   144.9   165.5
+  again                            128.0   126.6   103.1     135.5   153.0   160.9
+[0, 2, 3] (3)                      131.1   129.4   104.4     141.2   150.6   175.4
+  again                            129.7   127.9   105.7     144.5   157.6   164.8
+  again                            132.3   129.9   104.2     150.8   165.8   175.8
+[0, 2, 4] (4)                      127.3 / 130.2 (two runs)
+[0, 2, 4, 7] (7)                   126.8           107.1     129.0   147.5   160.4
+[0, 2, 3, 4, 7] (7)                124.0           104.8     132.8   158.0   144.6
+fixed 3                            132.9   130.0    96.1     147.6   171.9   179.0
+```
+
+Every candidate costs exploration steps, so larger sets lose. `[0, 2, 3]` at drafts 3 is +2.4% over `[0, 2]` in all
+three pairs and keeps the prose prompt over plain decode, where fixed 3 falls under it. Inkling now offers 0, 2 and
+the drafter's depth.
+
+The same profile (drafts 3, one request) showed layers 20-23 (Q6_K gate-up, Q8_0 down) took 35.4 ms of the
+request's expert time against 84.7 for the twenty NVFP4 layers: 4 of 48 visits. Their experts are Candle QTensors;
+the fused decode kernel declines Inkling's softcapped SiLU, and the expert-indexed matvec fallback was for raw
+experts only, so they ran the gather path (each projection through `indexed_moe_forward_*`, the activation apart) in
+decode and verify alike. Any experts with kernel weights now take the indexed matvec (then grouped mmq past 8
+tokens): the same request's layers 20-23 take 17.2 ms (`mmvq_gguf_q6_k_moe` with the fused GLU, `q8_0_moe`).
+
+Against master (`ccabab936`, the same card, alternating): plain 109.4 / 109.7 -> 109.8 / 110.7; auto depth at drafts 3
+130.9 -> 135.0 mean (code 142.9 -> 162.1, json 170.1 -> 179.3, rust 170.3 -> 162.6). Master's drafts-3 auto depth
+offers `[0, 3]`.
+
+## Run 42 - 2026-11-23 14:00
+
+Layers 20-23's experts (Q6_K gate-up, Q8_0 down) in the tile scheme. The tensor-core matvec is now generic over a
+tile type (`mmvq_tc_moe.cuh`: a step of K, its loads, its sub-blocks' A fragments and both rows' scales):
+
+```
+type     step   tile (16 rows)                         a lane's loads a step          decode
+NVFP4    64     576 B: scales, 32 x 16 B               16 B + 8 B scales              FP4 table, immediates
+Q8_0     32     544 B: 8 x (2 f16), 32 x 16 B          16 B + 4 B scales              none (int8)
+Q6_K     128    3360 B a superblock: 8 x (2 f16 d),    3 x 16 B + 16 B scales + 4 B   4 low bits | 2 high, - 32
+                8 x 32 sub-block scales, 2 halves of
+                32 x 48 B (8 words low bits, 16 B high)
+```
+
+Each keeps the bytes its 16 GGUF blocks take. Q8_0 and Q6_K are Candle types, so their stacks loaded as QTensors;
+on an sm80+ GPU a rank-3 stack that tiles now loads as raw blocks and uploads tiled (the direct and the packed
+loaders both). Readers: the matvec, `load_tiles_q8_0_tiled` / `load_tiles_q6_K_tiled` for prefill (values in mmq's
+natural order, the same Q8_0 / Q6_K dot products), `q8_0` / `q6_k_untile_rows` for gathers, then Candle's CUDA
+dequantizer over the gathered rows (`QCudaStorage::from_device_blocks`), and host untiling for read-back.
+
+A served run failed every prefill with NaN logits until the padding was fixed: mmq reads a K tail's whole tiles
+(Inkling's down, K = 1152, is 4.5 steps of 256), and in a tile order the last group's overrun spans 16 rows' tiles,
+past the one row of zeroed padding a row-major tensor needs, into unallocated memory. Tiled stacks now pad 16 rows
+(test: the padding covers a group's tail). NVFP4's tiles had the same short padding and read past it unharmed by luck.
+
+nsys, drafts 3, one prose request, layers 20-23 a launch: Q6_K gate-up 133.6 -> 100.1 us, Q8_0 down 132.0 -> 63.0 us;
+their share of the request's expert time 35.4 ms (gather, Run 41) -> 17.2 (indexed matvec) -> 11.7 ms.
+Bench against master (`ccabab936`, alternating, two rounds): pp512 2217 / 2188 -> 2208 / 2140, pp2048 1871 / 1856 ->
+1829 / 1868, tg128 106.5 -> 107: level within the card's drift.
+
+Served against master (`ccabab936`, alternating, two rounds; no errors): plain 110.3 / 109.2 -> 110.1 / 110.7; auto
+depth at drafts 3 130.5 / 130.4 -> 135.0 / 134.6 (prose 104.4 -> 106.2, code 140.7 -> 143.3 / 148.8, json 171.8 ->
+182.8 / 178.1). Run 41's auto depth and indexed-matvec fallback alone gave 135.0: the Q6_K / Q8_0 tiles' kernel gains
+(11.7 against 17.2 ms of a request) are inside the served noise once those layers left the gather path. KLD 0.00389
+(median 0.00160, same top 97.32%), unchanged.
+
+## Run 43 - 2026-11-23 14:45
+
+The NVFP4 prefill gap of Run 40 (pp512 ~2% under the row-major loader). nsys at pp2048, an environment switch
+keeping NVFP4 row-major in the same binary: the expert mmq 700.1 us a launch tiled against 669.8 row-major (+4.5%).
+ncu, one launch at base clocks:
+
+```
+                         time      instructions   global ld sectors   ld requests   long-scoreboard
+tiled                    802.9 us  196.7 M        20.5 M              2.85 M        1194
+row-major                773.0 us  172.1 M        43.2 M              3.82 M        1679
+```
+
+Half the sectors and less waiting on memory, but 14% more instructions: every tile word holds two rows' values
+(the mma A fragment's rows g and g + 8), and the fold's table is per row and per sub-block, so each word is decoded
+twice, half of each kept. The compiler drops the unused half's last permute, so a two-table lookup or a compacted
+half-word lookup costs the same instructions a value. The A fragment fixes what a lane holds (4 values of each of two
+rows), so any tile word mixes two rows or two sub-blocks, and the fold's tables always split it; Run 9's per-16 path
+avoids the fold but runs half-K mma steps (2209 against 2361). The ~4.5% of this kernel (~1-2% of a prefill) is the
+price of one layout for the tensor-core matvec and folded prefill: decode and verify gain 3-29%. Left as is.

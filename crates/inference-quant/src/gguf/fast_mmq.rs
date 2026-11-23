@@ -75,6 +75,8 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Iq4Nl
             | GgufType::Nvfp4
             | GgufType::Nvfp4Tiled
+            | GgufType::Q8_0Tiled
+            | GgufType::Q6KTiled
             | GgufType::Iq4Xs
             | GgufType::Iq2Xxs
             | GgufType::Iq2Xs
@@ -118,7 +120,7 @@ pub fn supports_weight(weight: &dyn KernelWeight) -> bool {
 // The row stride mmq takes: blocks for ggml's types, bytes for ik's (some of whose rows start with a scale) and the
 // tile orders (whose loaders find a row's 16-row group by bytes)
 fn mmq_row_stride(dtype: GgufType, k: usize) -> i64 {
-    if dtype.is_trellis() || dtype.is_iqk() || dtype == GgufType::Nvfp4Tiled {
+    if dtype.is_trellis() || dtype.is_iqk() || dtype.is_expert_tiled() {
         dtype.row_bytes(k).expect("validated at construction") as i64
     } else {
         (k / qk_for(dtype)) as i64
@@ -133,6 +135,7 @@ fn qk_for(dtype: GgufType) -> usize {
         | GgufType::Q5_0
         | GgufType::Q5_1
         | GgufType::Q8_0
+        | GgufType::Q8_0Tiled
         | GgufType::Iq4Nl => 32,
         GgufType::Nvfp4 | GgufType::Nvfp4Tiled => 64,
         GgufType::Q2K
@@ -140,6 +143,7 @@ fn qk_for(dtype: GgufType) -> usize {
         | GgufType::Q4K
         | GgufType::Q5K
         | GgufType::Q6K
+        | GgufType::Q6KTiled
         | GgufType::Iq4Xs
         | GgufType::Iq2Xxs
         | GgufType::Iq2Xs
@@ -180,11 +184,12 @@ fn ds_layout_for(dtype: GgufType) -> DsLayout {
         GgufType::Q4_0 | GgufType::Q4_1 => DsLayout::DS4,
         GgufType::Q5_0 => DsLayout::D4,
         GgufType::Q5_1 => DsLayout::DS4,
-        GgufType::Q8_0 => DsLayout::D4,
+        GgufType::Q8_0 | GgufType::Q8_0Tiled => DsLayout::D4,
         GgufType::Q2K => DsLayout::D2S6,
         GgufType::Q3K => DsLayout::D4,
         GgufType::Q4K | GgufType::Q5K => DsLayout::DS4,
         GgufType::Q6K
+        | GgufType::Q6KTiled
         | GgufType::Iq4Nl
         | GgufType::Nvfp4
         | GgufType::Nvfp4Tiled
@@ -332,11 +337,13 @@ fn mmq_launcher(dtype: GgufType) -> Option<MmqLauncher> {
         GgufType::Q5_0 => ffi::launch_mmq_gguf_q5_0,
         GgufType::Q5_1 => ffi::launch_mmq_gguf_q5_1,
         GgufType::Q8_0 => ffi::launch_mmq_gguf_q8_0,
+        GgufType::Q8_0Tiled => ffi::launch_mmq_gguf_q8_0_tiled,
         GgufType::Q2K => ffi::launch_mmq_gguf_q2_k,
         GgufType::Q3K => ffi::launch_mmq_gguf_q3_k,
         GgufType::Q4K => ffi::launch_mmq_gguf_q4_k,
         GgufType::Q5K => ffi::launch_mmq_gguf_q5_k,
         GgufType::Q6K => ffi::launch_mmq_gguf_q6_k,
+        GgufType::Q6KTiled => ffi::launch_mmq_gguf_q6_k_tiled,
         GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl,
         GgufType::Nvfp4 => ffi::launch_mmq_gguf_nvfp4,
         GgufType::Nvfp4Tiled => ffi::launch_mmq_gguf_nvfp4_tiled,
@@ -375,11 +382,13 @@ fn mmq_moe_launcher(dtype: GgufType) -> Option<MmqMoeLauncher> {
         GgufType::Q5_0 => ffi::launch_mmq_gguf_q5_0_moe,
         GgufType::Q5_1 => ffi::launch_mmq_gguf_q5_1_moe,
         GgufType::Q8_0 => ffi::launch_mmq_gguf_q8_0_moe,
+        GgufType::Q8_0Tiled => ffi::launch_mmq_gguf_q8_0_tiled_moe,
         GgufType::Q2K => ffi::launch_mmq_gguf_q2_k_moe,
         GgufType::Q3K => ffi::launch_mmq_gguf_q3_k_moe,
         GgufType::Q4K => ffi::launch_mmq_gguf_q4_k_moe,
         GgufType::Q5K => ffi::launch_mmq_gguf_q5_k_moe,
         GgufType::Q6K => ffi::launch_mmq_gguf_q6_k_moe,
+        GgufType::Q6KTiled => ffi::launch_mmq_gguf_q6_k_tiled_moe,
         GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl_moe,
         GgufType::Nvfp4 => ffi::launch_mmq_gguf_nvfp4_moe,
         GgufType::Nvfp4Tiled => ffi::launch_mmq_gguf_nvfp4_tiled_moe,

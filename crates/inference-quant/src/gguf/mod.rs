@@ -52,6 +52,10 @@ pub mod mapped;
 mod nvfp4_tiled;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
+#[cfg(any(feature = "cuda", test))]
+mod q6k_tiled;
+#[cfg(any(feature = "cuda", test))]
+mod q8_0_tiled;
 #[cfg(feature = "cuda")]
 pub mod quantize_cuda;
 pub mod raw;

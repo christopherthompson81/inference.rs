@@ -1467,8 +1467,9 @@ impl FastExpertsWeights {
                 .forward_decode(forward, config)
                 .map_err(|err| err.context("moe experts fast decode"))?
             {
-                // The fused decode kernels take Candle's types only; raw experts run the expert-indexed matvec
-                None if self.has_raw_kernel_experts() => {
+                // The fused decode kernels take Candle's types and SiLU/GELU only; other experts with kernel weights
+                // (raw blocks, or Candle's types under another activation) run the expert-indexed matvec
+                None if self.has_kernel_experts() => {
                     match self
                         .forward_indexed_mmvq(forward, config)
                         .map_err(|err| err.context("moe experts indexed mmvq decode"))?
@@ -1518,16 +1519,14 @@ impl FastExpertsWeights {
     }
 
     #[cfg(feature = "cuda")]
-    fn has_raw_kernel_experts(&self) -> bool {
+    fn has_kernel_experts(&self) -> bool {
         [
             &self.fused_gate_proj,
             &self.fused_up_proj,
             &self.fused_down_proj,
         ]
         .iter()
-        .any(|projection| {
-            projection.kernel_weight().is_some() && projection.get_qtensor().is_none()
-        })
+        .all(|projection| projection.kernel_weight().is_some())
     }
 
     fn uses_flattened_gather(&self, device: &Device) -> bool {

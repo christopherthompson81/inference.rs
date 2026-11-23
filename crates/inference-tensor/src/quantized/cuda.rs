@@ -257,6 +257,31 @@ impl QCudaStorage {
         })
     }
 
+    /// `el_count` values' blocks copied from bytes already on `device` (as a gather leaves them), padded as `zeros`.
+    pub fn from_device_blocks(
+        device: &CudaDevice,
+        blocks: &CudaSlice<u8>,
+        el_count: usize,
+        dtype: GgmlDType,
+    ) -> Result<Self> {
+        let mut storage = Self::zeros(device, el_count, dtype)?;
+        let len = storage.data.len;
+        if blocks.len() < len {
+            crate::bail!(
+                "{dtype:?} blocks of {el_count} values take {len} bytes, got {}",
+                blocks.len()
+            );
+        }
+        device
+            .cuda_stream()
+            .memcpy_dtod(
+                &blocks.slice(..len),
+                &mut storage.data.inner.slice_mut(..len),
+            )
+            .w()?;
+        Ok(storage)
+    }
+
     pub fn dtype(&self) -> GgmlDType {
         self.dtype
     }

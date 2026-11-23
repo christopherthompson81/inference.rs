@@ -107,6 +107,7 @@ static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
         case GGML_TYPE_Q5_1:
             return MMQ_Q8_1_DS_LAYOUT_DS4;
         case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q8_0_TILED:
             return MMQ_Q8_1_DS_LAYOUT_D4;
         case GGML_TYPE_MXFP4:
             return MMQ_Q8_1_DS_LAYOUT_D4;
@@ -121,6 +122,7 @@ static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
         case GGML_TYPE_Q5_K:
             return MMQ_Q8_1_DS_LAYOUT_DS4;
         case GGML_TYPE_Q6_K:
+        case GGML_TYPE_Q6_K_TILED:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ2_S:
@@ -249,6 +251,7 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
         case GGML_TYPE_Q5_0:    return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_Q5_1:    return MMQ_DP4A_TXS_Q8_1;
         case GGML_TYPE_Q8_0:    return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_Q8_0_TILED: return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_MXFP4:   return MMQ_DP4A_TXS_Q8_1;
         case GGML_TYPE_NVFP4:   return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_NVFP4_TILED: return MMQ_DP4A_TXS_Q8_0;
@@ -257,6 +260,7 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
         case GGML_TYPE_Q4_K:    return MMQ_DP4A_TXS_Q4_K;
         case GGML_TYPE_Q5_K:    return MMQ_DP4A_TXS_Q5_K;
         case GGML_TYPE_Q6_K:    return MMQ_DP4A_TXS_Q6_K;
+        case GGML_TYPE_Q6_K_TILED: return MMQ_DP4A_TXS_Q6_K;
         case GGML_TYPE_IQ2_XXS: return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_IQ2_XS:  return MMQ_DP4A_TXS_Q8_0_16;
         case GGML_TYPE_IQ2_S:   return MMQ_DP4A_TXS_Q8_0_16;
@@ -308,6 +312,7 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_Q5_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_Q5_1:    return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q8_0:    return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q8_0_TILED: return MMQ_MMA_TILE_X_K_Q8_0;
         // tile sizes are the same for Q8_1 and FP4 for blackwell
         case GGML_TYPE_MXFP4:   return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_NVFP4:   return MMQ_MMA_TILE_X_K_Q8_0;
@@ -317,6 +322,7 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_Q4_K:    return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q5_K:    return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q6_K:    return MMQ_MMA_TILE_X_K_Q6_K;
+        case GGML_TYPE_Q6_K_TILED: return MMQ_MMA_TILE_X_K_Q6_K;
         case GGML_TYPE_IQ2_XXS: return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_IQ2_XS:  return MMQ_MMA_TILE_X_K_Q3_K;
         case GGML_TYPE_IQ2_S:   return MMQ_MMA_TILE_X_K_Q3_K;
@@ -2670,6 +2676,160 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     }
 }
 
+// load_tiles_q8_0 over q8_0_tiled.rs's tile order: `x` is row 0's 16-row group and `stride` the row-major row size in
+// bytes; a 544-byte tile a 32-value block holds 8 entries of row e's then row e + 8's f16 scale, then 32 lanes' 16
+// bytes, lane 4 e + t holding values 4 t .. 4 t + 3 of sub-blocks 0 and 1, row e then row e + 8. A thread takes one
+// lane of one block for a row pair.
+template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_q8_0_tiled(
+    const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr int nwarps = mmq_get_nwarps_device();
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_tile + 2*MMQ_TILE_NE_K);
+#else
+    constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_Q8_0, mmq_y);
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + txs.qs);
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+
+    constexpr int tile_bytes = 544;
+    constexpr int quad = 4;
+    constexpr int blocks = MMQ_ITER_K / QK8_0;
+    static_assert(warp_size == blocks * quad, "a warp is one row pair's K step");
+    static_assert((mmq_y / 2) % nwarps == 0, "the warps cover the tile's row pairs");
+    const int kb = threadIdx.x / quad;
+    const int t = threadIdx.x % quad;
+
+#pragma unroll
+    for (int p0 = 0; p0 < mmq_y / 2; p0 += nwarps) {
+        const int pair = p0 + threadIdx.y;
+        int group16 = pair / 8;
+        const int e = pair % 8;
+        if constexpr (need_check) {
+            group16 = min(group16, i_max / 16);
+        }
+        const int ra = pair / 8 * 16 + e;
+        const int rb = ra + 8;
+        const char * tile = x + (int64_t)group16 * 16 * stride + (int64_t)(kbx0 + kb) * tile_bytes;
+        const uint4 q = *reinterpret_cast<const uint4 *>(tile + 32 + (quad * e + t) * 16);
+        const int k = 8 * kb + t;
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_qs[ra * MMQ_MMA_TILE_X_K_Q8_0 + k]     = (int) q.x;
+        x_qs[ra * MMQ_MMA_TILE_X_K_Q8_0 + k + 4] = (int) q.z;
+        x_qs[rb * MMQ_MMA_TILE_X_K_Q8_0 + k]     = (int) q.y;
+        x_qs[rb * MMQ_MMA_TILE_X_K_Q8_0 + k + 4] = (int) q.w;
+#else
+        x_qs[ra * (2 * MMQ_TILE_NE_K + 1) + k]     = (int) q.x;
+        x_qs[ra * (2 * MMQ_TILE_NE_K + 1) + k + 4] = (int) q.z;
+        x_qs[rb * (2 * MMQ_TILE_NE_K + 1) + k]     = (int) q.y;
+        x_qs[rb * (2 * MMQ_TILE_NE_K + 1) + k + 4] = (int) q.w;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        if (t == 0) {
+            const float2 d = __half22float2(*reinterpret_cast<const half2 *>(tile + e * 4));
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            x_df[ra * MMQ_MMA_TILE_X_K_Q8_0 + kb] = d.x;
+            x_df[rb * MMQ_MMA_TILE_X_K_Q8_0 + kb] = d.y;
+#else
+            x_df[ra * (2 * MMQ_TILE_NE_K / QI8_0) + ra / (QI8_0 / 2) + kb] = d.x;
+            x_df[rb * (2 * MMQ_TILE_NE_K / QI8_0) + rb / (QI8_0 / 2) + kb] = d.y;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        }
+    }
+}
+
+// four values' top two bits (bits 2 j of `b`) moved to bits 4-5 of byte j
+static __device__ __forceinline__ uint32_t q6_k_tiled_high_bits(const uint32_t b) {
+    return ((b & 0x03) | ((b & 0x0C) << 6) | ((b & 0x30) << 12) | ((b & 0xC0) << 18)) << 4;
+}
+
+// load_tiles_q6_K over q6k_tiled.rs's tile order: `x` is row 0's 16-row group and `stride` the row-major row size in
+// bytes; a 3360-byte tile a superblock holds 8 entries of row e's then row e + 8's f16 `d`, 8 entries of their
+// sub-block scales (per half: row e's 8, row e + 8's 8), then per 128-value half 32 lanes' 48 bytes (lane 4 e + t's
+// word i: the low four bits of sub-block i's values 4 t .. 4 t + 3, row e low nibbles, row e + 8 high; then 16 bytes
+// of top bits, byte 2 i row e's, 2 i + 1 row e + 8's). A thread takes one lane of one half for a row pair.
+template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_q6_K_tiled(
+    const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr int nwarps = mmq_get_nwarps_device();
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + MMQ_TILE_NE_K*2);
+    int   * x_sc = (int   *) (x_df + MMQ_TILE_NE_K/QI6_K);
+#else
+    constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_Q6_K, mmq_y);
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + txs.qs);
+    int   * x_sc = (int   *) (x_df + txs.dm);
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+
+    constexpr int quad = 4;
+    constexpr int halves = 2;
+    constexpr int pairs_per_warp = warp_size / (halves * quad);
+    static_assert((mmq_y / 2) % (pairs_per_warp * nwarps) == 0, "the warps cover the tile's row pairs");
+    static_assert(MMQ_ITER_K == QK_K, "a K step is one superblock");
+    const int h = (threadIdx.x / quad) % halves;
+    const int t = threadIdx.x % quad;
+
+#pragma unroll
+    for (int p0 = 0; p0 < mmq_y / 2; p0 += pairs_per_warp * nwarps) {
+        const int pair = p0 + threadIdx.y * pairs_per_warp + threadIdx.x / (halves * quad);
+        int group16 = pair / 8;
+        const int e = pair % 8;
+        if constexpr (need_check) {
+            group16 = min(group16, i_max / 16);
+        }
+        const int ra = pair / 8 * 16 + e;
+        const int rb = ra + 8;
+        const char * tile = x + (int64_t)group16 * 16 * stride + (int64_t)kbx0 * 3360;
+        const uint4 * lane = reinterpret_cast<const uint4 *>(tile + 288 + h * 1536 + (quad * e + t) * 48);
+        const uint4 lo[2] = {lane[0], lane[1]};
+        const uint4 hi = lane[2];
+        const uint32_t los[8] = {lo[0].x, lo[0].y, lo[0].z, lo[0].w, lo[1].x, lo[1].y, lo[1].z, lo[1].w};
+        const uint32_t his[4] = {hi.x, hi.y, hi.z, hi.w};
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const uint32_t bits = his[i >> 1] >> (16 * (i & 1));
+            const int va = __vsub4((los[i] & 0x0F0F0F0F) | q6_k_tiled_high_bits(bits & 0xFF), 0x20202020);
+            const int vb = __vsub4(((los[i] >> 4) & 0x0F0F0F0F) | q6_k_tiled_high_bits((bits >> 8) & 0xFF), 0x20202020);
+            const int k = 32 * h + 4 * i + t;
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            x_qs[ra * MMQ_MMA_TILE_X_K_Q6_K + k] = va;
+            x_qs[rb * MMQ_MMA_TILE_X_K_Q6_K + k] = vb;
+#else
+            x_qs[ra * (2 * MMQ_TILE_NE_K + 1) + k] = va;
+            x_qs[rb * (2 * MMQ_TILE_NE_K + 1) + k] = vb;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        }
+        if (t == 0) {
+            const uint4 sc = *reinterpret_cast<const uint4 *>(tile + 32 + e * 32 + h * 16);
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            x_sc[ra * MMQ_MMA_TILE_X_K_Q6_K + 2 * h]     = (int) sc.x;
+            x_sc[ra * MMQ_MMA_TILE_X_K_Q6_K + 2 * h + 1] = (int) sc.y;
+            x_sc[rb * MMQ_MMA_TILE_X_K_Q6_K + 2 * h]     = (int) sc.z;
+            x_sc[rb * MMQ_MMA_TILE_X_K_Q6_K + 2 * h + 1] = (int) sc.w;
+#else
+            x_sc[ra * (MMQ_TILE_NE_K / 8) + ra / 8 + 2 * h]     = (int) sc.x;
+            x_sc[ra * (MMQ_TILE_NE_K / 8) + ra / 8 + 2 * h + 1] = (int) sc.y;
+            x_sc[rb * (MMQ_TILE_NE_K / 8) + rb / 8 + 2 * h]     = (int) sc.z;
+            x_sc[rb * (MMQ_TILE_NE_K / 8) + rb / 8 + 2 * h + 1] = (int) sc.w;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            if (h == 0) {
+                const float2 d = __half22float2(*reinterpret_cast<const half2 *>(tile + e * 4));
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+                x_df[ra * MMQ_MMA_TILE_X_K_Q6_K] = d.x;
+                x_df[rb * MMQ_MMA_TILE_X_K_Q6_K] = d.y;
+#else
+                x_df[ra * (MMQ_TILE_NE_K / QI6_K) + ra / QI6_K] = d.x;
+                x_df[rb * (MMQ_TILE_NE_K / QI6_K) + rb / QI6_K] = d.y;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            }
+        }
+    }
+}
+
 template <int mmq_x, int mmq_y>
 static __device__ __forceinline__ void vec_dot_q6_K_q8_1_dp4a(
     const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00) {
@@ -3551,6 +3711,14 @@ struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q8_0> {
 };
 
 template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q8_0_TILED> {
+    static constexpr int              vdr          = VDR_Q8_0_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q8_0_tiled<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+
+template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_MXFP4> {
     static constexpr int              vdr          = VDR_MXFP4_Q8_1_MMQ;
 #ifdef BLACKWELL_MMA_AVAILABLE
@@ -3615,6 +3783,14 @@ template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q6_K> {
     static constexpr int              vdr          = VDR_Q6_K_Q8_1_MMQ;
     static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q6_K<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q6_K_q8_1_mma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q6_K_q8_1_dp4a<mmq_x, mmq_y>;
+};
+
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q6_K_TILED> {
+    static constexpr int              vdr          = VDR_Q6_K_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q6_K_tiled<mmq_y, need_check>;
     static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q6_K_q8_1_mma<mmq_x, mmq_y>;
     static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q6_K_q8_1_dp4a<mmq_x, mmq_y>;
 };
