@@ -982,3 +982,29 @@ decode at 9.8K (nsys, busy/step)    10.76 ms   10.76 ms
 Served runs move ±3% between runs either way (code at drafts 2: 121-123 with, 126-127 without, while the cycle
 times match). What's left per token at q8 with 4 sequences: 8 global visits at q8 (17.4 KB) and the drafter's 3
 layers at bf16 and full length (12 KB, 2 of them sliding). The drafter is the next lever.
+
+## Run 35 - 2026-11-24 00:30
+
+The drafter's paged layers on a q8 cache. They were pinned to the model dtype ("its attention reads them
+unquantized"), 12 KB a token of ~30 at q8. A DFlash drafter now declares it reads q8
+(`AuxiliaryPagedLayers.quantized`), and its layers take a q8 cache's type: other widths keep bf16, since their
+acceptance isn't measured. The drafter writes them through `reshape_and_cache_quant` (which rotates), and its paged
+attention passes fattn the bit widths, Q rotated as K and the output rotated back as V.
+
+On the way, a 768-token chat at q8 with drafting failed: "recurrent checkpoint rollback failed: indexed row copy
+does not support U8". The window rings (#1055) are bytes on a q8 cache, and a verify's rollback copies them. The
+indexed row copy now takes u8. With that, a 9.8K prefix hit on q8 without a drafter restores identical text (with
+auto depth the text moves at near ties between runs, as drafting does).
+
+```
+recipe C + drafter, 3090, q8 KV        context, 4 seqs   context, 1 seq
+drafter layers bf16 (#1055)            155,840           173,568
+drafter layers q8                      193,728           215,712
+
+eight prompts, drafts 2                accepted/step     tok/s
+bf16 KV (drafter bf16)                 1.116             114.1
+q8 KV (drafter q8)                     1.130             113.9
+```
+
+Tiny checkpoint: `the_checkpoint_drafter_keeps_greedy_output_on_a_q8_cache_on_cuda`. Next: the drafter's two
+sliding layers still keep every position (4.4 KB a token at q8).

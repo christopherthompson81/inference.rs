@@ -1064,11 +1064,25 @@ async fn paged_trace(
     request: RequestBuilder,
     len: usize,
 ) -> anyhow::Result<traces::Trace> {
-    // BF16: the drafter's paged attention reads half-precision caches
+    paged_trace_on(dir, drafting, request, len, inference::PagedCacheType::Auto).await
+}
+
+async fn paged_trace_on(
+    dir: &tempfile::TempDir,
+    drafting: Drafting,
+    request: RequestBuilder,
+    len: usize,
+    cache: inference::PagedCacheType,
+) -> anyhow::Result<traces::Trace> {
+    // BF16: the drafter's paged attention reads half-precision caches (or q8 ones)
     let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
         .with_dtype(ModelDType::BF16)
         .with_prefix_cache_n(None)
-        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+        .with_paged_attn(
+            inference::PagedAttentionMetaBuilder::default()
+                .with_paged_cache_type(cache)
+                .build()?,
+        );
     if drafting != Drafting::Off {
         builder = builder.with_mtp_model(dir.path().to_string_lossy(), Some(DRAFT_BLOCK - 1));
     }
@@ -1122,6 +1136,21 @@ async fn the_checkpoint_drafter_keeps_greedy_output_on_cuda() -> anyhow::Result<
     let request = || chat("say something long");
     let plain = paged_trace(&dir, Drafting::Off, request(), DRAFT_DECODE_LEN).await?;
     let drafted = paged_trace(&dir, Drafting::Fixed, request(), DRAFT_DECODE_LEN).await?;
+    ensure_same_greedy(&drafted, &plain)
+}
+
+// on a q8 cache the drafter's paged layers are q8 too (written quantized, read through rotated queries), and drafting
+// still keeps the greedy output
+#[tokio::test]
+async fn the_checkpoint_drafter_keeps_greedy_output_on_a_q8_cache_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = drafter_checkpoint()?;
+    let q8 = inference::PagedCacheType::Quant { k: 8, v: 8 };
+    let request = || chat("say something long");
+    let plain = paged_trace_on(&dir, Drafting::Off, request(), DRAFT_DECODE_LEN, q8).await?;
+    let drafted = paged_trace_on(&dir, Drafting::Fixed, request(), DRAFT_DECODE_LEN, q8).await?;
     ensure_same_greedy(&drafted, &plain)
 }
 
