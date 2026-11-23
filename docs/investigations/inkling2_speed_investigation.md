@@ -830,3 +830,22 @@ graph. So the drafter's host work does overlap the step. A drafting cycle is 18.
 busy 17.72, idle 0.61 ms (3.3%). The idle sits inside the eager drafter pass (177 launches, many shorter than
 their launch cost). A CUDA graph for that pass is the way to recover it. Plain stretches lose 1.5-2% separately, to
 the lookahead being off (Run 28).
+
+## Run 30 - 2026-11-23 11:30
+
+The Markov fold at 8 bits on CUDA: U8 values (`q - 128`), with an F32 scale for every 32 of a row's 256. Each
+32-column part the fold is made from is one scale group, so the build never holds more than a part in F32.
+`quantize_markov_fold` makes it, the pick kernel reads it, and the reservation counts 59 MB against 104 MB. Other
+devices keep it BF16. The kernel case checks the 8-bit pick against the argmax over the values it dequantizes to.
+
+```
+pick, us (nsys, median of 260)     bytes read
+bf16 fold                  124.7   103 MB + logits
+8-bit, a warp a row        100.5   the 5-step reduce a row bounds it
+8-bit, a lane a group       73.5   8 lanes a row, 4 rows a warp: ~800 GB/s
+```
+
+Two picks a cycle, so ~100 us a cycle (0.55%). Acceptance at drafts 2 over Run 27's prompts is unchanged: 1.116
+accepted a step with either fold, within 1-3 tokens a prompt. Served speed is up 0.5-1.9% a prompt, though the card
+drifts ~2% between runs. The drafter's `markov_w1` (another 103 MB BF16, one row read a draft) is the next one to
+shrink for context.

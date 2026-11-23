@@ -301,13 +301,13 @@ impl DFlashConfig {
     }
 
     /// What the drafter makes on the device beside its weights once serving (Inkling 2's folded head), in bytes.
-    pub fn runtime_bytes(&self, dtype: DType) -> usize {
+    pub fn runtime_bytes(&self, dtype: DType, device: &Device) -> usize {
         match self.markov_rank {
             Some(rank)
                 if self.is_inkling()
                     && crate::inkling::is_rnn_head(self.markov_head_type.as_deref()) =>
             {
-                crate::inkling::fold_bytes(self.vocab_size, rank, dtype)
+                crate::inkling::fold_bytes(self.vocab_size, rank, dtype, device)
             }
             _ => 0,
         }

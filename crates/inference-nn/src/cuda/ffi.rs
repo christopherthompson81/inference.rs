@@ -350,11 +350,13 @@ inference_tensor::kernel_library! {
             stream: i64,
         ) -> i32;
         pub fn inkling_markov_pick_scratch(b: i32) -> i64;
+        pub fn inkling_markov_q8_rank(rank: i32) -> i32;
         pub fn inkling_markov_pick(
             logits: *const c_void,
             logits_dtype: i32,
             logits_batch: i64,
             fold_w: *const c_void,
+            fold_s: *const f32,
             fold_b: *const f32,
             latent: *const f32,
             b: i32,
