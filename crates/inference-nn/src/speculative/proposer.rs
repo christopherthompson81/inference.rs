@@ -61,6 +61,15 @@ pub struct SpeculativeProposeBatchCtx<'a> {
     pub rng: Arc<Mutex<Isaac64Rng>>,
 }
 
+/// A step that drafts nothing, whose rows the drafter takes into its context so a later step can draft again:
+/// each sequence's committed length and its row and row count in the last target forward, as when proposing.
+pub struct SpeculativeFollowCtx<'a> {
+    pub seq_ids: &'a [usize],
+    pub base_lens: &'a [usize],
+    pub target_rows: &'a [(usize, usize)],
+    pub cache: SpeculativeKvCache<'a>,
+}
+
 /// Outcome of verifying one sequence's staged drafts, in target-batch order.
 #[derive(Clone, Copy, Debug)]
 pub struct SpeculativeCommitRow {

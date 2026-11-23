@@ -18,8 +18,9 @@ use super::cache::{SpeculativeCacheAccess, SpeculativeCacheGuard, SpeculativeCac
 #[cfg(feature = "cuda")]
 use super::proposer::SpeculativeProposePrepareCtx;
 use super::proposer::{
-    SpeculativeCommitRow, SpeculativeProposalBatch, SpeculativeProposalDistribution,
-    SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeTokens,
+    SpeculativeCommitRow, SpeculativeFollowCtx, SpeculativeProposalBatch,
+    SpeculativeProposalDistribution, SpeculativeProposeBatchCtx, SpeculativeProposePreparation,
+    SpeculativeTokens,
 };
 use super::staging::{StagedBatchState, staged_batch_state};
 use super::verifier::{
@@ -129,6 +130,10 @@ pub trait SpeculativePipelineExt: Pipeline {
         self.speculative_target_mut().speculative_bypass(seq_ids)
     }
 
+    fn speculative_follow(&mut self, ctx: SpeculativeFollowCtx<'_>) -> Result<bool> {
+        self.speculative_target_mut().speculative_follow(ctx)
+    }
+
     fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
         self.speculative_target().speculative_target_hiddens(rows)
     }
@@ -174,6 +179,7 @@ fn plan_speculative_step(
         .lock()
         .expect("speculative autotuner poisoned");
     tuner.set_candidates(&candidates);
+    tuner.end_plain_step(seq_ids, std::time::Instant::now());
     if tuner.is_active() && plan.proposal_len > 0 {
         plan.proposal_len = tuner.choose(seq_ids, plan.proposal_len);
     }
@@ -297,7 +303,13 @@ where
                 return Ok(false);
             };
             if plan.proposal_len == 0 {
-                mark_batch_bypassed(target, seqs)?;
+                let base_lens = seqs
+                    .iter()
+                    .map(|seq| seq.get_toks().len())
+                    .collect::<Vec<_>>();
+                let rows = (0..seqs.len()).map(|idx| (idx, 1)).collect::<Vec<_>>();
+                let sequences = seqs.iter().map(|seq| &**seq).collect::<Vec<_>>();
+                follow_or_bypass(target, &seq_ids, &base_lens, &rows, cache, &sequences)?;
                 return Ok(false);
             }
             bootstrap_staged_batch(
@@ -808,9 +820,16 @@ where
     };
     let proposal_len = plan.proposal_len;
     if proposal_len == 0 {
-        target.speculative_bypass(&seq_ids)?;
         clear_active_staged(seqs, active_indices);
-        return Ok(());
+        let target_rows = hidden_rows
+            .iter()
+            .map(|(batch_idx, accepted)| (*batch_idx, accepted + 1))
+            .collect::<Vec<_>>();
+        let sequences = active_indices
+            .iter()
+            .map(|idx| &*seqs[*idx])
+            .collect::<Vec<_>>();
+        return follow_or_bypass(target, &seq_ids, base_lens, &target_rows, cache, &sequences);
     }
 
     let can_stage = {
@@ -906,6 +925,33 @@ fn autotuner(
         .speculative_autotuner()
         .lock()
         .expect("speculative autotuner poisoned")
+}
+
+/// A step that drafts nothing: the proposer keeps the sequences ready to draft again where it can (the step timed
+/// as a plain one), and bypasses them otherwise.
+fn follow_or_bypass<C>(
+    target: &mut dyn SpeculativePipelineExt,
+    seq_ids: &[usize],
+    base_lens: &[usize],
+    target_rows: &[(usize, usize)],
+    cache: &C,
+    sequences: &[&Sequence],
+) -> Result<()>
+where
+    C: SpeculativeCacheAccess,
+{
+    let followed = target.speculative_follow(SpeculativeFollowCtx {
+        seq_ids,
+        base_lens,
+        target_rows,
+        cache: cache.proposer_cache(sequences)?,
+    })?;
+    if followed {
+        autotuner(target).begin_step(seq_ids, 0, std::time::Instant::now());
+        Ok(())
+    } else {
+        target.speculative_bypass(seq_ids)
+    }
 }
 
 fn mark_batch_bypassed(

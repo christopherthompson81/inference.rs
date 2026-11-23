@@ -756,3 +756,48 @@ A slow average (0.05) matters, since a fast one switches off on code's short dip
 on across the set, and up to +18% on prose. The worst request is 1.2% under plain (the explainer: the average takes
 a while to fall). Not modelled: keeping the drafter's context current while off (each plain step's hidden state, or
 the gap re-read at resume), sampled decoding's lower acceptance, and the eight prompts the parameters were picked on.
+
+## Run 28 - 2026-11-23 09:00
+
+Run 27's on/off choice, built into the speculative autotuner instead of a separate rule. Inkling's drafter offers
+depths `[0, n]` under `--mtp-auto-depth`. A step at depth 0 is a plain one. The driver times it from one plan to the
+next and asks the target to follow it (`speculative_follow`) instead of bypassing it. A bypassed sequence is dormant
+for good: the drafter refuses to propose once its context has a gap. Following buffers the step's taps (`[1, rows,
+hidden]` copies) and appends them to the drafter's paged context in one batch, at the next proposal or every 32 rows.
+The tuner's 3% switch margin and 32-decision probes stay as they were.
+
+First pass, 8 prompts greedy (Run 27's set, served): 115.5 against 111.6 always on. Two faults:
+
+- Code ran 118.8 against 125.2 always on: 1222 of 1362 decisions were plain. Prose ran first and pulled down the
+  shared population curve, so code started pessimistic. A probe is 2 trials against a 48-trial half-life, so it
+  barely moves a sequence's estimate. Fix: a sequence drafts for its first 12 verified steps before plain competes
+  (a first try counted predicted hits, which grow slowly at low acceptance, so it never stopped exploring).
+- Plain stretches ran ~3.5% under a plain server. The tuner measured a plain step at 9.6-10 ms against 9.0. Buffering
+  the appends (each was an eager context projection) didn't close it. nsys (graph trace, a prose request) shows the
+  same 9.38 ms decode graph in both. The gap between two plain graphs is 0.39 ms here against 0.04 ms plain: a
+  pipeline with a proposer turns off the CUDA one-token lookahead (`supports_batched_cuda_sampling`), so the host
+  prepares and launches each step after the last one ends. That's 21 host-to-device copies, 28 allocations, 3 event
+  syncs and the 0.29 ms launch call, where the plain server overlaps all of it with the step before. Follow and the
+  plan take ~35 us of it.
+
+```
+greedy, tok/s     plain   always on (2)   auto
+prose             111.2    92.6           109.3
+code              111.2   125.2           132.0
+story             111.2    99.5           109.3
+explainer         111.2   105.8           109.6
+email             111.2   119.1           116.6
+how-to            111.2   104.5           109.6
+rust              111.2   135.2           128.0
+json              111.2   152.3           147.6
+all               111.2   111.6           117.4
+
+sampled (0.7, seed 7)
+all               111.3   106.9           115.8    (prose 107.7, code 123.8, rust 133.5, json 143.3)
+```
+
+Tests: tuner cases for plain winning at low acceptance, a new sequence drafting first, and plain-step timing.
+`auto_depth_keeps_greedy_output_through_plain_steps_on_cuda` checks the tiny checkpoint's random drafter for 160
+tokens, EOS ignored. It drafts, goes plain, flushes 31 buffered rows at each probe and drafts again, and its greedy
+output matches plain decode. What's left: plain stretches 1.5-2% under a plain server, until a step that may draft
+can take the lookahead path.

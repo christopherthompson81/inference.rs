@@ -911,6 +911,8 @@ const DRAFT_TAPS: [usize; 3] = [1, 5, 10];
 const DRAFT_SEED: u64 = 0x6d74_7000;
 // past the bias's extent and the drafter's window, through many rejected and partly accepted blocks
 const DRAFT_DECODE_LEN: usize = 24;
+// past the drafting the tuner starts with, a plain stretch and a probe
+const AUTO_DECODE_LEN: usize = 160;
 const DRAFT_LOGPROB_TOLERANCE: f32 = 0.06;
 
 fn drafter_config() -> serde_json::Value {
@@ -996,44 +998,37 @@ fn drafter_weights() -> anyhow::Result<HashMap<String, Tensor>> {
     Ok(w)
 }
 
-async fn paged_trace(dir: &tempfile::TempDir, drafter: bool) -> anyhow::Result<traces::Trace> {
+#[derive(Clone, Copy, PartialEq)]
+enum Drafting {
+    Off,
+    Fixed,
+    Auto,
+}
+
+async fn paged_trace(
+    dir: &tempfile::TempDir,
+    drafting: Drafting,
+    request: RequestBuilder,
+    len: usize,
+) -> anyhow::Result<traces::Trace> {
     // BF16: the drafter's paged attention reads half-precision caches
     let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
         .with_dtype(ModelDType::BF16)
         .with_prefix_cache_n(None)
         .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
-    if drafter {
+    if drafting != Drafting::Off {
         builder = builder.with_mtp_model(dir.path().to_string_lossy(), Some(DRAFT_BLOCK - 1));
     }
+    if drafting == Drafting::Auto {
+        builder = builder.with_mtp_auto_depth();
+    }
     let model = builder.build().await?;
-    Ok(
-        traces::greedy(&model, chat("say something long"), DRAFT_DECODE_LEN)
-            .await?
-            .0,
-    )
+    Ok(traces::greedy(&model, request, len).await?.0)
 }
 
-// drafting from the checkpoint's own drafter keeps the greedy output: each verify step's rejected rows are cut from
-// every slot's convolution states
-#[tokio::test]
-async fn the_checkpoint_drafter_keeps_greedy_output_on_cuda() -> anyhow::Result<()> {
-    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
-        return Ok(());
-    }
-    let (official, _) = official_weights(false)?;
-    let config = serde_json::json!({
-        "architectures": ["Inkling2LoopForConditionalGeneration"],
-        "model_type": "inkling2_loop",
-        "text_config": config(&OFFICIAL),
-        "mtp_config": drafter_config(),
-        "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"},
-    });
-    let dir = write_checkpoint(config, &official)?;
-    inference_tensor::safetensors::save(&drafter_weights()?, dir.path().join("mtp.safetensors"))?;
-    let plain = paged_trace(&dir, false).await?;
-    let drafted = paged_trace(&dir, true).await?;
+fn ensure_same_greedy(drafted: &traces::Trace, plain: &traces::Trace) -> anyhow::Result<()> {
     // a verify step's rows sum in other orders than a decode step's: equal up to a near tie, which may flip
-    for (step, (d, p)) in drafted.iter().zip(&plain).enumerate() {
+    for (step, (d, p)) in drafted.iter().zip(plain).enumerate() {
         anyhow::ensure!(
             (d.1 - p.1).abs() < DRAFT_LOGPROB_TOLERANCE,
             "step {step}: drafted {drafted:?}, plain {plain:?}"
@@ -1047,4 +1042,47 @@ async fn the_checkpoint_drafter_keeps_greedy_output_on_cuda() -> anyhow::Result<
         "drafted {drafted:?}, plain {plain:?}"
     );
     Ok(())
+}
+
+fn drafter_checkpoint() -> anyhow::Result<tempfile::TempDir> {
+    let (official, _) = official_weights(false)?;
+    let config = serde_json::json!({
+        "architectures": ["Inkling2LoopForConditionalGeneration"],
+        "model_type": "inkling2_loop",
+        "text_config": config(&OFFICIAL),
+        "mtp_config": drafter_config(),
+        "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+    });
+    let dir = write_checkpoint(config, &official)?;
+    inference_tensor::safetensors::save(&drafter_weights()?, dir.path().join("mtp.safetensors"))?;
+    Ok(dir)
+}
+
+// drafting from the checkpoint's own drafter keeps the greedy output: each verify step's rejected rows are cut from
+// every slot's convolution states
+#[tokio::test]
+async fn the_checkpoint_drafter_keeps_greedy_output_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = drafter_checkpoint()?;
+    let request = || chat("say something long");
+    let plain = paged_trace(&dir, Drafting::Off, request(), DRAFT_DECODE_LEN).await?;
+    let drafted = paged_trace(&dir, Drafting::Fixed, request(), DRAFT_DECODE_LEN).await?;
+    ensure_same_greedy(&drafted, &plain)
+}
+
+// choosing between drafting and plain decode each step keeps the greedy output: the random drafter's misses switch
+// it to plain steps, whose rows the drafter buffers, and probes draft again from them
+#[tokio::test]
+async fn auto_depth_keeps_greedy_output_through_plain_steps_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = drafter_checkpoint()?;
+    // the tiny model soon samples its EOS
+    let request = || chat("say something long").set_sampler_ignore_eos(true);
+    let plain = paged_trace(&dir, Drafting::Off, request(), AUTO_DECODE_LEN).await?;
+    let auto = paged_trace(&dir, Drafting::Auto, request(), AUTO_DECODE_LEN).await?;
+    ensure_same_greedy(&auto, &plain)
 }

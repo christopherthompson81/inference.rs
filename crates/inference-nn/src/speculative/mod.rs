@@ -18,8 +18,8 @@ pub use policy::{
     SpeculativeGraphPlan, auto_depth_graph_plans, depths_up_to,
 };
 pub use proposer::{
-    DraftSequence, SparseSpeculativeProbs, SpeculativeCommitRow, SpeculativeKvCache,
-    SpeculativePrefillCtx, SpeculativeProposal, SpeculativeProposalBatch,
+    DraftSequence, SparseSpeculativeProbs, SpeculativeCommitRow, SpeculativeFollowCtx,
+    SpeculativeKvCache, SpeculativePrefillCtx, SpeculativeProposal, SpeculativeProposalBatch,
     SpeculativeProposalDistribution, SpeculativeProposeBatchCtx, SpeculativeProposePreparation,
     SpeculativeProposePrepareCtx, SpeculativeProposer, SpeculativeTapRouting, SpeculativeTokens,
     TargetAttentionInputs, TargetTokenEmbedder,

@@ -105,6 +105,8 @@ pub(super) struct SpecState {
     spec_taps: Mutex<Option<Vec<Tensor>>>,
     prompt_taps: Mutex<Option<Vec<Tensor>>>,
     replays: Mutex<Vec<ConvReplay>>,
+    // choose each step between drafting and plain decode
+    auto_depth: bool,
 }
 
 impl SpecState {
@@ -143,6 +145,7 @@ impl SpecState {
         self.draft_lm_head = None;
         self.visits.clear();
         self.output = false;
+        self.auto_depth = false;
         *self.spec_taps.lock().expect("spec taps poisoned") = None;
         *self.prompt_taps.lock().expect("prompt taps poisoned") = None;
         self.replays.lock().expect("conv replays poisoned").clear();
@@ -211,6 +214,7 @@ impl Model {
                 )
             })
             .transpose()?;
+        self.spec.auto_depth = config.auto_depth;
         *self.spec.drafter.lock().expect("drafter poisoned") = Some(Arc::new(drafter));
         Ok(info)
     }
@@ -406,6 +410,25 @@ impl crate::speculative::SpeculativeTargetMixin for Model {
         self.spec
             .drafter()
             .map_or(0, |drafter| drafter.evict_cuda_graphs_lru(max_entries))
+    }
+
+    // a step either drafts the drafter's depth or none: on this MoE every verified row reads its own experts, so
+    // shallower depths lose to one of the two
+    fn speculative_depth_candidates(&self) -> Vec<usize> {
+        match self.spec.drafter() {
+            Some(drafter) if self.spec.auto_depth => vec![0, drafter.n_predict()],
+            _ => Vec::new(),
+        }
+    }
+
+    fn speculative_follow(
+        &mut self,
+        ctx: crate::speculative::SpeculativeFollowCtx<'_>,
+    ) -> Result<bool> {
+        match self.spec.drafter() {
+            Some(drafter) => drafter.follow(self, ctx),
+            None => Ok(false),
+        }
     }
 
     fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {
