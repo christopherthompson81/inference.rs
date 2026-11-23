@@ -240,7 +240,14 @@ impl ExternalDrafter {
             target.runtime.prefix_cache_capacity(),
         );
         let windowed_kv = drafter.enable_windowed_kv(sequence_capacity, retained_prefixes)?;
-        let paged_kv = !windowed_kv && drafter.enable_paged_kv(target.paged_first_layer);
+        let mixed_kv = !windowed_kv
+            && drafter.enable_mixed_kv(
+                target.paged_first_layer,
+                sequence_capacity,
+                retained_prefixes,
+            )?;
+        let paged_kv =
+            mixed_kv || (!windowed_kv && drafter.enable_paged_kv(target.paged_first_layer));
         let adaptive = config.n_predict.is_none() && windowed_kv && dflash_adaptive_requested();
         let max_live_sequences = sequence_capacity.saturating_sub(target.recurrent_pad_slots);
         let adaptive = adaptive && drafter.enable_adaptive(n_predict, max_live_sequences);
@@ -251,10 +258,11 @@ impl ExternalDrafter {
             MtpDraftSamplingMethod::Greedy => "greedy draft",
             MtpDraftSamplingMethod::Probabilistic => "probabilistic draft",
         };
-        let context = match (windowed_kv, paged_kv) {
-            (true, _) => "windowed",
-            (false, true) => "paged",
-            (false, false) => "eager",
+        let context = match (windowed_kv, mixed_kv, paged_kv) {
+            (true, ..) => "windowed",
+            (false, true, _) => "paged and windowed",
+            (false, false, true) => "paged",
+            (false, false, false) => "eager",
         };
         let depth = if adaptive {
             format!("batch-adaptive depth <= {n_predict}")

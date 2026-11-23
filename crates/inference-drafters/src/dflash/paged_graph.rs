@@ -14,7 +14,7 @@ use inference_tensor::{DType, Device, Result, Tensor, Var};
 
 use super::{
     DFlashDraftModel, DFlashPagedCache, DFlashProposalBatch, Markov, PagedDraftMeta,
-    PagedDraftSlots, dflash_rope_from_positions,
+    PagedDraftSlots, PoolDraftMeta, WindowedKvQuery, dflash_rope_from_positions,
 };
 
 // the fewest block-table columns a graph keeps; wider tables round up to a power of two, so a growing context
@@ -40,6 +40,25 @@ struct PagedGraphRows {
     block_tables: Vec<u32>,
     slots: Vec<i64>,
     seq_lens: Vec<u32>,
+    // a mixed drafter's sliding layers: the windowed pool's graph batch for the same rows
+    pool: Option<PoolGraphRows>,
+}
+
+struct PoolGraphRows {
+    block_tables: Vec<u32>,
+    width: usize,
+    slots: Vec<i64>,
+    cumulative_kv_lens: Vec<u32>,
+    cumulative_query_lens: Vec<u32>,
+    max_query_len: usize,
+}
+
+struct PoolGraphBuffers {
+    block_tables: Var,
+    slot_mapping: Var,
+    cumulative_kv_lens: Var,
+    cumulative_query_lens: Tensor,
+    max_query_len: usize,
 }
 
 struct PagedGraphBuffers {
@@ -52,6 +71,7 @@ struct PagedGraphBuffers {
     cumulative_query_lens: Tensor,
     // `[batch, hidden]` each row's recurrent Markov head context
     contexts: Option<Var>,
+    pool: Option<PoolGraphBuffers>,
     output_tokens: Var,
 }
 
@@ -118,6 +138,27 @@ impl PagedGraphBuffers {
             seq_lens: u32s(&rows.seq_lens, (1, b))?,
             cumulative_query_lens,
             contexts: contexts.map(Var::from_tensor).transpose()?,
+            pool: rows
+                .pool
+                .as_ref()
+                .map(|pool| -> Result<PoolGraphBuffers> {
+                    Ok(PoolGraphBuffers {
+                        block_tables: u32s(&pool.block_tables, (b, pool.width))?,
+                        slot_mapping: Var::from_tensor(&Tensor::from_vec(
+                            pool.slots.clone(),
+                            (pool.slots.len(),),
+                            device,
+                        )?)?,
+                        cumulative_kv_lens: u32s(&pool.cumulative_kv_lens, (1, b + 1))?,
+                        cumulative_query_lens: Tensor::from_vec(
+                            pool.cumulative_query_lens.clone(),
+                            (b + 1,),
+                            device,
+                        )?,
+                        max_query_len: pool.max_query_len,
+                    })
+                })
+                .transpose()?,
             output_tokens: Var::zeros((b, key.block - model.draft_row_offset), DType::U32, device)?,
         })
     }
@@ -165,7 +206,28 @@ impl PagedGraphBuffers {
                 location,
                 &rows.seq_lens,
                 &self.seq_lens,
-            )
+            )?;
+            if let (Some(src), Some(dst)) = (&rows.pool, &self.pool) {
+                staging.copy_from_u32_slice(
+                    "paged_draft_pool_tables",
+                    location,
+                    &src.block_tables,
+                    &dst.block_tables,
+                )?;
+                staging.copy_from_i64_slice(
+                    "paged_draft_pool_slots",
+                    location,
+                    &src.slots,
+                    &dst.slot_mapping,
+                )?;
+                staging.copy_from_u32_slice(
+                    "paged_draft_pool_kv_lens",
+                    location,
+                    &src.cumulative_kv_lens,
+                    &dst.cumulative_kv_lens,
+                )?;
+            }
+            Ok(())
         })?;
         if let (Some(src), Some(dst)) = (contexts, &self.contexts) {
             inference_nn::cuda::graph::copy_tensor(src, &dst.as_detached_tensor())?;
@@ -183,7 +245,6 @@ impl DFlashDraftModel {
     ) -> Result<Option<DFlashProposalBatch>> {
         if !inference_nn::cuda::graph_capture::cuda_decode_graphs_enabled()
             || !self.uses_paged_kv()
-            || self.windowed_pool.is_some()
             || self.selector.is_some()
             || self.dspine.is_some()
             || run.seq_ids.is_empty()
@@ -308,6 +369,31 @@ impl DFlashDraftModel {
         slots.resize(key.batch_bucket * key.block, PAD_SLOT);
         let mut seq_lens = kv_lens;
         seq_lens.extend(std::iter::repeat_n(1, pad));
+        let pool = match &self.windowed_pool {
+            Some(pool) => {
+                let queries = run
+                    .seq_ids
+                    .iter()
+                    .map(|seq_id| WindowedKvQuery {
+                        seq_id: *seq_id,
+                        query_len: key.block,
+                    })
+                    .collect::<Vec<_>>();
+                let batch = pool
+                    .lock()
+                    .expect("dflash windowed pool poisoned")
+                    .scratch_graph_batch(&queries, key.batch_bucket)?;
+                Some(PoolGraphRows {
+                    block_tables: batch.block_tables_for_graph().to_vec(),
+                    width: batch.block_table_width_for_graph(),
+                    slots: batch.slot_mapping_for_graph().to_vec(),
+                    cumulative_kv_lens: batch.cumulative_kv_lens_for_graph().to_vec(),
+                    cumulative_query_lens: batch.cumulative_query_lens_for_graph().to_vec(),
+                    max_query_len: batch.max_query_len(),
+                })
+            }
+            None => None,
+        };
         Ok(PagedGraphRows {
             token_ids,
             positions,
@@ -315,6 +401,7 @@ impl DFlashDraftModel {
             block_tables,
             slots,
             seq_lens,
+            pool,
         })
     }
 
@@ -375,6 +462,20 @@ impl DFlashDraftModel {
         let block_tables = buffers.block_tables.as_detached_tensor();
         let slot_mapping = buffers.slot_mapping.as_detached_tensor();
         let seq_lens = buffers.seq_lens.as_detached_tensor().squeeze(0)?;
+        let pool = buffers
+            .pool
+            .as_ref()
+            .map(|pool| -> Result<_> {
+                let cumulative = pool.cumulative_kv_lens.as_detached_tensor().squeeze(0)?;
+                let b = key.batch_bucket;
+                let lens = (cumulative.narrow(0, 1, b)? - cumulative.narrow(0, 0, b)?)?;
+                Ok((
+                    pool.block_tables.as_detached_tensor(),
+                    pool.slot_mapping.as_detached_tensor(),
+                    lens,
+                ))
+            })
+            .transpose()?;
         let mut drafted = self.draft_hidden_paged_tensors(
             &noise,
             Some(&anchors),
@@ -384,6 +485,15 @@ impl DFlashDraftModel {
                 slot_mapping: &slot_mapping,
                 seq_lens: &seq_lens,
                 cumulative_query_lens: &buffers.cumulative_query_lens,
+                pool: pool.as_ref().zip(buffers.pool.as_ref()).map(
+                    |((tables, slots, lens), buffers)| PoolDraftMeta {
+                        block_tables: tables,
+                        slot_mapping: slots,
+                        seq_lens: lens,
+                        cumulative_query_lens: &buffers.cumulative_query_lens,
+                        max_query_len: buffers.max_query_len,
+                    },
+                ),
             },
             run.paged,
         )?;
