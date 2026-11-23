@@ -273,10 +273,14 @@ pub fn plan(
     if layers.has_overrides() {
         source = format!("{source}, then {layers}");
     }
-    // a drafter's auxiliary layers stay at the model dtype: its attention reads them unquantized
+    // a drafter's auxiliary layers stay at the model dtype, but a drafter that reads q8 keeps a q8 cache's type
     let own = model.num_layers() - model.auxiliary_paged_layers();
+    let auxiliary = match base {
+        PagedCacheType::Quant { k: 8, v: 8 } if model.auxiliary_layers_take_q8() => base,
+        _ => PagedCacheType::Auto,
+    };
     for slot in &mut types[own..] {
-        *slot = PagedCacheType::Auto;
+        *slot = auxiliary;
     }
     CachePlan {
         layers: types,
@@ -324,6 +328,7 @@ mod tests {
                 num_kv_heads: 8,
                 head_dim: 128,
                 attended: true,
+                quantized: false,
             },
         );
         assert_eq!(KvFingerprint::of(&with_drafter), fingerprint);

@@ -306,6 +306,7 @@ impl Eagle3Config {
             num_kv_heads: self.num_kv_heads,
             head_dim: self.head_dim,
             attended: true,
+            quantized: false,
         }
     }
 

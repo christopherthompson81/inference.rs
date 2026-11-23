@@ -169,6 +169,10 @@ pub trait ModelConfigLike {
     fn auxiliary_paged_layers(&self) -> usize {
         0
     }
+    /// Whether the auxiliary layers' owner reads and writes a q8 cache, so they may take the model's.
+    fn auxiliary_layers_take_q8(&self) -> bool {
+        false
+    }
     /// Whether an attention kernel reads `layer_idx`'s paged cache, so its shape decides the attention backend.
     fn layer_is_attended(&self, _layer_idx: usize) -> bool {
         true
@@ -458,6 +462,8 @@ pub struct AuxiliaryPagedLayers {
     pub head_dim: usize,
     // false for layers no attention kernel reads (QSA's indexer keys, which it copies out cell by cell)
     pub attended: bool,
+    // the drafter writes and reads a q8 cache, so its layers take the model's when that is q8
+    pub quantized: bool,
 }
 
 impl AuxiliaryPagedLayers {
@@ -492,6 +498,9 @@ impl ModelConfigLike for AuxiliaryPagedKvCacheConfig {
     }
     fn attends_paged_cache_in_place(&self) -> bool {
         self.base.attends_paged_cache_in_place()
+    }
+    fn auxiliary_layers_take_q8(&self) -> bool {
+        self.auxiliary.quantized
     }
     fn num_layers(&self) -> usize {
         self.base.num_layers() + self.auxiliary.count
@@ -662,6 +671,7 @@ mod tests {
                 num_kv_heads: 4,
                 head_dim: 64,
                 attended: true,
+                quantized: false,
             },
         );
         assert_eq!(config.num_layers(), 6);

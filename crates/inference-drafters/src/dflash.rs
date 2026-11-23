@@ -360,6 +360,7 @@ impl DFlashConfig {
                 num_kv_heads: self.num_key_value_heads,
                 head_dim: self.head_dim(),
                 attended: true,
+                quantized: true,
             }
         })
     }
@@ -1513,8 +1514,30 @@ impl DFlashCudaGraphOutput {
     }
 }
 
+/// Rows `[tokens, kv_heads, head_dim]` into a drafter's paged layer at `slots`: a q8 cache quantizes (and rotates) them.
 #[cfg(all(feature = "cuda", target_family = "unix"))]
+fn write_paged_rows(
+    k: &Tensor,
+    v: &Tensor,
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    slots: &Tensor,
+) -> Result<()> {
+    if key_cache.dtype() == DType::U8 {
+        return inference_paged_attn::reshape_and_cache_quant(k, v, key_cache, value_cache, slots);
+    }
+    inference_paged_attn::reshape_and_cache_flashinfer(
+        k,
+        v,
+        key_cache,
+        value_cache,
+        slots,
+        inference_paged_attn::DEFAULT_FP8_KV_CACHE_SCALES,
+    )
+}
+
 /// A paged draft's rows on the host: `[batch, width]` block tables, its rows' slots and each sequence's length.
+#[cfg(all(feature = "cuda", target_family = "unix"))]
 struct PagedDraftSlots {
     tables: Vec<u32>,
     width: usize,
@@ -4051,14 +4074,7 @@ impl DFlashDraftModel {
             // [kv_heads, tokens, head_dim] -> [tokens, kv_heads, head_dim], row-major even for one token
             let k = k_all.i(layer)?.transpose(0, 1)?.force_contiguous()?;
             let v = v_all.i(layer)?.transpose(0, 1)?.force_contiguous()?;
-            inference_paged_attn::reshape_and_cache_flashinfer(
-                &k,
-                &v,
-                &key_cache,
-                &value_cache,
-                &slot_mapping,
-                inference_paged_attn::DEFAULT_FP8_KV_CACHE_SCALES,
-            )?;
+            write_paged_rows(&k, &v, &key_cache, &value_cache, &slot_mapping)?;
         }
         let mut positions = self
             .paged_next_pos
@@ -4199,21 +4215,35 @@ impl DFlashDraftModel {
             DraftAttentionLayout::TokensFirst,
             |layer_idx, layer, q, k_noise, v_noise| {
                 let (key_cache, value_cache) = self.paged_layer(paged, layer_idx)?;
-                inference_paged_attn::reshape_and_cache_flashinfer(
-                    k_noise,
-                    v_noise,
-                    &key_cache,
-                    &value_cache,
-                    slot_mapping,
-                    inference_paged_attn::DEFAULT_FP8_KV_CACHE_SCALES,
-                )?;
+                write_paged_rows(k_noise, v_noise, &key_cache, &value_cache, slot_mapping)?;
                 let q = q.reshape((batch * block, self.num_heads, self.head_dim))?;
-                let opts = inference_fattn::FattnOptions {
+                let mut opts = inference_fattn::FattnOptions {
                     scale,
                     causal: layer.is_causal,
                     window_left: layer.sliding_window.map(|window| window - 1),
                     sinks: layer.sinks.clone(),
                     ..Default::default()
+                };
+                // a q8 cache holds K and V Hadamard-rotated: Q goes in rotated as K was, the output comes out
+                // rotated as V was
+                let quant = (key_cache.dtype() == DType::U8)
+                    .then(|| {
+                        inference_paged_attn::quant_cache_bits(
+                            &key_cache,
+                            &value_cache,
+                            self.head_dim,
+                        )
+                    })
+                    .flatten();
+                let q = match quant {
+                    Some((k, v)) => {
+                        opts.kv_bits = Some(inference_fattn::KvBits { k, v });
+                        inference_paged_attn::hadamard(
+                            &q,
+                            inference_paged_attn::kv_quant::k_rotation(self.head_dim),
+                        )?
+                    }
+                    None => q,
                 };
                 let kv = inference_fattn::PagedKv {
                     k_cache: &key_cache,
@@ -4227,7 +4257,13 @@ impl DFlashDraftModel {
                     cu_seqlens: cumulative_query_lens,
                     max_len: block,
                 };
-                let out = inference_fattn::flash_attn_paged_varlen(&q, &q_seqs, &kv, &opts)?;
+                let mut out = inference_fattn::flash_attn_paged_varlen(&q, &q_seqs, &kv, &opts)?;
+                if quant.is_some() {
+                    out = inference_paged_attn::hadamard(
+                        &out,
+                        inference_paged_attn::kv_quant::v_rotation(self.head_dim),
+                    )?;
+                }
                 out.reshape((batch, block, self.num_heads * self.head_dim))
             },
         )?;
