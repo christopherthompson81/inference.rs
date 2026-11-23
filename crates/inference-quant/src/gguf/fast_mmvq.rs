@@ -1213,6 +1213,24 @@ pub fn supports_moe(
             .all(|w| moe_matvec_reads(w.gguf_type()) && w.kernel_shape().rank() == 3)
 }
 
+// Past this many tokens grouped mmq, which reads each routed expert once, beats a matvec per routed pair
+const PAIR_MOE_MATVEC_MAX_TOKENS: usize = 8;
+// The tensor-core matvec reads each routed expert once too and walks its pairs in column chunks: it stays ahead of
+// grouped mmq through a 4-sequence verify of 8 rows each (inkling2_speed Run 50)
+const TC_MOE_MATVEC_MAX_TOKENS: usize = 32;
+
+/// The most tokens an expert-indexed matvec over these projections takes before grouped mmq is the faster read.
+pub fn moe_matvec_max_tokens(weights: &[&dyn KernelWeight]) -> usize {
+    if weights
+        .iter()
+        .all(|w| tc_moe_launcher(w.gguf_type()).is_some())
+    {
+        TC_MOE_MATVEC_MAX_TOKENS
+    } else {
+        PAIR_MOE_MATVEC_MAX_TOKENS
+    }
+}
+
 // whether an expert-indexed matvec reads this type: a per-pair kernel, or the tensor-core one for tiled NVFP4
 fn moe_matvec_reads(ty: GgufType) -> bool {
     tc_moe_launcher(ty).is_some() || moe_launcher(ty).is_some()

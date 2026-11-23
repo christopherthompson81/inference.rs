@@ -20,9 +20,6 @@ use super::forward::{MoEForward, MoEForwardConfig};
 
 #[cfg(feature = "cuda")]
 pub(super) const GROUPED_PREFILL_MIN_TOKENS: usize = 32;
-// Past this many tokens grouped mmq, which reads each routed expert once, beats a matvec per routed pair
-#[cfg(feature = "cuda")]
-pub(super) const INDEXED_MMVQ_MAX_TOKENS: usize = 8;
 
 /// Canonical stacked expert weights, ENK [E, N, K] = [E, out, in]. The raw backends (Fused,
 /// Cutile) hold exactly this; nothing else stores a layout.
@@ -2122,8 +2119,9 @@ fn indexed_mmvq_scaled(
 ) -> Result<Option<Tensor>> {
     {
         if forward.lora.is_some()
-            || forward.shape.num_tokens > INDEXED_MMVQ_MAX_TOKENS
             || !inference_quant::supports_indexed_moe_mmvq(gate, up, down)
+            || forward.shape.num_tokens
+                > inference_quant::indexed_moe_mmvq_max_tokens(&[gate, up, down])
         {
             return Ok(None);
         }

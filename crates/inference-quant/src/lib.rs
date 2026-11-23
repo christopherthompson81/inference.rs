@@ -260,7 +260,9 @@ pub use gguf::fast_mmq::{
 #[cfg(feature = "cuda")]
 pub use gguf::fast_mmvq::{
     ExpertScales, moe_decode as indexed_moe_mmvq, moe_decode_gated as indexed_moe_mmvq_gated,
-    moe_decode_ungated as indexed_moe_mmvq_ungated, supports_moe as supports_indexed_moe_mmvq,
+    moe_decode_ungated as indexed_moe_mmvq_ungated,
+    moe_matvec_max_tokens as indexed_moe_mmvq_max_tokens,
+    supports_moe as supports_indexed_moe_mmvq,
     supports_moe_ungated as supports_indexed_moe_mmvq_ungated, with_shared_input,
 };
 pub use gguf::kernel::GgufType;
