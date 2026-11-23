@@ -879,3 +879,34 @@ auto            117.4 (Run 28)                         120.1
 ```
 
 The tiny checkpoint's drafter tests replay it 42 times with greedy output unchanged.
+
+## Run 32 - 2026-11-23 15:30
+
+The one-token CUDA lookahead for a speculative pipeline's plain steps (Run 28's remaining 1.5-2%). Parked on the
+local branch `wip/inkling2-spec-lookahead`, not merged.
+
+What was built:
+- A per-step gate. A pipeline with a proposer may queue the next forward when nothing is staged and the tuner's
+  last choice for the batch was plain.
+- A hook before the next forward is queued. It copies the step's taps into the drafter's buffer
+  (`follow_buffered`; the graph's tap buffers are fixed, so a copy queued first reads this step) and makes the
+  step's decision. It ends the lease when the decision drafts (held for the next plan, so a probe isn't lost to a
+  second decision) or when the buffer is full (the next step appends it).
+- The decode graph's launch handle, which a speculative graph's state used to withhold. The one-token replay
+  installs that state like any replay.
+
+The mechanics work. Plain graphs run 46 us apart against 301 us before (a plain server: 38 us). Greedy output
+diverges from plain decode only at near ties (0.018 and 0.016 nats at the first divergence of two 512-token
+completions), as fixed drafting's does.
+
+What broke is the tuner's plain-step cost, which it times on the host's clock:
+- To the next plan: once a step can be queued, the next plan may run when the next forward is only queued, before
+  the GPU runs it. Those samples were 0.1 ms, and the estimator takes a sample 3x below its estimate as the new
+  estimate. Plain then scored ~8000 tok/s, and code fell to 124 against 132-136.
+- Start to start, one kind of start at a time: that's robust, but it can't time a lone plain step, which is what a
+  probe in a drafting stretch is. Plain stayed unmeasured and lost to drafting everywhere (prose 95).
+- Plus three plain steps in a row whenever plain is unmeasured: lease boundaries give two-step samples, and
+  overall it ran 115.4 / 114.9 against 119.0 without the lookahead.
+
+A sound version would time plain steps on the GPU (events around the decode graph) rather than on the host.
+The gain left is small, since prose already runs within 1-2% of a plain server, mostly from probes and exploring.
