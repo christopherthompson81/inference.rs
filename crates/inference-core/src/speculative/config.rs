@@ -207,7 +207,7 @@ pub fn reserve_external_mtp_memory_with_runtime(
             .with_recurrent_checkpoint_lanes(drafts + 1)?
             .with_speculative_query_rows(drafts + 1);
         cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
-        drafter_runtime = dflash_config.runtime_bytes(dtype);
+        drafter_runtime = dflash_config.runtime_bytes(dtype, device);
         // a full-attention drafter keeps its context in the target's blocks, which only the CUDA kernels read
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if device.is_cuda()

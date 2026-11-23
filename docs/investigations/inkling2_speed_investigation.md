@@ -801,3 +801,112 @@ Tests: tuner cases for plain winning at low acceptance, a new sequence drafting 
 tokens, EOS ignored. It drafts, goes plain, flushes 31 buffered rows at each probe and drafts again, and its greedy
 output matches plain decode. What's left: plain stretches 1.5-2% under a plain server, until a step that may draft
 can take the lookahead path.
+
+## Run 29 - 2026-11-23 10:30
+
+Is the Q8_0 drafter as fast as it can be, and does the drafter's host work overlap the step? nsys of a served
+drafts-2 request (recipe C, the photosynthesis prompt, 256 tokens). Kernel-level (`node`) for the drafter's
+kernels, and the graph-level trace from Run 28 for idle time, since node tracing inflates graph launches.
+
+A cycle's eager work (130 cycles), us a cycle:
+
+```
+457  Q6_K target head over the 2 draft rows (380 MB, ~830 GB/s)
+343  Q8_0 drafter matvecs, 13 launches at 3 rows: qkv 17.2 us (~730 GB/s), gate-up 54.2 (~830), down 28.4 (~790),
+     o 11.4 (~490), context k/v 9 us x3
+250  Markov picks, 2 x 125 us: each reads the whole fold table (201024 x rank 256, BF16, 103 MB) at ~825 GB/s
+~600 small ops (casts, copies, norms, attention, cache writes), 177 launches a cycle in all
+```
+
+The Q8_0 weights read at 730-830 GB/s except the o projection. By bytes, at most ~50 us a cycle is left in them
+(0.3%), and below 6 bits acceptance slips (the drafter-ISQ table above). Q8_0 stays.
+
+The Markov fold table is bandwidth-bound at BF16. 8 bits a value would halve both picks (~125 us a cycle) and free
+51 MB of VRAM. Untested for acceptance.
+
+Overlap: node tracing showed a 1.6 ms gap before each verify graph, but its launch call took 2.1 ms under that
+tracing. At graph level the call takes 385 us and is issued while the drafter runs, and the GPU waits 16 us for the
+graph. So the drafter's host work does overlap the step. A drafting cycle is 18.39 ms: verify graph 16.21, GPU
+busy 17.72, idle 0.61 ms (3.3%). The idle sits inside the eager drafter pass (177 launches, many shorter than
+their launch cost). A CUDA graph for that pass is the way to recover it. Plain stretches lose 1.5-2% separately, to
+the lookahead being off (Run 28).
+
+## Run 30 - 2026-11-23 11:30
+
+The Markov fold at 8 bits on CUDA: U8 values (`q - 128`), with an F32 scale for every 32 of a row's 256. Each
+32-column part the fold is made from is one scale group, so the build never holds more than a part in F32.
+`quantize_markov_fold` makes it, the pick kernel reads it, and the reservation counts 59 MB against 104 MB. Other
+devices keep it BF16. The kernel case checks the 8-bit pick against the argmax over the values it dequantizes to.
+
+```
+pick, us (nsys, median of 260)     bytes read
+bf16 fold                  124.7   103 MB + logits
+8-bit, a warp a row        100.5   the 5-step reduce a row bounds it
+8-bit, a lane a group       73.5   8 lanes a row, 4 rows a warp: ~800 GB/s
+```
+
+Two picks a cycle, so ~100 us a cycle (0.55%). Acceptance at drafts 2 over Run 27's prompts is unchanged: 1.116
+accepted a step with either fold, within 1-3 tokens a prompt. Served speed is up 0.5-1.9% a prompt, though the card
+drifts ~2% between runs. The drafter's `markov_w1` (another 103 MB BF16, one row read a draft) is the next one to
+shrink for context.
+
+## Run 31 - 2026-11-23 13:00
+
+The paged-context drafter's pass in a CUDA graph (`dflash/paged_graph.rs`). DFlash's graphs need a windowed pool,
+and Inkling's drafter keeps a global layer's context in the target's paged cache, so it ran eagerly: 177 launches a
+cycle. The graph's buffers hold the rows' ids and positions, the anchors, the slots, the block tables and lengths,
+and each row's Markov head context, refreshed from the host before each replay. The block table is padded to a power
+of two (at least 16 columns), so a growing context recaptures a few times. fattn bounds its key loop by the
+longest length on the device, so padding costs no attention. A shape's first pass runs eagerly under the host-vector
+cache guard (the first capture failed with "h2d param cache miss": the warm-up had run without it), and the next
+one captures. The anchor row embeds through the target's `embed_tokens` (Inkling's adds a norm), so the run takes
+it as a closure. The eager forward and the graph share `draft_hidden_paged_tensors` and `paged_draft_slots`.
+
+```
+graph-level nsys, the photosynthesis prompt, drafts 2     cycle     busy      idle    eager launches a cycle
+eager drafter (Run 29, bf16 fold)                         18.39 ms  17.72 ms  0.61    177
+graphed drafter (1.16 ms a replay)                        18.04     17.60     0.40     45
+```
+
+What's left idle is ~10 host round trips around verification (device-to-host reads, 10-30 us each).
+
+Served, Run 27's eight prompts (accepted counts equal to the 8-bit fold run's, prompt for prompt):
+
+```
+all, tok/s      bf16 fold, eager   8-bit fold, eager   8-bit fold, graph
+drafts 2        111.6              111.2               114.1
+auto            117.4 (Run 28)                         120.1
+```
+
+The tiny checkpoint's drafter tests replay it 42 times with greedy output unchanged.
+
+## Run 32 - 2026-11-23 15:30
+
+The one-token CUDA lookahead for a speculative pipeline's plain steps (Run 28's remaining 1.5-2%). Parked on the
+local branch `wip/inkling2-spec-lookahead`, not merged.
+
+What was built:
+- A per-step gate. A pipeline with a proposer may queue the next forward when nothing is staged and the tuner's
+  last choice for the batch was plain.
+- A hook before the next forward is queued. It copies the step's taps into the drafter's buffer
+  (`follow_buffered`; the graph's tap buffers are fixed, so a copy queued first reads this step) and makes the
+  step's decision. It ends the lease when the decision drafts (held for the next plan, so a probe isn't lost to a
+  second decision) or when the buffer is full (the next step appends it).
+- The decode graph's launch handle, which a speculative graph's state used to withhold. The one-token replay
+  installs that state like any replay.
+
+The mechanics work. Plain graphs run 46 us apart against 301 us before (a plain server: 38 us). Greedy output
+diverges from plain decode only at near ties (0.018 and 0.016 nats at the first divergence of two 512-token
+completions), as fixed drafting's does.
+
+What broke is the tuner's plain-step cost, which it times on the host's clock:
+- To the next plan: once a step can be queued, the next plan may run when the next forward is only queued, before
+  the GPU runs it. Those samples were 0.1 ms, and the estimator takes a sample 3x below its estimate as the new
+  estimate. Plain then scored ~8000 tok/s, and code fell to 124 against 132-136.
+- Start to start, one kind of start at a time: that's robust, but it can't time a lone plain step, which is what a
+  probe in a drafting stretch is. Plain stayed unmeasured and lost to drafting everywhere (prose 95).
+- Plus three plain steps in a row whenever plain is unmeasured: lease boundaries give two-step samples, and
+  overall it ran 115.4 / 114.9 against 119.0 without the lookahead.
+
+A sound version would time plain steps on the GPU (events around the decode graph) rather than on the host.
+The gain left is small, since prose already runs within 1-2% of a plain server, mostly from probes and exploring.

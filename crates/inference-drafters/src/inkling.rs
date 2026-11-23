@@ -69,8 +69,32 @@ pub(crate) fn drafter_config(value: &serde_json::Value) -> Option<serde_json::Va
 
 /// The recurrent head's fold of `hidden_out` into the head, `[padded vocab, rank]` at `dtype` and `[padded vocab]`
 /// F32, in bytes: made on the first draft, after the paged cache is sized.
-pub(crate) fn fold_bytes(padded_vocab: usize, rank: usize, dtype: DType) -> usize {
-    padded_vocab * (rank * dtype.size_in_bytes() + DType::F32.size_in_bytes())
+pub(crate) fn fold_bytes(padded_vocab: usize, rank: usize, dtype: DType, device: &Device) -> usize {
+    let weight = if eight_bit_fold(device, rank) {
+        #[cfg(feature = "cuda")]
+        {
+            rank + rank / inference_nn::cuda::inkling::MARKOV_Q8_GROUP * DType::F32.size_in_bytes()
+        }
+        #[cfg(not(feature = "cuda"))]
+        unreachable!("an 8-bit fold is CUDA's")
+    } else {
+        rank * dtype.size_in_bytes()
+    };
+    padded_vocab * (weight + DType::F32.size_in_bytes())
+}
+
+/// Whether the fold is kept 8-bit: on CUDA, whose pick kernel reads it so, when its rank is whole parts.
+fn eight_bit_fold(device: &Device, rank: usize) -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        const _: () = assert!(FOLD_COLUMNS == inference_nn::cuda::inkling::MARKOV_Q8_GROUP);
+        device.is_cuda() && inference_nn::cuda::inkling::markov_q8_rank(rank)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (device, rank);
+        false
+    }
 }
 
 /// Whether a `markov_head_type` is the recurrent head this module runs.
@@ -210,9 +234,41 @@ pub(crate) struct RnnMarkovHead {
     vocab: usize,
     // the head's input dtype
     dtype: DType,
-    // `hidden_out` folded into the head: `[padded vocab, rank]` at the model dtype and `[padded vocab]` F32, made on
-    // first use
-    fold: Mutex<Option<(Tensor, Tensor)>>,
+    // `hidden_out` folded into the head, made on first use
+    fold: Mutex<Option<Fold>>,
+}
+
+/// The fold: `[padded vocab, rank]` at the model dtype, or on CUDA 8-bit with its group scales (the pick reads it all
+/// for every draft), and `[padded vocab]` F32.
+#[derive(Clone)]
+struct Fold {
+    weight: Tensor,
+    scales: Option<Tensor>,
+    bias: Tensor,
+}
+
+impl Fold {
+    /// The weight at `dtype`, for the pick through a matmul.
+    fn dense(&self, dtype: DType) -> Result<Tensor> {
+        let Some(scales) = &self.scales else {
+            return self.weight.to_dtype(dtype);
+        };
+        #[cfg(feature = "cuda")]
+        {
+            use inference_nn::cuda::inkling::{MARKOV_Q8_GROUP, MARKOV_Q8_ZERO};
+            let (rows, rank) = self.weight.dims2()?;
+            ((self.weight.to_dtype(DType::F32)? - MARKOV_Q8_ZERO)?
+                .reshape((rows, rank / MARKOV_Q8_GROUP, MARKOV_Q8_GROUP))?
+                .broadcast_mul(&scales.unsqueeze(2)?)?)
+            .reshape((rows, rank))?
+            .to_dtype(dtype)
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = scales;
+            unreachable!("an 8-bit fold is CUDA's")
+        }
+    }
 }
 
 pub(crate) struct RnnShape {
@@ -254,7 +310,7 @@ impl RnnMarkovHead {
         })
     }
 
-    fn folded(&self, lm_head: &dyn QuantMethod) -> Result<(Tensor, Tensor)> {
+    fn folded(&self, lm_head: &dyn QuantMethod) -> Result<Fold> {
         let mut fold = self.fold.lock().expect("markov fold poisoned");
         if let Some(fold) = fold.as_ref() {
             return Ok(fold.clone());
@@ -264,20 +320,42 @@ impl RnnMarkovHead {
         let dtype = self.dtype;
         let columns = self.hidden_out_w.t()?.contiguous()?.to_dtype(dtype)?;
         let rank = columns.dim(0)?;
-        let parts = (0..rank)
-            .step_by(FOLD_COLUMNS)
-            .map(|start| {
-                lm_head
-                    .forward(&columns.narrow(0, start, FOLD_COLUMNS.min(rank - start))?)?
-                    .to_dtype(dtype)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let weight = Tensor::cat(&parts, 0)?.t()?.contiguous()?;
+        let part = |start: usize| {
+            lm_head.forward(&columns.narrow(0, start, FOLD_COLUMNS.min(rank - start))?)
+        };
+        let (weight, scales) = if eight_bit_fold(columns.device(), rank) {
+            #[cfg(feature = "cuda")]
+            {
+                // each part is one scale group, so the F32 values never span more than it
+                let (q, scales): (Vec<_>, Vec<_>) = (0..rank)
+                    .step_by(FOLD_COLUMNS)
+                    .map(|start| {
+                        let values = part(start)?.to_dtype(DType::F32)?.t()?.contiguous()?;
+                        inference_nn::cuda::inkling::quantize_markov_fold(&values)
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .unzip();
+                (Tensor::cat(&q, 1)?, Some(Tensor::cat(&scales, 1)?))
+            }
+            #[cfg(not(feature = "cuda"))]
+            unreachable!("an 8-bit fold is CUDA's")
+        } else {
+            let parts = (0..rank)
+                .step_by(FOLD_COLUMNS)
+                .map(|start| part(start)?.to_dtype(dtype))
+                .collect::<Result<Vec<_>>>()?;
+            (Tensor::cat(&parts, 0)?.t()?.contiguous()?, None)
+        };
         let bias = lm_head
             .forward(&self.hidden_out_b.unsqueeze(0)?.to_dtype(dtype)?)?
             .to_dtype(DType::F32)?
             .squeeze(0)?;
-        let made = (weight, bias);
+        let made = Fold {
+            weight,
+            scales,
+            bias,
+        };
         *fold = Some(made.clone());
         Ok(made)
     }
@@ -294,7 +372,7 @@ impl RnnMarkovHead {
     ) -> Result<Tensor> {
         let (batch, drafts, hidden) = rows.dims3()?;
         let r = self.rank;
-        let (fold_w, fold_b) = self.folded(lm_head)?;
+        let fold = self.folded(lm_head)?;
         let inputs = Tensor::cat(
             &[
                 &rows.to_dtype(DType::F32)?,
@@ -326,8 +404,9 @@ impl RnnMarkovHead {
             #[cfg(feature = "cuda")]
             if let Some(pick) = inference_nn::cuda::inkling::markov_pick(
                 &logits.i((.., s))?,
-                &fold_w,
-                &fold_b,
+                &fold.weight,
+                fold.scales.as_ref(),
+                &fold.bias,
                 &latent,
                 self.vocab,
             )? {
@@ -337,9 +416,9 @@ impl RnnMarkovHead {
             }
             let bias = latent
                 .to_dtype(self.dtype)?
-                .matmul(&fold_w.t()?)?
+                .matmul(&fold.dense(self.dtype)?.t()?)?
                 .to_dtype(DType::F32)?
-                .broadcast_add(&fold_b)?;
+                .broadcast_add(&fold.bias)?;
             let biased = (logits.i((.., s))?.to_dtype(DType::F32)? + bias)?;
             let capped = ((biased / self.softcap)?.tanh()? * self.softcap)?;
             prev = capped.narrow(1, 0, self.vocab)?.argmax(D::Minus1)?;

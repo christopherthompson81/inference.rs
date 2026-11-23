@@ -26,6 +26,13 @@ constexpr int CONTROLLER_MAX_RANK = 128;
 constexpr int CONTROLLER_THREADS = 256;
 // a Markov pick's blocks a batch row (each a slice of the vocabulary) and its block
 constexpr int PICK_BLOCKS = 256;
+// an 8-bit Markov fold's values sit at `q - MARKOV_Q8_ZERO`, a scale every MARKOV_Q8_GROUP of them
+constexpr int MARKOV_Q8_ZERO = 128;
+constexpr int MARKOV_Q8_GROUP = 32;
+// the 8-bit pick's groups fill whole lanes of a warp
+__host__ __device__ constexpr bool markov_q8_rank(int rank) {
+  return rank % MARKOV_Q8_GROUP == 0 && rank / MARKOV_Q8_GROUP <= 32 && 32 % (rank / MARKOV_Q8_GROUP) == 0;
+}
 constexpr int PICK_THREADS = 256;
 // the down projection's dots split over this many slices of the hidden dim, their partial sums the up kernel's to add
 constexpr int CONTROLLER_DOWN_CHUNKS = 4;
@@ -557,6 +564,45 @@ __global__ void markov_pick_partial_kernel(const L* logits, int64_t logits_batch
   }
 }
 
+// the 8-bit fold (`q - MARKOV_Q8_ZERO`, an f32 scale a MARKOV_Q8_GROUP): a lane a group, so a warp takes
+// `WARP / groups` rows at once and reduces each over its groups' lanes
+template <typename L>
+__global__ void markov_pick_partial_q8_kernel(const L* logits, int64_t logits_batch, const uint8_t* fold_w,
+                                              const float* fold_s, const float* fold_b, const float* latent,
+                                              int rank, int vocab, float* part_v, int* part_i) {
+  const int bi = blockIdx.y;
+  const int groups = rank / MARKOV_Q8_GROUP;
+  const int rows = WARP / groups;
+  const int warp = threadIdx.x / WARP, lane = threadIdx.x % WARP;
+  const int sub = lane / groups, g = lane % groups;
+  float lat[MARKOV_Q8_GROUP];
+#pragma unroll
+  for (int k = 0; k < MARKOV_Q8_GROUP; k++) lat[k] = latent[int64_t(bi) * rank + g * MARKOV_Q8_GROUP + k];
+  const int per = (vocab + gridDim.x - 1) / gridDim.x;
+  const int lo = blockIdx.x * per, hi = min(vocab, lo + per);
+  float best = NAN;
+  int at = INT_MAX;
+  for (int v0 = lo + warp * rows; v0 < hi; v0 += PICK_THREADS / WARP * rows) {
+    const int v = v0 + sub;
+    float dot = 0.0f;
+    if (v < hi) {
+      const uint4* w = reinterpret_cast<const uint4*>(fold_w + int64_t(v) * rank + g * MARKOV_Q8_GROUP);
+      const uint4 raw[2] = {w[0], w[1]};
+      const uint8_t* q = reinterpret_cast<const uint8_t*>(raw);
+#pragma unroll
+      for (int k = 0; k < MARKOV_Q8_GROUP; k++) dot += float(int(q[k]) - MARKOV_Q8_ZERO) * lat[k];
+      dot *= fold_s[int64_t(v) * groups + g];
+    }
+    for (int off = groups / 2; off > 0; off /= 2) dot += __shfl_xor_sync(0xffffffff, dot, off);
+    if (g == 0 && v < hi) pick_better(best, at, load(logits, int64_t(bi) * logits_batch + v) + fold_b[v] + dot, v);
+  }
+  pick_block(best, at);
+  if (threadIdx.x == 0) {
+    part_v[bi * gridDim.x + blockIdx.x] = best;
+    part_i[bi * gridDim.x + blockIdx.x] = at;
+  }
+}
+
 __global__ void markov_pick_final_kernel(const float* part_v, const int* part_i, int parts, uint32_t* out) {
   const int bi = blockIdx.x;
   float best = NAN;
@@ -822,27 +868,37 @@ extern "C" int inkling_sigmoid_gate(const float* x, const void* gate, int gate_d
   return (int)cudaGetLastError();
 }
 
+// whether the 8-bit pick takes a fold of this rank
+extern "C" int inkling_markov_q8_rank(int rank) { return markov_q8_rank(rank); }
+
 // the f32 + i32 partials a Markov pick over `b` rows takes
 extern "C" int64_t inkling_markov_pick_scratch(int b) { return int64_t(b) * PICK_BLOCKS; }
 
-// each batch row's argmax over `v < vocab` of `logits[v] + fold_b[v] + fold_w[v] . latent` (fold_w bf16
-// `[>= vocab, rank]`, rank a multiple of 8 and its rows 16-byte aligned), `part_v`/`part_i` of the scratch's size
+// each batch row's argmax over `v < vocab` of `logits[v] + fold_b[v] + fold_w[v] . latent` (fold_w `[>= vocab,
+// rank]`: bf16, its rows 16-byte aligned, or with `fold_s` u8 with a scale every MARKOV_Q8_GROUP), `part_v`/`part_i`
+// of the scratch's size
 extern "C" int inkling_markov_pick(const void* logits, int logits_dtype, int64_t logits_batch, const void* fold_w,
-                                   const float* fold_b, const float* latent, int b, int rank, int vocab,
-                                   float* part_v, int* part_i, uint32_t* out, int64_t stream) {
-  if (rank % 8 != 0) return -1;
+                                   const float* fold_s, const float* fold_b, const float* latent, int b, int rank,
+                                   int vocab, float* part_v, int* part_i, uint32_t* out, int64_t stream) {
+  if (fold_s ? !markov_q8_rank(rank) : rank % 8 != 0) return -1;
   const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
   const dim3 grid(PICK_BLOCKS, b);
   const size_t smem = size_t(rank) * sizeof(float);
+#define PICK(L)                                                                                              \
+  if (fold_s)                                                                                                \
+    markov_pick_partial_q8_kernel<L><<<grid, PICK_THREADS, 0, s>>>((const L*)logits, logits_batch,            \
+                                                                   (const uint8_t*)fold_w, fold_s, fold_b,    \
+                                                                   latent, rank, vocab, part_v, part_i);      \
+  else                                                                                                       \
+    markov_pick_partial_kernel<L><<<grid, PICK_THREADS, smem, s>>>((const L*)logits, logits_batch,            \
+                                                                   (const __nv_bfloat16*)fold_w, fold_b,      \
+                                                                   latent, rank, vocab, part_v, part_i)
   if (logits_dtype == 0) {
-    markov_pick_partial_kernel<<<grid, PICK_THREADS, smem, s>>>((const float*)logits, logits_batch,
-                                                                (const __nv_bfloat16*)fold_w, fold_b, latent, rank,
-                                                                vocab, part_v, part_i);
+    PICK(float);
   } else {
-    markov_pick_partial_kernel<<<grid, PICK_THREADS, smem, s>>>((const __nv_bfloat16*)logits, logits_batch,
-                                                                (const __nv_bfloat16*)fold_w, fold_b, latent, rank,
-                                                                vocab, part_v, part_i);
+    PICK(__nv_bfloat16);
   }
+#undef PICK
   markov_pick_final_kernel<<<b, PICK_THREADS, 0, s>>>(part_v, part_i, PICK_BLOCKS, out);
   return (int)cudaGetLastError();
 }

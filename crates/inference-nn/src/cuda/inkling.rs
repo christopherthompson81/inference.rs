@@ -12,9 +12,16 @@ use inference_tensor::{DType, Device, Layout, Result, Shape, Storage, Tensor};
 // the kernels' dtype codes
 const F32_CODE: i32 = 0;
 const BF16_CODE: i32 = 1;
+// no kernel takes U8 as an element type
+const NO_DTYPE_CODE: i32 = -1;
 // the kernel's bounds: states and queries a mix takes
 const MAX_STATES: usize = 16;
 const MAX_QUERIES: usize = 4;
+/// An 8-bit Markov fold stores `value / scale + MARKOV_Q8_ZERO` as U8, a scale every MARKOV_Q8_GROUP values (the
+/// kernel's constants).
+pub const MARKOV_Q8_ZERO: f64 = 128.0;
+pub const MARKOV_Q8_GROUP: usize = 32;
+const MARKOV_Q8_LEVELS: f64 = 127.0;
 
 fn status(code: i32, what: &str) -> Result<()> {
     if code != 0 {
@@ -53,6 +60,11 @@ fn device_ptr<'a>(
         DType::BF16 => {
             let (p, g) = s.as_cuda_slice::<half::bf16>()?.device_ptr(stream);
             (p + offset * 2, BF16_CODE, g)
+        }
+        // the 8-bit Markov fold's values
+        DType::U8 => {
+            let (p, g) = s.as_cuda_slice::<u8>()?.device_ptr(stream);
+            (p + offset, NO_DTYPE_CODE, g)
         }
         dtype => inference_tensor::bail!("Inkling kernels take f32 or bf16, not {dtype:?}"),
     })
@@ -569,13 +581,43 @@ pub fn attention_rows(op: &AttentionRows<'_>) -> Result<Option<[Tensor; 5]>> {
     ]))
 }
 
+/// Whether the 8-bit pick takes a fold of this rank (whole groups filling a warp's lanes).
+pub fn markov_q8_rank(rank: usize) -> bool {
+    // SAFETY: a pure query
+    i32::try_from(rank).is_ok_and(|rank| unsafe { super::ffi::inkling_markov_q8_rank(rank) } != 0)
+}
+
+/// A Markov fold's `(rows, rank)` F32 values (rank a multiple of MARKOV_Q8_GROUP) as [`markov_pick`]'s 8-bit form:
+/// U8 `(rows, rank)` and F32 scales `(rows, rank / MARKOV_Q8_GROUP)`, each group's largest magnitude at 127.
+pub fn quantize_markov_fold(values: &Tensor) -> Result<(Tensor, Tensor)> {
+    let (rows, rank) = values.dims2()?;
+    if !rank.is_multiple_of(MARKOV_Q8_GROUP) {
+        inference_tensor::bail!(
+            "an 8-bit Markov fold needs whole groups of {MARKOV_Q8_GROUP}, got rank {rank}"
+        );
+    }
+    let groups = values.reshape((rows, rank / MARKOV_Q8_GROUP, MARKOV_Q8_GROUP))?;
+    let scales = (groups.abs()?.max_keepdim(2)? / MARKOV_Q8_LEVELS)?;
+    // an all-zero group keeps a scale of 1 and its zeros
+    let safe = scales.eq(0.0)?.where_cond(&scales.ones_like()?, &scales)?;
+    let q = (groups
+        .broadcast_div(&safe)?
+        .round()?
+        .clamp(-MARKOV_Q8_LEVELS, MARKOV_Q8_LEVELS)?
+        + MARKOV_Q8_ZERO)?
+        .to_dtype(DType::U8)?
+        .reshape((rows, rank))?;
+    Ok((q, safe.squeeze(2)?.contiguous()?))
+}
+
 /// Each row's greedy pick under a recurrent Markov head: the argmax over `v < vocab` of
 /// `logits[v] + fold_b[v] + fold_w[v] . latent` (`logits` `(b, >= vocab)` f32 or bf16 with its last axis contiguous,
-/// `fold_w` `(>= vocab, rank)` BF16, `fold_b` F32, `latent` `(b, rank)` F32), as U32 `(b,)`; `None` for a layout the
-/// kernel does not take.
+/// `fold_w` `(>= vocab, rank)` BF16, or U8 with `fold_scales` `(rows, rank / MARKOV_Q8_GROUP)` F32, `fold_b` F32,
+/// `latent` `(b, rank)` F32), as U32 `(b,)`; `None` for a layout the kernel does not take.
 pub fn markov_pick(
     logits: &Tensor,
     fold_w: &Tensor,
+    fold_scales: Option<&Tensor>,
     fold_b: &Tensor,
     latent: &Tensor,
     vocab: usize,
@@ -588,10 +630,19 @@ pub fn markov_pick(
     let stride = logits.stride();
     if !takes(logits)
         || stride[1] != 1
-        || fold_w.dtype() != DType::BF16
         || !fold_w.is_contiguous()
         || !fold_w.layout().start_offset().is_multiple_of(8)
-        || !rank.is_multiple_of(8)
+        || !match fold_scales {
+            None => fold_w.dtype() == DType::BF16 && rank.is_multiple_of(8),
+            Some(scales) => {
+                fold_w.dtype() == DType::U8
+                    && markov_q8_rank(rank)
+                    && fold_w.layout().start_offset().is_multiple_of(16)
+                    && scales.dtype() == DType::F32
+                    && scales.is_contiguous()
+                    && scales.dims2()? == (rows, rank / MARKOV_Q8_GROUP)
+            }
+        }
         || rows < vocab
         || width < vocab
         || fold_b.dtype() != DType::F32
@@ -615,6 +666,14 @@ pub fn markov_pick(
     let (lp, l_dtype, _l) = device_ptr(&lg, ll, &stream)?;
     let (wg, wl) = fold_w.storage_and_layout();
     let (wp, _, _w) = device_ptr(&wg, wl, &stream)?;
+    let scales = fold_scales.map(|scales| scales.storage_and_layout());
+    let scales = scales
+        .as_ref()
+        .map(|(sg, sl)| device_ptr(sg, sl, &stream))
+        .transpose()?;
+    let sp = scales
+        .as_ref()
+        .map_or(std::ptr::null(), |(sp, _, _)| *sp as *const f32);
     let (bg, bl) = fold_b.storage_and_layout();
     let (bp, _, _b) = device_ptr(&bg, bl, &stream)?;
     let (ag, al) = latent.storage_and_layout();
@@ -631,6 +690,7 @@ pub fn markov_pick(
                     l_dtype,
                     i64_of(stride[0])?,
                     wp as *const core::ffi::c_void,
+                    sp,
                     bp as *const f32,
                     ap as *const f32,
                     i32_of(b)?,
@@ -1398,10 +1458,37 @@ mod tests {
                 .narrow(1, 0, VOCAB)?
                 .argmax(D::Minus1)?
                 .to_vec1::<u32>()?;
-            let picked = super::markov_pick(&step, &fold_w, &fold_b, &latent, VOCAB)?
+            let picked = super::markov_pick(&step, &fold_w, None, &fold_b, &latent, VOCAB)?
                 .expect("the kernel takes the layout")
                 .to_vec1::<u32>()?;
             assert_eq!(picked, expected, "{dtype:?}");
+            // the 8-bit fold against the values it stands for
+            let (q, scales) = super::quantize_markov_fold(&fold_w.to_dtype(DType::F32)?)?;
+            let dequantized = ((q.to_dtype(DType::F32)? - super::MARKOV_Q8_ZERO)?
+                .reshape((
+                    PADDED,
+                    RANK / super::MARKOV_Q8_GROUP,
+                    super::MARKOV_Q8_GROUP,
+                ))?
+                .broadcast_mul(&scales.unsqueeze(2)?)?)
+            .reshape((PADDED, RANK))?;
+            let error = (&dequantized - fold_w.to_dtype(DType::F32)?)?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            assert!(
+                error <= scales.max_all()?.to_scalar::<f32>()? / 2.0 + 1e-6,
+                "8-bit fold error {error}"
+            );
+            let bias = latent.matmul(&dequantized.t()?)?.broadcast_add(&fold_b)?;
+            let expected = (step.to_dtype(DType::F32)? + bias)?
+                .narrow(1, 0, VOCAB)?
+                .argmax(D::Minus1)?
+                .to_vec1::<u32>()?;
+            let picked = super::markov_pick(&step, &q, Some(&scales), &fold_b, &latent, VOCAB)?
+                .expect("the kernel takes the 8-bit layout")
+                .to_vec1::<u32>()?;
+            assert_eq!(picked, expected, "8-bit, {dtype:?}");
         }
         Ok(())
     }
