@@ -186,6 +186,46 @@ impl std::fmt::Debug for CudaDevice {
 }
 
 impl CudaDevice {
+    /// `storage` copied straight into pinned host memory mapped into this device, never staged in VRAM: for a table
+    /// loaded beside a cache already sized to the device, of which each step reads a few rows over the bus.
+    pub fn mapped_host_from_cpu(&self, storage: &CpuStorage) -> Result<CudaStorage> {
+        let stream = self.cuda_stream();
+        macro_rules! mapped {
+            ($data:expr, $variant:ident) => {{
+                let mut dst = unsafe { stream.alloc_mapped_host($data.len()) }.w()?;
+                stream.memcpy_htod($data.as_slice(), &mut dst).w()?;
+                CudaStorageSlice::$variant(dst)
+            }};
+        }
+        let slice = match storage {
+            CpuStorage::U8(data) => mapped!(data, U8),
+            CpuStorage::U32(data) => mapped!(data, U32),
+            CpuStorage::I16(data) => mapped!(data, I16),
+            CpuStorage::I32(data) => mapped!(data, I32),
+            CpuStorage::I64(data) => mapped!(data, I64),
+            CpuStorage::BF16(data) => mapped!(data, BF16),
+            CpuStorage::F16(data) => mapped!(data, F16),
+            CpuStorage::F32(data) => mapped!(data, F32),
+            CpuStorage::F64(data) => mapped!(data, F64),
+            CpuStorage::F8E4M3(data) => mapped!(data, F8E4M3),
+            CpuStorage::F4(_)
+            | CpuStorage::F6E2M3(_)
+            | CpuStorage::F6E3M2(_)
+            | CpuStorage::F8E8M0(_) => {
+                return Err(CudaError::UnsupportedDtype {
+                    dtype: storage.dtype(),
+                    op: "mapped_host_from_cpu",
+                }
+                .into());
+            }
+        };
+        stream.synchronize().w()?;
+        Ok(CudaStorage {
+            slice,
+            device: self.clone(),
+        })
+    }
+
     #[allow(clippy::missing_safety_doc)]
     pub unsafe fn alloc<T: cudarc::driver::DeviceRepr>(
         &self,

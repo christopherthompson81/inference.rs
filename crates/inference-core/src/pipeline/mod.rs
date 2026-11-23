@@ -689,6 +689,19 @@ struct RecurrentReservationInputs {
     model_dtype: DType,
 }
 
+// The most sequence slots (with the graph pad) up to `requested` whose pool, snapshots included, fits `fitted_pool`.
+fn capacity_beside_snapshots(
+    requested: usize,
+    fitted_pool: usize,
+    pool_of: impl Fn(usize) -> usize,
+) -> usize {
+    let mut capacity = requested;
+    while capacity > RECURRENT_GRAPH_PAD_SLOTS + 1 && pool_of(capacity) > fitted_pool {
+        capacity -= 1;
+    }
+    capacity
+}
+
 fn reserve_recurrent_serving_capacity(
     cache: &EitherCache,
     paged_attn_config: PagedAttentionConfig,
@@ -739,16 +752,29 @@ fn reserve_recurrent_serving_capacity(
     } else {
         requested_lanes
     };
-    let mut capacity = requested_capacity;
-    for device in budget(requested_capacity)? {
+    // prefix snapshots never take a sequence's slot: a set count comes on top of the sequences, never past the initial
+    // pool's size; without one the initial pool's spare slots serve them
+    let pool_of = |capacity: usize| match paged_attn_config.recurrent_snapshot_slots {
+        Some(slots) => crate::kv_cache::recurrent_pool_capacity(
+            capacity - RECURRENT_GRAPH_PAD_SLOTS,
+            Some(slots),
+        ),
+        None => capacity,
+    };
+    // the whole pool fits beside the KV floor, so sequences give way before the snapshots overrun the requested context
+    let requested_pool = pool_of(requested_capacity);
+    let mut fitted_pool = requested_pool;
+    for device in budget(requested_pool)? {
         if device.capped {
             let slot = RecurrentSlotBytes {
                 layout_lanes,
                 deferred: device.deferred_slot_bytes,
             };
-            capacity = capacity.min(automatic_recurrent_capacity_budget(device.budget, slot)?);
+            fitted_pool =
+                fitted_pool.min(automatic_recurrent_capacity_budget(device.budget, slot)?);
         }
     }
+    let capacity = capacity_beside_snapshots(requested_capacity, fitted_pool, pool_of);
     if capacity < requested_capacity {
         tracing::warn!(
             max_num_seqs = serving_capacity,
@@ -760,22 +786,13 @@ fn reserve_recurrent_serving_capacity(
     cache
         .hybrid()
         .set_fitted_serving_capacity(capacity - RECURRENT_GRAPH_PAD_SLOTS);
-    // prefix snapshots never take a sequence's slot: a set count comes on top of what the budget fitted, never past
-    // the initial pool's size; without one the initial pool's spare slots serve them
-    let pool_capacity = match paged_attn_config.recurrent_snapshot_slots {
-        Some(slots) => {
-            let pool = crate::kv_cache::recurrent_pool_capacity(
-                capacity - RECURRENT_GRAPH_PAD_SLOTS,
-                Some(slots),
-            );
-            cache.hybrid().set_recurrent_capacity_floor(pool);
-            pool
-        }
-        None => capacity,
-    };
+    let pool_capacity = pool_of(capacity);
+    if paged_attn_config.recurrent_snapshot_slots.is_some() {
+        cache.hybrid().set_recurrent_capacity_floor(pool_capacity);
+    }
     let checkpoint_lanes = if auto_lanes {
         let mut lanes = paged_attn_config.recurrent_checkpoint_lanes;
-        for device in budget(capacity)? {
+        for device in budget(pool_capacity)? {
             lanes = lanes.min(automatic_recurrent_checkpoint_lane_budget(device.budget)?);
         }
         lanes
@@ -1809,10 +1826,11 @@ mod tests {
     use super::{
         ModelForwardContext, RECURRENT_GRAPH_PAD_SLOTS, RecurrentCheckpointBudget,
         RecurrentReservationInputs, RecurrentSlotBytes, automatic_recurrent_capacity_budget,
-        automatic_recurrent_checkpoint_lane_budget, effective_recurrent_checkpoint_lanes,
-        next_pipeline_prompt_chunk_group, prompt_chunk_is_final, recurrent_batch_kind_for_input,
-        recurrent_kv_floor_bytes, reserve_recurrent_serving_capacity, resolve_lora_execution,
-        should_sample_step, should_try_speculative_sampling,
+        automatic_recurrent_checkpoint_lane_budget, capacity_beside_snapshots,
+        effective_recurrent_checkpoint_lanes, next_pipeline_prompt_chunk_group,
+        prompt_chunk_is_final, recurrent_batch_kind_for_input, recurrent_kv_floor_bytes,
+        reserve_recurrent_serving_capacity, resolve_lora_execution, should_sample_step,
+        should_try_speculative_sampling,
     };
     use crate::gdn::RecurrentBatchKind;
     use crate::model::{ForwardCache, LogitsSelection};
@@ -2075,6 +2093,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(bytes, 977 * MIB);
+    }
+
+    #[test]
+    fn snapshot_slots_come_out_of_the_fitted_pool_before_the_kv_floor() {
+        let pad = RECURRENT_GRAPH_PAD_SLOTS;
+        let pool_of =
+            |capacity: usize| crate::kv_cache::recurrent_pool_capacity(capacity - pad, Some(1));
+        let requested = 4 + pad;
+        // the pool holds the sequences, the pad and one snapshot slot; a fit one short of that drops a sequence
+        assert_eq!(
+            capacity_beside_snapshots(requested, pool_of(requested), pool_of),
+            requested
+        );
+        assert_eq!(
+            capacity_beside_snapshots(requested, pool_of(requested) - 1, pool_of),
+            requested - 1
+        );
+        assert!(pool_of(capacity_beside_snapshots(requested, 4, pool_of)) <= 4);
+        // a fit below one sequence's pool still serves one sequence
+        assert_eq!(capacity_beside_snapshots(requested, 0, pool_of), pad + 1);
+        // without snapshot slots the pool is the sequences
+        assert_eq!(
+            capacity_beside_snapshots(requested, 3 + pad, |capacity| capacity),
+            3 + pad
+        );
     }
 
     #[test]

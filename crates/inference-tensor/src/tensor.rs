@@ -2159,6 +2159,31 @@ impl Tensor {
         ))))
     }
 
+    /// The tensor in pinned host memory mapped into `device`, from the host or that device; `None` off CUDA. A host
+    /// tensor goes there directly, never through VRAM.
+    #[cfg(feature = "cuda")]
+    pub fn to_mapped_host_on(&self, device: &Device) -> Result<Option<Tensor>> {
+        let Device::Cuda(cuda) = device else {
+            return Ok(None);
+        };
+        if self.device().is_cuda() {
+            return self.to_mapped_host();
+        }
+        let tensor = self.contiguous()?;
+        let (storage, layout) = tensor.storage_and_layout();
+        let Storage::Cpu(cpu) = &*storage else {
+            return Ok(None);
+        };
+        if layout.start_offset() != 0 {
+            crate::bail!("to_mapped_host_on needs a tensor that starts its storage");
+        }
+        let mapped = cuda.mapped_host_from_cpu(cpu)?;
+        Ok(Some(Tensor::from((
+            Storage::Cuda(mapped),
+            tensor.shape().clone(),
+        ))))
+    }
+
     /// If the target device is the same as the tensor device, only a shallow copy is performed.
     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
         if self.device().same_device(device) {

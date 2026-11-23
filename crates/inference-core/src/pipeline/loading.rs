@@ -516,6 +516,8 @@ const OFFLOAD_RUNTIME_RESERVE_BYTES: usize = 1 << 30;
 // The paged cache an `auto` cache becomes when MoE experts leave the GPU: its room goes to cached experts, and 3-bit
 // K and V cost nothing measurable on the hybrid models tried (qwen4exp investigation Run 35)
 const OFFLOAD_CACHE_TYPE: crate::PagedCacheType = crate::PagedCacheType::Quant { k: 3, v: 3 };
+// the untied output head as the weight sources name it (GGUF `output.weight`, an HF `lm_head`)
+const UNTIED_HEAD_TENSOR: &str = "lm_head.weight";
 
 struct ExpertCachePlan<'a> {
     sizing: super::isq_flow::AutoDeviceMapSizingInputs<'a>,
@@ -1353,6 +1355,11 @@ fn mtp_head_expert_overrides(
 
 /// Whether the config declares its head untied from the token embedding (on the model or its text model), so the
 /// embedding can leave the device without the head reading it over the bus.
+// a GGUF's synthesized config rarely states the tie, but its own output head shows the embedding is not the head
+fn head_is_untied(config: &str, source_contains: impl Fn(&str) -> bool) -> bool {
+    config_unties_embeddings(config) || source_contains(UNTIED_HEAD_TENSOR)
+}
+
 fn config_unties_embeddings(config: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(config) else {
         return false;
@@ -1398,12 +1405,6 @@ pub(crate) fn open_load_session(
         available_devices,
     } = resolve_load_devices(mapped.model_config(config)?.as_ref(), device, write_uqff)?;
     let distributed = tensor_parallelism.is_enabled();
-    let embeddings_on_host = embeddings_on_host
-        && device.is_cuda()
-        && !write_uqff
-        && !distributed
-        && in_situ_quant.is_none()
-        && config_unties_embeddings(config);
     let moe_expert_cache =
         moe_expert_cache.filter(|_| device.is_cuda() && !write_uqff && !distributed);
     let WeightSources {
@@ -1411,6 +1412,17 @@ pub(crate) fn open_load_session(
         prepared: prepared_weight_source,
         combined: weight_source,
     } = open_weight_sources(uqff_files, prepared_weight_source)?;
+    let untied = head_is_untied(config, |name| {
+        weight_source
+            .as_ref()
+            .is_some_and(|source| source.contains(name))
+    });
+    let embeddings_on_host = embeddings_on_host
+        && device.is_cuda()
+        && !write_uqff
+        && !distributed
+        && in_situ_quant.is_none()
+        && untied;
     // a cache holding every expert of the largest layer is the resident load
     let largest_layer_experts = match weight_source.as_ref() {
         Some(source) => source
@@ -1820,6 +1832,17 @@ mod tests {
         ));
         assert!(!config_unties_embeddings(r#"{"hidden_size": 8}"#));
         assert!(!config_unties_embeddings("not json"));
+    }
+
+    #[test]
+    fn a_checkpoint_with_its_own_output_head_lets_the_embedding_leave_the_device() {
+        let gguf_config = r#"{"hidden_size": 8}"#;
+        assert!(head_is_untied(gguf_config, |name| name == UNTIED_HEAD_TENSOR));
+        assert!(!head_is_untied(gguf_config, |_| false));
+        assert!(!head_is_untied(
+            r#"{"tie_word_embeddings": true}"#,
+            |name| { name == "model.embed_tokens.weight" }
+        ));
     }
 
     fn paths_with_gen_conf(gen_conf: PathBuf) -> crate::pipeline::LocalModelPaths<PathBuf> {

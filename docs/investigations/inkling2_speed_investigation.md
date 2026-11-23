@@ -1407,3 +1407,42 @@ The growth is gone. The flat ~340 MB is mostly what a first request creates (cuB
 pool), which a fresh process pays after its sizing; one 256 MB chunk stays pinned by ~24 KB not traced, and the next
 model's weights reuse it (its pool ends 32 MB larger). The desktop's share of the card moved 770 -> 1270 MB during the
 session, which is why drafts 7 at 229,376 stopped fitting even fresh: that margin is ~100 MB.
+
+## Run 48 - 2026-11-23 23:00
+
+Context room from the token embedding and the drafter's `markov_w1` (HyperInkling keeps both in host memory). Recipe C
++ drafter at drafts 7, q8 KV, fresh process per load, 4 sequences asked for, desktop holding ~1.2 GB of the card.
+
+The embedding already had a mapped host path (`embeddings_on_host`, on by default), but the load only took it when the
+config says `tie_word_embeddings: false`, and a GGUF's synthesized config rarely states the tie: no GGUF model ever
+took it (Inkling's `token_embd`, Q6_K 362 MiB, sat in VRAM). The gate now also accepts the checkpoint's own output
+head (`lm_head.weight`, GGUF `output.weight`). Loaded at 131,072, the process used 20,310 MiB against master's 20,662.
+
+That alone moved the largest context from 229,376 to 237,568, not further: the freed memory went to recurrent
+sequence slots. The recurrent planner fits the pool beside the requested context's KV (the floor), but counted only
+the sequences and the graph pad; the prefix snapshot slot came on top after the fit, ~140 MB unbudgeted, so the KV
+sizer came up ~117 MB short (`requires 4590 MB but only 4473 MB`, at 245,760, while the planner had fitted 4
+sequences). The fit now takes the whole pool, snapshots included, and drops sequences until it fits; the checkpoint
+lane budget reads the pool too (`capacity_beside_snapshots`).
+
+`markov_w1` (`[201024, 256]` BF16, 103 MB, one row read a draft) loads from the host weights straight into mapped
+host memory on CUDA (`Tensor::to_mapped_host_on`; the drafter loads after the cache is sized, so it is never staged in
+VRAM), and the drafter's reservation drops it (`DFlashConfig::host_bytes`).
+
+```
+                         largest context (fresh)   sequences at it   decode, 300 tok (3 runs)
+master                   229,376                   4                 138.9 142.1 142.3 (at 221,184)
+embedding gate           237,568                   -
++ pool fit               253,952                   1 (2 at 245,760)
++ markov_w1 on host      262,144                   1 (2 at 253,952)  148.4 160.5 154.2
+  drafter q8_0           262,144                   1                 150.8 162.6 159.7
+```
+
+Greedy output is unchanged: master and branch give the same two texts (this setup alternates between two across
+runs). The decode rise is not from these changes (they move no hot reads off the device that a step waits on: one
+embedding row and one `w1` row a draft cross PCIe); a 1-sequence pool is the likely difference, unmeasured.
+Desktop use swings ~50 MB between loads, so a context within ~100 MB of its limit can fail and then load.
+
+Drafter weights below 8 bits (HyperInkling's INT4): Run 17 measured q4k accepting 313 / 178 against bf16's 317 / 177
+and no faster; the projections are under ~450 MB at BF16 (606 MiB drafter less `markov_w1` and the small tensors), so
+q4k over q8_0 frees ~100 MB, ~5K tokens, for a measured acceptance loss. Not pursued.

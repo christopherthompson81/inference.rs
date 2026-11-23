@@ -187,6 +187,8 @@ pub fn reserve_external_mtp_memory_with_runtime(
     }
     #[cfg_attr(not(feature = "drafters"), allow(unused_mut))]
     let mut drafter_runtime = 0usize;
+    #[cfg_attr(not(feature = "drafters"), allow(unused_mut))]
+    let mut drafter_host = 0usize;
     #[cfg(feature = "drafters")]
     let local_mtp = MtpConfig {
         model: Some(resolve_mtp_path(mtp_config)?.to_string_lossy().into_owned()),
@@ -208,6 +210,7 @@ pub fn reserve_external_mtp_memory_with_runtime(
             .with_speculative_query_rows(drafts + 1);
         cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
         drafter_runtime = dflash_config.runtime_bytes(dtype, device);
+        drafter_host = dflash_config.host_bytes(dtype, device);
         // a full-attention drafter keeps its context in the target's blocks, which only the CUDA kernels read
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if device.is_cuda()
@@ -217,6 +220,7 @@ pub fn reserve_external_mtp_memory_with_runtime(
         }
     }
     let bytes = external_weight_size_in_bytes(mtp_config, dtype)?
+        .saturating_sub(drafter_host)
         .checked_add(drafter_runtime)
         .ok_or_else(|| anyhow::anyhow!("external MTP memory reservation overflow"))?;
     #[cfg(all(feature = "cuda", feature = "drafters", target_family = "unix"))]
