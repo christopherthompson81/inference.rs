@@ -6,6 +6,8 @@ use std::collections::{BTreeSet, HashMap};
 
 /// The largest open ring `fill_open_rings` closes, in edges
 pub const MAX_RING: usize = 12;
+/// The longest boundary loop [`close_loops`] closes by default, in edges
+pub const MAX_LOOP: usize = 64;
 const MIN_RING: usize = 4;
 // a triangle at most this share of the ring's squared extent counts as degenerate
 const DEGENERATE: f64 = 1e-9;
@@ -223,6 +225,51 @@ fn min_area(ring: &[u32], positions: &[[f32; 3]]) -> Vec<[u32; 3]> {
     tris
 }
 
+/// Closes the boundary loops (edges of one face) of up to `max_edges` edges with a minimum-area triangulation each: a
+/// crack zips shut, a hole fills, and no vertex is added. Rims that branch (a vertex with four boundary edges) are walked
+/// edge by edge and cut into simple loops wherever the walk comes back to a vertex. The new faces, to be wound with the
+/// rest by [`orient`].
+pub fn close_loops(faces: &[[u32; 3]], positions: &[[f32; 3]], max_edges: usize) -> Vec<[u32; 3]> {
+    let mut count: HashMap<(u32, u32), u32> = HashMap::new();
+    for f in faces {
+        for (x, y) in [(f[0], f[1]), (f[1], f[2]), (f[2], f[0])] {
+            *count.entry(key(x, y)).or_default() += 1;
+        }
+    }
+    let mut rim: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut open: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for (&(a, b), _) in count.iter().filter(|&(_, &c)| c == 1) {
+        rim.entry(a).or_default().push(b);
+        rim.entry(b).or_default().push(a);
+        open.insert((a, b));
+    }
+    for next in rim.values_mut() {
+        next.sort_unstable();
+    }
+    let mut added = Vec::new();
+    while let Some(&(a, b)) = open.iter().next() {
+        open.remove(&(a, b));
+        // the walk so far; a vertex met again closes the loop since it
+        let mut path = vec![a, b];
+        let mut at = b;
+        while let Some(&next) = rim[&at].iter().find(|&&n| open.contains(&key(at, n))) {
+            open.remove(&key(at, next));
+            if let Some(i) = path.iter().position(|&v| v == next) {
+                let ring = path.split_off(i);
+                if ring.len() >= 3 && ring.len() <= max_edges {
+                    added.extend(min_area(&ring, positions));
+                }
+                if path.is_empty() {
+                    break;
+                }
+            }
+            path.push(next);
+            at = next;
+        }
+    }
+    added
+}
+
 fn cross(u: [f64; 3], w: [f64; 3]) -> [f64; 3] {
     [
         u[1] * w[2] - u[2] * w[1],
@@ -362,6 +409,32 @@ mod tests {
                 .sum::<f32>();
             assert!(out > 0.0, "face {a} {b} {c} points inward");
         }
+    }
+
+    #[test]
+    fn a_cube_missing_its_top_is_closed_without_new_vertices() {
+        let positions: Vec<[f32; 3]> = (0..8)
+            .map(|i| [(i & 1) as f32, (i >> 1 & 1) as f32, (i >> 2) as f32])
+            .collect();
+        // two triangles on each side but the top (z = 1)
+        let sides = [
+            [0, 1, 3],
+            [0, 3, 2],
+            [0, 4, 5],
+            [0, 5, 1],
+            [0, 2, 6],
+            [0, 6, 4],
+            [1, 5, 7],
+            [1, 7, 3],
+            [2, 3, 7],
+            [2, 7, 6],
+        ];
+        let closing = close_loops(&sides, &positions, MAX_LOOP);
+        assert_eq!(closing.len(), 2);
+        assert!(closing.iter().flatten().all(|&v| v >= 4));
+        let mut all: Vec<[u32; 3]> = sides.to_vec();
+        all.extend(closing);
+        assert!(close_loops(&all, &positions, MAX_LOOP).is_empty());
     }
 
     #[test]

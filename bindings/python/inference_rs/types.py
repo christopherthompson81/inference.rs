@@ -1480,6 +1480,7 @@ class ImageTo3dJob:
 class ImageToMeshJob:
     """LATO.2's mesh (artist-like topology, untextured) of the object in the job's one image."""
 
+    close_loops: int | None = None
     placement: Placement | None = None
     remove_background: bool | None = None
     seed: int | None = None

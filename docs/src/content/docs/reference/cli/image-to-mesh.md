@@ -24,6 +24,7 @@ inference image-to-mesh [OPTIONS] --image <IMAGE> --out <OUT>
 | `--topology-steps <TOPOLOGY_STEPS>` | `50` | The topology flow's sampling steps |
 | `--structure-steps <STRUCTURE_STEPS>` | `25` | The scaffold flow's sampling steps |
 | `--max-ring <MAX_RING>` | `12` | Fill open rings of up to this many edges (below 4: leave the holes) |
+| `--close-loops <CLOSE_LOOPS>` | `64` | Then close the boundary loops (holes and cracks) of up to this many edges, adding no vertices (below 3: none) |
 | `--lato2 <LATO2>` |  | The LATO.2 folder (its .pt checkpoints); fetched from 0x4c48/LATO.2 when unset |
 | `--trellis-large <TRELLIS_LARGE>` |  | The TRELLIS-image-large folder (its structure flow and decoder); fetched when unset |
 | `--dinov2 <DINOV2>` |  | The DINOv2 ViT-L/14-reg folder; fetched from facebook/dinov2-with-registers-large when unset |

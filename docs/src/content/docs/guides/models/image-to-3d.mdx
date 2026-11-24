@@ -99,7 +99,9 @@ vertices) samples a latent per vertex that the topology VAE turns into a logit f
 are the edges, every edge triangle a face, and chordless open rings of up to 12 edges are filled by a minimum-area
 triangulation. The reference leaves each face wound in index order, so about half point inward; here each face whose
 normal leads out of the mesh one way and not the other takes that side, and the rest take the winding of their
-neighbours (see the investigation log's Run 3).
+neighbours (see the investigation log's Run 3). The holes the ring filling leaves, mostly long cracks where the
+predicted surface fails to join, are then closed loop by loop (Run 4); what stays open is mostly the rims of nested
+inner layers, which other surface covers.
 
 ```bash
 inference image-to-mesh --image chair.jpg --out chair/
@@ -115,6 +117,7 @@ inference image-to-mesh --image chair.png --out chair/ --vertices 1000 --seed 3
 | `--vertex-steps`, `--vertex-guidance` | 24, 3 | V-Flow's Euler steps and classifier-free guidance strength (0: none) |
 | `--topology-steps` | 50 | T-Flow's Euler steps (no guidance) |
 | `--max-ring` | 12 | Fill open rings of up to this many edges (below 4: leave the holes) |
+| `--close-loops` | 64 | Then close the boundary loops (holes and cracks) of up to this many edges, each by a minimum-area triangulation of its rim, adding no vertices (below 3: none; not in the reference) |
 | `--lato2`, `--trellis-large`, `--dinov2`, `--birefnet` | fetched | Local checkpoint folders (`0x4c48/LATO.2`, `microsoft/TRELLIS-image-large`, `facebook/dinov2-with-registers-large`, `ZhengPeng7/BiRefNet`) |
 | `--cpu` | off | Run on the CPU (very slow) |
 
@@ -138,7 +141,7 @@ connections where the predicted edges miss, as the authors note. To color one, g
 [`texture-mesh`](#painting-a-mesh).
 
 As a server job: `{"kind": "image_to_mesh"}` with one image, optionally `seed`, `vertices`, `remove_background`,
-`vertex_steps`, `topology_steps` and `placement`; outputs under `mesh/`. The web UI's 3D tab has it as **Low-poly mesh
+`vertex_steps`, `topology_steps`, `close_loops` and `placement`; outputs under `mesh/`. The web UI's 3D tab has it as **Low-poly mesh
 from an image**. With `--world-models <folder>`, checkpoints found there as `LATO.2`, `TRELLIS-image-large` and
 `dinov2-with-registers-large` are used instead of fetching them.
 
