@@ -88,3 +88,34 @@ order did not matter here; it could pick a different equal-length ring elsewhere
 
 Next: the whole pipeline at the shipped precision (f16 structure blocks, bf16 V-Flow/VAEs, f32 T-Flow) on the GPU,
 its time, and the CLI.
+
+## Run 3 - 2026-11-24 23:00
+
+Question: why does a served mesh look about half holes (a gnome figure, from the LAN web UI), when the reference's
+demo shows a few?
+
+The faces are written in index order (`u < v < w`, as the reference writes them), so their winding is arbitrary. A
+check of edges two faces share on the robot mesh: 5343 of 7580 walked the same way by both faces (inconsistent), while
+only 143 edges border a single face. The viewer's single-sided material culls the inward half; the matplotlib previews
+used `|n . light|` shading and hid it. The reference's own output carries the same arbitrary winding.
+
+Measured with a z-buffered render that draws back faces black (`zbuf.py`, scratch), as the share of the object's pixels:
+
+| winding | robot (az 0.5 / 3.6) | gnome |
+|-|-|-|
+| as generated (the reference's order) | 0.479 / 0.518 | 0.479 / 0.490 |
+| spread across two-face edges, each piece flipped by its signed volume | 0.248 / 0.221 | |
+| the same, flipped by normals against the piece's center | 0.248 / 0.221 | |
+| per piece, ray parity along a few normals | 0.147 / 0.148 | |
+| spread stopping at folds (normals past 120 degrees), escape vote per piece | 0.139 / 0.145 | |
+| every face with a clear escape vote decides itself, the rest spread from them | 0.006 / 0.001 | 0.021 / 0.007 |
+
+Dead ends: spreading the winding is consistent across every edge (0 inconsistent afterwards) yet still turns regions
+inside out, because the predicted connectivity folds back on itself and joins nested shells: the largest robot piece
+(1565 faces) had 376 faces whose normal escapes the mesh outward and 354 inward. Ray parity counts crossings of
+interpenetrating parts (the arms through the torso) and flipped the torso wrong.
+
+What works: per face, a ray from its center along its normal and one against it; a face where exactly one escapes the
+mesh takes that side (2199 of 5129 robot faces decide this way); the enclosed rest take the winding of a decided
+neighbour across an edge only the two share. The GLB is now also double-sided, so a face this still gets wrong shows
+instead of leaving a hole. Cost: brute-force ray tests on all cores, well under a second at these face counts.

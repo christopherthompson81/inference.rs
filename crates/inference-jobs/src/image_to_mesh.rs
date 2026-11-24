@@ -113,7 +113,8 @@ pub fn to_obj(mesh: &Mesh) -> String {
     out
 }
 
-/// The mesh of the object in `image` into `out_dir`: `model.glb` (untextured), `mesh.obj` (both y up, in the unit cube
+/// The mesh of the object in `image` into `out_dir`: `model.glb` (untextured, double-sided: the faces are wound outward
+/// where that can be told, and a wrong one still shows), `mesh.obj` (both y up, in the unit cube
 /// around the origin), `condition.png` (the crop the models see) and `meta.json`.
 pub fn generate_mesh_on(
     models: &ImageToMeshModels,
@@ -148,7 +149,7 @@ pub fn generate_mesh_on(
     };
     std::fs::write(
         out_dir.join(GLB_FILE),
-        to_glb(&z_up, &vec![SURFACE; mesh.vertices.len()]),
+        to_glb(&z_up, &vec![SURFACE; mesh.vertices.len()], true),
     )?;
     std::fs::write(out_dir.join(OBJ_FILE), to_obj(mesh))?;
     let report = ImageToMeshReport {
