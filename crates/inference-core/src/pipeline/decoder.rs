@@ -161,16 +161,14 @@ impl DecoderModel {
     ) -> inference_tensor::Result<bool> {
         match self {
             Self::Text(model) => model.set_control_vectors(set),
-            Self::Multimodal(_) => {
-                inference_tensor::bail!("control vectors steer text models; this one is multimodal")
-            }
+            Self::Multimodal(model) => model.set_control_vectors(set),
         }
     }
 
     fn control_vectors(&self) -> inference_nn::control_vectors::ControlVectorSet {
         match self {
             Self::Text(model) => model.control_vectors(),
-            Self::Multimodal(_) => Default::default(),
+            Self::Multimodal(model) => model.control_vectors(),
         }
     }
 
@@ -1356,14 +1354,14 @@ impl Pipeline for DecoderPipeline {
     fn begin_layer_capture(&self) -> bool {
         match &self.model {
             DecoderModel::Text(model) => model.begin_layer_capture(),
-            DecoderModel::Multimodal(_) => false,
+            DecoderModel::Multimodal(model) => model.begin_layer_capture(),
         }
     }
 
     fn take_layer_capture(&self) -> Result<Option<Vec<inference_tensor::Tensor>>> {
         Ok(match &self.model {
             DecoderModel::Text(model) => model.take_layer_capture()?,
-            DecoderModel::Multimodal(_) => None,
+            DecoderModel::Multimodal(model) => model.take_layer_capture()?,
         })
     }
 

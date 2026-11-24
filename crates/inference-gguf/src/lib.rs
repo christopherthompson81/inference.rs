@@ -15,6 +15,7 @@ pub mod granite_multimodal_bindings;
 pub mod idefics3_bindings;
 mod inkling2_bindings;
 mod inkling2_checkpoint;
+pub mod inkling2_vision_bindings;
 pub use inkling2_bindings::{
     Inkling2GgufTensor, inkling2_gguf_tensor, official_checkpoint_experts,
 };

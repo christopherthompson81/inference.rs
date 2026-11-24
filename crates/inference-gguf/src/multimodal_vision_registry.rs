@@ -48,6 +48,7 @@ pub enum NativeMultimodalGgufFamily {
     Granite4Vision,
     GraniteSpeech,
     Idefics3,
+    Inkling2,
     Mistral3,
     Llama4,
     Lfm2Vl,
@@ -98,6 +99,7 @@ pub fn describes_own_config(architecture: &str, projector: &str) -> bool {
             NativeMultimodalGgufFamily::AudioFlamingo3
                 | NativeMultimodalGgufFamily::DeepseekOcr
                 | NativeMultimodalGgufFamily::GlmAsr
+                | NativeMultimodalGgufFamily::Inkling2
                 | NativeMultimodalGgufFamily::MERaLiON2
                 | NativeMultimodalGgufFamily::NemotronOmni
                 | NativeMultimodalGgufFamily::NemotronV2Vl
@@ -120,6 +122,7 @@ impl NativeMultimodalGgufFamily {
             Self::Granite4Vision => MultimodalLoaderType::Granite4Vision,
             Self::GraniteSpeech => MultimodalLoaderType::GraniteSpeech,
             Self::Idefics3 => MultimodalLoaderType::Idefics3,
+            Self::Inkling2 => MultimodalLoaderType::Inkling2Vl,
             Self::Mistral3 => MultimodalLoaderType::Mistral3,
             Self::Llama4 => MultimodalLoaderType::Llama4,
             Self::Lfm2Vl => MultimodalLoaderType::Lfm2Vl,
@@ -141,6 +144,10 @@ impl NativeMultimodalGgufFamily {
             Self::AudioFlamingo3 => synthesize_audio_flamingo3_config(archive).map(Some),
             Self::DeepseekOcr => synthesize_deepseek_ocr_config(archive).map(Some),
             Self::GlmAsr => synthesize_glm_asr_config(archive).map(Some),
+            Self::Inkling2 => {
+                super::inkling2_vision_bindings::synthesize_inkling2_vision_config(archive)
+                    .map(Some)
+            }
             #[cfg(any(test, feature = "models-gemma"))]
             Self::MERaLiON2 => synthesize_meralion2_config(archive).map(Some),
             Self::NemotronOmni | Self::NemotronV2Vl => {
@@ -170,6 +177,8 @@ impl NativeMultimodalGgufFamily {
             | Self::Granite4Vision
             | Self::GraniteSpeech
             | Self::Idefics3
+            // no rotary positions in the text model
+            | Self::Inkling2
             | Self::Mistral3
             | Self::Llama4
             | Self::MuseGlimmer
@@ -201,6 +210,9 @@ impl NativeMultimodalGgufFamily {
             Self::Granite4Vision => build_granite4_vision_bindings(archive),
             Self::GraniteSpeech => build_granite_speech_bindings(archive),
             Self::Idefics3 => build_idefics3_bindings(archive),
+            Self::Inkling2 => {
+                super::inkling2_vision_bindings::build_inkling2_vision_bindings(archive)
+            }
             Self::Mistral3 => build_mistral3_bindings(archive),
             Self::Llama4 => build_llama4_bindings(archive),
             Self::Lfm2Vl => build_lfm2_vl_bindings(archive),
@@ -218,7 +230,7 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 23] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 24] = [
     (
         deepseek_ocr_bindings::PROJECTOR,
         deepseek_ocr_bindings::TEXT_ARCHITECTURE,
@@ -247,6 +259,11 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 23] = [
         NativeMultimodalGgufFamily::GraniteSpeech,
     ),
     ("idefics3", "llama", NativeMultimodalGgufFamily::Idefics3),
+    (
+        super::inkling2_vision_bindings::PROJECTOR,
+        super::inkling2_vision_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::Inkling2,
+    ),
     ("pixtral", "mistral3", NativeMultimodalGgufFamily::Mistral3),
     (
         qwen2_audio_bindings::AF3_PROJECTOR,

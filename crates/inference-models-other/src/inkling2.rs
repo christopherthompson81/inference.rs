@@ -1825,9 +1825,12 @@ impl Model {
     }
 
     pub fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
+        self.forward_embeds(self.embed(input_ids)?, ctx)
+    }
+
+    // `x` is the normed token embeddings, image rows already in place
+    pub fn forward_embeds(&self, x: Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         let cfg = &self.cfg;
-        let x = self.embed_tokens.embedding_forward(input_ids, self.dtype)?;
-        let x = self.embed_norm.forward(&x)?;
         let (b, t, _) = x.dims3()?;
         let recurrent = ctx
             .recurrent_metadata()

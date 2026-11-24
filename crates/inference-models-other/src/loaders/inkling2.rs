@@ -16,7 +16,7 @@ impl NormalModelLoader for Inkling2Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = parse(config)?;
+        let cfg = inkling2_text_config(config)?;
         Ok(Box::new(crate::inkling2::Model::new(
             &cfg,
             vb,
@@ -26,7 +26,7 @@ impl NormalModelLoader for Inkling2Loader {
     }
 
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        Ok(Box::new(parse(config)?))
+        Ok(Box::new(inkling2_text_config(config)?))
     }
 
     // the paged cache is read by the fused CUDA attention only
@@ -60,7 +60,7 @@ impl DeviceMappedModelLoader for Inkling2Loader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = parse(config)?;
+        let cfg = inkling2_text_config(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -80,7 +80,7 @@ impl DeviceMappedModelLoader for Inkling2Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = parse(config)?;
+        let cfg = inkling2_text_config(config)?;
         let hidden = cfg.hidden_size;
         let q_dim = cfg.num_attention_heads * cfg.head_dim;
         let kv_dim = cfg.num_key_value_heads * cfg.head_dim;
@@ -96,13 +96,13 @@ impl DeviceMappedModelLoader for Inkling2Loader {
 
     // the weight layers; the cache's slots (each pass of the looped core its own) are `model_config`'s
     fn num_layers(&self, config: &str) -> Result<usize> {
-        Ok(parse(config)?.num_hidden_layers)
+        Ok(inkling2_text_config(config)?.num_hidden_layers)
     }
 
     // a verify row's logits (f32, the softcap's copies), the four taps and each slot's conv stash (its state and
     // inputs, f32)
     fn speculative_row_bytes(&self, config: &str) -> Result<Option<usize>> {
-        let cfg = parse(config)?;
+        let cfg = inkling2_text_config(config)?;
         let f32 = DType::F32.size_in_bytes();
         let logits = VERIFY_LOGIT_COPIES * cfg.vocab_size * f32;
         let taps = VERIFY_TAPS * cfg.hidden_size * f32;
@@ -130,7 +130,7 @@ impl DeviceMappedModelLoader for Inkling2Loader {
     }
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = parse(config)?;
+        let cfg = inkling2_text_config(config)?;
         Ok(Box::new(cfg.paged_cache_config(base_metadata(&cfg), None)))
     }
 
@@ -141,7 +141,7 @@ impl DeviceMappedModelLoader for Inkling2Loader {
         device: &inference_tensor::Device,
         paged: Option<crate::paged_attention::PagedKvLayout>,
     ) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = parse(config)?;
+        let cfg = inkling2_text_config(config)?;
         let ring = cfg.window_ring(paged, device, DType::BF16);
         Ok(Box::new(
             cfg.paged_cache_config(base_metadata(&cfg), ring.as_ref()),
@@ -149,9 +149,9 @@ impl DeviceMappedModelLoader for Inkling2Loader {
     }
 }
 
-// the text model's config: the checkpoint's own `text_config` where it nests one beside the vision tower's, whose
-// experts' precisions (`hf_quant_config.json`) the checkpoint binding reads in place of its ModelOpt declaration
-fn parse(config: &str) -> Result<crate::inkling2::Config> {
+/// The text model's config: the checkpoint's own `text_config` where it nests one beside the vision tower's, whose
+/// experts' precisions (`hf_quant_config.json`) the checkpoint binding reads in place of its ModelOpt declaration.
+pub fn inkling2_text_config(config: &str) -> Result<crate::inkling2::Config> {
     let value: serde_json::Value = serde_json::from_str(config)?;
     match value.get("text_config") {
         Some(text) => {
