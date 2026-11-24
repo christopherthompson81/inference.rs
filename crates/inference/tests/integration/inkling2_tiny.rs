@@ -1242,18 +1242,26 @@ async fn the_checkpoint_drafter_keeps_greedy_output_on_a_q8_cache_on_cuda() -> a
     ensure_same_greedy(&drafted, &plain)
 }
 
-// a cache width the CUDA attention can't read fails the load, not every request after it
+// a packed cache (q4 here) serves plain and drafted decodes alike; K and V at different widths fail the load, not every
+// request after it
 #[tokio::test]
-async fn a_q3_cache_fails_the_load_on_cuda() -> anyhow::Result<()> {
+async fn a_q4_cache_keeps_drafted_output_and_mixed_widths_fail_the_load_on_cuda()
+-> anyhow::Result<()> {
     if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
         return Ok(());
     }
     let dir = drafter_checkpoint()?;
-    let q3 = inference::PagedCacheType::Quant { k: 3, v: 3 };
-    let error = paged_trace_on(&dir, Drafting::Off, chat("hi"), 1, q3)
+    let q4 = inference::PagedCacheType::Quant { k: 4, v: 4 };
+    let request = || chat("say something long");
+    let plain = paged_trace_on(&dir, Drafting::Off, request(), DRAFT_DECODE_LEN, q4).await?;
+    anyhow::ensure!(!plain.is_empty(), "a q4 cache decoded nothing");
+    let drafted = paged_trace_on(&dir, Drafting::Fixed, request(), DRAFT_DECODE_LEN, q4).await?;
+    ensure_same_greedy(&drafted, &plain)?;
+    let mixed = inference::PagedCacheType::Quant { k: 8, v: 4 };
+    let error = paged_trace_on(&dir, Drafting::Off, chat("hi"), 1, mixed)
         .await
-        .expect_err("a q3 cache loads");
-    anyhow::ensure!(format!("{error:#}").contains("not q3/q3"), "{error:#}");
+        .expect_err("a q8/q4 cache loads");
+    anyhow::ensure!(format!("{error:#}").contains("not q8/q4"), "{error:#}");
     Ok(())
 }
 
