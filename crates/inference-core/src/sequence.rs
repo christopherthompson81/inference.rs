@@ -257,9 +257,12 @@ pub struct Sequence {
     sequence_stepping_type: SeqStepType,
     pub(crate) return_raw_logits: bool,
     pub(crate) raw_logits_on_device: bool,
+    pub(crate) capture_layer_outputs: bool,
     token_offset: usize,
     eos_tokens: Vec<u32>,
     adapter: Option<AdapterLease>,
+    // the control vectors the model ran under when the sequence started (`ControlVectorSet::hash`)
+    control_vector_hash: Option<u64>,
 
     // Multimodal data (images, diffusion settings, pixel caches)
     pub multimodal: MultimodalData,
@@ -458,9 +461,11 @@ impl Sequence {
             sequence_stepping_type,
             return_raw_logits,
             raw_logits_on_device: false,
+            capture_layer_outputs: false,
             token_offset: 0,
             eos_tokens,
             adapter: None,
+            control_vector_hash: None,
             total_prompt_time: None,
             total_completion_time: None,
             step_start_instant: None,
@@ -531,6 +536,31 @@ impl Sequence {
 
     pub fn id(&self) -> &usize {
         &self.id
+    }
+
+    pub(crate) fn set_control_vector_hash(&mut self, hash: Option<u64>) {
+        self.control_vector_hash = hash;
+        self.block_hash_revision = self.block_hash_revision.wrapping_add(1);
+    }
+
+    /// What the sequence's cached states depend on beyond its tokens and media: its adapter, its control vectors.
+    pub fn block_hash_keys(&self) -> Vec<inference_nn::paged_attention::block_hash::ExtraHashKey> {
+        use inference_nn::paged_attention::block_hash::ExtraHashKey;
+        self.adapter_generation()
+            .map(ExtraHashKey::AdapterGeneration)
+            .into_iter()
+            .chain(self.control_vector_hash.map(ExtraHashKey::ControlVectors))
+            .collect()
+    }
+
+    /// Whether the sequence's states depend on more than its tokens and media (an adapter, control vectors), so no
+    /// store that outlives the model's settings may keep them.
+    pub fn custom_states(&self) -> bool {
+        self.adapter_generation().is_some() || self.control_vector_hash.is_some()
+    }
+
+    pub fn control_vector_hash(&self) -> Option<u64> {
+        self.control_vector_hash
     }
 
     pub(crate) fn bind_adapter(&mut self, adapter: AdapterLease) {

@@ -417,6 +417,17 @@ INFERENCE_API inference_status inference_lora_adapter_load(const inference_engin
 INFERENCE_API inference_status inference_lora_adapter_unload(const inference_engine *engine, const char *request,
                                                             size_t request_len, inference_string **out_response);
 
+/* Control vectors: per-layer directions added to the residual stream after each layer (llama.cpp's
+ * --control-vector). Getting takes {"model"?} (or an empty request) and returns {"vectors": {"files", "layer_range"}};
+ * setting takes {"model"?, "vectors": {"files": [{"path", "scale"?}], "layer_range"?: [first, last]}} and returns the
+ * same. Empty "files" stops steering. Changing files or scales on a steered model rewrites its vectors in place and
+ * keeps its CUDA graphs. An unreadable file, one that does not fit the model, or a model that takes no control vectors
+ * is INFERENCE_ERR_INVALID_REQUEST with code "control_vectors_failed". */
+INFERENCE_API inference_status inference_control_vectors_get(const inference_engine *engine, const char *request,
+                                                             size_t request_len, inference_string **out_response);
+INFERENCE_API inference_status inference_control_vectors_set(const inference_engine *engine, const char *request,
+                                                             size_t request_len, inference_string **out_response);
+
 /* Generates images with a diffusion model (the POST /v1/images/generations body); out_response receives the image
  * list JSON. A "url" image is a PNG in the file store: its url is /v1/files/<id>/content, read with
  * inference_file_content. */

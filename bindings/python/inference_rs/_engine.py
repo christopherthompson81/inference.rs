@@ -392,6 +392,12 @@ class JsonEngine:
     def unload_lora_adapter(self, request_json: str) -> str:
         return self._call("inference_lora_adapter_unload", request_json)
 
+    def control_vectors(self, request_json: str = "{}") -> str:
+        return self._call("inference_control_vectors_get", request_json)
+
+    def set_control_vectors(self, request_json: str) -> str:
+        return self._call("inference_control_vectors_set", request_json)
+
     def image_generation(self, request_json: str) -> str:
         return self._call("inference_image_generation", request_json)
 

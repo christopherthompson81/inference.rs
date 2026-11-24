@@ -603,6 +603,11 @@ entry_points! {
     json inference_lora_adapter_unload =>
         |engine, request| engine.unload_lora_adapter_json(request).map_err(api_failure);
     /// Safety: as for `inference_chat`.
+    json inference_control_vectors_get => |engine, request| engine.control_vectors_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_control_vectors_set =>
+        |engine, request| engine.set_control_vectors_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
     json inference_image_generation => |engine, request| engine.image_generation_json(request).map_err(api_failure);
 }
 

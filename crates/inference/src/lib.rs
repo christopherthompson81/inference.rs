@@ -254,6 +254,7 @@ pub use inference_api as api;
 pub use inference_api::{
     Engine, EngineLoadError, EngineSpec, INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION,
     api_error::{ApiError, ApiErrorKind},
+    control_vector_derive::CONTROL_VECTOR_DIR_ENV,
     engine::{
         AgentPermission, AgentToolApproval, AgentToolApprovalDecision, AnyMoeSpec, CalledFunction,
         CodeExecutionConfig, CodeExecutionPermission, DiffusionLoaderType, EngineCallbacks,
@@ -287,6 +288,10 @@ pub use inference_api::{
         TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
         TranscriptionSegment, TranscriptionSessionRequest, TranscriptionTask, TranscriptionWord,
         VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
+    },
+    operations::{
+        ControlVectorFile, ControlVectors, ControlVectorsResponse, DerivedControlVector,
+        SetControlVectorsRequest,
     },
     response::{
         ChatCompletionChunkResponse, ChatCompletionResponse, ChunkChoice, Delta,

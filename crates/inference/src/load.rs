@@ -269,6 +269,35 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// Steers the model by a control vector file (llama.cpp's GGUF or safetensors, `direction.<layer>`) at
+        /// `scale`; several add up. On a loaded model, `Engine::set_control_vectors` changes them.
+        pub fn with_control_vector(
+            mut self,
+            path: impl AsRef<std::path::Path>,
+            scale: f32,
+        ) -> Self {
+            self.options
+                .runtime
+                .control_vectors
+                .get_or_insert_with(Default::default)
+                .files
+                .push($crate::ControlVectorFile {
+                    path: path.as_ref().to_string_lossy().into_owned(),
+                    scale,
+                });
+            self
+        }
+
+        /// Steers only layers `first..=last` (0-based) by the control vectors.
+        pub fn with_control_vector_layer_range(mut self, first: usize, last: usize) -> Self {
+            self.options
+                .runtime
+                .control_vectors
+                .get_or_insert_with(Default::default)
+                .layer_range = Some([first, last]);
+            self
+        }
+
         /// Whether a checkpoint whose fast paths read another format (Inkling 2's own) loads as that format,
         /// built from it once into a cache; on by default.
         pub fn with_load_recipes(mut self, load_recipes: bool) -> Self {

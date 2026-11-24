@@ -1,12 +1,12 @@
-//! Engine operations outside the request protocols: requantization, online calibration, agentic sessions and
-//! tokenization.
+//! Engine operations outside the request protocols: requantization, online calibration, control vectors, agentic
+//! sessions and tokenization.
 
 use either::Either;
 use futures::future::BoxFuture;
 pub use inference_core::{CalibrationAction, CalibrationStatus, SerializedSession};
 use inference_core::{
-    CalibrationRequest, DetokenizationRequest, InferenceRsError, RequantizeRequest, Request,
-    TokenizationRequest, parse_isq_value,
+    CalibrationRequest, ControlVectorRequest, DetokenizationRequest, InferenceRsError,
+    RequantizeRequest, Request, TokenizationRequest, parse_isq_value,
 };
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -19,6 +19,7 @@ const INVALID_SESSION: &str = "invalid_session";
 const INVALID_ISQ: &str = "invalid_isq";
 const CALIBRATION_FAILED: &str = "calibration_failed";
 const REQUANTIZE_FAILED: &str = "requantize_failed";
+const CONTROL_VECTORS_FAILED: &str = "control_vectors_failed";
 const TOKENIZATION_FAILED: &str = "tokenization_failed";
 
 #[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
@@ -164,6 +165,138 @@ async fn answer<T>(
         )),
         None => Err(ApiError::internal()),
     }
+}
+
+fn default_scale() -> f32 {
+    1.0
+}
+
+/// A control vector file (llama.cpp's GGUF, `direction.<layer>`, or a safetensors file with those names) and the
+/// scale its directions are added at.
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
+pub struct ControlVectorFile {
+    /// The file's path on the engine's host.
+    pub path: String,
+    #[serde(default = "default_scale")]
+    pub scale: f32,
+}
+
+/// A control vector derived on the loaded model from contrasting texts (llama.cpp's `cvector-generator` `mean`
+/// method): each positive text pairs with the negative one at its index, and the vector is their layer outputs' mean
+/// difference, normalized per layer. Derived once and cached, keyed on the model and the texts.
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
+pub struct DerivedControlVector {
+    pub positive: Vec<String>,
+    pub negative: Vec<String>,
+    #[serde(default = "default_scale")]
+    pub scale: f32,
+    /// `mean`, the only method so far, when absent.
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+/// The control vectors a model is steered by: each layer's output gains the files' (and derived vectors') directions
+/// for it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs
+/// on every pass. A derived vector is reported back as its cached file.
+#[derive(Debug, Clone, Default, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
+pub struct ControlVectors {
+    #[serde(default)]
+    pub files: Vec<ControlVectorFile>,
+    #[serde(default)]
+    pub derived: Vec<DerivedControlVector>,
+    /// The first and last layer steered (0-based, inclusive); every layer a file names when absent.
+    #[serde(default)]
+    pub layer_range: Option<[usize; 2]>,
+}
+
+impl ControlVectors {
+    pub(crate) fn to_set(&self) -> inference_core::control_vectors::ControlVectorSet {
+        inference_core::control_vectors::ControlVectorSet {
+            files: self
+                .files
+                .iter()
+                .map(|f| inference_core::control_vectors::ControlVectorFile {
+                    path: f.path.clone().into(),
+                    scale: f.scale,
+                })
+                .collect(),
+            layers: self.layer_range.map(|[first, last]| (first, last)),
+        }
+    }
+
+    fn of(set: &inference_core::control_vectors::ControlVectorSet) -> Self {
+        Self {
+            files: set
+                .files
+                .iter()
+                .map(|f| ControlVectorFile {
+                    path: f.path.to_string_lossy().into_owned(),
+                    scale: f.scale,
+                })
+                .collect(),
+            derived: Vec::new(),
+            layer_range: set.layers.map(|(first, last)| [first, last]),
+        }
+    }
+}
+
+/// Steers a model (the default one unless `model` names another) by `vectors` from its next step; empty `files`
+/// stops. Changing the files or their scales on a steered model rewrites its vectors in place, keeping its CUDA graphs.
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
+pub struct SetControlVectorsRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub vectors: ControlVectors,
+}
+
+/// Which model's control vectors to read: the default one when absent.
+#[derive(Debug, Clone, Default, inference_json::FromJson, Serialize, ToSchema)]
+pub struct ControlVectorsQuery {
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// The control vectors a model is steered by after the request.
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
+pub struct ControlVectorsResponse {
+    pub vectors: ControlVectors,
+}
+
+pub(crate) async fn control_vectors(
+    state: &SharedInferenceRsState,
+    model: Option<&str>,
+    vectors: Option<&ControlVectors>,
+) -> Result<ControlVectorsResponse, ApiError> {
+    let ask = |set| async move {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let request = Request::ControlVectors(ControlVectorRequest { set, response: tx });
+        send(state, model, request).await?;
+        answer(rx, CONTROL_VECTORS_FAILED).await
+    };
+    let set = match vectors {
+        // derived vectors become their cached files, derived on the model first where the cache lacks them
+        Some(vectors) if !vectors.derived.is_empty() => {
+            let model_name = ask(None).await?.model;
+            let mut resolved = vectors.clone();
+            for derived in &vectors.derived {
+                let path =
+                    crate::control_vector_derive::derived_file(state, model, &model_name, derived)
+                        .await?;
+                resolved.files.push(ControlVectorFile {
+                    path: path.to_string_lossy().into_owned(),
+                    scale: derived.scale,
+                });
+            }
+            resolved.derived.clear();
+            Some(resolved.to_set())
+        }
+        Some(vectors) => Some(vectors.to_set()),
+        None => None,
+    };
+    let state = ask(set).await?;
+    Ok(ControlVectorsResponse {
+        vectors: ControlVectors::of(&state.set),
+    })
 }
 
 pub(crate) async fn re_isq(

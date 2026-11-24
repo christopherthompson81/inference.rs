@@ -8,6 +8,8 @@ export interface Slot {
   kinds: ModelKind[];
   /** Offers the KV context length and MTP speculative decoding. */
   chat?: boolean;
+  /** Offers steering by a control vector (a text model's: the chat and code tabs share it). */
+  steer?: boolean;
   /** Offers a device, for the layout detector that runs beside the engine. */
   device?: boolean;
   /** Also takes a text GGUF with a projector beside it, which the inventory lists as text. */
@@ -25,6 +27,7 @@ export const SLOTS = {
     title: "Chat model",
     kinds: ["text", "multimodal"],
     chat: true,
+    steer: true,
     hint: "A GGUF (with its projector for images), a model directory, or a Hugging Face repo",
   },
   transcription: {
@@ -99,7 +102,37 @@ export interface SlotForm {
   cacheLayers: string;
   /** Whether the server loads this slot again when it starts. */
   loadAtStart: boolean;
+  /** Steering by a control vector derived from the texts below. */
+  steer?: boolean;
+  /** One text a line; line i pairs with line i of the other. */
+  steerPositive?: string;
+  steerNegative?: string;
+  /** The vector's scale: its directions are unit length, so about 4 nudges and 8 is strong; negative turns it. */
+  steerScale?: number;
+  /** `first-last` (0-based) to steer only those layers; "" steers every layer. */
+  steerLayers?: string;
 }
+
+/** The steering a slot's form sets up, or null when it sets none. */
+export function controlVectors(form: SlotForm): manager.ControlVectors | null {
+  const lines = (text: string | undefined) =>
+    (text ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+  const positive = lines(form.steerPositive);
+  const negative = lines(form.steerNegative);
+  if (!form.steer || positive.length === 0 || negative.length === 0) return null;
+  const vectors: manager.ControlVectors = {
+    derived: [{ positive, negative, scale: form.steerScale ?? DEFAULT_STEER_SCALE }],
+  };
+  const range = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(form.steerLayers ?? "");
+  if (range) vectors.layer_range = [Number(range[1]), Number(range[2])];
+  return vectors;
+}
+
+/** The scale a new slot's steering starts at. */
+export const DEFAULT_STEER_SCALE = 4;
 
 /** The KV cache storages a slot's form offers; quantized widths may differ for K and V. */
 export const CACHE_TYPES = ["auto", "f8e4m3", "q8", "q7", "q6", "q5", "q4", "q3", "q2"] as const;
@@ -253,6 +286,7 @@ class ManagerStore {
         cacheV,
         cacheLayers: request.paged_cache_layers ?? "",
         loadAtStart: kept.load_at_start,
+        ...steerFields(request.control_vectors),
       });
     }
     this.persistForms();
@@ -277,6 +311,8 @@ class ManagerStore {
       const cache = cacheType(form);
       if (cache) request.paged_cache_type = cache;
       if (form.cacheLayers.trim()) request.paged_cache_layers = form.cacheLayers.trim();
+      const vectors = spec.steer ? controlVectors(form) : null;
+      if (vectors) request.control_vectors = vectors;
     }
     if (spec.vad) {
       const vad = form.vad ?? this.vads[0]?.path ?? "";
@@ -376,6 +412,23 @@ class ManagerStore {
     this.changes++;
   }
 
+  /** Steers the slot's loaded model by its form's vectors from its next request, or stops when steering is off. */
+  async steer(slot: SlotId) {
+    this.persistForms();
+    const served = this.servedIn(slot);
+    if (!served) return;
+    this.activity[slot] = { busy: true, progress: null, error: null };
+    try {
+      await manager.setControlVectors(served.model_id, controlVectors(this.form(slot)) ?? {});
+      this.activity[slot] = { busy: false, progress: null, error: null };
+    } catch (e) {
+      this.activity[slot] = { busy: false, progress: null, error: e instanceof Error ? e.message : String(e) };
+      return;
+    }
+    // a slot the server keeps reloads steered as it is now
+    if (this.saved[SLOTS[slot].id]) await this.saveSettings(slot);
+  }
+
   async unload(slot: SlotId) {
     this.activity[slot] = { busy: true, progress: null, error: null };
     try {
@@ -387,6 +440,20 @@ class ManagerStore {
     await this.refresh();
     this.changes++;
   }
+}
+
+// a kept load's steering as the form's fields: its first derived vector (the form makes one)
+function steerFields(vectors: manager.ControlVectors | undefined): Partial<SlotForm> {
+  const derived = vectors?.derived?.[0];
+  if (!derived) return { steer: false };
+  const range = vectors?.layer_range;
+  return {
+    steer: true,
+    steerPositive: derived.positive.join("\n"),
+    steerNegative: derived.negative.join("\n"),
+    steerScale: derived.scale ?? DEFAULT_STEER_SCALE,
+    steerLayers: range ? `${range[0]}-${range[1]}` : "",
+  };
 }
 
 /** Whether `slot` can load `model`. */

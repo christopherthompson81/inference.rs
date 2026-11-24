@@ -148,7 +148,7 @@ pub(crate) fn engine_spec(inputs: EngineSpecInputs) -> Result<EngineSpec> {
     Ok(EngineSpec {
         model,
         model_id: inputs.model_id,
-        runtime: runtime_options_spec(inputs.runtime, model_runtime, inputs.throughput_logging),
+        runtime: runtime_options_spec(inputs.runtime, model_runtime, inputs.throughput_logging)?,
         agentic: agentic_spec(AgenticInputs {
             runtime: inputs.runtime,
             sandbox: inputs.sandbox,
@@ -168,8 +168,8 @@ pub(crate) fn runtime_options_spec(
     runtime: &RuntimeOptions,
     base: RuntimeSpec,
     throughput_logging: bool,
-) -> RuntimeSpec {
-    RuntimeSpec {
+) -> Result<RuntimeSpec> {
+    Ok(RuntimeSpec {
         max_seqs: Some(runtime.max_seqs),
         prefix_cache_n: Some(runtime.prefix_cache_n),
         prefix_cache_dir: path_string(runtime.prefix_cache_dir.as_deref()),
@@ -196,11 +196,16 @@ pub(crate) fn runtime_options_spec(
             .max_prefill_chunk_tokens
             .map(std::num::NonZeroUsize::get),
         embeddings_on_host: Some(!runtime.no_embeddings_on_host),
+        control_vectors: crate::args::control_vectors(
+            &runtime.control_vectors,
+            &runtime.control_vector_texts,
+            runtime.control_vector_layer_range.as_deref(),
+        )?,
         moe_expert_cache: runtime.moe_expert_cache,
         max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),
         throughput_logging: Some(throughput_logging),
         ..base
-    }
+    })
 }
 
 pub(crate) struct AgenticInputs<'a> {

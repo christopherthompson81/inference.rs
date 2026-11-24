@@ -181,6 +181,7 @@ fn build_model_specs(
             mtp: None,
             lazy: entry.lazy,
             pinned: entry.pinned,
+            control_vectors: None,
         });
     }
     Ok((specs, device))
@@ -225,7 +226,7 @@ fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
     Ok(EngineSpec {
         models,
         default_model_id: inputs.default_model_id,
-        runtime: runtime_options_spec(inputs.runtime, base, inputs.throughput_logging),
+        runtime: runtime_options_spec(inputs.runtime, base, inputs.throughput_logging)?,
         agentic: agentic_spec(AgenticInputs {
             runtime: inputs.runtime,
             sandbox: inputs.sandbox,

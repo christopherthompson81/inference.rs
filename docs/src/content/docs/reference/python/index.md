@@ -25,7 +25,7 @@ pip install -e bindings/python
 | [Chat and completions](/reference/python/chat/) | Chat completion, completion, embedding, rerank and decision requests and responses, tools and output formats. |
 | [Responses](/reference/python/responses/) | OpenResponses requests, resources and stream events. |
 | [Anthropic](/reference/python/anthropic/) | Anthropic Messages requests, responses and skill listings. |
-| [Models, adapters, files and skills](/reference/python/management/) | Model status and cache counters, the model manager, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls. |
+| [Models, adapters, files and skills](/reference/python/management/) | Model status and cache counters, the model manager, LoRA adapters, control vectors, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls. |
 | [Jobs](/reference/python/jobs/) | World generation and reconstruction jobs: what to run, their records, stages, previews, outputs and events. |
 | [Layout](/reference/python/layout/) | PP-DocLayoutV3 document layout detection, in process and over HTTP. |
 

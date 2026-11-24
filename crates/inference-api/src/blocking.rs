@@ -281,6 +281,18 @@ impl BlockingEngine {
         })
     }
 
+    pub fn control_vectors_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.control_vectors_json(&request).await
+        })
+    }
+
+    pub fn set_control_vectors_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.set_control_vectors_json(&request).await
+        })
+    }
+
     pub fn add_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.add_model_json(&request).await

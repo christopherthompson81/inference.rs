@@ -1363,6 +1363,29 @@ pub trait Pipeline:
         None
     }
 
+    /// Steers the model by `set` from its next step, or stops with an empty one.
+    fn set_control_vectors(
+        &mut self,
+        _set: inference_nn::control_vectors::ControlVectorSet,
+    ) -> Result<()> {
+        anyhow::bail!("this pipeline takes no control vectors")
+    }
+
+    /// The control vectors the model is steered by, empty when none are.
+    fn control_vectors(&self) -> inference_nn::control_vectors::ControlVectorSet {
+        Default::default()
+    }
+
+    /// Records each layer's output over the next forwards, unsteered; false for a model that takes no control vectors.
+    fn begin_layer_capture(&self) -> bool {
+        false
+    }
+
+    /// The outputs recorded since [`Pipeline::begin_layer_capture`], a tensor a layer.
+    fn take_layer_capture(&self) -> Result<Option<Vec<Tensor>>> {
+        Ok(None)
+    }
+
     /// The task adapters an embedding request may name.
     fn embedding_tasks(&self) -> Option<Arc<inference_nn::embedding::EmbeddingTasks>> {
         None

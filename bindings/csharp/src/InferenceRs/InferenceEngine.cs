@@ -402,6 +402,24 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_lora_adapter_unload));
     }
 
+    public string ControlVectors(string requestJson = "{}")
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_control_vectors_get(
+            engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_control_vectors_get));
+    }
+
+    public string SetControlVectors(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_control_vectors_set(
+            engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_control_vectors_set));
+    }
+
     public string ImageGeneration(string requestJson)
     {
         using var engine = Borrow();

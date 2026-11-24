@@ -119,6 +119,41 @@ pub async fn re_isq(
     json_response(engine.re_isq(request).await)
 }
 
+#[cfg_attr(test, utoipa::path(
+  get,
+  tag = "inference.rs",
+  path = "/control_vectors",
+  params(("model" = Option<String>, Query, description = "The model to report on; the default model when absent.")),
+  responses((status = 200, description = "The control vectors the model is steered by.", body = inference_api::operations::ControlVectorsResponse))
+))]
+pub async fn control_vectors(
+    OwnedEngine(engine): OwnedEngine,
+    QueryParams(query): QueryParams<inference_api::operations::ControlVectorsQuery>,
+) -> Response {
+    json_response(engine.control_vectors(query.model.as_deref()).await)
+}
+
+#[cfg_attr(test, utoipa::path(
+  post,
+  tag = "inference.rs",
+  path = "/control_vectors/set",
+  request_body = inference_api::operations::SetControlVectorsRequest,
+  responses(
+    (status = 200, description = "The model is steered by the vectors from its next step.", body = inference_api::operations::ControlVectorsResponse),
+    (status = 400, description = "A file is unreadable or does not fit the model, or the model takes no control vectors")
+  )
+))]
+pub async fn set_control_vectors(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<ApiJson<inference_api::operations::SetControlVectorsRequest>, ApiJsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => return openai_error_response(error),
+    };
+    json_response(engine.set_control_vectors(request).await)
+}
+
 // remote clients only get a bare file name so the write can't leave the working directory
 fn http_save_cimatrix_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
     let path = std::path::Path::new(name);

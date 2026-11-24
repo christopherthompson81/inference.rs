@@ -57,6 +57,8 @@ pub enum ExtraHashKey {
         attention_policy: MultimodalAttentionPolicy,
     },
     AdapterGeneration(AdapterGenerationId),
+    /// The control vectors the states were computed under (`ControlVectorSet::hash`).
+    ControlVectors(u64),
     /// User-provided cache salt for per-request isolation.
     CacheSalt(String),
 }

@@ -206,6 +206,13 @@ class Engine:
     def unload_lora_adapter(self, request: types.UnloadLoraAdapterRequest | str) -> types.LoraAdapterObject:
         return from_json(types.LoraAdapterObject, self.json.unload_lora_adapter(to_json(request)))
 
+    def control_vectors(self, model: str | None = None) -> types.ControlVectorsResponse:
+        request = json.dumps({} if model is None else {"model": model})
+        return from_json(types.ControlVectorsResponse, self.json.control_vectors(request))
+
+    def set_control_vectors(self, request: types.SetControlVectorsRequest | str) -> types.ControlVectorsResponse:
+        return from_json(types.ControlVectorsResponse, self.json.set_control_vectors(to_json(request)))
+
     def image_generation(self, request: types.ImageGenerationRequest | str) -> types.ImageGenerationResponse:
         return from_json(types.ImageGenerationResponse, self.json.image_generation(to_json(request)))
 

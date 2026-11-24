@@ -92,6 +92,27 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
     }
     fn max_seq_len(&self) -> usize;
     fn config(&self) -> &ModelConfigMetadata;
+    /// Steers the model by `set` from its next forward (an empty set stops); whether its CUDA graphs need capturing
+    /// again, which only attaching a set where none was, or removing one, does.
+    fn set_control_vectors(
+        &self,
+        _set: crate::control_vectors::ControlVectorSet,
+    ) -> inference_tensor::Result<bool> {
+        inference_tensor::bail!("this model takes no control vectors")
+    }
+    /// The control vectors the model is steered by, empty when none are.
+    fn control_vectors(&self) -> crate::control_vectors::ControlVectorSet {
+        Default::default()
+    }
+    /// Records each layer's output over the next forwards, unsteered, for deriving control vectors; false for a model
+    /// that takes none.
+    fn begin_layer_capture(&self) -> bool {
+        false
+    }
+    /// The outputs recorded since [`NormalModel::begin_layer_capture`], a layer's visits pooled as rows.
+    fn take_layer_capture(&self) -> inference_tensor::Result<Option<Vec<Tensor>>> {
+        Ok(None)
+    }
     /// How many tokens before each chunk the forward reads from `ModelForwardContext::token_window`; `None` when it
     /// reads no window.
     fn token_window(&self) -> Option<usize> {

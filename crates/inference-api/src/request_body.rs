@@ -79,6 +79,8 @@ json_requests!(
     crate::operations::SessionForkRequest,
     crate::engine_logits::PromptLogitsRequest,
     crate::operations::ReIsqRequest,
+    crate::operations::SetControlVectorsRequest,
+    crate::operations::ControlVectorsQuery,
     crate::operations::CalibrationApplyRequest,
     crate::operations::CalibrationTarget,
     crate::operations::TokenizeRequest,

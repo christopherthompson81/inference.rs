@@ -281,6 +281,23 @@ impl Engine {
             }
             Request::Tokenize(req) => self.tokenize_text(req).await,
             Request::Detokenize(req) => self.detokenize_text(req).await,
+            Request::ControlVectors(req) => {
+                let result = {
+                    let mut pipeline = get_mut_arcmutex!(self.pipeline);
+                    let applied = match req.set {
+                        Some(set) => pipeline.set_control_vectors(set),
+                        None => Ok(()),
+                    };
+                    applied.map(|()| crate::request::ControlVectorState {
+                        set: pipeline.control_vectors(),
+                        model: pipeline.name(),
+                    })
+                };
+                if let Err(e) = &result {
+                    warn!("Setting control vectors failed: {e:?}");
+                }
+                let _ = req.response.send(result).await;
+            }
             Request::JointDecision(req) => {
                 let scores = get_mut_arcmutex!(self.pipeline)
                     .joint_decision(&req.hidden, &req.layout)
@@ -452,6 +469,7 @@ impl Engine {
         )));
 
         let tokenizer = get_mut_arcmutex!(self.pipeline).tokenizer();
+        let control_vector_hash = get_mut_arcmutex!(self.pipeline).control_vectors().hash();
 
         let sampler = Sampler::new(
             Some(request.sampling_params.temperature.unwrap_or(1.0)),
@@ -572,10 +590,12 @@ impl Engine {
             if let Some(adapter_lease) = &adapter_lease {
                 seq.bind_adapter(adapter_lease.clone());
             }
+            seq.set_control_vector_hash(control_vector_hash);
 
             seq.set_cancellation(request.cancellation.clone());
             seq.set_prefix_warmup(request.prefix_warmup);
             seq.raw_logits_on_device = request.raw_logits_on_device;
+            seq.capture_layer_outputs = request.capture_layer_outputs;
             seq.set_trim_leading_whitespace(is_chat);
             seq.set_prefix_cache_ttl(request.prefix_cache_ttl);
             self.enable_template_reasoning(&mut seq);
@@ -592,7 +612,7 @@ impl Engine {
                 get_mut_arcmutex!(self.prefix_cacher)
                     .search_for_matching_cache(
                         seq.get_toks(),
-                        seq.adapter_generation(),
+                        crate::prefix_cacher::StateKey::of(&seq),
                         seq.mm_features(),
                         seq.image_hashes(),
                         seq.audio_hashes(),
@@ -738,9 +758,7 @@ impl Engine {
 
     fn checkpoint_hints(&self, seq: &Sequence, is_chat: bool) -> crate::pipeline::CheckpointHints {
         // progressive checkpoints are worth their copies only where the store keeps them, which takes plain text only
-        let stored = seq.mm_features().is_empty()
-            && seq.adapter_generation().is_none()
-            && !seq.return_raw_logits;
+        let stored = seq.mm_features().is_empty() && !seq.custom_states() && !seq.return_raw_logits;
         let interval = get_mut_arcmutex!(self.prefix_cacher)
             .disk_tier()
             .map(|tier| tier.checkpoint_tokens)

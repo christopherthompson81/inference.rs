@@ -1566,6 +1566,9 @@ pub struct Model {
     ring: Option<WindowRing>,
     ring_caches: Vec<Option<usize>>,
     spec: speculative::SpecState,
+    // added to each layer visit's output, the looped core's every pass alike
+    control_vectors: inference_nn::control_vectors::ControlVectorSlot,
+    control_devices: Vec<Device>,
 }
 
 impl Model {
@@ -1720,7 +1723,17 @@ impl Model {
             &layer_devices,
         )?;
         let world = mapper.get_comm_for(0)?.world_size();
+        let control_devices = (0..cfg.num_hidden_layers)
+            .map(|layer| {
+                mapper
+                    .device_for(layer, false)
+                    .unwrap_or(&normal_loading_metadata.real_device)
+                    .clone()
+            })
+            .collect();
         Ok(Self {
+            control_vectors: Default::default(),
+            control_devices,
             embed_tokens,
             embed_norm,
             layers,
@@ -2081,7 +2094,8 @@ impl Model {
                 taps.borrow_mut().push(x.clone());
             }
             visit.set(visit.get() + 1);
-            run(layer, slot, x, blocks, messages)
+            let out = run(layer, slot, x, blocks, messages)?;
+            self.control_vectors.apply(layer, out)
         };
         let lc = &cfg.loop_config;
         let mut blocks = Blocks::default();
@@ -2182,6 +2196,28 @@ impl IsqModel for Model {
 impl NormalModel for Model {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
+    }
+
+    fn set_control_vectors(
+        &self,
+        set: inference_nn::control_vectors::ControlVectorSet,
+    ) -> Result<bool> {
+        self.control_vectors
+            .replace(set, &self.control_devices, self.cfg.hidden_size, self.dtype)
+    }
+
+    fn control_vectors(&self) -> inference_nn::control_vectors::ControlVectorSet {
+        self.control_vectors.current()
+    }
+
+    fn begin_layer_capture(&self) -> bool {
+        self.control_vectors
+            .begin_capture(self.cfg.num_hidden_layers);
+        true
+    }
+
+    fn take_layer_capture(&self) -> Result<Option<Vec<Tensor>>> {
+        self.control_vectors.take_capture()
     }
 
     fn device(&self) -> &Device {
