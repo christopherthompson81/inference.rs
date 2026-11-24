@@ -598,7 +598,7 @@ impl Engine {
             seq.capture_layer_outputs = request.capture_layer_outputs;
             seq.set_trim_leading_whitespace(is_chat);
             seq.set_prefix_cache_ttl(request.prefix_cache_ttl);
-            self.enable_template_reasoning(&mut seq);
+            self.enable_template_reasoning(&mut seq, request.sampling_params.thinking_budget);
             seq.multimodal.keep_prompt_tokens = extras.keep_prompt_tokens;
             self.prepare_multimodal_prompt(&mut seq)?;
             seq.set_checkpoint_hints(self.checkpoint_hints(&seq, is_chat));
@@ -1202,7 +1202,8 @@ impl Engine {
         Ok(Some(layer_caches))
     }
 
-    fn enable_template_reasoning(&self, seq: &mut Sequence) {
+    // `thinking_budget`: reasoning tokens before the template's closing marker is pushed up, when it is one token
+    fn enable_template_reasoning(&self, seq: &mut Sequence, thinking_budget: Option<usize>) {
         use crate::reasoning_parsers::{
             ReasoningMode, TagReasoningContext, tag_based::THINK_OPEN_TAG,
         };
@@ -1239,6 +1240,19 @@ impl Engine {
         } else {
             return;
         };
+        if let Some(budget) = thinking_budget
+            && let Some(tokenizer) = pipeline.tokenizer()
+        {
+            let (open, close) = ctx.tags();
+            match (tokenizer.token_to_id(open), tokenizer.token_to_id(close)) {
+                (Some(open), Some(close)) => seq.set_reasoning_budget(open, close, budget),
+                _ => tracing::warn!(
+                    open,
+                    close,
+                    "A thinking budget needs reasoning markers that are single tokens; ignoring it"
+                ),
+            }
+        }
         seq.enable_reasoning(ReasoningMode::TagBased, Box::new(ctx));
     }
 

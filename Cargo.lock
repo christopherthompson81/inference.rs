@@ -2691,6 +2691,7 @@ dependencies = [
  "inference-api",
  "inference-json",
  "inference-mcp",
+ "libc",
  "regex",
  "reqwest 0.13.1",
  "serde",

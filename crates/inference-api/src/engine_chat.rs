@@ -785,6 +785,7 @@ async fn parse_request_inner(
         n_choices: oairequest.n_choices,
         dry_params,
         no_repeat_ngram_size: None,
+        thinking_budget: oairequest.thinking_budget,
     };
     Ok((
         Request::Normal(Box::new(NormalRequest {

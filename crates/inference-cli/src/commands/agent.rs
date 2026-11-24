@@ -129,6 +129,7 @@ pub async fn run_agent(
         model: request_model,
         max_rounds: coder.max_rounds,
         max_reply_tokens: coder.max_reply_tokens,
+        thinking_budget: (coder.thinking_budget > 0).then_some(coder.thinking_budget),
         request,
     };
     let mut agent = Agent::new(

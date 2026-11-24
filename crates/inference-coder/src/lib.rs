@@ -14,7 +14,7 @@ pub mod turn;
 
 pub use agent::{
     Agent, AgentConfig, AgentUi, COMPACT_COMMAND, DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS,
-    Interrupt, TurnEnd,
+    DEFAULT_THINKING_BUDGET, Interrupt, TurnEnd,
 };
 pub use backend::{ChatBackend, EngineBackend, HttpBackend};
 pub use changes::Changes;

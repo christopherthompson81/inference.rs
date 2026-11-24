@@ -44,4 +44,9 @@ pub struct CoderOptions {
     /// otherwise runs until the context is full)
     #[arg(long, default_value_t = inference_coder::DEFAULT_MAX_REPLY_TOKENS)]
     pub max_reply_tokens: usize,
+
+    /// Reasoning tokens one reply thinks for before the server pushes the model to end its thinking and act; 0 sends
+    /// no budget
+    #[arg(long, default_value_t = inference_coder::DEFAULT_THINKING_BUDGET)]
+    pub thinking_budget: usize,
 }

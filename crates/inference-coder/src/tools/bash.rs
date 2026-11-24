@@ -15,6 +15,21 @@ const MAX_OUTPUT_BYTES: usize = 30_000;
 
 pub struct BashTool;
 
+// Kills the command's whole process group when dropped: on a timeout or an interrupt the shell's children (a server, a
+// game left running, a pipeline) would otherwise outlive the call, holding the CPU, ports or files
+#[cfg(unix)]
+struct ProcessGroup(Option<u32>);
+
+#[cfg(unix)]
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+            // SAFETY: signals only the group this call started; a group already gone just fails with ESRCH
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
+    }
+}
+
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
         "bash"
@@ -45,7 +60,10 @@ impl Tool for BashTool {
             let timeout = usize_arg(&args, "timeout_ms")
                 .unwrap_or(DEFAULT_TIMEOUT_MS)
                 .min(MAX_TIMEOUT_MS);
-            let child = tokio::process::Command::new(SHELL)
+            let mut command_line = tokio::process::Command::new(SHELL);
+            #[cfg(unix)]
+            command_line.process_group(0);
+            let child = command_line
                 .arg("-c")
                 // stderr joins stdout so the model sees them interleaved as a terminal would show them
                 .arg(format!("exec 2>&1\n{command}"))
@@ -59,6 +77,8 @@ impl Tool for BashTool {
                 Ok(child) => child,
                 Err(error) => return ToolOutcome::error(format!("cannot start {SHELL}: {error}")),
             };
+            #[cfg(unix)]
+            let _group = ProcessGroup(child.id());
             let mut stdout = child.stdout.take().expect("stdout is piped");
             let mut output = Vec::new();
             let run = async {
@@ -115,5 +135,24 @@ mod tests {
             .run(json!({"command": "sleep 5", "timeout_ms": 100}), &ctx)
             .await;
         assert!(slow.is_error && slow.text.contains("timed out"));
+    }
+
+    // a timed-out command's children go with it, not just the shell
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timeout_kills_the_commands_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            root: dir.path().to_path_buf(),
+            images: false,
+        };
+        let marker = dir.path().join("child-still-ran");
+        let command = format!("(sleep 1; touch {}) | cat; sleep 5", marker.display());
+        let out = BashTool
+            .run(json!({"command": command, "timeout_ms": 200}), &ctx)
+            .await;
+        assert!(out.is_error && out.text.contains("timed out"));
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(!marker.exists(), "the subshell outlived the timeout");
     }
 }

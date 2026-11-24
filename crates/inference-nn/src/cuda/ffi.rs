@@ -413,7 +413,13 @@ inference_tensor::kernel_library! {
             width: i32,
             stream: i64,
         ) -> i32;
-        pub fn biased_attention_decode_partials(batch: i32, t: i32, heads: i32, head_dim: i32) -> i64;
+        pub fn biased_attention_decode_partials(
+            batch: i32,
+            t: i32,
+            heads: i32,
+            kv_heads: i32,
+            head_dim: i32,
+        ) -> i64;
         pub fn biased_attention_f32(
             q: *const f32,
             k: *const f32,

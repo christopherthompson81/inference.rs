@@ -81,6 +81,9 @@ pub struct SamplingParams {
     /// No n-gram of this length occurs twice in the prompt and output together (transformers' `no_repeat_ngram_size`).
     #[serde(default)]
     pub no_repeat_ngram_size: Option<usize>,
+    /// Reasoning tokens a reply thinks for before its end-of-reasoning token is pushed up, more with each token past.
+    #[serde(default)]
+    pub thinking_budget: Option<usize>,
 }
 
 impl SamplingParams {
@@ -103,6 +106,7 @@ impl SamplingParams {
             stop_toks: None,
             ignore_eos: false,
             max_len: None,
+            thinking_budget: None,
             logits_bias: None,
             n_choices: 1,
             dry_params: None,
@@ -131,6 +135,7 @@ impl SamplingParams {
             n_choices: 1,
             dry_params: None,
             no_repeat_ngram_size: None,
+            thinking_budget: None,
         }
     }
 
@@ -303,6 +308,46 @@ pub trait CustomLogitsProcessor: Send + Sync {
 impl<T: Fn(&Tensor, &[u32]) -> Result<Tensor> + Send + Sync> CustomLogitsProcessor for T {
     fn apply(&self, logits: &Tensor, context: &[u32]) -> Result<Tensor> {
         self(logits, context)
+    }
+}
+
+// the end-of-reasoning logit's push per token past the budget, and its cap: past it the token is all but certain
+const REASONING_BUDGET_BIAS_PER_TOKEN: f32 = 0.5;
+const REASONING_BUDGET_MAX_BIAS: f32 = 30.0;
+
+/// Pushes up `close` once the reasoning block `open` began has run `budget` tokens without it, so the model ends its
+/// thinking at a point of its choosing soon after rather than mid-word.
+pub struct ReasoningBudget {
+    pub open: u32,
+    pub close: u32,
+    pub budget: usize,
+}
+
+impl ReasoningBudget {
+    /// The bias on `close` for the position after `context`; None outside a reasoning block or within the budget.
+    pub fn bias(&self, context: &[u32]) -> Option<f32> {
+        let open = context.iter().rposition(|&token| token == self.open)?;
+        let thought = &context[open + 1..];
+        if thought.contains(&self.close) {
+            return None;
+        }
+        let past = thought.len().checked_sub(self.budget)?;
+        #[allow(clippy::cast_precision_loss)]
+        let bias = (past + 1) as f32 * REASONING_BUDGET_BIAS_PER_TOKEN;
+        Some(bias.min(REASONING_BUDGET_MAX_BIAS))
+    }
+}
+
+impl CustomLogitsProcessor for ReasoningBudget {
+    fn apply(&self, logits: &Tensor, context: &[u32]) -> Result<Tensor> {
+        let Some(bias) = self.bias(context) else {
+            return Ok(logits.clone());
+        };
+        let mut values = logits.to_vec1::<f32>()?;
+        if let Some(value) = values.get_mut(self.close as usize) {
+            *value += bias;
+        }
+        Tensor::from_vec(values, logits.shape(), logits.device())
     }
 }
 
@@ -1031,6 +1076,13 @@ impl Sampler {
 
     pub fn is_argmax(&self) -> bool {
         self.temperature.is_none()
+    }
+
+    /// This sampler with `processor` applied after the others.
+    pub fn with_logits_processor(&self, processor: Arc<dyn CustomLogitsProcessor>) -> Self {
+        let mut sampler = self.clone();
+        sampler.logits_processors.push(processor);
+        sampler
     }
 
     /// Greedy over the raw logits: no temperature, penalty, DRY, bias or custom processor reshapes them first.
@@ -3240,6 +3292,47 @@ mod tests {
         assert_eq!(res.top_logprobs, None);
         let expected = 2.0f32 - (0.0f32.exp() + 1.0f32.exp() + 2.0f32.exp()).ln();
         assert!((res.logprob - expected).abs() < 1e-6);
+    }
+
+    // the close marker's push starts at the budget and grows a step per token, inside an open block only
+    #[test]
+    fn a_reasoning_budget_pushes_the_close_marker_past_the_budget() {
+        const OPEN: u32 = 7;
+        const CLOSE: u32 = 8;
+        let budget = super::ReasoningBudget {
+            open: OPEN,
+            close: CLOSE,
+            budget: 3,
+        };
+        let thought = |n: usize| {
+            [1, OPEN]
+                .into_iter()
+                .chain(std::iter::repeat_n(2, n))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(budget.bias(&thought(2)), None);
+        let at_budget = budget.bias(&thought(3)).unwrap();
+        let past = budget.bias(&thought(4)).unwrap();
+        assert!(at_budget > 0.0 && past > at_budget);
+        assert!(budget.bias(&thought(10_000)).unwrap() <= super::REASONING_BUDGET_MAX_BIAS);
+        // a closed block, and no block at all, are left alone
+        let mut closed = thought(10);
+        closed.push(CLOSE);
+        assert_eq!(budget.bias(&closed), None);
+        assert_eq!(budget.bias(&[1, 2, 3, 4, 5]), None);
+        let logits = Tensor::new(&[0f32; 10], &Device::Cpu).unwrap();
+        let pushed = budget
+            .apply(&logits, &thought(4))
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(pushed[CLOSE as usize], past);
+        assert!(
+            pushed
+                .iter()
+                .enumerate()
+                .all(|(i, v)| i == CLOSE as usize || *v == 0.0)
+        );
     }
 
     #[test]

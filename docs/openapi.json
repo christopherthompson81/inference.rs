@@ -5029,6 +5029,15 @@
             "description": "Sampling temperature; higher values increase randomness.",
             "example": 0.7
           },
+          "thinking_budget": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Reasoning tokens a reply thinks for before the model's end-of-thinking token is pushed up, more with each token\npast, so a reply that keeps reasoning ends its thinking and answers.",
+            "example": null,
+            "minimum": 0
+          },
           "tool_choice": {
             "oneOf": [
               {

@@ -748,7 +748,7 @@ impl dyn Pipeline {
             let Some(row) = seq_indices.iter().position(|&idx| idx == capture.seq_idx) else {
                 continue;
             };
-            let Some(snapshot) = hybrid.reserve_recurrent_snapshot()? else {
+            let Some(snapshot) = hybrid.reserve_recurrent_snapshot(capture.boundary)? else {
                 break;
             };
             let point = crate::kv_cache::RecurrentCapturePoint {

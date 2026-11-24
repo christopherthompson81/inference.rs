@@ -186,6 +186,7 @@ Chat completion request following OpenAI's specification
 | `stop_token_ids` | `list[int] \| None` | optional |
 | `stream` | `bool \| None` | optional |
 | `temperature` | `float \| None` | optional |
+| `thinking_budget` | `int \| None` | optional |
 | `tool_choice` | `ToolChoice \| None` | optional |
 | `tools` | `list[OpenAiTool] \| None` | optional |
 | `top_k` | `int \| None` | optional |

@@ -86,6 +86,20 @@ impl CudaMemoryPoolUsage {
 }
 
 impl MemoryUsage {
+    /// `query` as a load sizes against it: the process-lifetime workspaces count as free, since a load reuses what an
+    /// earlier model left there and a first load allocates them only after sizing. A reload then sizes as the first did.
+    pub fn query_for_load(&self, device: &Device) -> Result<DeviceMemory> {
+        let memory = self.query(device)?;
+        #[cfg(feature = "cuda")]
+        if let (Device::Cuda(dev), DeviceMemory::Discrete { total, free }) = (device, memory) {
+            let free = free
+                .saturating_add(dev.process_lifetime_reserved_bytes()?)
+                .min(total);
+            return Ok(DeviceMemory::Discrete { total, free });
+        }
+        Ok(memory)
+    }
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     pub fn query(&self, device: &Device) -> Result<DeviceMemory> {
         match device {

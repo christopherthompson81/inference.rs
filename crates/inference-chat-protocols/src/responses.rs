@@ -2041,6 +2041,7 @@ fn parse_openresponses_request(
         host_tools: oairequest.host_tools,
         parallel_tool_calls: oairequest.parallel_tool_calls,
         reasoning_effort,
+        thinking_budget: None,
         chat_template_kwargs: None,
         files: oairequest.files,
     };

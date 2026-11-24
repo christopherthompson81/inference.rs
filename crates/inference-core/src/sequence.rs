@@ -342,6 +342,20 @@ pub struct Sequence {
     // Tag-based reasoning parser.
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
     reasoning_mode: Option<ReasoningMode>,
+    reasoning_budget: Option<ReasoningBudgetState>,
+}
+
+// tokens ahead of the budget the processor goes on, so a speculative step's drafted positions are all checked
+const REASONING_BUDGET_ARM_AHEAD: usize = 16;
+
+// A reasoning budget and where the open reasoning block began; the budget's processor joins the sampler only near
+// the budget, since any processor takes the step off the fast sampling paths
+struct ReasoningBudgetState {
+    processor: Arc<inference_nn::sampler::ReasoningBudget>,
+    unbudgeted: Arc<Sampler>,
+    // the token count when the open reasoning block began, None outside one
+    block_start: Option<usize>,
+    armed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -472,6 +486,7 @@ impl Sequence {
             step_timing_kind: None,
             reasoning_parser: None,
             reasoning_mode: None,
+            reasoning_budget: None,
         }
     }
 
@@ -1171,6 +1186,7 @@ impl Sequence {
 
         self.cumulative_logprob += tok.logprob;
         self.tokens.push(tok.token);
+        self.observe_reasoning_budget(tok.token);
         self.logprobs.push(tok);
         self.reset_prefill_toks();
         is_done
@@ -1841,6 +1857,60 @@ impl Sequence {
                 .tool_call_state
                 .as_ref()
                 .is_some_and(|state| state.requires_special_tokens())
+    }
+
+    /// Pushes the end-of-reasoning token `close` up once a block `open` began has run `budget` tokens.
+    pub fn set_reasoning_budget(&mut self, open: u32, close: u32, budget: usize) {
+        let block_start = self
+            .tokens
+            .iter()
+            .rposition(|&token| token == open)
+            .filter(|&at| !self.tokens[at + 1..].contains(&close))
+            .map(|at| at + 1);
+        self.reasoning_budget = Some(ReasoningBudgetState {
+            processor: Arc::new(inference_nn::sampler::ReasoningBudget {
+                open,
+                close,
+                budget,
+            }),
+            unbudgeted: self.sampler.clone(),
+            block_start,
+            armed: false,
+        });
+        self.observe_reasoning_budget_at(self.tokens.len());
+    }
+
+    fn observe_reasoning_budget(&mut self, token: u32) {
+        let Some(state) = self.reasoning_budget.as_mut() else {
+            return;
+        };
+        if token == state.processor.open {
+            state.block_start = Some(self.tokens.len());
+        } else if token == state.processor.close {
+            state.block_start = None;
+        }
+        self.observe_reasoning_budget_at(self.tokens.len());
+    }
+
+    // arms the processor near the budget and drops it once the block closes
+    fn observe_reasoning_budget_at(&mut self, len: usize) {
+        let Some(state) = self.reasoning_budget.as_mut() else {
+            return;
+        };
+        let near = state.block_start.is_some_and(|start| {
+            len - start + REASONING_BUDGET_ARM_AHEAD >= state.processor.budget
+        });
+        if near && !state.armed {
+            self.sampler = Arc::new(
+                state
+                    .unbudgeted
+                    .with_logits_processor(state.processor.clone()),
+            );
+            state.armed = true;
+        } else if !near && state.armed {
+            self.sampler = state.unbudgeted.clone();
+            state.armed = false;
+        }
     }
 
     /// Enable reasoning with the given parser and mode.

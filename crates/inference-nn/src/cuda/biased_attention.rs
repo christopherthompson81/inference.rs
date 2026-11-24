@@ -306,6 +306,7 @@ fn biased_attention_rows(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
                     i32_of(b)?,
                     i32_of(t)?,
                     i32_of(heads)?,
+                    i32_of(kv_heads)?,
                     i32_of(d)?,
                 )
             })
@@ -892,10 +893,23 @@ mod tests {
         run(&shape((2, 4, 1, 1, 77, 64, 32, 0)), Some(DType::BF16))
     }
 
+    // a block takes every head of a KV head (Inkling 2's 3 a KV head, on a view and a q8 cache, split long pasts
+    // and verify rows); 8 heads a KV head take the per-head kernel
+    fn cuda_grouped_decode_matches_the_reference() -> Result<()> {
+        for t in [1, DECODE_ROWS as usize] {
+            let mut c = shape((2, 24, 8, t, 2000, 128, 256, 0));
+            c.log_scale = Some((0.1, 64.0));
+            run(&c, None)?;
+            run_q8(&c)?;
+        }
+        run(&shape((1, 8, 1, 1, 700, 64, 32, 0)), None)
+    }
+
     inference_tensor::gpu_cases!(
         cuda_cases,
         [
             cuda_decode_matches_the_reference,
+            cuda_grouped_decode_matches_the_reference,
             cuda_log_scaled_queries_match_the_reference,
             cuda_paged_bf16_decode_matches_the_reference,
             cuda_paged_decode_matches_the_reference,

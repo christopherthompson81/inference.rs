@@ -20,8 +20,9 @@ use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_coder::{
     Agent, AgentConfig, AgentUi, Approval, COMPACT_COMMAND, Changes, ChatBackend, Compaction,
-    DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS, EngineBackend, Interrupt, PermissionMode,
-    Permissions, Session, ToolCall, ToolKind, ToolOutcome, Turn, TurnEnd,
+    DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS, DEFAULT_THINKING_BUDGET, EngineBackend,
+    Interrupt, PermissionMode, Permissions, Session, ToolCall, ToolKind, ToolOutcome, Turn,
+    TurnEnd,
     activity::{Run, RunTracker},
     default_tools,
     prompt::system_prompt,
@@ -552,6 +553,7 @@ async fn load(
         model,
         max_rounds: DEFAULT_MAX_ROUNDS,
         max_reply_tokens: DEFAULT_MAX_REPLY_TOKENS,
+        thinking_budget: Some(DEFAULT_THINKING_BUDGET),
         request: Map::new(),
     };
     let id = session.id.clone();

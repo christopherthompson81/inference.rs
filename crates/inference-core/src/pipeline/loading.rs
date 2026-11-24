@@ -603,7 +603,7 @@ impl ExpertCachePlan<'_> {
             self.paged_attn_config.as_ref().map(|cfg| cfg.kv_layout()),
         )?;
         let cap = crate::paged_attention::device_memory_cap(
-            crate::MemoryUsage.query(primary)?.available(),
+            crate::MemoryUsage.query_for_load(primary)?.available(),
             primary,
         );
         let tokens = params.max_seq_len() * params.max_batch_size();
@@ -945,7 +945,7 @@ fn default_floor_overlap(cfg: &PagedAttentionConfig, primary: &Device) -> Result
     {
         return Ok(0);
     }
-    let memory = crate::MemoryUsage.query(primary)?;
+    let memory = crate::MemoryUsage.query_for_load(primary)?;
     let available = memory.available();
     let held_back = available - crate::paged_attention::device_memory_cap(available, primary);
     Ok(

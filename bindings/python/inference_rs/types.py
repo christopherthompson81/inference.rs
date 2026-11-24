@@ -924,6 +924,7 @@ class ChatCompletionRequest:
     stop_token_ids: list[int] | None = None
     stream: bool | None = None
     temperature: float | None = None
+    thinking_budget: int | None = None
     tool_choice: ToolChoice | None = None
     tools: list[OpenAiTool] | None = None
     top_k: int | None = None
