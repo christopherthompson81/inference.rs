@@ -41,6 +41,8 @@ pub(crate) mod idefics2;
 #[cfg(feature = "models-llama")]
 pub(crate) mod idefics3;
 #[cfg(feature = "models-other")]
+pub(crate) mod inkling2;
+#[cfg(feature = "models-other")]
 pub(crate) mod lfm2_vl;
 #[cfg(feature = "models-llama")]
 pub(crate) mod llama4;

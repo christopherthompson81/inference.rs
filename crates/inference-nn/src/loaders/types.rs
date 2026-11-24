@@ -266,6 +266,7 @@ macro_rules! multimodal_loader_table {
                 loader: GraniteSpeechLoader, feature: "models-other",
             },
             Lfm2Vl { cli: "lfm2vl" | "lfm2_vl", hf: "Lfm2VlForConditionalGeneration", loader: Lfm2VlLoader, feature: "models-other" },
+            Inkling2Vl { cli: "inkling2_vl", hf: "Inkling2LoopForConditionalGeneration", loader: Inkling2VlLoader, feature: "models-other" },
             VLlama { cli: "vllama", hf: "MllamaForConditionalGeneration", loader: VLlamaLoader, feature: "models-llama" },
             Qwen2VL { cli: "qwen2vl", hf: "Qwen2VLForConditionalGeneration", loader: Qwen2VLLoader, feature: "models-qwen" },
             Idefics3 { cli: "idefics3", hf: "Idefics3ForConditionalGeneration", loader: Idefics3Loader, feature: "models-llama" },

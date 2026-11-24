@@ -129,6 +129,10 @@ pub struct ManagedLoadRequest {
     /// Control vectors the model is steered by from its first request (files on the server's host).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_vectors: Option<crate::operations::ControlVectors>,
+    /// For a checkpoint loaded through its recipe (Inkling 2's), whether its vision tower loads too; unset uses the
+    /// server's `runtime.recipe_vision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 /// A load the manager keeps under its model id: the request its last successful load used, and whether the server
@@ -564,6 +568,7 @@ impl ModelManager {
             lazy: false,
             pinned: false,
             control_vectors: request.control_vectors,
+            recipe_vision: request.vision,
         };
         self.engine.add_model(spec).await?;
         let kind = match kind.or_else(|| self.served_kind(&id)) {

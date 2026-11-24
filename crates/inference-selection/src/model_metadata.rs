@@ -432,6 +432,11 @@ impl SupportedArch for MultimodalLoaderType {
                 modalities: &[Text, Vision],
                 examples: &[ex!("ibm-granite/granite-vision-4.1-4b")],
             },
+            Self::Inkling2Vl => ArchMetadata {
+                families: &["Inkling 2"],
+                modalities: &[Text, Vision],
+                examples: &[ex!("thinkingmachines/Inkling-2-Mini")],
+            },
             Self::Lfm2Vl => ArchMetadata {
                 families: &["LFM2-VL", "LFM2.5-VL"],
                 modalities: &[Text, Vision],

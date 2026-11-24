@@ -569,6 +569,7 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `paged_cache_type` | `PagedCacheType \| None` | optional |
 | `paged_context_len` | `int \| None` | optional |
 | `pinned` | `bool \| None` | optional |
+| `recipe_vision` | `bool \| None` | optional |
 
 
 ## `ModelSpeculativeStats`
@@ -625,6 +626,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.NEMOTRON_OMNI` | `'nemotron_omni'` |
 | `MultimodalLoaderType.GRANITE_SPEECH` | `'granite_speech'` |
 | `MultimodalLoaderType.LFM2VL` | `'lfm2vl'` |
+| `MultimodalLoaderType.INKLING2_VL` | `'inkling2_vl'` |
 | `MultimodalLoaderType.VLLAMA` | `'vllama'` |
 | `MultimodalLoaderType.QWEN2VL` | `'qwen2vl'` |
 | `MultimodalLoaderType.IDEFICS3` | `'idefics3'` |
@@ -785,6 +787,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | `prefix_cache_n` | `int \| None` | optional |
 | `prefix_cache_ram_gib` | `int \| None` | optional |
 | `recipe_dir` | `str \| None` | optional |
+| `recipe_vision` | `bool \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `throughput_logging` | `bool \| None` | optional |
 | `token_source` | `str \| None` | optional |

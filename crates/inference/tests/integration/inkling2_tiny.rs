@@ -1271,3 +1271,311 @@ async fn auto_depth_keeps_greedy_output_through_plain_steps_on_cuda() -> anyhow:
     let auto = paged_trace(&dir, Drafting::Auto, request(), AUTO_DECODE_LEN).await?;
     ensure_same_greedy(&auto, &plain)
 }
+
+// a tiny tower: 8 px cells (4 px patches merged 2 x 2) over a 4 x 4 position grid, so most pictures resize it
+const TOWER_HIDDEN: usize = 64;
+const TOWER_LAYERS: usize = 2;
+const TOWER_HEADS: usize = 1;
+const TOWER_PATCH: usize = 4;
+const TOWER_GRID: usize = 4;
+const TOWER_MLP_RATIO: usize = 2;
+const TOWER_PROJECTION: usize = 64;
+const TOWER_SEED: u64 = 0x7669_7369;
+// the fixture's last added token (`<|video_pad|>`) renamed, inside the vocabulary as the real pad is
+const IMAGE_PAD_ID: u32 = 265;
+const IMAGE_PAD: &str = "<|unused_200054|>";
+// pictures of 3 x 2 and 2 x 2 cells
+const PICTURE: (u32, u32) = (20, 12);
+const OTHER_PICTURE: (u32, u32) = (16, 9);
+const PICTURE_CELLS: usize = 6;
+const OTHER_PICTURE_CELLS: usize = 4;
+const PICTURE_PROMPT: &str = "what is in the picture";
+const VISION_TEMPLATE: &str = "{% for m in messages %}{% if m.content is string %}{{ m.content }}\
+{% else %}{% for p in m.content %}{% if p.type == 'text' %}{{ p.text }}{% else %}<|unused_200054|>{% endif %}\
+{% endfor %}{% endif %}{% endfor %}";
+// cached KV comes from another prefill than a full recompute, so logprobs match only to rounding
+const CACHED_LOGPROB_TOLERANCE: f32 = 1e-3;
+
+fn tower_config(text_hidden: usize) -> serde_json::Value {
+    serde_json::json!({
+        "hidden_size": TOWER_HIDDEN,
+        "num_hidden_layers": TOWER_LAYERS,
+        "num_attention_heads": TOWER_HEADS,
+        "mlp_ratio": TOWER_MLP_RATIO as f64,
+        "native_patch_size": TOWER_PATCH,
+        "adapter_merge_size": 2,
+        "posemb_grid_size": TOWER_GRID,
+        "projection_hidden_dim": TOWER_PROJECTION,
+        "projector_bias": false,
+        "text_hidden_size": text_hidden,
+        "layer_norm_eps": 1e-5,
+    })
+}
+
+fn tower_weights(text_hidden: usize) -> anyhow::Result<HashMap<String, Tensor>> {
+    let rng = &mut StdRng::seed_from_u64(TOWER_SEED);
+    let (d, f) = (TOWER_HIDDEN, TOWER_HIDDEN * TOWER_MLP_RATIO);
+    let mut w = HashMap::new();
+    let e = "model.visual.backbone.embeddings";
+    w.insert(format!("{e}.class_embedding"), random(rng, &[d])?);
+    w.insert(format!("{e}.cls_position_embedding"), random(rng, &[d])?);
+    w.insert(
+        format!("{e}.patch_embedding.weight"),
+        random(rng, &[d, 3 * TOWER_PATCH * TOWER_PATCH])?,
+    );
+    w.insert(
+        format!("{e}.position_embedding"),
+        random(rng, &[TOWER_GRID * TOWER_GRID, d])?,
+    );
+    for norm in ["weight", "bias"] {
+        let t = if norm == "weight" {
+            near_one(rng, &[d])?
+        } else {
+            random(rng, &[d])?
+        };
+        w.insert(format!("model.visual.backbone.ln_pre.{norm}"), t);
+    }
+    for i in 0..TOWER_LAYERS {
+        let l = format!("model.visual.backbone.layers.{i}");
+        for norm in ["ln_1", "ln_2"] {
+            w.insert(format!("{l}.{norm}.weight"), near_one(rng, &[d])?);
+            w.insert(format!("{l}.{norm}.bias"), random(rng, &[d])?);
+        }
+        for scale in ["ls_1", "ls_2"] {
+            w.insert(format!("{l}.{scale}.gamma"), random(rng, &[d])?);
+        }
+        for (name, rows, cols) in [
+            ("self_attn.q_proj", d, d),
+            ("self_attn.k_proj", d, d),
+            ("self_attn.v_proj", d, d),
+            ("self_attn.out_proj", d, d),
+            ("mlp.c_fc", f, d),
+            ("mlp.c_proj", d, f),
+        ] {
+            w.insert(format!("{l}.{name}.weight"), random(rng, &[rows, cols])?);
+            w.insert(format!("{l}.{name}.bias"), random(rng, &[rows])?);
+        }
+    }
+    w.insert(
+        "model.visual.proj_in.weight".into(),
+        random(rng, &[TOWER_PROJECTION, 4 * d])?,
+    );
+    w.insert(
+        "model.visual.proj_out.weight".into(),
+        random(rng, &[text_hidden, TOWER_PROJECTION])?,
+    );
+    Ok(w)
+}
+
+// `dir`'s checkpoint given the tower: its config, weights, a tokenizer with the pad and a template that writes it
+fn add_tower(
+    dir: &tempfile::TempDir,
+    weights: &HashMap<String, Tensor>,
+    text_hidden: usize,
+) -> anyhow::Result<()> {
+    let config_path = dir.path().join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+    if config.get("text_config").is_none() {
+        config = serde_json::json!({"text_config": config});
+    }
+    config["architectures"] = serde_json::json!(["Inkling2LoopForConditionalGeneration"]);
+    config["model_type"] = serde_json::json!("inkling2_loop");
+    config["vision_config"] = tower_config(text_hidden);
+    config["image_token_id"] = serde_json::json!(IMAGE_PAD_ID);
+    std::fs::write(&config_path, config.to_string())?;
+    let tokenizer_path = dir.path().join("tokenizer.json");
+    let mut tokenizer: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&tokenizer_path)?)?;
+    let pad = tokenizer["added_tokens"]
+        .as_array_mut()
+        .and_then(|tokens| tokens.iter_mut().find(|t| t["id"] == IMAGE_PAD_ID))
+        .ok_or_else(|| anyhow::anyhow!("the tokenizer has no added token {IMAGE_PAD_ID}"))?;
+    let old = pad["content"].as_str().unwrap_or_default().to_string();
+    pad["content"] = serde_json::json!(IMAGE_PAD);
+    if let Some(vocab) = tokenizer["model"]["vocab"].as_object_mut()
+        && let Some(id) = vocab.remove(&old)
+    {
+        vocab.insert(IMAGE_PAD.to_string(), id);
+    }
+    std::fs::write(&tokenizer_path, tokenizer.to_string())?;
+    std::fs::write(dir.path().join("chat_template.jinja"), VISION_TEMPLATE)?;
+    // the text weights as given (an official checkpoint's experts stay packed bytes)
+    let mut all = weights.clone();
+    all.extend(tower_weights(text_hidden)?);
+    inference_tensor::safetensors::save(&all, dir.path().join("model.safetensors"))?;
+    Ok(())
+}
+
+fn picture((width, height): (u32, u32)) -> image::DynamicImage {
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([
+            (x * 37 % 251) as u8,
+            (y * 53 % 241) as u8,
+            ((x + y) * 29 % 239) as u8,
+        ])
+    }))
+}
+
+fn picture_chat(size: (u32, u32)) -> RequestBuilder {
+    RequestBuilder::from(inference::MultimodalMessages::new().add_image_message(
+        TextMessageRole::User,
+        PICTURE_PROMPT,
+        vec![picture(size)],
+    ))
+}
+
+// paged on CUDA (where a repeat reads the prefix cache), else on the CPU
+async fn vision_model(dir: &tempfile::TempDir) -> anyhow::Result<(inference::Model, bool)> {
+    let mut builder = inference::MultimodalModelBuilder::new(dir.path().to_string_lossy())
+        .with_load_recipes(false)
+        .with_dtype(ModelDType::F32)
+        .with_prefix_cache_n(Some(4));
+    let paged = cfg!(feature = "cuda") && Device::new_cuda(0).is_ok();
+    if paged {
+        builder = builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+    } else {
+        builder = builder.with_force_cpu();
+    }
+    Ok((builder.build().await?, paged))
+}
+
+// a picture takes one pad a cell, its rows steer the reply, and a repeat served from the prefix cache decodes the same
+#[tokio::test]
+async fn a_picture_expands_to_its_cells_steers_the_reply_and_repeats_from_the_cache()
+-> anyhow::Result<()> {
+    let dir = checkpoint()?;
+    add_tower(&dir, &weights(&TINY)?, TINY.hidden)?;
+    let (model, paged) = vision_model(&dir).await?;
+    let text = model
+        .send_chat_request(chat(PICTURE_PROMPT).set_sampler_max_len(1))
+        .await?
+        .usage
+        .prompt_tokens;
+    let first = model
+        .send_chat_request(picture_chat(PICTURE).set_sampler_max_len(1))
+        .await?
+        .usage
+        .prompt_tokens;
+    assert_eq!(first - text, PICTURE_CELLS, "the picture's pads");
+    let (traced, _) = traces::greedy(&model, picture_chat(PICTURE), MAX_LEN).await?;
+    let (repeat, cached) = traces::greedy(&model, picture_chat(PICTURE), MAX_LEN).await?;
+    assert!(
+        !paged || cached > 0,
+        "the repeat read nothing from the prefix cache"
+    );
+    assert_eq!(traced.len(), repeat.len());
+    for ((a, la), (b, lb)) in traced.iter().zip(&repeat) {
+        assert_eq!(a, b);
+        assert!((la - lb).abs() < CACHED_LOGPROB_TOLERANCE, "{la} vs {lb}");
+    }
+    let (other, _) = traces::greedy(&model, picture_chat(OTHER_PICTURE), MAX_LEN).await?;
+    assert!(
+        traced
+            .iter()
+            .zip(&other)
+            .any(|(a, b)| a.0 != b.0 || (a.1 - b.1).abs() > CACHED_LOGPROB_TOLERANCE),
+        "another picture left the reply as it was: {traced:?}"
+    );
+    Ok(())
+}
+
+// drafting over a prompt with a picture keeps the greedy output, verify steps rolling the conv states back as without
+#[tokio::test]
+async fn the_checkpoint_drafter_keeps_greedy_output_after_a_picture_on_cuda() -> anyhow::Result<()>
+{
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = drafter_checkpoint()?;
+    let (official, _) = official_weights(false)?;
+    add_tower(&dir, &official, OFFICIAL.hidden)?;
+    let dir = &dir;
+    let trace = |drafting: Drafting| async move {
+        let mut builder = inference::MultimodalModelBuilder::new(dir.path().to_string_lossy())
+            .with_load_recipes(false)
+            .with_dtype(ModelDType::BF16)
+            .with_prefix_cache_n(None)
+            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+        if drafting != Drafting::Off {
+            builder = builder.with_mtp_model(dir.path().to_string_lossy(), Some(DRAFT_BLOCK - 1));
+        }
+        let model = builder.build().await?;
+        anyhow::Ok(
+            traces::greedy(&model, picture_chat(PICTURE), DRAFT_DECODE_LEN)
+                .await?
+                .0,
+        )
+    };
+    let plain = trace(Drafting::Off).await?;
+    let drafted = trace(Drafting::Fixed).await?;
+    ensure_same_greedy(&drafted, &plain)
+}
+
+// asked for, the recipe brings the checkpoint's tower: its projector written once beside the recipe, the load reading
+// pictures through it
+#[tokio::test]
+async fn a_recipe_load_asked_for_vision_writes_the_projector_once_and_reads_pictures()
+-> anyhow::Result<()> {
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
+    let (official, _) = official_weights(false)?;
+    let dir = official_checkpoint(&official)?;
+    add_tower(&dir, &official, OFFICIAL.hidden)?;
+    let recipes = tempfile::tempdir()?;
+    let built = || -> anyhow::Result<Vec<std::path::PathBuf>> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(recipes.path())? {
+            for file in std::fs::read_dir(entry?.path())? {
+                files.push(file?.path());
+            }
+        }
+        files.sort();
+        Ok(files)
+    };
+    let recipe = |vision: bool| {
+        builder(&dir, None)
+            .with_load_recipes(true)
+            .with_recipe_vision(vision)
+            .with_recipe_dir(recipes.path())
+    };
+    // text only by default: no projector written
+    drop(recipe(false).build().await?);
+    anyhow::ensure!(built()?.len() == 1, "a text load wrote {:?}", built()?);
+    let model = recipe(true).build().await?;
+    let files = built()?;
+    anyhow::ensure!(
+        files.len() == 2
+            && files.iter().any(|f| f
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("mmproj-"))),
+        "the recipe and its projector, built {files:?}"
+    );
+    // pictures against each other: the GGUF tokenizer splits none of the fixture's text
+    let mut tokens = Vec::new();
+    for size in [PICTURE, OTHER_PICTURE] {
+        tokens.push(
+            model
+                .send_chat_request(picture_chat(size).set_sampler_max_len(1))
+                .await?
+                .usage
+                .prompt_tokens,
+        );
+    }
+    anyhow::ensure!(
+        tokens[0] - tokens[1] == PICTURE_CELLS - OTHER_PICTURE_CELLS,
+        "prompt tokens {tokens:?}"
+    );
+    drop(model);
+    let modified = files
+        .iter()
+        .map(|f| Ok(std::fs::metadata(f)?.modified()?))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    drop(recipe(true).build().await?);
+    let again = built()?
+        .iter()
+        .map(|f| Ok(std::fs::metadata(f)?.modified()?))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    anyhow::ensure!(again == modified, "a second load reads the built projector");
+    Ok(())
+}

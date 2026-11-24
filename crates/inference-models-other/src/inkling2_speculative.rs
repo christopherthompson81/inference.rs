@@ -163,7 +163,7 @@ impl Model {
         self.cfg.cache_slots() + 1
     }
 
-    fn embed(&self, ids: &Tensor) -> Result<Tensor> {
+    pub fn embed(&self, ids: &Tensor) -> Result<Tensor> {
         let x = self.embed_tokens.embedding_forward(ids, self.dtype)?;
         self.embed_norm.forward(&x)
     }

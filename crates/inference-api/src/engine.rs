@@ -211,6 +211,24 @@ pub struct ModelSpec {
     /// loaded).
     #[serde(default)]
     pub control_vectors: Option<crate::operations::ControlVectors>,
+    /// In place of `runtime.recipe_vision` for this model: a checkpoint loaded through its recipe (Inkling 2's) loads
+    /// its vision tower too.
+    #[serde(default)]
+    pub recipe_vision: Option<bool>,
+}
+
+impl ModelSpec {
+    // the engine's recipe options, this model's vision choice in place of the engine's
+    fn recipes(
+        &self,
+        recipes: &inference_selection::recipes::RecipeOptions,
+    ) -> inference_selection::recipes::RecipeOptions {
+        let mut recipes = recipes.clone();
+        if let Some(vision) = self.recipe_vision {
+            recipes.vision = vision;
+        }
+        recipes
+    }
 }
 
 // the default RAM tier, shrunk on a machine with little memory
@@ -412,6 +430,10 @@ pub struct RuntimeSpec {
     /// Control vectors the model given in `model` is steered by from its first request.
     #[serde(default)]
     pub control_vectors: Option<crate::operations::ControlVectors>,
+    /// A checkpoint loaded through its recipe (Inkling 2's) loads its vision tower too, written once beside the recipe
+    /// as a projector; off unless set.
+    #[serde(default)]
+    pub recipe_vision: Option<bool>,
     /// Where built recipes are kept; unset, `INFERENCE_RS_RECIPE_DIR` or `~/.cache/inference-rs/recipes`.
     #[serde(default)]
     pub recipe_dir: Option<String>,
@@ -459,6 +481,7 @@ impl RuntimeSpec {
     fn recipe_options(&self) -> inference_selection::recipes::RecipeOptions {
         inference_selection::recipes::RecipeOptions {
             enabled: self.load_recipes.unwrap_or(true),
+            vision: self.recipe_vision.unwrap_or(false),
             dir: self.recipe_dir.as_ref().map(std::path::PathBuf::from),
         }
     }
@@ -784,6 +807,7 @@ impl EngineSpec {
             );
         }
         for mut spec in std::mem::take(&mut self.models) {
+            let model_recipes = spec.recipes(&recipes);
             let (model_id, isq) = (&mut spec.model_id, &mut spec.isq);
             spec.model = resolve_model_source(
                 spec.model,
@@ -792,7 +816,7 @@ impl EngineSpec {
                 &token_source,
                 force_cpu,
                 runtime_isq.as_deref(),
-                &recipes,
+                &model_recipes,
             )
             .await?;
             self.models.push(spec);
@@ -1480,6 +1504,7 @@ impl Engine {
             return Err(ApiError::invalid_request(QUANT_WITH_ISQ));
         }
         let force_cpu = self.models.device().is_cpu();
+        let recipes = spec.recipes(self.models.recipes());
         let (model_id, isq) = (&mut spec.model_id, &mut spec.isq);
         spec.model = resolve_model_source(
             spec.model,
@@ -1488,7 +1513,7 @@ impl Engine {
             self.models.token_source(),
             force_cpu,
             self.models.in_situ_quant(),
-            self.models.recipes(),
+            &recipes,
         )
         .await
         .map_err(add_model_error)?;

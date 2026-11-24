@@ -198,6 +198,22 @@ pub trait MultimodalModel:
         model_specific_args: Box<dyn Any>, // pixel attention mask, or image sizes, or anything else
         ctx: &mut ModelForwardContext<'_>,
     ) -> inference_tensor::Result<Tensor>;
+    /// As [`NormalModel::set_control_vectors`], for a model whose text stack takes them.
+    fn set_control_vectors(
+        &self,
+        _set: crate::control_vectors::ControlVectorSet,
+    ) -> inference_tensor::Result<bool> {
+        inference_tensor::bail!("control vectors steer text models; this one is multimodal")
+    }
+    fn control_vectors(&self) -> crate::control_vectors::ControlVectorSet {
+        Default::default()
+    }
+    fn begin_layer_capture(&self) -> bool {
+        false
+    }
+    fn take_layer_capture(&self) -> inference_tensor::Result<Option<Vec<Tensor>>> {
+        Ok(None)
+    }
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
         false

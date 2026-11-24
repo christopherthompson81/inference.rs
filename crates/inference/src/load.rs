@@ -305,6 +305,13 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// Whether a checkpoint loaded through its recipe (Inkling 2's) loads its vision tower too, written once beside
+        /// the recipe as a projector; off by default.
+        pub fn with_recipe_vision(mut self, vision: bool) -> Self {
+            self.options.runtime.recipe_vision = Some(vision);
+            self
+        }
+
         /// Where built recipes are kept, in place of `INFERENCE_RS_RECIPE_DIR` or `~/.cache/inference-rs/recipes`.
         pub fn with_recipe_dir(mut self, dir: impl AsRef<std::path::Path>) -> Self {
             self.options.runtime.recipe_dir = Some(dir.as_ref().to_string_lossy().into_owned());
