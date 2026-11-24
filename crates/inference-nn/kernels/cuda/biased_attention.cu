@@ -38,6 +38,15 @@ constexpr int MMA_KEYS = 64;
 constexpr int MMA_MIN_QUERIES = 32;
 // shared rows padded by 8 halves against bank conflicts
 constexpr int MMA_PAD = 8;
+// a verify on tensor cores: a block every query and head of a KV head, up to two m16 tiles of rows, its warps a tile
+// and half of each tile of keys; a split at least VERIFY_SPLIT_KEYS keys
+constexpr int VERIFY_ROWS = 2 * MMA_ROWS;
+constexpr int VERIFY_WARPS = 4;
+constexpr int VERIFY_KEYS = 32;
+constexpr int VERIFY_SPLIT_KEYS = 128;
+// a sequence's verify rows take the tensor-core kernel from this many keys; under it the decode kernel's, whose rows
+// sum as a decode row's do, bit for bit (a drafted greedy reply stays the plain one at short context)
+constexpr int VERIFY_MIN_KEYS = 8192;
 
 __device__ __forceinline__ float load(const float* p, int64_t i) { return p[i]; }
 __device__ __forceinline__ float load(const __half* p, int64_t i) { return __half2float(p[i]); }
@@ -133,6 +142,79 @@ __device__ __forceinline__ void load_span_at(const Q8* row, int off, float (&o)[
   }
 }
 
+// the power of 2 putting x's magnitude in [0.5, 1) (0 for 0), within what pow2 makes; its value
+constexpr int POW2_LIMIT = 125;
+__device__ __forceinline__ int exponent_of(float x) {
+  return x > 0.0f ? max(-POW2_LIMIT, min(POW2_LIMIT, int((__float_as_uint(x) >> 23) & 0xFFu) - 126)) : 0;
+}
+__device__ __forceinline__ float pow2(int e) { return __uint_as_float(uint32_t(e + 127) << 23); }
+
+// a q8 byte b as the f32 b - 128, exact: b under the bits of 2^23, less 2^23 + 128
+constexpr unsigned F32_TWO23_BITS = 0x4B000000u;
+constexpr float Q8_F32_OFFSET = 8388736.0f;
+__device__ __forceinline__ float q8_centered(uint32_t raw, int byte) {
+  return __uint_as_float(__byte_perm(raw, F32_TWO23_BITS, 0x7540 | byte)) - Q8_F32_OFFSET;
+}
+
+// 4 values of a row in one load, as they sit in the cache
+template <int BYTES>
+struct RawOf;
+template <>
+struct RawOf<1> {
+  using type = uint32_t;
+};
+template <>
+struct RawOf<2> {
+  using type = uint2;
+};
+template <>
+struct RawOf<4> {
+  using type = uint4;
+};
+template <typename T>
+using Raw4 = typename RawOf<sizeof(T)>::type;
+
+// 4 loaded values as f16 pairs for the tensor cores: a q8 row's as the integers 2b - 255 (exact; its scales carry the
+// rest), others as they are
+template <typename T>
+__device__ __forceinline__ void stage4(const Raw4<T>& raw, __half2& lo, __half2& hi) {
+  float v[4];
+  load_row<4>(reinterpret_cast<const T*>(&raw), v);
+  lo = __floats2half2_rn(v[0], v[1]);
+  hi = __floats2half2_rn(v[2], v[3]);
+}
+// a byte b under a high byte of 0x64 is the f16 1024 + b; less 1152, times 2, plus 1 is 2b - 255, each step exact
+constexpr unsigned Q8_HALF_HIGH = 0x64646464u;
+constexpr float Q8_HALF_OFFSET = 1152.0f;
+// value = (2b - 255) x scale / Q8_STAGED_DIV
+constexpr float Q8_STAGED_DIV = 2.0f * Q8_MID;
+// 4 loaded values of a 32-value group (8 lanes) as f16 pairs under a power of 2 of the group's largest, which it
+// returns as the group's scale: f16 keeps small and large values' bits
+template <typename T>
+__device__ __forceinline__ float stage4_scaled(const Raw4<T>& raw, __half2& lo, __half2& hi) {
+  float v[4];
+  load_row<4>(reinterpret_cast<const T*>(&raw), v);
+  float mx = fmaxf(fmaxf(fabsf(v[0]), fabsf(v[1])), fmaxf(fabsf(v[2]), fabsf(v[3])));
+#pragma unroll
+  for (int o = 1; o < Q8_GROUP / 4; o *= 2) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+  const int e = exponent_of(mx);
+  const float down = pow2(-e);
+  lo = __floats2half2_rn(v[0] * down, v[1] * down);
+  hi = __floats2half2_rn(v[2] * down, v[3] * down);
+  return pow2(e);
+}
+
+template <>
+__device__ __forceinline__ void stage4<Q8>(const uint32_t& raw, __half2& lo, __half2& hi) {
+  const __half2 two = __float2half2_rn(2.0f);
+  const __half2 one = __float2half2_rn(1.0f);
+  const __half2 off = __float2half2_rn(Q8_HALF_OFFSET);
+  const uint32_t a = __byte_perm(raw, Q8_HALF_HIGH, 0x4140);
+  const uint32_t b = __byte_perm(raw, Q8_HALF_HIGH, 0x4342);
+  lo = __hfma2(__hsub2(*reinterpret_cast<const __half2*>(&a), off), two, one);
+  hi = __hfma2(__hsub2(*reinterpret_cast<const __half2*>(&b), off), two, one);
+}
+
 // where a (batch, kv head, key)'s row of K or V sits
 template <typename T>
 struct Kv {
@@ -186,6 +268,8 @@ struct Args {
   float* partials;
   unsigned int* arrived;
   int splits;
+  // with a verify beside it, the decode kernel leaves sequences of this many keys or more to it (0: takes all)
+  int verify_min_keys;
 };
 
 template <typename T>
@@ -301,6 +385,17 @@ __device__ __forceinline__ void mma_f16(float (&c)[4], const uint32_t (&a)[4], u
       "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
       : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
       : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#endif
+}
+
+// four 8x8 f16 tiles from shared rows (lane l gives row l % 8 of tile l / 8), each transposed
+__device__ __forceinline__ void ldmatrix_x4_trans(const __half* row, uint32_t& r0, uint32_t& r1, uint32_t& r2,
+                                                  uint32_t& r3) {
+#if __CUDA_ARCH__ >= 800
+  const unsigned addr = static_cast<unsigned>(__cvta_generic_to_shared(row));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+               : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+               : "r"(addr));
 #endif
 }
 
@@ -481,6 +576,29 @@ __global__ void __launch_bounds__(MMA_WARPS * WARP) prefill_mma_kernel(Args<T> a
 #endif
 }
 
+// a row's split partials `(splits, head_dim + 2)` merged into its output, a lane R of its values
+template <int R>
+__device__ __forceinline__ void merge_splits(const float* parts, int used, int lane, float* o) {
+  constexpr int HD = R * WARP;
+  float mt = -INFINITY;
+  for (int sp = 0; sp < used; sp++) mt = fmaxf(mt, __ldcg(parts + sp * (HD + 2)));
+  float lt = 0.0f;
+  float out[R];
+#pragma unroll
+  for (int r = 0; r < R; r++) out[r] = 0.0f;
+  for (int sp = 0; sp < used; sp++) {
+    const float ms = __ldcg(parts + sp * (HD + 2));
+    if (ms == -INFINITY) continue;
+    const float wt = __expf(ms - mt);
+    lt += __ldcg(parts + sp * (HD + 2) + 1) * wt;
+#pragma unroll
+    for (int r = 0; r < R; r++) out[r] += __ldcg(parts + sp * (HD + 2) + 2 + lane * R + r) * wt;
+  }
+  const float inv = 1.0f / lt;
+#pragma unroll
+  for (int r = 0; r < R; r++) o[lane * R + r] = out[r] * inv;
+}
+
 // a block a query of G heads sharing a KV head (or a split of its keys), its warps' lane groups each taking keys (a
 // group a key, its lanes splitting the head's dims, so a key's K and V rows load coalesced, once for all G heads, and
 // each head's dot reduces over KEY_LANES lanes), DECODE_KEYS keys a group a step to keep loads in flight; the groups
@@ -502,23 +620,32 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
   const int split = blockIdx.x % splits;
   const int head0 = blockIdx.y * G;
   const int batch = blockIdx.z;
+  if (a.verify_min_keys > 0 && past_of(a, batch) + a.t >= a.verify_min_keys) return;
   const int kvh = head0 / (a.heads / a.kv_heads);
   const int pos = past_of(a, batch) + i;
   const float tau = tau_of(a, pos);
   const int64_t row0 = (int64_t(batch) * a.t + i) * a.heads + head0;
-  float qr[G][PER];
+  // a q8 cache's values read as b - 128 times their group's scale / 128: K's +0.5 comes back through the lane's sum of
+  // q, V's through a sum of the weights (c) every value of the lane's group shares
+  constexpr bool QUANT = std::is_same<T, Q8>::value;
+  float qr[G][PER], qsum[G];
 #pragma unroll
   for (int g = 0; g < G; g++) {
+    qsum[g] = 0.0f;
 #pragma unroll
-    for (int r = 0; r < PER; r++) qr[g][r] = a.q[(row0 + g) * HD + j * PER + r] * a.scale;
+    for (int r = 0; r < PER; r++) {
+      qr[g][r] = a.q[(row0 + g) * HD + j * PER + r] * a.scale;
+      qsum[g] += qr[g][r];
+    }
   }
   // the sink starts the first split's first group's softmax: its weight and no value
   const bool sink = warp == 0 && group == 0 && split == 0;
-  float m[G], l[G], acc[G][PER];
+  float m[G], l[G], acc[G][PER], c[G];
 #pragma unroll
   for (int g = 0; g < G; g++) {
     m[g] = sink ? a.sinks[row0 + g] : -INFINITY;
     l[g] = sink ? 1.0f : 0.0f;
+    c[g] = 0.0f;
 #pragma unroll
     for (int r = 0; r < PER; r++) acc[g][r] = 0.0f;
   }
@@ -535,18 +662,39 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
   for (int base = lo + warp * WARP_KEYS; base <= last; base += DECODE_WARPS * WARP_KEYS) {
     float s[G][DECODE_KEYS];
     float vr[DECODE_KEYS][PER];
+    float vscale[DECODE_KEYS];
 #pragma unroll
     for (int k = 0; k < DECODE_KEYS; k++) {
       const int key = min(base + group * DECODE_KEYS + k, last);
+      const T* krow = a.k.row(batch, kvh, key, row_len<T>(HD));
+      const T* vrow = a.v.row(batch, kvh, key, row_len<T>(HD));
       float kv[PER];
-      load_span_at<HD, PER>(a.k.row(batch, kvh, key, row_len<T>(HD)), j * PER, kv);
-      load_span_at<HD, PER>(a.v.row(batch, kvh, key, row_len<T>(HD)), j * PER, vr[k]);
+      float kscale = 1.0f;
+      vscale[k] = 1.0f;
+      if constexpr (QUANT) {
+#pragma unroll
+        for (int w = 0; w < PER / 4; w++) {
+          const uint32_t kraw = *reinterpret_cast<const uint32_t*>(krow + j * PER + 4 * w);
+          const uint32_t vraw = *reinterpret_cast<const uint32_t*>(vrow + j * PER + 4 * w);
+#pragma unroll
+          for (int b = 0; b < 4; b++) {
+            kv[4 * w + b] = q8_centered(kraw, b);
+            vr[k][4 * w + b] = q8_centered(vraw, b);
+          }
+        }
+        const int grp = j * PER / Q8_GROUP;
+        kscale = __half2float(reinterpret_cast<const __half*>(krow + HD)[grp]) / Q8_MID;
+        vscale[k] = __half2float(reinterpret_cast<const __half*>(vrow + HD)[grp]) / Q8_MID;
+      } else {
+        load_span_at<HD, PER>(krow, j * PER, kv);
+        load_span_at<HD, PER>(vrow, j * PER, vr[k]);
+      }
 #pragma unroll
       for (int g = 0; g < G; g++) {
-        float part = 0.0f;
+        float part = QUANT ? 0.5f * qsum[g] : 0.0f;
 #pragma unroll
         for (int r = 0; r < PER; r++) part += qr[g][r] * kv[r];
-        s[g][k] = part;
+        s[g][k] = part * kscale;
       }
     }
 #pragma unroll
@@ -557,23 +705,47 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
         for (int o = KEY_LANES / 2; o > 0; o /= 2) s[g][k] += __shfl_xor_sync(0xffffffffu, s[g][k], o);
       }
     }
+    // the group's keys fold in together: one rescale of the sums for both
 #pragma unroll
-    for (int k = 0; k < DECODE_KEYS; k++) {
-      const int key = base + group * DECODE_KEYS + k;
-      if (key > last) break;
-      const int dist = pos - key;
+    for (int g = 0; g < G; g++) {
+      const float* bias = a.table + (row0 + g) * (a.extent + 1);
+      float score[DECODE_KEYS];
+      float mx = m[g];
 #pragma unroll
-      for (int g = 0; g < G; g++) {
-        const float* bias = a.table + (row0 + g) * (a.extent + 1);
-        const float score = (s[g][k] + (dist < a.extent ? bias[dist] : 0.0f)) * tau;
-        const float m_new = fmaxf(m[g], score);
-        const float alpha = __expf(m[g] - m_new);
-        const float p = __expf(score - m_new);
-        l[g] = l[g] * alpha + p;
-#pragma unroll
-        for (int r = 0; r < PER; r++) acc[g][r] = acc[g][r] * alpha + p * vr[k][r];
-        m[g] = m_new;
+      for (int k = 0; k < DECODE_KEYS; k++) {
+        const int key = base + group * DECODE_KEYS + k;
+        const int dist = pos - key;
+        score[k] = key <= last ? (s[g][k] + (dist < a.extent ? bias[dist] : 0.0f)) * tau : -INFINITY;
+        mx = fmaxf(mx, score[k]);
       }
+      if (mx == -INFINITY) continue;
+      const float alpha = __expf(m[g] - mx);
+      float pv[DECODE_KEYS];
+      float psum = 0.0f, pvsum = 0.0f;
+#pragma unroll
+      for (int k = 0; k < DECODE_KEYS; k++) {
+        const float p = __expf(score[k] - mx);
+        psum += p;
+        pv[k] = p * vscale[k];
+        pvsum += pv[k];
+      }
+      l[g] = l[g] * alpha + psum;
+#pragma unroll
+      for (int r = 0; r < PER; r++) {
+        float x = acc[g][r] * alpha;
+#pragma unroll
+        for (int k = 0; k < DECODE_KEYS; k++) x += pv[k] * vr[k][r];
+        acc[g][r] = x;
+      }
+      if constexpr (QUANT) c[g] = c[g] * alpha + 0.5f * pvsum;
+      m[g] = mx;
+    }
+  }
+  if constexpr (QUANT) {
+#pragma unroll
+    for (int g = 0; g < G; g++) {
+#pragma unroll
+      for (int r = 0; r < PER; r++) acc[g][r] += c[g];
     }
   }
   // the warp's groups merged: lanes of the same dims across the groups
@@ -638,23 +810,385 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
     if (before != unsigned(used) - 1) return;
     __threadfence();
     if (lane == 0) a.arrived[row] = 0;
-    mt = -INFINITY;
-    for (int sp = 0; sp < used; sp++) mt = fmaxf(mt, __ldcg(parts + sp * (HD + 2)));
-    lt = 0.0f;
-#pragma unroll
-    for (int r = 0; r < R; r++) out[r] = 0.0f;
-    for (int sp = 0; sp < used; sp++) {
-      const float ms = __ldcg(parts + sp * (HD + 2));
-      if (ms == -INFINITY) continue;
-      const float wt = __expf(ms - mt);
-      lt += __ldcg(parts + sp * (HD + 2) + 1) * wt;
-#pragma unroll
-      for (int r = 0; r < R; r++) out[r] += __ldcg(parts + sp * (HD + 2) + 2 + lane * R + r) * wt;
-    }
+    merge_splits<R>(parts, used, lane, o);
+    return;
   }
   const float inv = 1.0f / lt;
 #pragma unroll
   for (int r = 0; r < R; r++) o[lane * R + r] = out[r] * inv;
+}
+
+// a verify's rows on tensor cores (sm80+): a block every query and head of one KV head (row r is query r / G, head
+// r % G) over a split of the keys, so each K and V row loads once for all of them. Each key tile's K and V^T staged
+// in shared memory as f16, a q8 cache's as the exact integers 2b - 255 with its scales applied to the f32 sums by
+// group; q and the probabilities each as an f16 part and its f16 remainder, as in the prefill. Warp w takes row tile
+// w % 2 and half w / 2 of each key tile; the halves merge in shared memory, the splits through the partials.
+template <int R, typename T>
+__global__ void __launch_bounds__(VERIFY_WARPS * WARP) verify_mma_kernel(Args<T> a) {
+#if __CUDA_ARCH__ >= 800
+  constexpr bool QUANT = std::is_same<T, Q8>::value;
+  constexpr int HD = R * WARP;
+  constexpr int KSTEPS = HD / 16;
+  constexpr int GROUPS = HD / Q8_GROUP;
+  constexpr int GROUP_TILES = Q8_GROUP / 8;
+  constexpr int WARP_KEYS = VERIFY_KEYS / 2;
+  constexpr int SN = WARP_KEYS / 8;
+  constexpr int ON = HD / 8;
+  static_assert(GROUP_TILES % 2 == 0 && GROUPS * GROUP_TILES == ON, "value tiles load in pairs, a group's");
+  constexpr int ROW_BYTES = VERIFY_KEYS * (HD + MMA_PAD) * 2;
+  constexpr int SC_BYTES = 2 * VERIFY_KEYS * GROUPS * 4;
+  constexpr int MERGE_BYTES = VERIFY_ROWS * (HD + 2) * 4;
+  constexpr int STAGE_BYTES = 2 * ROW_BYTES + SC_BYTES;
+  // a thread's chunks of 4 values a tile, and its scales
+  constexpr int CHUNKS = VERIFY_KEYS * HD / 4 / (VERIFY_WARPS * WARP);
+  constexpr int SCALES = QUANT ? (VERIFY_KEYS * GROUPS + VERIFY_WARPS * WARP - 1) / (VERIFY_WARPS * WARP) : 0;
+  __shared__ __align__(16) unsigned char smem[STAGE_BYTES > MERGE_BYTES ? STAGE_BYTES : MERGE_BYTES];
+  __shared__ unsigned int ticket;
+  auto ks = reinterpret_cast<__half(*)[HD + MMA_PAD]>(smem);
+  auto vs = reinterpret_cast<__half(*)[HD + MMA_PAD]>(smem + ROW_BYTES);
+  auto ksc = reinterpret_cast<float(*)[GROUPS]>(smem + 2 * ROW_BYTES);
+  auto vsc = ksc + VERIFY_KEYS;
+  auto merged = reinterpret_cast<float(*)[HD + 2]>(smem);
+  const int warp = threadIdx.x / WARP;
+  const int lane = threadIdx.x % WARP;
+  const int g = lane / 4;
+  const int t4 = lane % 4;
+  const int mt = warp % 2;
+  const int kb = warp / 2 * WARP_KEYS;
+  const int splits = max(1, a.splits);
+  const int split = blockIdx.x;
+  const int kvh = blockIdx.y;
+  const int batch = blockIdx.z;
+  const int group = a.heads / a.kv_heads;
+  const int nr = a.t * group;
+  const int past = past_of(a, batch);
+  if (past + a.t < a.verify_min_keys) return;
+  // this lane's two rows
+  int pos[2], first[2];
+  bool valid[2];
+  float tau[2];
+  const float* bias[2];
+  int64_t qrow[2];
+#pragma unroll
+  for (int h = 0; h < 2; h++) {
+    const int r = mt * MMA_ROWS + g + 8 * h;
+    valid[h] = r < nr;
+    const int i = valid[h] ? r / group : 0;
+    qrow[h] = (int64_t(batch) * a.t + i) * a.heads + kvh * group + (valid[h] ? r % group : 0);
+    pos[h] = past + i;
+    first[h] = first_key(a.window, pos[h]);
+    tau[h] = tau_of(a, pos[h]);
+    bias[h] = a.table + qrow[h] * (a.extent + 1);
+  }
+  // q's fragments, an f16 part and its remainder, in shared memory for every warp of the row tile
+  __shared__ uint4 qs[2][2][KSTEPS][WARP];
+  // each row under a power of 2 of its largest before its f16 split, so small or large q keep their bits; the factor
+  // comes back on its scores
+  auto q_of = [&](int h, int d) -> float { return valid[h] ? a.q[qrow[h] * HD + d] * a.scale : 0.0f; };
+  float qdown[2], qup[2];
+#pragma unroll
+  for (int h = 0; h < 2; h++) {
+    float mx = 0.0f;
+#pragma unroll
+    for (int kk = 0; kk < KSTEPS; kk++) {
+      const int d = kk * 16 + 2 * t4;
+      mx = fmaxf(mx, fmaxf(fmaxf(fabsf(q_of(h, d)), fabsf(q_of(h, d + 1))),
+                           fmaxf(fabsf(q_of(h, d + 8)), fabsf(q_of(h, d + 9)))));
+    }
+    mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+    mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+    const int e = exponent_of(mx);
+    qdown[h] = pow2(-e);
+    qup[h] = pow2(e);
+  }
+  auto q_at = [&](int h, int d) -> float { return q_of(h, d) * qdown[h]; };
+#pragma unroll
+  for (int kk = 0; kk < KSTEPS; kk++) {
+    const int d = kk * 16 + 2 * t4;
+    uint32_t qf[4], qr[4];
+    split_half2(q_at(0, d), q_at(0, d + 1), qf[0], qr[0]);
+    split_half2(q_at(1, d), q_at(1, d + 1), qf[1], qr[1]);
+    split_half2(q_at(0, d + 8), q_at(0, d + 9), qf[2], qr[2]);
+    split_half2(q_at(1, d + 8), q_at(1, d + 9), qf[3], qr[3]);
+    // each key half's warp writes one of them
+    qs[kb != 0][mt][kk][lane] =
+        kb == 0 ? make_uint4(qf[0], qf[1], qf[2], qf[3]) : make_uint4(qr[0], qr[1], qr[2], qr[3]);
+  }
+  // the sink starts the first split's first key half
+  const bool sink = split == 0 && kb == 0;
+  float m[2], l[2];
+#pragma unroll
+  for (int h = 0; h < 2; h++) {
+    m[h] = valid[h] && sink ? a.sinks[qrow[h]] : -INFINITY;
+    l[h] = valid[h] && sink ? 1.0f : 0.0f;
+  }
+  float o[ON][4];
+#pragma unroll
+  for (int n = 0; n < ON; n++) o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.0f;
+  // this split's share of the keys any row sees
+  const int lo = first_key(a.window, past);
+  const int hi = past + a.t - 1;
+  const int keys = hi - lo + 1;
+  const int used = min(splits, (keys + VERIFY_SPLIT_KEYS - 1) / VERIFY_SPLIT_KEYS);
+  if (split >= used) return;
+  const int per = (keys + used - 1) / used;
+  const int s_lo = lo + split * per;
+  const int s_hi = min(hi, s_lo + per - 1);
+  // a tile's row addresses, worked out once a tile (two tiles' worth, the next one's ahead); its values and scales
+  // load into registers while the tile before computes
+  __shared__ const T* rows[2][2][VERIFY_KEYS];
+  const auto locate = [&](int base, int buf) {
+    if (threadIdx.x >= 2 * VERIFY_KEYS) return;
+    const int j = threadIdx.x % VERIFY_KEYS;
+    const int key = min(base + j, s_hi);
+    const Kv<T>& kv = threadIdx.x < VERIFY_KEYS ? a.k : a.v;
+    rows[buf][threadIdx.x / VERIFY_KEYS][j] = kv.row(batch, kvh, key, row_len<T>(HD));
+  };
+  static_assert(VERIFY_WARPS * WARP >= 2 * VERIFY_KEYS, "a thread a K or V row address");
+  Raw4<T> kraw[CHUNKS], vraw[CHUNKS];
+  float kscale[SCALES > 0 ? SCALES : 1], vscale[SCALES > 0 ? SCALES : 1];
+  const auto fetch = [&](int buf) {
+#pragma unroll
+    for (int c = 0; c < CHUNKS; c++) {
+      const int e = threadIdx.x + c * VERIFY_WARPS * WARP;
+      const int j = e / (HD / 4);
+      const int d = e % (HD / 4) * 4;
+      kraw[c] = *reinterpret_cast<const Raw4<T>*>(rows[buf][0][j] + d);
+      vraw[c] = *reinterpret_cast<const Raw4<T>*>(rows[buf][1][j] + d);
+    }
+    if constexpr (QUANT) {
+#pragma unroll
+      for (int c = 0; c < SCALES; c++) {
+        const int e = min(int(threadIdx.x) + c * VERIFY_WARPS * WARP, VERIFY_KEYS * GROUPS - 1);
+        const auto scale = [&](int kv) {
+          return __half2float(reinterpret_cast<const __half*>(rows[buf][kv][e / GROUPS] + HD)[e % GROUPS]) /
+                 Q8_STAGED_DIV;
+        };
+        kscale[c] = scale(0);
+        vscale[c] = scale(1);
+      }
+    }
+  };
+  locate(s_lo, 0);
+  __syncthreads();
+  fetch(0);
+  for (int base = s_lo, it = 0; base <= s_hi; base += VERIFY_KEYS, it++) {
+    const bool more = base + VERIFY_KEYS <= s_hi;
+    __syncthreads();
+    // keys past the split stage as zeros: their scores are masked, their values must not be NaN
+#pragma unroll
+    for (int c = 0; c < CHUNKS; c++) {
+      const int e = threadIdx.x + c * VERIFY_WARPS * WARP;
+      const int j = e / (HD / 4);
+      const int d = e % (HD / 4) * 4;
+      __half2 k01, k23, v01, v23;
+      if constexpr (QUANT) {
+        stage4<T>(kraw[c], k01, k23);
+        stage4<T>(vraw[c], v01, v23);
+      } else {
+        const float kup = stage4_scaled<T>(kraw[c], k01, k23);
+        const float vup = stage4_scaled<T>(vraw[c], v01, v23);
+        if (d % Q8_GROUP == 0) ksc[j][d / Q8_GROUP] = kup, vsc[j][d / Q8_GROUP] = vup;
+      }
+      if (base + j > s_hi) k01 = k23 = v01 = v23 = __float2half2_rn(0.0f);
+      *reinterpret_cast<uint2*>(&ks[j][d]) =
+          make_uint2(*reinterpret_cast<uint32_t*>(&k01), *reinterpret_cast<uint32_t*>(&k23));
+      *reinterpret_cast<uint2*>(&vs[j][d]) =
+          make_uint2(*reinterpret_cast<uint32_t*>(&v01), *reinterpret_cast<uint32_t*>(&v23));
+    }
+    if constexpr (QUANT) {
+#pragma unroll
+      for (int c = 0; c < SCALES; c++) {
+        const int e = threadIdx.x + c * VERIFY_WARPS * WARP;
+        if (e >= VERIFY_KEYS * GROUPS) break;
+        const bool in = base + e / GROUPS <= s_hi;
+        ksc[e / GROUPS][e % GROUPS] = in ? kscale[c] : 0.0f;
+        vsc[e / GROUPS][e % GROUPS] = in ? vscale[c] : 0.0f;
+      }
+    }
+    if (more) locate(base + VERIFY_KEYS, (it + 1) % 2);
+    __syncthreads();
+    if (more) fetch((it + 1) % 2);
+    // S = Q K^T a 32-value group of dims at a time, each group's sums times its keys' scales
+    constexpr int GSTEPS = Q8_GROUP / 16;
+    float sc[SN][4];
+#pragma unroll
+    for (int n = 0; n < SN; n++) sc[n][0] = sc[n][1] = sc[n][2] = sc[n][3] = 0.0f;
+#pragma unroll
+    for (int gi = 0; gi < KSTEPS / GSTEPS; gi++) {
+      float part[SN][4];
+#pragma unroll
+      for (int n = 0; n < SN; n++) part[n][0] = part[n][1] = part[n][2] = part[n][3] = 0.0f;
+#pragma unroll
+      for (int kk = gi * GSTEPS; kk < (gi + 1) * GSTEPS; kk++) {
+        const uint4 hi4 = qs[0][mt][kk][lane];
+        const uint4 lo4 = qs[1][mt][kk][lane];
+        const uint32_t qf[4] = {hi4.x, hi4.y, hi4.z, hi4.w};
+        const uint32_t qr[4] = {lo4.x, lo4.y, lo4.z, lo4.w};
+#pragma unroll
+        for (int n = 0; n < SN; n++) {
+          const __half* krow = &ks[kb + n * 8 + g][kk * 16 + 2 * t4];
+          const uint32_t k0 = *reinterpret_cast<const uint32_t*>(krow);
+          const uint32_t k1 = *reinterpret_cast<const uint32_t*>(krow + 8);
+          mma_f16(part[n], qf, k0, k1);
+          mma_f16(part[n], qr, k0, k1);
+        }
+      }
+#pragma unroll
+      for (int n = 0; n < SN; n++) {
+        const int kc = kb + n * 8 + 2 * t4;
+#pragma unroll
+        for (int c = 0; c < 4; c++) sc[n][c] += ksc[kc + c % 2][gi] * part[n][c];
+      }
+    }
+    float tile_max[2] = {-INFINITY, -INFINITY};
+#pragma unroll
+    for (int n = 0; n < SN; n++) {
+#pragma unroll
+      for (int c = 0; c < 4; c++) {
+        const int h = c / 2;
+        const int key = base + kb + n * 8 + 2 * t4 + c % 2;
+        const int dist = pos[h] - key;
+        const bool visible = valid[h] && key <= pos[h] && key >= first[h] && key <= s_hi;
+        const float b = dist >= 0 && dist < a.extent ? bias[h][dist] : 0.0f;
+        sc[n][c] = visible ? (sc[n][c] * qup[h] + b) * tau[h] : -INFINITY;
+        tile_max[h] = fmaxf(tile_max[h], sc[n][c]);
+      }
+    }
+    float alpha[2], rowsum[2] = {0.0f, 0.0f};
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      tile_max[h] = fmaxf(tile_max[h], __shfl_xor_sync(0xffffffffu, tile_max[h], 1));
+      tile_max[h] = fmaxf(tile_max[h], __shfl_xor_sync(0xffffffffu, tile_max[h], 2));
+      const float m_new = fmaxf(m[h], tile_max[h]);
+      alpha[h] = m[h] == -INFINITY ? 0.0f : __expf(m[h] - m_new);
+      m[h] = m_new;
+    }
+#pragma unroll
+    for (int n = 0; n < SN; n++) {
+#pragma unroll
+      for (int c = 0; c < 4; c++) {
+        const int h = c / 2;
+        sc[n][c] = sc[n][c] == -INFINITY ? 0.0f : __expf(sc[n][c] - m[h]);
+        rowsum[h] += sc[n][c];
+      }
+    }
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      rowsum[h] += __shfl_xor_sync(0xffffffffu, rowsum[h], 1);
+      rowsum[h] += __shfl_xor_sync(0xffffffffu, rowsum[h], 2);
+      l[h] = l[h] * alpha[h] + rowsum[h];
+    }
+#pragma unroll
+    for (int n = 0; n < ON; n++) {
+      o[n][0] *= alpha[0];
+      o[n][1] *= alpha[0];
+      o[n][2] *= alpha[1];
+      o[n][3] *= alpha[1];
+    }
+    // O += P V: two score tiles (16 keys) are an A fragment, a group's value tiles taking P times its keys' value
+    // scales, under a power of 2 of the warp's largest (back on the group's f32 sums), so the weights stay in f16 range
+#pragma unroll
+    for (int kk = 0; kk < WARP_KEYS / 16; kk++) {
+      const int kc = kb + kk * 16 + 2 * t4;
+#pragma unroll
+      for (int gi = 0; gi < GROUPS; gi++) {
+        float w[4] = {vsc[kc][gi], vsc[kc + 1][gi], vsc[kc + 8][gi], vsc[kc + 9][gi]};
+        float wmax = fmaxf(fmaxf(w[0], w[1]), fmaxf(w[2], w[3]));
+        wmax = fmaxf(wmax, __shfl_xor_sync(0xffffffffu, wmax, 1));
+        wmax = fmaxf(wmax, __shfl_xor_sync(0xffffffffu, wmax, 2));
+        const int e = exponent_of(wmax);
+        const float down = pow2(-e);
+#pragma unroll
+        for (int x = 0; x < 4; x++) w[x] *= down;
+        uint32_t pf[4], pr[4];
+        split_half2(sc[2 * kk][0] * w[0], sc[2 * kk][1] * w[1], pf[0], pr[0]);
+        split_half2(sc[2 * kk][2] * w[0], sc[2 * kk][3] * w[1], pf[1], pr[1]);
+        split_half2(sc[2 * kk + 1][0] * w[2], sc[2 * kk + 1][1] * w[3], pf[2], pr[2]);
+        split_half2(sc[2 * kk + 1][2] * w[2], sc[2 * kk + 1][3] * w[3], pf[3], pr[3]);
+        float part[GROUP_TILES][4];
+#pragma unroll
+        for (int n = 0; n < GROUP_TILES; n++) part[n][0] = part[n][1] = part[n][2] = part[n][3] = 0.0f;
+        // B fragments of two value tiles a load, from key-major rows transposed
+#pragma unroll
+        for (int n = 0; n < GROUP_TILES; n += 2) {
+          const int mat = lane / 8;
+          const __half* vrow = &vs[kb + kk * 16 + mat % 2 * 8 + lane % 8][(gi * GROUP_TILES + n + mat / 2) * 8];
+          uint32_t v0, v1, v2, v3;
+          ldmatrix_x4_trans(vrow, v0, v1, v2, v3);
+          mma_f16(part[n], pf, v0, v1);
+          mma_f16(part[n], pr, v0, v1);
+          mma_f16(part[n + 1], pf, v2, v3);
+          mma_f16(part[n + 1], pr, v2, v3);
+        }
+        const float up = pow2(e);
+#pragma unroll
+        for (int n = 0; n < GROUP_TILES; n++) {
+#pragma unroll
+          for (int x = 0; x < 4; x++) o[gi * GROUP_TILES + n][x] += up * part[n][x];
+        }
+      }
+    }
+  }
+  // the second key half's warps hand theirs to the first's
+  __syncthreads();
+  if (kb != 0) {
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      float* dst = merged[mt * MMA_ROWS + g + 8 * h];
+      if (t4 == 0) dst[0] = m[h], dst[1] = l[h];
+#pragma unroll
+      for (int n = 0; n < ON; n++) {
+        dst[2 + n * 8 + 2 * t4] = o[n][2 * h];
+        dst[2 + n * 8 + 2 * t4 + 1] = o[n][2 * h + 1];
+      }
+    }
+  }
+  __syncthreads();
+  if (kb == 0) {
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      const float* src = merged[mt * MMA_ROWS + g + 8 * h];
+      const float mo = fmaxf(m[h], src[0]);
+      const float w0 = m[h] == -INFINITY ? 0.0f : __expf(m[h] - mo);
+      const float w1 = src[0] == -INFINITY ? 0.0f : __expf(src[0] - mo);
+      const float lt = l[h] * w0 + src[1] * w1;
+      if (!valid[h]) continue;
+      float* dst;
+      float scale_out;
+      if (used > 1) {
+        dst = a.partials + (qrow[h] * splits + split) * (HD + 2);
+        if (t4 == 0) dst[0] = mo, dst[1] = lt;
+        dst += 2;
+        scale_out = 1.0f;
+      } else {
+        dst = a.out + qrow[h] * HD;
+        scale_out = 1.0f / lt;
+      }
+#pragma unroll
+      for (int n = 0; n < ON; n++) {
+        const int d = n * 8 + 2 * t4;
+        dst[d] = (o[n][2 * h] * w0 + src[2 + d] * w1) * scale_out;
+        dst[d + 1] = (o[n][2 * h + 1] * w0 + src[2 + d + 1] * w1) * scale_out;
+      }
+    }
+  }
+  if (used == 1) return;
+  __threadfence();
+  __syncthreads();
+  // one count a block: its first row's
+  const int64_t counter = int64_t(batch) * a.t * a.heads + kvh * group;
+  if (threadIdx.x == 0) ticket = atomicAdd(a.arrived + counter, 1u);
+  __syncthreads();
+  // the last split merges every row's partials
+  if (ticket != unsigned(used) - 1) return;
+  __threadfence();
+  if (threadIdx.x == 0) a.arrived[counter] = 0;
+  for (int r = warp; r < nr; r += VERIFY_WARPS) {
+    const int64_t row = (int64_t(batch) * a.t + r / group) * a.heads + kvh * group + r % group;
+    merge_splits<R>(a.partials + row * splits * (HD + 2), used, lane, a.out + row * HD);
+  }
+#endif
 }
 
 // whether the device runs the tensor-core prefill (sm80+), asked once
@@ -693,11 +1227,35 @@ int decode_splits(int batch, int t, int heads, int kv_heads) {
   return int(std::min<int64_t>(DECODE_MAX_SPLITS, std::max<int64_t>(1, want)));
 }
 
+// a verify's blocks a KV head: enough for the SMs
+int verify_splits(int batch, int kv_heads) {
+  const int64_t rows = int64_t(batch) * kv_heads;
+  const int64_t want = (int64_t(sm_count()) * DECODE_BLOCKS_PER_SM + rows - 1) / rows;
+  return int(std::min<int64_t>(DECODE_MAX_SPLITS, std::max<int64_t>(1, want)));
+}
+
+// whether a decode of `t` queries takes the tensor-core verify: several queries, every row of a KV head in its tiles
+bool verify_mma(int t, int heads, int kv_heads) {
+  return t > 1 && kv_heads > 0 && heads % kv_heads == 0 && t * (heads / kv_heads) <= VERIFY_ROWS && mma_device();
+}
+
+// the splits a decode's partials are sized for: the most either kernel takes
+int alloc_splits(int batch, int t, int heads, int kv_heads) {
+  const int splits = decode_splits(batch, t, heads, kv_heads);
+  return verify_mma(t, heads, kv_heads) ? std::max(splits, verify_splits(batch, kv_heads)) : splits;
+}
+
 template <int R, typename T>
 cudaError_t launch(const Args<T>& a, int batch, bool decode, cudaStream_t stream) {
+  const bool split = a.partials && a.arrived && a.splits > 1;
   if (decode) {
+    // an f32 cache keeps the f32 kernel; with the verify, both kernels launch, each taking the sequences of its
+    // length, and both split as the partials were sized (their layouts the same)
+    const bool verify = !std::is_same<T, float>::value && verify_mma(a.t, a.heads, a.kv_heads);
     Args<T> d = a;
-    if (!(a.partials && a.arrived && a.splits > 1)) d.splits = 1;
+    d.splits = !split ? 1 : verify ? a.splits : std::min(a.splits, decode_splits(batch, a.t, a.heads, a.kv_heads));
+    d.verify_min_keys = verify ? VERIFY_MIN_KEYS : 0;
+    if (verify) verify_mma_kernel<R, T><<<dim3(d.splits, a.kv_heads, batch), VERIFY_WARPS * WARP, 0, stream>>>(d);
     const dim3 block(DECODE_WARPS * WARP);
     // heads sharing a KV head go to one block, which reads each K and V row once for all of them
     switch (decode_group(a.heads, a.kv_heads)) {
@@ -758,7 +1316,7 @@ struct BiasedAttentionShape {
 // the f32 partials a decode of `t` queries over `batch` sequences and `heads` takes (0: one block a row)
 extern "C" int64_t biased_attention_decode_partials(int batch, int t, int heads, int kv_heads, int head_dim) {
   const int64_t rows = int64_t(batch) * t * heads;
-  const int splits = decode_splits(batch, t, heads, kv_heads);
+  const int splits = alloc_splits(batch, t, heads, kv_heads);
   return splits > 1 ? rows * splits * (head_dim + 2) : 0;
 }
 
@@ -773,7 +1331,7 @@ extern "C" int biased_attention_f32(const float* q, const float* k, const float*
                 {v, v_batch, v_head, nullptr, 0, 0, 0, 0},
                 table, sinks, out, p.heads, p.kv_heads, p.t, p.past_lens, p.past_sub, p.past, p.extent, p.window,
                 p.scale, p.log_alpha, p.log_floor, p.partials, p.arrived,
-                decode_splits(p.batch, p.t, p.heads, p.kv_heads)};
+                alloc_splits(p.batch, p.t, p.heads, p.kv_heads)};
   return dispatch(a, p.batch, p.head_dim, p.t <= p.decode_rows, reinterpret_cast<cudaStream_t>(stream));
 }
 
@@ -795,7 +1353,7 @@ extern "C" int biased_attention_paged(const float* q, const void* k_cache, const
               {(const T*)v_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads, ring},          \
               table, sinks, out, p.heads, p.kv_heads, p.t, p.past_lens, p.past_sub, p.past, p.extent, p.window,    \
               p.scale, p.log_alpha, p.log_floor, p.partials, p.arrived,                                          \
-              decode_splits(p.batch, p.t, p.heads, p.kv_heads)};                                                   \
+              alloc_splits(p.batch, p.t, p.heads, p.kv_heads)};                                                    \
     return dispatch(a, p.batch, p.head_dim, decode, s);                                                            \
   }
   switch (cache_dtype) {
