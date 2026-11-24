@@ -31,6 +31,7 @@ LATO.2's mesh (artist-like topology, untextured) of the object in the job's one 
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `close_loops` | `int \| None` | optional |
 | `placement` | `Placement \| None` | optional |
 | `remove_background` | `bool \| None` | optional |
 | `seed` | `int \| None` | optional |

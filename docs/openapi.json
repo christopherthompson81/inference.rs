@@ -7321,6 +7321,15 @@
         "type": "object",
         "description": "LATO.2's mesh (artist-like topology, untextured) of the object in the job's one image.",
         "properties": {
+          "close_loops": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Close the holes and cracks whose rim is up to this many edges, adding no vertices (64 by default; 0: none)",
+            "minimum": 0
+          },
           "placement": {
             "oneOf": [
               {

@@ -11,7 +11,7 @@ use inference_recon::trellis2::mesh::Mesh;
 use inference_tensor::Device;
 use serde::Serialize;
 
-pub use inference_recon::lato2::faces::MAX_RING;
+pub use inference_recon::lato2::faces::{MAX_LOOP, MAX_RING};
 pub use inference_recon::lato2::structure::{STRUCTURE_SAMPLER, StructureSampler};
 pub use inference_recon::lato2::topology::TOPO_STEPS;
 pub use inference_recon::lato2::vertex_flow::{VERTEX_SAMPLER, VertexSampler};

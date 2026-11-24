@@ -669,6 +669,10 @@ pub enum Command {
         #[arg(long, default_value_t = inference_jobs::image_to_mesh::MAX_RING)]
         max_ring: usize,
 
+        /// Then close the boundary loops (holes and cracks) of up to this many edges, adding no vertices (below 3: none)
+        #[arg(long, default_value_t = inference_jobs::image_to_mesh::MAX_LOOP)]
+        close_loops: usize,
+
         /// The LATO.2 folder (its .pt checkpoints); fetched from 0x4c48/LATO.2 when unset
         #[arg(long)]
         lato2: Option<PathBuf>,

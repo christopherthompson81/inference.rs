@@ -264,6 +264,9 @@ pub struct Lato2Options {
     pub topology_steps: usize,
     /// Open rings up to this many edges are filled (below 4: none)
     pub max_ring: usize,
+    /// Boundary loops (holes and cracks) of up to this many edges left after the ring filling are closed, adding no
+    /// vertices (below 3: none). Not in the reference, whose meshes keep them
+    pub close_loops: usize,
 }
 
 impl Default for Lato2Options {
@@ -275,6 +278,7 @@ impl Default for Lato2Options {
             vertex: VERTEX_SAMPLER,
             topology_steps: TOPO_STEPS,
             max_ring: faces::MAX_RING,
+            close_loops: faces::MAX_LOOP,
         }
     }
 }
@@ -419,13 +423,17 @@ pub fn generate(
         decoder.edges(&feats, topology::EDGE_THRESHOLD)?
     };
     let cells: Vec<[f32; 3]> = vertices.cells.iter().map(|c| c.map(|v| v as f32)).collect();
-    let mut faces = faces::faces(n, &edges, &cells, options.max_ring);
-    faces::orient(&mut faces, &positions);
+    let mut mesh = Mesh {
+        vertices: positions,
+        faces: faces::faces(n, &edges, &cells, options.max_ring),
+    };
+    if options.close_loops >= 3 {
+        let closing = faces::close_loops(&mesh.faces, &cells, options.close_loops);
+        mesh.faces.extend(closing);
+    }
+    faces::orient(&mut mesh.faces, &mesh.vertices);
     Ok(Generated {
-        mesh: Mesh {
-            vertices: positions,
-            faces,
-        },
+        mesh,
         condition,
         scaffold,
         edges: edges.len(),

@@ -119,3 +119,30 @@ What works: per face, a ray from its center along its normal and one against it;
 mesh takes that side (2199 of 5129 robot faces decide this way); the enclosed rest take the winding of a decided
 neighbour across an edge only the two share. The GLB is now also double-sided, so a face this still gets wrong shows
 instead of leaving a hole. Cost: brute-force ray tests on all cores, well under a second at these face counts.
+
+## Run 4 - 2026-11-24 23:40
+
+Question: after the winding fix the served gnome figure still shows hole defects; what closes them?
+
+Measured on that figure (its job input, background removed, seed 0) with `holes.py` (scratch: boundary edges, their
+connected pieces and sizes) and renders with the open edges drawn red:
+
+| fill | faces | boundary edges | pieces (largest, in edges) |
+|-|-|-|-|
+| rings up to 12 (the reference) | 4226 | 380 | 11 (160, 94, 25, 22, 18) |
+| rings up to 24 | 4273 | 335 | 10 (137, 94, 25) |
+| rings up to 64 or 200 | 4273 | 335 | unchanged from 24 |
+| rings 24 + CuMesh fan fill (perimeter 0.15 / 0.4 / 1 / 5) | 4278-4394 | 330 / 286 / 214 / 214 | 10 / 7 / 4 / 4 |
+| rings 12 + boundary loops closed by min-area triangulation (vertex walk) | 4297 | 297 | 5 (160, 94, 25) |
+| the same, walking edges and cutting sub-loops at revisited vertices | 4345 | 237 | 4 (154, 65, 9, 9) |
+
+Only 2 of 218 boundary vertices branch; the open edges sit in the beard and lower body, as long winding cracks. Longer
+rings stop helping at 24: the ring search rejects rings with chords and avoids vertices adjacent to both ends, and
+face-less predicted edges cross the cracks. The fan fill (a new vertex at each loop's center) needs a perimeter as large
+as the whole mesh to reach the cracks and would fan across them. A minimum-area triangulation of each boundary loop
+zips a crack shut without new vertices; walking edges (not vertices) and cutting a loop off wherever the walk returns
+to a vertex handles rims that touch themselves. In the z-buffered render the shaded surface then shows almost no gaps
+(back faces 1.2% / 0.3% of the object): the red edges left lie on the rims of nested inner layers of the beard, under
+other surface, and end at edges of three or more faces rather than closing.
+
+Kept: loop closing up to 64 edges by default (`--close-loops`, job `close_loops`).

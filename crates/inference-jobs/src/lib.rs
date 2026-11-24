@@ -639,6 +639,9 @@ pub struct ImageToMeshJob {
     /// The topology flow's sampling steps, 1 to 200 (50 by default)
     #[serde(default)]
     pub topology_steps: Option<u32>,
+    /// Close the holes and cracks whose rim is up to this many edges, adding no vertices (64 by default; 0: none)
+    #[serde(default)]
+    pub close_loops: Option<u32>,
     /// How much it may displace to run, in place of the server's setting
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -1708,8 +1711,8 @@ fn image_to_mesh_work(
     job: ImageToMeshJob,
 ) -> Result<(Prepare, Work), ApiError> {
     use crate::image_to_mesh::{
-        DEFAULT_VERTICES, ImageToMeshOptions, Settings, TOPO_STEPS, VERTEX_SAMPLER, VERTICES_RANGE,
-        VertexSampler, fetch_models, generate_mesh_on,
+        DEFAULT_VERTICES, ImageToMeshOptions, MAX_LOOP, Settings, TOPO_STEPS, VERTEX_SAMPLER,
+        VERTICES_RANGE, VertexSampler, fetch_models, generate_mesh_on,
     };
     let vertices = job.vertices.map_or(DEFAULT_VERTICES, |v| v as usize);
     if !VERTICES_RANGE.contains(&vertices) {
@@ -1740,6 +1743,7 @@ fn image_to_mesh_work(
                 ..VERTEX_SAMPLER
             },
             topology_steps: job.topology_steps.map_or(TOPO_STEPS, |s| s as usize),
+            close_loops: job.close_loops.map_or(MAX_LOOP, |n| n as usize),
             ..Settings::default()
         },
         remove_background: job.remove_background.unwrap_or(false),

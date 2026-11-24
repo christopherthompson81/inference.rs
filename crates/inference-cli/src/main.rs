@@ -275,6 +275,7 @@ async fn main() -> Result<()> {
             topology_steps,
             structure_steps,
             max_ring,
+            close_loops,
             lato2,
             trellis_large,
             dinov2,
@@ -312,6 +313,7 @@ async fn main() -> Result<()> {
                     },
                     topology_steps,
                     max_ring,
+                    close_loops,
                 },
                 remove_background,
             };
