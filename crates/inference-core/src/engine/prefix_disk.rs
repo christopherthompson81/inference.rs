@@ -58,7 +58,7 @@ impl Engine {
         else {
             return Ok(());
         };
-        let restored = self.fill_imported_prefix(&imported, loaded);
+        let restored = self.fill_imported_prefix(&imported, loaded, n_blocks * block_size);
         if let Ok(Some((snapshot, auxiliary))) = &restored {
             get_mut_arcmutex!(disk.kv_cache_manager).cache_imported_blocks(&imported, key);
             // owned by the key's last block, as a captured snapshot is
@@ -90,6 +90,7 @@ impl Engine {
         &self,
         imported: &[(usize, usize)],
         loaded: LoadedPrefix,
+        tokens: usize,
     ) -> Result<
         Option<(
             crate::kv_cache::RecurrentSnapshotSlot,
@@ -129,7 +130,7 @@ impl Engine {
         let Some(snapshot) = pipeline
             .cache()
             .hybrid()
-            .import_recurrent_snapshot(&loaded.recurrent)?
+            .import_recurrent_snapshot(&loaded.recurrent, tokens)?
         else {
             return Ok(None);
         };

@@ -153,6 +153,11 @@ impl TagReasoningContext {
         ctx
     }
 
+    /// The markers that open and close a reasoning block.
+    pub fn tags(&self) -> (&str, &str) {
+        (&self.open_tag, &self.close_tag)
+    }
+
     fn with_tags(open: &str, close: &str) -> Self {
         Self {
             open_tag: open.to_string(),

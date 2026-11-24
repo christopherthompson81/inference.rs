@@ -563,7 +563,7 @@ fn recurrent_budgets(
         if device.is_cuda() {
             crate::utils::memory_usage::MemoryUsage.trim_cuda_memory_pool(&device, 0)?;
         }
-        let memory = crate::utils::memory_usage::MemoryUsage.query(&device)?;
+        let memory = crate::utils::memory_usage::MemoryUsage.query_for_load(&device)?;
         let snapshot_bytes = snapshot_bytes_by_device
             .get(&device.location())
             .copied()
@@ -1617,10 +1617,11 @@ pub trait Pipeline:
         }
         let snapshot = match captured {
             Some(snapshot) => Some(snapshot),
-            None => self
-                .cache()
-                .hybrid()
-                .store_recurrent_snapshot(*seq.id(), slot_idx)?,
+            None => self.cache().hybrid().store_recurrent_snapshot(
+                *seq.id(),
+                slot_idx,
+                cached_tokens,
+            )?,
         };
         // No idle slot, so there is nowhere to keep the state
         let Some(snapshot) = snapshot else {

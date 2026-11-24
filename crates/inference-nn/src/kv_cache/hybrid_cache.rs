@@ -516,8 +516,14 @@ pub fn recurrent_pool_capacity(serving_capacity: usize, snapshot_slots: Option<u
 enum RecurrentSlotOwner {
     Sequence(usize),
     GraphPad,
-    // A prefix-cache snapshot: `id` names the handle, the smallest `last_use` is evicted first
-    PrefixSnapshot { id: u64, last_use: u64 },
+    // A prefix-cache snapshot of `tokens`: `id` names the handle; the lowest `priority` (the eviction clock plus
+    // `tokens`, renewed on use) is evicted first, then the least recent `last_use`
+    PrefixSnapshot {
+        id: u64,
+        tokens: u64,
+        priority: u64,
+        last_use: u64,
+    },
 }
 
 /// A recurrent prefix snapshot held in an idle pool slot; the pool may reclaim the slot, which invalidates it.
@@ -1154,6 +1160,8 @@ pub struct HybridCache {
     // Scratch slot CUDA graph pad rows write into; allocated on first use, dropped on reset
     graph_pad_slot: Option<usize>,
     next_snapshot_id: u64,
+    // GreedyDual-Size clock: the priority of the last evicted snapshot, so a long prefix outlives short recent ones
+    snapshot_clock: u64,
     // the next forward's mid-chunk captures, each with its snapshot slot's physical index
     recurrent_captures: Vec<(RecurrentCapturePoint, u32)>,
     device_capture_indices: Vec<(Device, Vec<Tensor>)>,
@@ -1234,6 +1242,7 @@ impl HybridCache {
             recurrent_capacity_floor: capacity,
             graph_pad_slot: None,
             next_snapshot_id: 0,
+            snapshot_clock: 0,
             recurrent_captures: Vec::new(),
             device_capture_indices: Vec::new(),
         };
@@ -2053,7 +2062,9 @@ impl HybridCache {
         if self.recurrent_capacity() == 0 {
             inference_tensor::bail!("hybrid cache has no recurrent state pool");
         }
-        if !self.slot_owners.iter().any(Option::is_none) && !self.evict_oldest_snapshot()? {
+        if !self.slot_owners.iter().any(Option::is_none)
+            && self.evict_cheapest_snapshot()?.is_none()
+        {
             let new_capacity = self
                 .recurrent_capacity()
                 .checked_mul(2)
@@ -2159,27 +2170,46 @@ impl HybridCache {
         Ok(true)
     }
 
-    fn oldest_snapshot_slot(&self) -> Option<usize> {
+    fn cheapest_snapshot_slot(&self) -> Option<usize> {
         self.slot_owners
             .iter()
             .enumerate()
             .filter_map(|(slot, owner)| match owner {
-                Some(RecurrentSlotOwner::PrefixSnapshot { last_use, .. }) => {
-                    Some((*last_use, slot))
-                }
+                Some(RecurrentSlotOwner::PrefixSnapshot {
+                    priority, last_use, ..
+                }) => Some((*priority, *last_use, slot)),
                 _ => None,
             })
             .min()
-            .map(|(_, slot)| slot)
+            .map(|(_, _, slot)| slot)
     }
 
-    /// Frees the oldest snapshot slot, if any, for a sequence or a newer snapshot.
-    fn evict_oldest_snapshot(&mut self) -> Result<bool> {
-        let Some(slot) = self.oldest_snapshot_slot() else {
-            return Ok(false);
+    /// Frees the snapshot that saves the least for its age, advancing the eviction clock to it; the freed slot, if any.
+    fn evict_cheapest_snapshot(&mut self) -> Result<Option<usize>> {
+        let Some(slot) = self.cheapest_snapshot_slot() else {
+            return Ok(None);
         };
+        if let Some(Some(RecurrentSlotOwner::PrefixSnapshot { priority, .. })) =
+            self.slot_owners.get(slot)
+        {
+            self.snapshot_clock = self.snapshot_clock.max(*priority);
+        }
         self.free_snapshot_slot(slot)?;
-        Ok(true)
+        Ok(Some(slot))
+    }
+
+    // the owner of a new snapshot of `tokens`, ranked from the current clock
+    fn new_snapshot_owner(&mut self, tokens: usize) -> (u64, RecurrentSlotOwner) {
+        let id = self.next_snapshot_id;
+        self.next_snapshot_id += 1;
+        let tokens = tokens as u64;
+        let owner = RecurrentSlotOwner::PrefixSnapshot {
+            id,
+            tokens,
+            priority: self.snapshot_clock.saturating_add(tokens),
+            last_use: id,
+        };
+        (id, owner)
     }
 
     fn free_snapshot_slot(&mut self, slot_idx: usize) -> Result<()> {
@@ -2226,15 +2256,17 @@ impl HybridCache {
         Ok(())
     }
 
-    /// Copies the sequence's committed state into a free or least recently used snapshot slot; `None` if neither exists.
+    /// Copies the sequence's committed state after `tokens` into a free slot or the cheapest snapshot's; `None` if
+    /// neither exists.
     pub fn store_recurrent_snapshot(
         &mut self,
         sequence_id: usize,
         slot_idx: usize,
+        tokens: usize,
     ) -> Result<Option<RecurrentSnapshotSlot>> {
         self.ensure_recurrent_slot_owned(slot_idx, RecurrentSlotOwner::Sequence(sequence_id))?;
         self.ensure_recurrent_slot_initialized(slot_idx)?;
-        let Some(snapshot) = self.reserve_recurrent_snapshot()? else {
+        let Some(snapshot) = self.reserve_recurrent_snapshot(tokens)? else {
             return Ok(None);
         };
         let (from, to) = (
@@ -2245,16 +2277,16 @@ impl HybridCache {
         Ok(Some(snapshot))
     }
 
-    /// A snapshot slot for a forward to write a mid-chunk state into (`set_recurrent_captures`); `None` when every slot
-    /// is a sequence's.
-    pub fn reserve_recurrent_snapshot(&mut self) -> Result<Option<RecurrentSnapshotSlot>> {
+    /// A snapshot slot for a forward to write the state after `tokens` into (`set_recurrent_captures`); `None` when
+    /// every slot is a sequence's.
+    pub fn reserve_recurrent_snapshot(
+        &mut self,
+        tokens: usize,
+    ) -> Result<Option<RecurrentSnapshotSlot>> {
         let target = match self.slot_owners.iter().position(Option::is_none) {
             Some(target) => target,
-            None => match self.oldest_snapshot_slot() {
-                Some(target) => {
-                    self.free_snapshot_slot(target)?;
-                    target
-                }
+            None => match self.evict_cheapest_snapshot()? {
+                Some(target) => target,
                 None => return Ok(None),
             },
         };
@@ -2263,9 +2295,8 @@ impl HybridCache {
                 pool.reserve_at(target)?;
             }
         }
-        let id = self.next_snapshot_id;
-        self.next_snapshot_id += 1;
-        self.slot_owners[target] = Some(RecurrentSlotOwner::PrefixSnapshot { id, last_use: id });
+        let (id, owner) = self.new_snapshot_owner(tokens);
+        self.slot_owners[target] = Some(owner);
         self.pristine_zero_slots[target] = false;
         self.last_released_sequence_owners[target] = None;
         self.committed_lanes[target] = 0;
@@ -2358,11 +2389,12 @@ impl HybridCache {
         Ok(Some(states))
     }
 
-    /// A snapshot slot filled from exported state, chosen as `store_recurrent_snapshot` chooses one; `None` when no
-    /// slot is free or held by an older snapshot.
+    /// A snapshot slot filled from exported state after `tokens`, chosen as `store_recurrent_snapshot` chooses one;
+    /// `None` when no slot is free or held by a snapshot.
     pub fn import_recurrent_snapshot(
         &mut self,
         states: &[RecurrentSnapshotState],
+        tokens: usize,
     ) -> Result<Option<RecurrentSnapshotSlot>> {
         let pools = self
             .caches
@@ -2392,11 +2424,8 @@ impl HybridCache {
         }
         let target = match self.slot_owners.iter().position(Option::is_none) {
             Some(target) => target,
-            None => match self.oldest_snapshot_slot() {
-                Some(target) => {
-                    self.free_snapshot_slot(target)?;
-                    target
-                }
+            None => match self.evict_cheapest_snapshot()? {
+                Some(target) => target,
                 None => return Ok(None),
             },
         };
@@ -2412,9 +2441,8 @@ impl HybridCache {
                 pool.scatter_recurrent_state(&idx, &state.recurrent.to_device(pool.device())?)?;
             }
         }
-        let id = self.next_snapshot_id;
-        self.next_snapshot_id += 1;
-        self.slot_owners[target] = Some(RecurrentSlotOwner::PrefixSnapshot { id, last_use: id });
+        let (id, owner) = self.new_snapshot_owner(tokens);
+        self.slot_owners[target] = Some(owner);
         self.pristine_zero_slots[target] = false;
         self.last_released_sequence_owners[target] = None;
         self.committed_lanes[target] = 0;
@@ -2464,12 +2492,18 @@ impl HybridCache {
         )
     }
 
-    /// Marks a held snapshot as the most recently used, so it is the last to give way.
+    /// Renews a held snapshot's priority from the current clock and marks it the most recently used.
     pub fn touch_recurrent_snapshot(&mut self, snapshot: RecurrentSnapshotSlot) {
-        if let Some(Some(RecurrentSlotOwner::PrefixSnapshot { id, last_use })) =
-            self.slot_owners.get_mut(snapshot.slot)
+        let clock = self.snapshot_clock;
+        if let Some(Some(RecurrentSlotOwner::PrefixSnapshot {
+            id,
+            tokens,
+            priority,
+            last_use,
+        })) = self.slot_owners.get_mut(snapshot.slot)
             && *id == snapshot.id
         {
+            *priority = clock.saturating_add(*tokens);
             *last_use = self.next_snapshot_id;
             self.next_snapshot_id += 1;
         }
@@ -2877,6 +2911,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    // the prompt length a test snapshot stands for; equal lengths rank by recency alone
+    const SNAPSHOT_TOKENS: usize = 64;
 
     fn config(layer_types: Vec<HybridLayerType>) -> HybridCacheConfig {
         HybridCacheConfig {
@@ -3883,7 +3920,7 @@ mod tests {
         }
 
         let snapshot = cache
-            .store_recurrent_snapshot(10, source)?
+            .store_recurrent_snapshot(10, source, SNAPSHOT_TOKENS)?
             .expect("a free slot holds the snapshot");
 
         assert!(cache.release_seq(20, destination)?);
@@ -4020,7 +4057,7 @@ mod tests {
         let first = cache.allocate_seq(1)?;
         ones_state(&mut cache, 1, first)?;
         let snapshot = cache
-            .store_recurrent_snapshot(1, first)?
+            .store_recurrent_snapshot(1, first, SNAPSHOT_TOKENS)?
             .expect("an idle slot");
         let second = cache.allocate_seq(2)?;
         assert!(cache.restore_recurrent_snapshot(2, second, snapshot)?);
@@ -4052,10 +4089,10 @@ mod tests {
         let first = cache.allocate_seq(1)?;
         ones_state(&mut cache, 1, first)?;
         let older = cache
-            .store_recurrent_snapshot(1, first)?
+            .store_recurrent_snapshot(1, first, SNAPSHOT_TOKENS)?
             .expect("an idle slot");
         let newer = cache
-            .store_recurrent_snapshot(1, first)?
+            .store_recurrent_snapshot(1, first, SNAPSHOT_TOKENS)?
             .expect("an idle slot");
         cache.touch_recurrent_snapshot(older);
 
@@ -4065,6 +4102,34 @@ mod tests {
         }
         assert!(cache.recurrent_snapshot_held(older));
         assert!(!cache.recurrent_snapshot_held(newer));
+        Ok(())
+    }
+
+    // a long prefix outlives newer short ones while its recompute cost outweighs their recency, then ages out
+    #[test]
+    fn a_long_prefix_snapshot_outlives_short_newer_ones() -> Result<()> {
+        let mut cache = HybridCache::new(
+            config(vec![HybridLayerType::Recurrent]),
+            DType::F32,
+            &[Device::Cpu],
+        )?;
+        let first = cache.allocate_seq(1)?;
+        ones_state(&mut cache, 1, first)?;
+        let spare = cache.recurrent_capacity() - cache.recurrent_slots_used();
+        let long = cache
+            .store_recurrent_snapshot(1, first, 40 * SNAPSHOT_TOKENS)?
+            .expect("an idle slot");
+        // twice the spare slots of short snapshots: each takes a free slot, then the cheapest short one's
+        let shorts = (0..2 * spare)
+            .map(|_| cache.store_recurrent_snapshot(1, first, SNAPSHOT_TOKENS))
+            .collect::<Result<Vec<_>>>()?;
+        assert!(cache.recurrent_snapshot_held(long));
+        assert!(!cache.recurrent_snapshot_held(shorts[0].expect("a slot")));
+        // each eviction advances the clock to the evicted short one: past 40 of them, the long one is the cheapest
+        for _ in 0..40 * spare {
+            cache.store_recurrent_snapshot(1, first, SNAPSHOT_TOKENS)?;
+        }
+        assert!(!cache.recurrent_snapshot_held(long));
         Ok(())
     }
 
@@ -4078,7 +4143,7 @@ mod tests {
         let first = cache.allocate_seq(1)?;
         ones_state(&mut cache, 1, first)?;
         let older = cache
-            .store_recurrent_snapshot(1, first)?
+            .store_recurrent_snapshot(1, first, SNAPSHOT_TOKENS)?
             .expect("an idle slot");
         cache.release_recurrent_snapshot(older)?;
         assert!(!cache.recurrent_snapshot_held(older));
@@ -4087,7 +4152,10 @@ mod tests {
         for sequence_id in 2..=cache.recurrent_capacity() {
             cache.allocate_seq(sequence_id)?;
         }
-        assert_eq!(cache.store_recurrent_snapshot(1, first)?, None);
+        assert_eq!(
+            cache.store_recurrent_snapshot(1, first, SNAPSHOT_TOKENS)?,
+            None
+        );
         Ok(())
     }
 

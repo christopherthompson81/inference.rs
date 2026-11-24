@@ -110,7 +110,7 @@ pub fn get_device_layers(
                 MemoryGpuConfig::MbAmount(user_mb) => {
                     // Clamp user's KV budget to available memory.
                     let primary_dev = &devices[0];
-                    let avail_bytes = MemoryUsage.query(primary_dev)?.available();
+                    let avail_bytes = MemoryUsage.query_for_load(primary_dev)?.available();
                     let cap = device_memory_cap(avail_bytes, primary_dev);
                     let act_overhead = non_mapped_max.max(mapped_max);
                     let budget_mb = cap
@@ -121,7 +121,7 @@ pub fn get_device_layers(
                 }
                 MemoryGpuConfig::BestEffortMbAmount { target_mb, min_mb } => {
                     let primary_dev = &devices[0];
-                    let avail_bytes = MemoryUsage.query(primary_dev)?.available();
+                    let avail_bytes = MemoryUsage.query_for_load(primary_dev)?.available();
                     let cap = device_memory_cap(avail_bytes, primary_dev);
                     let act_overhead = non_mapped_max.max(mapped_max);
                     // best effort shrinks to what the weights leave rather than pushing layers off the GPU
@@ -142,7 +142,7 @@ pub fn get_device_layers(
                     // Cap the KV budget so model + activations + KV fits within
                     // the device capacity derived from *available* memory.
                     let primary_dev = &devices[0];
-                    let avail_bytes = MemoryUsage.query(primary_dev)?.available();
+                    let avail_bytes = MemoryUsage.query_for_load(primary_dev)?.available();
                     let cap = device_memory_cap(avail_bytes, primary_dev);
                     let act_overhead = non_mapped_max.max(mapped_max);
                     let occupied = saturating_memory_sum([
@@ -234,7 +234,7 @@ pub fn get_device_layers(
 
     let mut avail = Vec::new();
     for dev in devices {
-        let a = MemoryUsage.query(dev)?.available();
+        let a = MemoryUsage.query_for_load(dev)?.available();
         avail.push((a, dev.clone()));
     }
     // On unified memory systems (iGPUs), GPU and CPU share the same physical RAM.

@@ -1262,6 +1262,11 @@ pub struct ChatCompletionRequest {
     #[schema(value_type = Option<ReasoningEffort>)]
     #[schema(example = json!(Option::None::<String>))]
     pub reasoning_effort: Option<String>,
+    /// Reasoning tokens a reply thinks for before the model's end-of-thinking token is pushed up, more with each token
+    /// past, so a reply that keeps reasoning ends its thinking and answers.
+    #[schema(example = json!(Option::None::<usize>))]
+    #[serde(default)]
+    pub thinking_budget: Option<usize>,
     /// vLLM-style template variables; `enable_thinking` and `reasoning_effort` map onto the fields above.
     #[schema(example = json!(Option::None::<HashMap<String, Value>>))]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,

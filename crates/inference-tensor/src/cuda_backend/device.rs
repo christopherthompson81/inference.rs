@@ -577,6 +577,30 @@ impl CudaDevice {
         Ok(unsafe { stream.upgrade_device_ptr(ptr, len) })
     }
 
+    /// Bytes the process-lifetime pool holds on this device: workspaces a later model reuses rather than allocates.
+    pub fn process_lifetime_reserved_bytes(&self) -> Result<usize> {
+        use cudarc::driver::sys;
+        let ordinal = self.cuda_stream().context().ordinal();
+        let Some(&pool) = static_pools()
+            .lock()
+            .expect("process-lifetime pools poisoned")
+            .get(&ordinal)
+        else {
+            return Ok(0);
+        };
+        let mut reserved = 0u64;
+        unsafe {
+            sys::cuMemPoolGetAttribute(
+                pool as sys::CUmemoryPool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT,
+                (&raw mut reserved).cast(),
+            )
+        }
+        .result()
+        .w()?;
+        Ok(usize::try_from(reserved).unwrap_or(usize::MAX))
+    }
+
     /// Compute capability as `major * 10 + minor` (86 for 8.6), queried once when the device is created.
     pub fn compute_cap(&self) -> usize {
         self.compute_cap

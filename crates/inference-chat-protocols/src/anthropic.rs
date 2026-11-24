@@ -571,6 +571,11 @@ impl AnthropicMessagesRequest {
 
     pub fn into_chat_completion_request(self) -> Result<ChatCompletionRequest> {
         let prefix_cache_ttl_secs = self.prefix_cache_ttl_secs();
+        let thinking_budget = self
+            .thinking
+            .as_ref()
+            .filter(|thinking| thinking.tp == "enabled")
+            .and_then(|thinking| thinking.budget_tokens);
         let enable_thinking =
             resolve_anthropic_thinking(self.thinking.as_ref(), self.enable_thinking)?;
         let reasoning_effort = resolve_anthropic_effort(
@@ -681,6 +686,7 @@ impl AnthropicMessagesRequest {
             dry_sequence_breakers: self.dry_sequence_breakers,
             enable_thinking,
             reasoning_effort: reasoning_effort.map(|effort| effort.to_string()),
+            thinking_budget,
             chat_template_kwargs: None,
             max_tool_rounds: self.max_tool_rounds,
             truncate_sequence: self.truncate_sequence,

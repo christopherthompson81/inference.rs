@@ -99,6 +99,7 @@ inference agent [OPTIONS] [COMMAND]
 | `--cwd <CWD>` |  | The project directory the tools work in (default: the current directory) |
 | `--max-rounds <MAX_ROUNDS>` | `200` | Model replies (each followed by its tool calls) one prompt may take before the agent stops |
 | `--max-reply-tokens <MAX_REPLY_TOKENS>` | `32768` | Tokens one model reply may take, reasoning included; a reply cut there ends the prompt (a model repeating itself otherwise runs until the context is full) |
+| `--thinking-budget <THINKING_BUDGET>` | `4096` | Reasoning tokens one reply thinks for before the server pushes the model to end its thinking and act; 0 sends no budget |
 | `--thinking <THINKING>` |  | Control thinking mode for models that support it. Use --thinking or --thinking true to force on, --thinking false to force off. Possible values: `true`, `false`. |
 | `--reasoning-effort <REASONING_EFFORT>` |  | Set reasoning effort: off, low, medium, high, or xhigh. "none" is an alias for off |
 

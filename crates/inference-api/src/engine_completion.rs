@@ -183,6 +183,7 @@ pub(crate) fn parse_request(
         n_choices: oairequest.n_choices,
         dry_params,
         no_repeat_ngram_size: None,
+        thinking_budget: None,
     };
     Ok((
         Request::Normal(Box::new(NormalRequest {

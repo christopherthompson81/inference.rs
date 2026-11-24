@@ -631,7 +631,7 @@ pub fn calculate_cache_config(
         let post_load_memory = if model_weight_size_in_bytes.is_none()
             && crate::utils::memory_usage::has_dedicated_memory(device)
         {
-            Some(MemoryUsage.query(device)?)
+            Some(MemoryUsage.query_for_load(device)?)
         } else {
             None
         };
@@ -662,7 +662,7 @@ pub fn calculate_cache_config(
             MemoryGpuConfig::Utilization(f) => {
                 let memory = match post_load_memory {
                     Some(memory) => memory,
-                    None => MemoryUsage.query(device)?,
+                    None => MemoryUsage.query_for_load(device)?,
                 };
                 let total = memory.total() as f32 / SIZE_IN_MB as f32;
                 if model_weight_size_in_bytes.is_some() {

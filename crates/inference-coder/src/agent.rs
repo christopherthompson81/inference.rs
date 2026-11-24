@@ -24,6 +24,9 @@ use crate::turn::{ToolCall, Turn};
 pub const DEFAULT_MAX_ROUNDS: usize = 200;
 // a reply that runs past this is cut: without a cap a looping reply fills the whole context (Qwen3's suggested length)
 pub const DEFAULT_MAX_REPLY_TOKENS: usize = 32_768;
+// reasoning past this pushes the model to close its thinking and act (about the 95th percentile of agent replies' reasoning;
+// a reply drafting whole files in its thinking otherwise runs to the reply cap)
+pub const DEFAULT_THINKING_BUDGET: usize = 4096;
 const LENGTH_FINISH: &str = "length";
 const REPLY_CUT: &str = "the reply was cut at the token limit";
 const INTERRUPTED: &str = "interrupted by the user";
@@ -135,6 +138,8 @@ pub struct AgentConfig {
     pub max_rounds: usize,
     /// The most tokens one model reply may take, reasoning included.
     pub max_reply_tokens: usize,
+    /// Reasoning tokens a reply thinks for before the server pushes it to stop (`thinking_budget`); None sends none.
+    pub thinking_budget: Option<usize>,
     /// Extra request fields (sampling, `enable_thinking`, `reasoning_effort`), the same on every request.
     pub request: Map<String, Value>,
 }
@@ -573,6 +578,11 @@ impl Agent {
         request
             .entry("max_tokens")
             .or_insert_with(|| json!(self.config.max_reply_tokens));
+        if let Some(budget) = self.config.thinking_budget {
+            request
+                .entry("thinking_budget")
+                .or_insert_with(|| json!(budget));
+        }
         request.insert("model".into(), Value::String(self.config.model.clone()));
         request.insert("messages".into(), Value::Array(messages));
         request.insert(
@@ -856,6 +866,7 @@ mod tests {
             model: "m".into(),
             max_rounds: 10,
             max_reply_tokens: 64,
+            thinking_budget: None,
             request: Map::new(),
         };
         let mut agent = Agent::new(
@@ -919,6 +930,7 @@ mod tests {
             model: "m".into(),
             max_rounds: 10,
             max_reply_tokens: 64,
+            thinking_budget: None,
             request: Map::new(),
         };
         let mut agent = Agent::new(
@@ -992,6 +1004,7 @@ mod tests {
             model: "m".into(),
             max_rounds: 10,
             max_reply_tokens: 64,
+            thinking_budget: None,
             request: Map::new(),
         };
         let mut agent = Agent::new(
@@ -1035,6 +1048,7 @@ mod tests {
             model: "m".into(),
             max_rounds: 10,
             max_reply_tokens: 64,
+            thinking_budget: None,
             request: Map::new(),
         };
         Agent::new(

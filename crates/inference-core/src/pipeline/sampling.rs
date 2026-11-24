@@ -182,7 +182,7 @@ pub(crate) fn cache_finished_sequence(
         match this
             .cache()
             .hybrid()
-            .store_recurrent_snapshot(*seq.id(), idx)
+            .store_recurrent_snapshot(*seq.id(), idx, seq.get_toks().len())
         {
             Ok(Some(snapshot)) => Some(snapshot),
             Ok(None) => return Ok(()),

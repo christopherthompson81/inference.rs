@@ -762,7 +762,10 @@ async fn a_full_device_evicts_the_idle_model() -> anyhow::Result<()> {
         // out only at a later sync
         MemoryUsage.synchronize_cuda_context(&device)?;
         MemoryUsage.trim_cuda_memory_pool(&device, 0)?;
-        let free = || -> anyhow::Result<u64> { Ok(MemoryUsage.query(&device)?.available() as u64) };
+        // as a load counts it: the process-lifetime workspaces it would reuse are free to it
+        let free = || -> anyhow::Result<u64> {
+            Ok(MemoryUsage.query_for_load(&device)?.available() as u64)
+        };
         let mut ballast = Vec::new();
         let mut chunk = CHUNK_BYTES;
         while free()? > LOADER_RESERVE_BYTES {
