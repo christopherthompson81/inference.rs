@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+
 //! Inkling 2's vision tower: a ViT with a CLS row, a learned position grid and 2D RoPE, then a 2 x 2 merge projected to
 //! the text model's width (vLLM `inkling2/nvidia/vision.py`, llama.cpp `inkling2v`).
 
@@ -12,9 +14,12 @@ const ROPE_THETA: f32 = 10000.0;
 const CHANNELS: usize = 3;
 // the canvas past the picture: a raw value, normalized like the pixels
 const PAD_PIXEL: f32 = -1.0;
+#[allow(clippy::excessive_precision)]
 const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 // the processor's float32-rounded CLIP std divides, the model's own multiplies back (vLLM `gather_patches`)
+#[allow(clippy::excessive_precision)]
 const PROCESSOR_CLIP_STD: [f32; 3] = [0.26862954, 0.2613026, 0.2757771];
+#[allow(clippy::excessive_precision)]
 const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
 crate::serde_default_fn!(usize, default_hidden_size, 1024);

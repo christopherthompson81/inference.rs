@@ -71,3 +71,23 @@ resize, the RoPE pairs and the merge order all match. The bf16 tower keeps an f3
 gap sits between llama.cpp (1e-2) and an all-bf16 run (4.2e-2), as vLLM's own bf16 encoder would.
 
 Next: the multimodal row wrapping the text model, its inputs processor, and an end-to-end answer about a picture.
+
+## Run 3 - 2026-11-24 09:50
+
+Question: does a served Inkling 2 read pictures end to end, with the prefix cache and the drafter?
+
+Command: `target/debug/inference serve -p 18234 --format gguf -m /mnt/data/models/inkling2-mini -f
+Inkling-2-Mini-NVFP4-C.gguf --mmproj .../ref/mmproj-inkling2-bf16.gguf --max-seq-len 32768` (then again with
+`--mtp-model /mnt/data/models/inkling2-mini-official --mtp-n-predict 7 --mtp-auto-depth`), greedy chat requests with a
+PNG data URL (`vis/ask.py`).
+
+- Loads as the new `Inkling2Vl` multimodal row (vision kept unmapped on cuda:0).
+- Synthetic shapes picture: 151 prompt tokens (117 cells), the same reasoning and answer as llama.cpp's mtmd-cli word
+  for word (red circle, blue rectangle, green triangle, "HELLO 42"); decode 110.9 tok/s plain.
+- Table fixture: "Fruit | Colour | Count / Apple | Red | 12 / Lemon | Yellow | 7", exact. The same request again:
+  64 of 75 prompt tokens from the prefix cache, the same 107 tokens.
+- With the drafter at 7 + auto depth: the same greedy outputs (154 and 107 tokens), 156.7 and 159.2 tok/s
+  (94/151 and 63/96 drafts accepted).
+
+So the wrapper's delegation holds for the paged cache, the prefix cache and the external drafter's verify steps.
+Open: tiny-model tests, the parity script, the official checkpoint's recipe load (no projector written yet).

@@ -695,6 +695,13 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
     }
     let name = &cfg.architectures[0];
     if let Ok(tp) = MultimodalLoaderType::from_causal_lm_name(name) {
+        // Inkling 2's class names its checkpoints with or without their tower
+        if tp == MultimodalLoaderType::Inkling2Vl
+            && !has_vision_config(config)
+            && let Some(text) = text_loader_of_multimodal(config)
+        {
+            return Ok(Detected::Normal(text));
+        }
         return Ok(Detected::Multimodal(tp));
     }
     match NormalLoaderType::from_causal_lm_name(name) {
@@ -704,6 +711,11 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
             .map(Detected::Normal)
             .ok_or(err),
     }
+}
+
+fn has_vision_config(config: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(config)
+        .is_ok_and(|config| config.get("vision_config").is_some())
 }
 
 // the text loader for a multimodal config's `text_config`, by its `model_type`
@@ -1031,27 +1043,35 @@ mod tests {
         assert_eq!(text_loader_of_multimodal(r#"{"model_type":"llama"}"#), None);
     }
 
-    // a multimodal class with only a text loader (Inkling 2's own checkpoints) runs its text model
+    // Inkling 2's class with its tower runs the multimodal model, without one its text model
     #[test]
-    fn a_multimodal_class_without_its_loader_runs_its_text_model() {
-        let detected = detect(
-            "thinkingmachines/Inkling-2-Mini",
-            &ConfigArtifacts {
-                contents: Some(
-                    r#"{"architectures":["Inkling2LoopForConditionalGeneration"],
-                        "text_config":{"model_type":"inkling2_loop_text"}}"#
-                        .to_string(),
-                ),
-                sentence_transformers_present: false,
-                repo_files: Vec::new(),
-                remote_access_issue: None,
-                weight_index: None,
-            },
-        )
-        .unwrap();
+    fn an_inkling2_checkpoint_runs_its_tower_only_when_it_has_one() {
+        let detect_config = |config: &str| {
+            detect(
+                "thinkingmachines/Inkling-2-Mini",
+                &ConfigArtifacts {
+                    contents: Some(config.to_string()),
+                    sentence_transformers_present: false,
+                    repo_files: Vec::new(),
+                    remote_access_issue: None,
+                    weight_index: None,
+                },
+            )
+            .unwrap()
+        };
         assert!(matches!(
-            detected,
+            detect_config(
+                r#"{"architectures":["Inkling2LoopForConditionalGeneration"],
+                    "text_config":{"model_type":"inkling2_loop_text"}}"#
+            ),
             Detected::Normal(NormalLoaderType::Inkling2Loop)
+        ));
+        assert!(matches!(
+            detect_config(
+                r#"{"architectures":["Inkling2LoopForConditionalGeneration"],
+                    "text_config":{"model_type":"inkling2_loop_text"},"vision_config":{}}"#
+            ),
+            Detected::Multimodal(MultimodalLoaderType::Inkling2Vl)
         ));
     }
 
