@@ -1173,6 +1173,17 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub no_embeddings_on_host: bool,
 
+    /// Steer the model by a control vector file (llama.cpp's GGUF or a safetensors file, `direction.<layer>`):
+    /// `FILE` or `FILE:SCALE` (scale 1 when none is given), repeatable, the scaled directions summed
+    #[arg(long = "control-vector", value_name = "FILE[:SCALE]")]
+    #[serde(default)]
+    pub control_vectors: Vec<String>,
+
+    /// Steer only layers START..=END (0-based) by the control vectors
+    #[arg(long, num_args = 2, value_names = ["START", "END"])]
+    #[serde(default)]
+    pub control_vector_layer_range: Option<Vec<usize>>,
+
     /// Keep MoE experts (GGUF or EXL3, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs
     /// a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus
     #[arg(long, value_name = "EXPERTS")]
@@ -1492,6 +1503,45 @@ pub struct BenchRuntimeOptions {
     /// a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus
     #[arg(long, value_name = "EXPERTS")]
     pub moe_expert_cache: Option<usize>,
+
+    /// Steer the model by a control vector file (llama.cpp's GGUF or a safetensors file, `direction.<layer>`):
+    /// `FILE` or `FILE:SCALE` (scale 1 when none is given), repeatable, the scaled directions summed
+    #[arg(long = "control-vector", value_name = "FILE[:SCALE]")]
+    pub control_vectors: Vec<String>,
+
+    /// Steer only layers START..=END (0-based) by the control vectors
+    #[arg(long, num_args = 2, value_names = ["START", "END"])]
+    pub control_vector_layer_range: Option<Vec<usize>>,
+}
+
+/// `--control-vector` values and the layer range as the engine's control vectors: `FILE:SCALE` splits at the last
+/// colon only where what follows is a number, so a path with colons stays whole.
+pub fn control_vectors(
+    files: &[String],
+    range: Option<&[usize]>,
+) -> Option<inference_api::operations::ControlVectors> {
+    if files.is_empty() {
+        return None;
+    }
+    let files = files
+        .iter()
+        .map(|file| match file.rsplit_once(':') {
+            Some((path, scale)) if !path.is_empty() && scale.parse::<f32>().is_ok() => {
+                inference_api::operations::ControlVectorFile {
+                    path: path.to_string(),
+                    scale: scale.parse().expect("checked above"),
+                }
+            }
+            _ => inference_api::operations::ControlVectorFile {
+                path: file.clone(),
+                scale: 1.0,
+            },
+        })
+        .collect();
+    Some(inference_api::operations::ControlVectors {
+        files,
+        layer_range: range.and_then(|r| Some([*r.first()?, *r.get(1)?])),
+    })
 }
 
 impl BenchRuntimeOptions {
@@ -1620,6 +1670,8 @@ impl Default for RuntimeOptions {
             max_seqs: DEFAULT_MAX_SEQS,
             max_num_batched_tokens: None,
             no_embeddings_on_host: false,
+            control_vectors: Vec::new(),
+            control_vector_layer_range: None,
             moe_expert_cache: None,
             max_prefill_chunk_tokens: None,
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),

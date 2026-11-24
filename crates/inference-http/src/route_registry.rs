@@ -82,6 +82,10 @@ pub const ROOT_ROUTE: RouteInfo = RouteInfo::new("/", "GET", RouteKind::Inferenc
 pub const AUTH_SESSION_ROUTE: RouteInfo =
     RouteInfo::new("/auth/session", "POST, DELETE", RouteKind::InferenceRs);
 pub const RE_ISQ_ROUTE: RouteInfo = RouteInfo::new("/re_isq", "POST", RouteKind::InferenceRs);
+pub const CONTROL_VECTORS_ROUTE: RouteInfo =
+    RouteInfo::new("/control_vectors", "GET", RouteKind::InferenceRs);
+pub const SET_CONTROL_VECTORS_ROUTE: RouteInfo =
+    RouteInfo::new("/control_vectors/set", "POST", RouteKind::InferenceRs);
 pub const CALIBRATION_START_ROUTE: RouteInfo =
     RouteInfo::new("/calibration/start", "POST", RouteKind::InferenceRs);
 pub const CALIBRATION_STATUS_ROUTE: RouteInfo =
@@ -235,6 +239,8 @@ pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     SESSION_ROUTE,
     AGENT_APPROVAL_ROUTE,
     RE_ISQ_ROUTE,
+    CONTROL_VECTORS_ROUTE,
+    SET_CONTROL_VECTORS_ROUTE,
     CALIBRATION_START_ROUTE,
     CALIBRATION_STATUS_ROUTE,
     CALIBRATION_APPLY_ROUTE,

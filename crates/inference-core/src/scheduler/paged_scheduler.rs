@@ -9,13 +9,13 @@ use std::{
 use tracing::{info, warn};
 
 use crate::{
-    AdapterGenerationId, Response, TERMINATE_ALL_NEXT_STEP,
+    Response, TERMINATE_ALL_NEXT_STEP,
     engine::IntervalLogger,
     get_mut_arcmutex,
     paged_attention::{
         block_hash::{
-            BlockHash, MultiModalFeature, adapter_generation_key, clamp_prefix_cache_hit_len,
-            compute_block_hashes, compute_new_block_hashes,
+            BlockHash, MultiModalFeature, clamp_prefix_cache_hit_len, compute_block_hashes,
+            compute_new_block_hashes,
         },
         kv_cache_manager::KVCacheManager,
     },
@@ -781,23 +781,17 @@ impl PagedAttentionScheduler {
         seq_id: usize,
         tokens: &[u32],
         mm_features: &[MultiModalFeature],
-        adapter_generation: Option<AdapterGenerationId>,
+        hash_keys: Vec<inference_nn::paged_attention::block_hash::ExtraHashKey>,
         revision: u64,
     ) {
         let Some(update) = self.block_hash_update(seq_id, tokens.len(), revision) else {
             return;
         };
-        let adapter_key = adapter_generation_key(adapter_generation);
         match update {
             BlockHashUpdate::Rebuild => {
                 self.seq_block_hashes.insert(
                     seq_id,
-                    compute_block_hashes(
-                        tokens,
-                        self.block_size,
-                        mm_features,
-                        adapter_key.as_slice(),
-                    ),
+                    compute_block_hashes(tokens, self.block_size, mm_features, &hash_keys),
                 );
                 self.seq_block_hash_revisions.insert(seq_id, revision);
             }
@@ -811,7 +805,7 @@ impl PagedAttentionScheduler {
                     self.block_size,
                     hashes,
                     mm_features,
-                    adapter_key.as_slice(),
+                    &hash_keys,
                 );
                 hashes.extend(new_hashes);
             }
@@ -1062,7 +1056,7 @@ impl PagedAttentionScheduler {
                 seq_id,
                 seq_guard.get_toks(),
                 seq_guard.mm_features(),
-                seq_guard.adapter_generation(),
+                seq_guard.block_hash_keys(),
                 block_hash_revision,
             );
             drop(seq_guard);
@@ -1385,7 +1379,7 @@ impl PagedAttentionScheduler {
                     seq_id,
                     seq_guard.get_toks(),
                     seq_guard.mm_features(),
-                    seq_guard.adapter_generation(),
+                    seq_guard.block_hash_keys(),
                     seq_guard.block_hash_revision(),
                 );
                 drop(seq_guard);
@@ -1460,7 +1454,7 @@ impl PagedAttentionScheduler {
                     id,
                     seq_guard.get_toks(),
                     seq_guard.mm_features(),
-                    seq_guard.adapter_generation(),
+                    seq_guard.block_hash_keys(),
                     seq_guard.block_hash_revision(),
                 );
                 drop(seq_guard);
@@ -1509,7 +1503,7 @@ impl PagedAttentionScheduler {
             seq_id,
             seq_guard.get_toks(),
             seq_guard.mm_features(),
-            seq_guard.adapter_generation(),
+            seq_guard.block_hash_keys(),
             seq_guard.block_hash_revision(),
         );
         seq_guard.set_num_computed_tokens(0);
@@ -1640,7 +1634,7 @@ impl Scheduler for PagedAttentionScheduler {
                     && !seq.is_prefix_warmup()
                     && !seq.return_raw_logits
                     && seq.mm_features().is_empty()
-                    && seq.adapter_generation().is_none())
+                    && !seq.custom_states())
                 .then(|| (toks.to_vec(), prompt))
             })
             .collect()

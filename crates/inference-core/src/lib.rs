@@ -106,6 +106,7 @@ mod gguf_write;
 mod inkling2_recipe;
 pub use gguf_imatrix::{HessianDir, ImatrixMapping, cimatrix_for_gguf, hessians_for_gguf};
 pub use inference_gguf::official_checkpoint_experts;
+pub use inference_nn::control_vectors;
 pub use inkling2_recipe::{
     INKLING2_RECIPE_C, Inkling2Recipe, ensure_inkling2_recipe, inkling2_checkpoint_dir,
     inkling2_recipe_bytes, inkling2_recipe_path, is_inkling2_checkpoint,
@@ -271,13 +272,13 @@ pub use pipeline::{
 pub use pipeline::{Phi2Loader, Phi3Loader, Phi3VLoader};
 pub use request::{
     ApproximateUserLocation, CalibrationAction, CalibrationRequest, Constraint,
-    DetokenizationRequest, DiarizationProgressHook, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
-    ImageGenerationResponseFormat, JointDecisionRequest, LlguidanceGrammar, MessageContent,
-    NormalRequest, ReasoningEffort, RequantizeRequest, Request, RequestCancellation,
-    RequestMessage, SearchContextSize, TokenizationRequest, TranscriptionProgressHook,
-    TranscriptionStreamOp, TranscriptionStreamRequest, TranscriptionStreamUpdate,
-    WebSearchContentType, WebSearchFilters, WebSearchImageSettings, WebSearchOptions,
-    WebSearchReturnTokenBudget, WebSearchUserLocation, WordTimestampsRequest,
+    ControlVectorRequest, DetokenizationRequest, DiarizationProgressHook, FINISH_REASON_CANCELED,
+    FINISH_REASON_LENGTH, ImageGenerationResponseFormat, JointDecisionRequest, LlguidanceGrammar,
+    MessageContent, NormalRequest, ReasoningEffort, RequantizeRequest, Request,
+    RequestCancellation, RequestMessage, SearchContextSize, TokenizationRequest,
+    TranscriptionProgressHook, TranscriptionStreamOp, TranscriptionStreamRequest,
+    TranscriptionStreamUpdate, WebSearchContentType, WebSearchFilters, WebSearchImageSettings,
+    WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation, WordTimestampsRequest,
     resolve_reasoning_controls,
 };
 pub use response::*;

@@ -1089,6 +1089,29 @@ class ContainerFileMetadata:
 
 
 @dataclass(kw_only=True)
+class ControlVectorFile:
+    """A control vector file (llama.cpp's GGUF, `direction.<layer>`, or a safetensors file with those names) and the scale its directions are added at."""
+
+    path: str
+    scale: float | None = None
+
+
+@dataclass(kw_only=True)
+class ControlVectors:
+    """The control vectors a model is steered by: each layer's output gains the files' directions for it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass."""
+
+    files: list[ControlVectorFile] | None = None
+    layer_range: list[int] | None = None
+
+
+@dataclass(kw_only=True)
+class ControlVectorsResponse:
+    """The control vectors a model is steered by after the request."""
+
+    vectors: ControlVectors
+
+
+@dataclass(kw_only=True)
 class DecisionAnswerChoice:
     choice: str
     confidence: float
@@ -1770,6 +1793,7 @@ class ManagedDownloadRequest:
 class ManagedLoadRequest:
     """A load: what to load, the id requests will name it by, and how to run it."""
 
+    control_vectors: ControlVectors | None = None
     device: str | None = None
     max_seqs: int | None = None
     mmproj: str | None = None
@@ -2195,6 +2219,7 @@ class ModelSpec:
     """One of several models an engine serves; unset settings fall back to `runtime`'s."""
 
     chat_template: str | None = None
+    control_vectors: ControlVectors | None = None
     device_layers: list[str] | None = None
     encoder_cache_memory_bytes: int | None = None
     hf_config_overrides: dict[str, Any] | None = None
@@ -3141,6 +3166,7 @@ class ResponsesUsage:
 @dataclass(kw_only=True)
 class RuntimeSpec:
     chat_template: str | None = None
+    control_vectors: ControlVectors | None = None
     device: str | None = None
     device_layers: list[str] | None = None
     disable_eos_stop: bool | None = None
@@ -3259,6 +3285,14 @@ class SessionList:
 @dataclass(kw_only=True)
 class SessionStored:
     id: str
+
+
+@dataclass(kw_only=True)
+class SetControlVectorsRequest:
+    """Steers a model (the default one unless `model` names another) by `vectors` from its next step; empty `files` stops. Changing the files or their scales on a steered model rewrites its vectors in place, keeping its CUDA graphs."""
+
+    model: str | None = None
+    vectors: ControlVectors
 
 
 @dataclass(kw_only=True)

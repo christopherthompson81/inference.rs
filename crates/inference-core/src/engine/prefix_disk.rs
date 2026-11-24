@@ -17,10 +17,7 @@ impl Engine {
 
     fn try_promote_stored_prefix(&self, seq: &Sequence) -> Result<()> {
         // only plain text prompts are written through
-        if seq.return_raw_logits
-            || !seq.mm_features().is_empty()
-            || seq.adapter_generation().is_some()
-        {
+        if seq.return_raw_logits || !seq.mm_features().is_empty() || seq.custom_states() {
             return Ok(());
         }
         let Some(disk) = get_mut_arcmutex!(self.prefix_cacher).disk_tier().cloned() else {

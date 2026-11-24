@@ -201,6 +201,14 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_control_vectors_get(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_control_vectors_set(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_image_generation(
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 

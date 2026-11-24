@@ -164,7 +164,7 @@ GROUPS = [
     (
         "Models, adapters, files and skills",
         "management",
-        "Model status and cache counters, the model manager, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls.",
+        "Model status and cache counters, the model manager, LoRA adapters, control vectors, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls.",
         lambda n: n.startswith(
             (
                 "Model",
@@ -173,6 +173,8 @@ GROUPS = [
                 "Lora",
                 "LoadLora",
                 "UnloadLora",
+                "ControlVector",
+                "SetControlVectors",
                 "File",
                 "ContainerFile",
                 "SourceMeta",

@@ -20,8 +20,7 @@ use crate::pipeline::execution::CudaStepSubmission;
 use crate::{
     get_mut_arcmutex,
     paged_attention::{
-        AttentionBackendKind, KVCacheManager, PagedAttentionMeta,
-        block_hash::{adapter_generation_key, compute_block_hashes},
+        AttentionBackendKind, KVCacheManager, PagedAttentionMeta, block_hash::compute_block_hashes,
     },
     pipeline::{
         CacheBackendMetadata, Pipeline, StepLookahead, StepSubmission,
@@ -676,12 +675,11 @@ impl Engine {
             }
 
             let num_blocks = encoded_len / block_size;
-            let adapter_key = adapter_generation_key(seq.adapter_generation());
             let block_hashes = compute_block_hashes(
                 seq.get_toks(),
                 block_size,
                 seq.mm_features(),
-                adapter_key.as_slice(),
+                &seq.block_hash_keys(),
             );
             if block_hashes.len() < num_blocks {
                 continue;

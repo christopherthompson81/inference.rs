@@ -196,6 +196,10 @@ pub(crate) fn runtime_options_spec(
             .max_prefill_chunk_tokens
             .map(std::num::NonZeroUsize::get),
         embeddings_on_host: Some(!runtime.no_embeddings_on_host),
+        control_vectors: crate::args::control_vectors(
+            &runtime.control_vectors,
+            runtime.control_vector_layer_range.as_deref(),
+        ),
         moe_expert_cache: runtime.moe_expert_cache,
         max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),
         throughput_logging: Some(throughput_logging),

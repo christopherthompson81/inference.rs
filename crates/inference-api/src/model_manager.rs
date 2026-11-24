@@ -126,6 +126,9 @@ pub struct ManagedLoadRequest {
     /// For a layout detector, `cpu` or `cuda:N`; unset uses the engine's device. Other models run on the engine's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    /// Control vectors the model is steered by from its first request (files on the server's host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_vectors: Option<crate::operations::ControlVectors>,
 }
 
 /// A load the manager keeps under its model id: the request its last successful load used, and whether the server
@@ -560,6 +563,7 @@ impl ModelManager {
             mtp: request.mtp,
             lazy: false,
             pinned: false,
+            control_vectors: request.control_vectors,
         };
         self.engine.add_model(spec).await?;
         let kind = match kind.or_else(|| self.served_kind(&id)) {

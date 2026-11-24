@@ -1,6 +1,6 @@
 ---
 title: Models, adapters, files and skills
-description: "Model status and cache counters, the model manager, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls."
+description: "Model status and cache counters, the model manager, LoRA adapters, control vectors, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls."
 sidebar:
   order: 7
 ---
@@ -101,6 +101,35 @@ OpenAI-compatible container file metadata backed by the same in-process file sto
 | `mime_type` | `str` | required |
 | `object` | `str` | required |
 | `source` | `SourceMeta` | required |
+
+
+## `ControlVectorFile`
+
+A control vector file (llama.cpp's GGUF, `direction.<layer>`, or a safetensors file with those names) and the scale its directions are added at.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `path` | `str` | required |
+| `scale` | `float \| None` | optional |
+
+
+## `ControlVectors`
+
+The control vectors a model is steered by: each layer's output gains the files' directions for it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `files` | `list[ControlVectorFile] \| None` | optional |
+| `layer_range` | `list[int] \| None` | optional |
+
+
+## `ControlVectorsResponse`
+
+The control vectors a model is steered by after the request.
+
+| Field | Type |
+| --- | --- |
+| `vectors` | `ControlVectors` |
 
 
 ## `DefaultModel`
@@ -458,6 +487,7 @@ A load: what to load, the id requests will name it by, and how to run it.
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `control_vectors` | `ControlVectors \| None` | optional |
 | `device` | `str \| None` | optional |
 | `max_seqs` | `int \| None` | optional |
 | `mmproj` | `str \| None` | optional |
@@ -761,6 +791,16 @@ Branches a session into a new one, named by the engine, with the source's first 
 | Field | Type |
 | --- | --- |
 | `id` | `str` |
+
+
+## `SetControlVectorsRequest`
+
+Steers a model (the default one unless `model` names another) by `vectors` from its next step; empty `files` stops. Changing the files or their scales on a steered model rewrites its vectors in place, keeping its CUDA graphs.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `model` | `str \| None` | optional |
+| `vectors` | `ControlVectors` | required |
 
 
 ## `SignInRequest`

@@ -181,6 +181,7 @@ fn build_model_specs(
             mtp: None,
             lazy: entry.lazy,
             pinned: entry.pinned,
+            control_vectors: None,
         });
     }
     Ok((specs, device))

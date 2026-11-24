@@ -45,6 +45,10 @@ fn bench_spec(
                 greedy_tolerance: runtime.mtp_greedy_tolerance,
             }),
             moe_expert_cache: runtime.moe_expert_cache,
+            control_vectors: crate::args::control_vectors(
+                &runtime.control_vectors,
+                runtime.control_vector_layer_range.as_deref(),
+            ),
             log: None,
             ..model_runtime
         },

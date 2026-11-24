@@ -969,7 +969,7 @@ impl Engine {
             | Request::WordTimestamps(_)
             | Request::TerminateAllSeqsNextStep => admission::AdmissionClass::BypassControl,
             Request::Terminate => admission::AdmissionClass::Shutdown,
-            Request::ReIsq(_) | Request::Calibration(_) => {
+            Request::ReIsq(_) | Request::Calibration(_) | Request::ControlVectors(_) => {
                 admission::AdmissionClass::OrderedControl
             }
         }

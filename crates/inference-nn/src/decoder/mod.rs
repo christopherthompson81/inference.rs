@@ -1504,6 +1504,9 @@ pub struct DecoderStack<A = AttentionBlock, F = Ffn> {
     pub mapper: Box<dyn DeviceMapper + Send + Sync>,
     // a standard stack rebuilds any one of its layers on a device of a converter's choosing
     rebuild: Option<stream::LayerRebuild>,
+    control_vectors: crate::control_vectors::ControlVectorSlot,
+    hidden_size: usize,
+    layer_devices: Vec<Device>,
 }
 
 // one layer from its weights under `vb`: the builder's halves and the norms around them
@@ -1723,6 +1726,14 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             shape.rms_norm_eps,
             mapper.set_nm_device(vb_m.pp(shape.norm_names.last), false),
         )?;
+        let layer_devices: Vec<Device> = (0..layers.len())
+            .map(|layer| {
+                mapper
+                    .device_for(layer, false)
+                    .unwrap_or(real_device)
+                    .clone()
+            })
+            .collect();
         Ok(Self {
             embeds_only: shape.vocab_size == EMBEDS_ONLY,
             embed_tokens,
@@ -1735,10 +1746,27 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             sliding_window: shape.sliding_window(),
             has_full_layers: shape.window_keeps_prompt
                 || shape.layer_windows.iter().any(Option::is_none),
+            control_vectors: Default::default(),
+            hidden_size: shape.hidden_size,
+            layer_devices,
             device: real_device.clone(),
             mapper,
             rebuild: None,
         })
+    }
+
+    /// Steers the stack by `set` from its next forward, or stops with an empty one; whether its graphs need
+    /// capturing again (a set attached where none was, or removed).
+    pub fn set_control_vectors(
+        &self,
+        set: crate::control_vectors::ControlVectorSet,
+    ) -> Result<bool> {
+        self.control_vectors
+            .replace(set, &self.layer_devices, self.hidden_size, self.dtype)
+    }
+
+    pub fn control_vectors(&self) -> crate::control_vectors::ControlVectorSet {
+        self.control_vectors.current()
     }
 
     pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor> {
@@ -1848,6 +1876,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 i,
                 masks.flash.as_ref(),
             )?;
+            xs = self.control_vectors.apply(i, xs)?;
             xs = after_layer(i, xs)?;
             if CALIBRATION_STOP.with(|stop| i >= stop.get()) {
                 inference_tensor::bail!("{CALIBRATION_STOPPED}");
@@ -2365,6 +2394,12 @@ impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin 
 impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
+    }
+    fn set_control_vectors(&self, set: crate::control_vectors::ControlVectorSet) -> Result<bool> {
+        self.stack.set_control_vectors(set)
+    }
+    fn control_vectors(&self) -> crate::control_vectors::ControlVectorSet {
+        self.stack.control_vectors()
     }
     fn layer_stream(&self) -> Option<&dyn crate::model::LayerStream> {
         self.stack

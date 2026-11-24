@@ -155,6 +155,25 @@ impl std::ops::DerefMut for DecoderModel {
 }
 
 impl DecoderModel {
+    fn set_control_vectors(
+        &self,
+        set: inference_nn::control_vectors::ControlVectorSet,
+    ) -> inference_tensor::Result<bool> {
+        match self {
+            Self::Text(model) => model.set_control_vectors(set),
+            Self::Multimodal(_) => {
+                inference_tensor::bail!("control vectors steer text models; this one is multimodal")
+            }
+        }
+    }
+
+    fn control_vectors(&self) -> inference_nn::control_vectors::ControlVectorSet {
+        match self {
+            Self::Text(model) => model.control_vectors(),
+            Self::Multimodal(_) => Default::default(),
+        }
+    }
+
     fn cache(&self) -> &EitherCache {
         match self {
             Self::Text(model) => model.cache(),
@@ -1311,6 +1330,21 @@ impl Pipeline for DecoderPipeline {
 
     fn adapter_runtime(&self) -> Option<Arc<DynamicLoraRuntime>> {
         self.core.dynamic_lora.clone()
+    }
+
+    fn set_control_vectors(
+        &mut self,
+        set: inference_nn::control_vectors::ControlVectorSet,
+    ) -> Result<()> {
+        // a set attached where none was, or removed, adds or drops nodes the captured graphs lack or hold
+        if self.model.set_control_vectors(set)? {
+            self.cleanup_cuda_graphs();
+        }
+        Ok(())
+    }
+
+    fn control_vectors(&self) -> inference_nn::control_vectors::ControlVectorSet {
+        self.model.control_vectors()
     }
 
     fn forward_inputs(

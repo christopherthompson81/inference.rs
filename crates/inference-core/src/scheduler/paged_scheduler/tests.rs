@@ -242,7 +242,7 @@ fn block_hash_update_waits_for_a_full_block() {
         scheduler.block_hash_update(seq_id, tokens.len(), revision),
         Some(BlockHashUpdate::Rebuild)
     );
-    scheduler.ensure_block_hashes(seq_id, &tokens, &[], None, revision);
+    scheduler.ensure_block_hashes(seq_id, &tokens, &[], Vec::new(), revision);
     assert!(scheduler.seq_block_hashes[&seq_id].is_empty());
     assert_eq!(
         scheduler.block_hash_update(seq_id, tokens.len(), revision),
@@ -254,7 +254,7 @@ fn block_hash_update_waits_for_a_full_block() {
         scheduler.block_hash_update(seq_id, tokens.len(), revision),
         Some(BlockHashUpdate::Append)
     );
-    scheduler.ensure_block_hashes(seq_id, &tokens, &[], None, revision);
+    scheduler.ensure_block_hashes(seq_id, &tokens, &[], Vec::new(), revision);
     assert_eq!(scheduler.seq_block_hashes[&seq_id].len(), 1);
 
     tokens.extend(std::iter::repeat_n(2, scheduler.block_size - 1));
@@ -271,7 +271,7 @@ fn block_hash_update_appends_then_rebuilds_on_revision_change() {
     let revision = 4;
     let mut tokens = vec![1; scheduler.block_size];
 
-    scheduler.ensure_block_hashes(seq_id, &tokens, &[], None, revision);
+    scheduler.ensure_block_hashes(seq_id, &tokens, &[], Vec::new(), revision);
     let first_hashes = scheduler.seq_block_hashes[&seq_id].clone();
     tokens.extend(std::iter::repeat_n(2, scheduler.block_size));
 
@@ -279,7 +279,7 @@ fn block_hash_update_appends_then_rebuilds_on_revision_change() {
         scheduler.block_hash_update(seq_id, tokens.len(), revision),
         Some(BlockHashUpdate::Append)
     );
-    scheduler.ensure_block_hashes(seq_id, &tokens, &[], None, revision);
+    scheduler.ensure_block_hashes(seq_id, &tokens, &[], Vec::new(), revision);
     assert_eq!(
         scheduler.seq_block_hashes[&seq_id],
         compute_block_hashes(&tokens, scheduler.block_size, &[], &[])
@@ -295,7 +295,7 @@ fn block_hash_update_appends_then_rebuilds_on_revision_change() {
         scheduler.block_hash_update(seq_id, tokens.len(), next_revision),
         Some(BlockHashUpdate::Rebuild)
     );
-    scheduler.ensure_block_hashes(seq_id, &tokens, &[], None, next_revision);
+    scheduler.ensure_block_hashes(seq_id, &tokens, &[], Vec::new(), next_revision);
     assert_ne!(scheduler.seq_block_hashes[&seq_id][0], first_hashes[0]);
     assert_eq!(
         scheduler.seq_block_hashes[&seq_id],
@@ -309,7 +309,7 @@ fn preemption_caches_hash_appended_after_token_growth() {
     let seq_id = 10;
     let seq = test_sequence(seq_id, scheduler.block_size);
     let initial_tokens = get_mut_arcmutex!(seq).get_toks().to_vec();
-    scheduler.ensure_block_hashes(seq_id, &initial_tokens, &[], None, 0);
+    scheduler.ensure_block_hashes(seq_id, &initial_tokens, &[], Vec::new(), 0);
 
     {
         let mut seq = get_mut_arcmutex!(seq);
@@ -361,12 +361,12 @@ fn finished_done_caches_but_error_only_cleans_up() {
     let error_tokens = get_mut_arcmutex!(error).get_toks().to_vec();
     let done_hashes = compute_block_hashes(&done_tokens, scheduler.block_size, &[], &[]);
     let error_hashes = compute_block_hashes(&error_tokens, scheduler.block_size, &[], &[]);
-    scheduler.ensure_block_hashes(done_id, &done_tokens, &[], None, 0);
+    scheduler.ensure_block_hashes(done_id, &done_tokens, &[], Vec::new(), 0);
     scheduler.ensure_block_hashes(
         error_id,
         &error_tokens,
         &[],
-        None,
+        Vec::new(),
         get_mut_arcmutex!(error).block_hash_revision(),
     );
     {

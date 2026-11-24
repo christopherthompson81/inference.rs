@@ -288,6 +288,9 @@ pub use inference_api::{
         TranscriptionSegment, TranscriptionSessionRequest, TranscriptionTask, TranscriptionWord,
         VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
     },
+    operations::{
+        ControlVectorFile, ControlVectors, ControlVectorsResponse, SetControlVectorsRequest,
+    },
     response::{
         ChatCompletionChunkResponse, ChatCompletionResponse, ChunkChoice, Delta,
         ImageGenerationResponse,

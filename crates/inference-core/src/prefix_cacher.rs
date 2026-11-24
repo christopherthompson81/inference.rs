@@ -58,24 +58,40 @@ impl From<Vec<u32>> for Tokens {
     }
 }
 
+/// What a cached state depends on beyond its tokens and media: the adapter and the control vectors it ran under.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct StateKey {
+    pub adapter_generation: Option<AdapterGenerationId>,
+    pub control_vectors: Option<u64>,
+}
+
+impl StateKey {
+    pub fn of(seq: &Sequence) -> Self {
+        Self {
+            adapter_generation: seq.adapter_generation(),
+            control_vectors: seq.control_vector_hash(),
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Debug, Hash)]
 struct CacheKey {
     tokens: Tokens,
-    adapter_generation: Option<AdapterGenerationId>,
+    state: StateKey,
 }
 
 impl CacheKey {
-    fn new(tokens: Vec<u32>, adapter_generation: Option<AdapterGenerationId>) -> Self {
+    fn new(tokens: Vec<u32>, state: StateKey) -> Self {
         Self {
             tokens: tokens.into(),
-            adapter_generation,
+            state,
         }
     }
 }
 
 impl From<Vec<u32>> for CacheKey {
     fn from(tokens: Vec<u32>) -> Self {
-        Self::new(tokens, None)
+        Self::new(tokens, StateKey::default())
     }
 }
 
@@ -453,7 +469,7 @@ impl PrefixCacheManagerV2 {
             });
 
             let replaced = self.caches.insert(
-                CacheKey::new(seq.get_toks().to_vec(), seq.adapter_generation()),
+                CacheKey::new(seq.get_toks().to_vec(), StateKey::of(seq)),
                 CacheElement {
                     cache,
                     recurrent_snapshots,
@@ -863,7 +879,7 @@ impl PrefixCacheManagerV2 {
     pub fn search_for_matching_cache(
         &mut self,
         toks: &[u32],
-        adapter_generation: Option<AdapterGenerationId>,
+        state: StateKey,
         mm_features: &[MultiModalFeature],
         image_hashes: Option<&[u64]>,
         audio_hashes: Option<&[u64]>,
@@ -894,7 +910,7 @@ impl PrefixCacheManagerV2 {
 
         let mut best_match: Option<(usize, &CacheElement)> = None;
         for (k, v) in &self.caches {
-            if k.adapter_generation != adapter_generation {
+            if k.state != state {
                 continue;
             }
             if v.video_hashes
@@ -1047,6 +1063,7 @@ impl PrefixCacheManagerV2 {
 
 #[cfg(test)]
 mod tests {
+    use super::StateKey;
     use inference_tensor::{DType, Device, Tensor};
     use std::{
         collections::HashSet,
@@ -1682,7 +1699,10 @@ mod tests {
 
         match prefix_cacher.search_for_matching_cache(
             &[1, 2, 3, 4, 5],
-            None,
+            StateKey {
+                adapter_generation: None,
+                control_vectors: None,
+            },
             &[],
             None,
             None,
@@ -1704,7 +1724,13 @@ mod tests {
         let generation_b = generation(2);
 
         prefix_cacher.caches.insert(
-            CacheKey::new(vec![1, 2, 3], Some(generation_a)),
+            CacheKey::new(
+                vec![1, 2, 3],
+                StateKey {
+                    adapter_generation: Some(generation_a),
+                    control_vectors: None,
+                },
+            ),
             CacheElement {
                 cache: vec![Some(make_normal_kv_cache(3)?)],
                 recurrent_snapshots: None,
@@ -1717,17 +1743,47 @@ mod tests {
         let query = [1, 2, 3, 4];
         assert!(
             prefix_cacher
-                .search_for_matching_cache(&query, None, &[], None, None, None)?
+                .search_for_matching_cache(
+                    &query,
+                    StateKey {
+                        adapter_generation: None,
+                        control_vectors: None
+                    },
+                    &[],
+                    None,
+                    None,
+                    None
+                )?
                 .is_none()
         );
         assert!(
             prefix_cacher
-                .search_for_matching_cache(&query, Some(generation_b), &[], None, None, None)?
+                .search_for_matching_cache(
+                    &query,
+                    StateKey {
+                        adapter_generation: Some(generation_b),
+                        control_vectors: None
+                    },
+                    &[],
+                    None,
+                    None,
+                    None
+                )?
                 .is_none()
         );
         assert!(
             prefix_cacher
-                .search_for_matching_cache(&query, Some(generation_a), &[], None, None, None)?
+                .search_for_matching_cache(
+                    &query,
+                    StateKey {
+                        adapter_generation: Some(generation_a),
+                        control_vectors: None
+                    },
+                    &[],
+                    None,
+                    None,
+                    None
+                )?
                 .is_some()
         );
 
@@ -1761,7 +1817,10 @@ mod tests {
 
         let hit = prefix_cacher.search_for_matching_cache(
             &[1, 2, 3, 4, 5, 6, 7, 99],
-            None,
+            StateKey {
+                adapter_generation: None,
+                control_vectors: None,
+            },
             &[],
             None,
             None,
@@ -1796,7 +1855,10 @@ mod tests {
 
         let hit = prefix_cacher.search_for_matching_cache(
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-            None,
+            StateKey {
+                adapter_generation: None,
+                control_vectors: None,
+            },
             &[],
             None,
             None,
@@ -1888,7 +1950,10 @@ mod tests {
 
         let exact = prefix_cacher.search_for_matching_cache(
             &[1, 2, 3, 4, 5, 6, 7, 8, 10],
-            None,
+            StateKey {
+                adapter_generation: None,
+                control_vectors: None,
+            },
             &[],
             None,
             None,
@@ -1908,7 +1973,10 @@ mod tests {
 
         let partial = prefix_cacher.search_for_matching_cache(
             &[1, 2, 3, 4, 10],
-            None,
+            StateKey {
+                adapter_generation: None,
+                control_vectors: None,
+            },
             &[],
             None,
             None,
@@ -1974,7 +2042,10 @@ mod tests {
 
         let hit = prefix_cacher.search_for_matching_cache(
             &[1, 2, 3, 4, 5, 6, 7, 8, 9],
-            None,
+            StateKey {
+                adapter_generation: None,
+                control_vectors: None,
+            },
             &features,
             Some(&[11, 22]),
             Some(&[33]),
@@ -2036,7 +2107,10 @@ mod tests {
 
         let hit = prefix_cacher.search_for_matching_cache(
             &[1, 2, 3, 4, 5, 6, 7, 8, 9],
-            None,
+            StateKey {
+                adapter_generation: None,
+                control_vectors: None,
+            },
             &features,
             Some(&[11, 99]),
             None,
@@ -2076,12 +2150,32 @@ mod tests {
 
         assert!(
             prefix_cacher
-                .search_for_matching_cache(&[1, 2, 3, 4], None, &[], None, None, Some(&[44]))?
+                .search_for_matching_cache(
+                    &[1, 2, 3, 4],
+                    StateKey {
+                        adapter_generation: None,
+                        control_vectors: None
+                    },
+                    &[],
+                    None,
+                    None,
+                    Some(&[44])
+                )?
                 .is_none()
         );
         assert!(
             prefix_cacher
-                .search_for_matching_cache(&[1, 2, 3, 4], None, &[], None, None, None)?
+                .search_for_matching_cache(
+                    &[1, 2, 3, 4],
+                    StateKey {
+                        adapter_generation: None,
+                        control_vectors: None
+                    },
+                    &[],
+                    None,
+                    None,
+                    None
+                )?
                 .is_none()
         );
 
@@ -2106,7 +2200,10 @@ mod tests {
             prefix_cacher
                 .search_for_matching_cache(
                     &[1, 2, 3, 4],
-                    None,
+                    StateKey {
+                        adapter_generation: None,
+                        control_vectors: None
+                    },
                     &[],
                     Some(&[11]),
                     Some(&[22]),
@@ -2156,7 +2253,10 @@ mod tests {
             prefix_cacher
                 .search_for_matching_cache(
                     &[1, 2, 3, 4, 5],
-                    None,
+                    StateKey {
+                        adapter_generation: None,
+                        control_vectors: None
+                    },
                     &image_features[..1],
                     Some(&[11, 22]),
                     Some(&[33]),
@@ -2168,7 +2268,10 @@ mod tests {
             prefix_cacher
                 .search_for_matching_cache(
                     &[1, 2, 3, 4, 5],
-                    None,
+                    StateKey {
+                        adapter_generation: None,
+                        control_vectors: None
+                    },
                     &image_features,
                     Some(&[11, 22]),
                     Some(&[33]),
@@ -2206,7 +2309,10 @@ mod tests {
 
         let hit = prefix_cacher.search_for_matching_cache(
             &[1, 2, 3, 4],
-            None,
+            StateKey {
+                adapter_generation: None,
+                control_vectors: None,
+            },
             &features,
             Some(&[11]),
             None,
@@ -2234,7 +2340,10 @@ mod tests {
             prefix_cacher
                 .search_for_matching_cache(
                     &[1, 2, 3, 4],
-                    None,
+                    StateKey {
+                        adapter_generation: None,
+                        control_vectors: None
+                    },
                     &leading_feature,
                     Some(&[11]),
                     None,

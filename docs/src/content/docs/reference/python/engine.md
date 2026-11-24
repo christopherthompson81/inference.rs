@@ -377,6 +377,22 @@ unload_lora_adapter(
 ) -> types.LoraAdapterObject
 ```
 
+### `Engine.control_vectors`
+
+```text
+control_vectors(
+    model: str | None = None,
+) -> types.ControlVectorsResponse
+```
+
+### `Engine.set_control_vectors`
+
+```text
+set_control_vectors(
+    request: types.SetControlVectorsRequest | str,
+) -> types.ControlVectorsResponse
+```
+
 ### `Engine.image_generation`
 
 ```text
@@ -912,6 +928,18 @@ load_lora_adapter(request_json: str) -> str
 
 ```text
 unload_lora_adapter(request_json: str) -> str
+```
+
+### `JsonEngine.control_vectors`
+
+```text
+control_vectors(request_json: str = '{}') -> str
+```
+
+### `JsonEngine.set_control_vectors`
+
+```text
+set_control_vectors(request_json: str) -> str
 ```
 
 ### `JsonEngine.image_generation`

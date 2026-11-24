@@ -143,6 +143,70 @@
         }
       }
     },
+    "/control_vectors": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "control_vectors",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "query",
+            "description": "The model to report on; the default model when absent.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The control vectors the model is steered by.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlVectorsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control_vectors/set": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "set_control_vectors",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetControlVectorsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The model is steered by the vectors from its next step.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlVectorsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A file is unreadable or does not fit the model, or the model takes no control vectors"
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -5782,6 +5846,58 @@
           }
         }
       },
+      "ControlVectorFile": {
+        "type": "object",
+        "description": "A control vector file (llama.cpp's GGUF, `direction.<layer>`, or a safetensors file with those names) and the\nscale its directions are added at.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The file's path on the engine's host."
+          },
+          "scale": {
+            "type": "number",
+            "format": "float"
+          }
+        }
+      },
+      "ControlVectors": {
+        "type": "object",
+        "description": "The control vectors a model is steered by: each layer's output gains the files' directions for it, summed at their\nscales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass.",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ControlVectorFile"
+            }
+          },
+          "layer_range": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "The first and last layer steered (0-based, inclusive); every layer a file names when absent."
+          }
+        }
+      },
+      "ControlVectorsResponse": {
+        "type": "object",
+        "description": "The control vectors a model is steered by after the request.",
+        "required": [
+          "vectors"
+        ],
+        "properties": {
+          "vectors": {
+            "$ref": "#/components/schemas/ControlVectors"
+          }
+        }
+      },
       "DecisionAnswer": {
         "oneOf": [
           {
@@ -8554,6 +8670,17 @@
           "model_id"
         ],
         "properties": {
+          "control_vectors": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ControlVectors",
+                "description": "Control vectors the model is steered by from its first request (files on the server's host)."
+              }
+            ]
+          },
           "device": {
             "type": [
               "string",
@@ -10647,6 +10774,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "control_vectors": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ControlVectors",
+                "description": "Control vectors the model is steered by from its first request (not for a lazy model: set them once it has\nloaded)."
+              }
             ]
           },
           "device_layers": {
@@ -14687,6 +14825,17 @@
               "null"
             ]
           },
+          "control_vectors": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ControlVectors",
+                "description": "Control vectors the model given in `model` is steered by from its first request."
+              }
+            ]
+          },
           "device": {
             "type": [
               "string",
@@ -15235,6 +15384,24 @@
         "properties": {
           "id": {
             "type": "string"
+          }
+        }
+      },
+      "SetControlVectorsRequest": {
+        "type": "object",
+        "description": "Steers a model (the default one unless `model` names another) by `vectors` from its next step; empty `files`\nstops. Changing the files or their scales on a steered model rewrites its vectors in place, keeping its CUDA graphs.",
+        "required": [
+          "vectors"
+        ],
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vectors": {
+            "$ref": "#/components/schemas/ControlVectors"
           }
         }
       },

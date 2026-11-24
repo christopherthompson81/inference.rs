@@ -207,6 +207,10 @@ pub struct ModelSpec {
     /// Never evicted to make room for another model; models are evictable by default.
     #[serde(default)]
     pub pinned: bool,
+    /// Control vectors the model is steered by from its first request (not for a lazy model: set them once it has
+    /// loaded).
+    #[serde(default)]
+    pub control_vectors: Option<crate::operations::ControlVectors>,
 }
 
 // the default RAM tier, shrunk on a machine with little memory
@@ -238,6 +242,11 @@ impl ModelSpec {
         }
         if self.max_seqs == Some(0) {
             return Err(zero("max_seqs"));
+        }
+        if self.lazy && self.control_vectors.is_some() {
+            return Err(EngineLoadError::InvalidSpec(format!(
+                "{label}: a lazy model takes its control vectors once it has loaded"
+            )));
         }
         if self.lazy && self.model_id.is_none() {
             return Err(EngineLoadError::InvalidSpec(format!(
@@ -400,6 +409,9 @@ pub struct RuntimeSpec {
     /// from it once into a cache; on unless set to false.
     #[serde(default)]
     pub load_recipes: Option<bool>,
+    /// Control vectors the model given in `model` is steered by from its first request.
+    #[serde(default)]
+    pub control_vectors: Option<crate::operations::ControlVectors>,
     /// Where built recipes are kept; unset, `INFERENCE_RS_RECIPE_DIR` or `~/.cache/inference-rs/recipes`.
     #[serde(default)]
     pub recipe_dir: Option<String>,
@@ -1045,6 +1057,7 @@ impl Engine {
             approval_broker: Default::default(),
         };
         spec.resolve_sources().await?;
+        let steering = spec.runtime.control_vectors.take();
         let mut builder = spec.into_builder()?;
         if let Some(search) = callbacks.search {
             builder = builder.with_search_callback(search);
@@ -1056,7 +1069,7 @@ impl Engine {
             .model_load_settings()
             .map_err(EngineLoadError::Load)?;
         let state = builder.build().await.map_err(EngineLoadError::Load)?;
-        Ok(Self::new(
+        let engine = Self::new(
             ChatEngine {
                 state,
                 agentic,
@@ -1069,7 +1082,25 @@ impl Engine {
             models,
         )
         .with_skill_dir(skill_dir)
-        .with_progress(progress))
+        .with_progress(progress);
+        if let Some(vectors) = steering {
+            engine.steer_after_load(None, vectors).await?;
+        }
+        Ok(engine)
+    }
+
+    // a load's control vectors, set once the model serves
+    async fn steer_after_load(
+        &self,
+        model: Option<String>,
+        vectors: crate::operations::ControlVectors,
+    ) -> Result<(), EngineLoadError> {
+        self.set_control_vectors(crate::operations::SetControlVectorsRequest { model, vectors })
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                EngineLoadError::Load(anyhow::anyhow!("control vectors: {}", error.message))
+            })
     }
 
     pub async fn load_json(
@@ -1461,6 +1492,7 @@ impl Engine {
         )
         .await
         .map_err(add_model_error)?;
+        let steering = spec.control_vectors.clone();
         let config = spec.into_config(ADDED_MODEL).map_err(add_model_error)?;
         if config.lazy {
             let model_id = config.model_id.clone();
@@ -1500,6 +1532,11 @@ impl Engine {
             .add_to(self.state(), &config.model_id)
             .await
             .map_err(|error| model_name_conflict(format!("{error:#}")))?;
+        if let Some(vectors) = steering {
+            self.steer_after_load(Some(model_id.clone()), vectors)
+                .await
+                .map_err(add_model_error)?;
+        }
         Ok(ModelStatusResponse {
             model_id,
             status: ModelStatus::Loaded,
@@ -1581,6 +1618,31 @@ impl Engine {
             format!("Re ISQ: {:?}", request.ggml_type),
         );
         operations::re_isq(self.state(), request).await
+    }
+
+    /// The control vectors a model (the default one unless `model` names another) is steered by.
+    pub async fn control_vectors(
+        &self,
+        model: Option<&str>,
+    ) -> Result<crate::operations::ControlVectorsResponse, ApiError> {
+        crate::operations::control_vectors(self.state(), model, None).await
+    }
+
+    /// Steers a model by control vectors from its next step, or stops with no files.
+    pub async fn set_control_vectors(
+        &self,
+        request: crate::operations::SetControlVectorsRequest,
+    ) -> Result<crate::operations::ControlVectorsResponse, ApiError> {
+        InferenceRs::maybe_log_request(
+            self.state().clone(),
+            format!("Control vectors: {:?}", request.vectors),
+        );
+        crate::operations::control_vectors(
+            self.state(),
+            request.model.as_deref(),
+            Some(&request.vectors),
+        )
+        .await
     }
 
     /// Starts, reports or applies online calibration; applying requantizes from the collected statistics.
@@ -1772,6 +1834,20 @@ impl Engine {
 
     pub async fn unload_lora_adapter_json(&self, request: &[u8]) -> Result<String, ApiError> {
         to_json(&self.unload_lora_adapter(parse_json(request)?).await?)
+    }
+
+    /// [`Engine::control_vectors`] for `{"model": ...}` (or an empty request, the default model).
+    pub async fn control_vectors_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let query: crate::operations::ControlVectorsQuery = if request.is_empty() {
+            crate::operations::ControlVectorsQuery { model: None }
+        } else {
+            parse_json(request)?
+        };
+        to_json(&self.control_vectors(query.model.as_deref()).await?)
+    }
+
+    pub async fn set_control_vectors_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.set_control_vectors(parse_json(request)?).await?)
     }
 
     /// Generates images with a diffusion model.

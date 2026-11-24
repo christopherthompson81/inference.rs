@@ -25,6 +25,7 @@ macro_rules! skip_without_cuda {
 pub mod amoe;
 pub mod attention;
 pub mod audio;
+pub mod control_vectors;
 pub mod cuda;
 pub mod decision;
 pub mod decoder;

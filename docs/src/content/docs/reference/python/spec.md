@@ -552,6 +552,7 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | Field | Type | Default |
 | --- | --- | --- |
 | `chat_template` | `str \| None` | optional |
+| `control_vectors` | `ControlVectors \| None` | optional |
 | `device_layers` | `list[str] \| None` | optional |
 | `encoder_cache_memory_bytes` | `int \| None` | optional |
 | `hf_config_overrides` | `dict[str, Any] \| None` | optional |
@@ -755,6 +756,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | Field | Type | Default |
 | --- | --- | --- |
 | `chat_template` | `str \| None` | optional |
+| `control_vectors` | `ControlVectors \| None` | optional |
 | `device` | `str \| None` | optional |
 | `device_layers` | `list[str] \| None` | optional |
 | `disable_eos_stop` | `bool \| None` | optional |

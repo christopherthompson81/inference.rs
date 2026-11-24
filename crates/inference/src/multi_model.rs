@@ -43,6 +43,7 @@ fn per_model(model: ModelSelected, options: LoadOptions) -> ModelSpec {
         mtp: runtime.mtp,
         lazy: false,
         pinned: false,
+        control_vectors: runtime.control_vectors,
     }
 }
 

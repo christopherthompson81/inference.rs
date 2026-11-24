@@ -140,6 +140,8 @@ SIGNATURES = {
     "inference_lora_adapters_list": (status, (c_void_p, *buffer, out)),
     "inference_lora_adapter_load": (status, (c_void_p, *buffer, out)),
     "inference_lora_adapter_unload": (status, (c_void_p, *buffer, out)),
+    "inference_control_vectors_get": (status, (c_void_p, *buffer, out)),
+    "inference_control_vectors_set": (status, (c_void_p, *buffer, out)),
     "inference_image_generation": (status, (c_void_p, *buffer, out)),
     "inference_image_edit": (status, (c_void_p, *buffer, POINTER(Media), c_size_t, out)),
     "inference_prompt_logits": (status, (c_void_p, *buffer, out, out)),
