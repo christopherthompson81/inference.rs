@@ -20,6 +20,9 @@ const DIT_1_3B: DitSpec = DitSpec {
     heads: 12,
     mlp: 8192,
     share_mod: true,
+    qk_norm: true,
+    cross_qk_norm: true,
+    rope_first: false,
 };
 
 /// `slat_flow_img2shape_dit_1_3B_{512,1024}_bf16.json`
@@ -163,11 +166,11 @@ impl ShapeFlow {
         let mut h = h;
         for (i, (block, kv)) in self.blocks.iter().zip(kv).enumerate() {
             h = if i == 0 {
-                block.forward_inspect(&h, &shared, rope, kv, &mut |name, t| {
+                block.forward_inspect(&h, &shared, Some(rope), kv, &mut |name, t| {
                     inspect(&format!("b0.{name}"), t)
                 })?
             } else {
-                block.forward(&h, &shared, rope, kv)?
+                block.forward(&h, &shared, Some(rope), kv)?
             };
             inspect(&format!("block{i}"), &h);
         }

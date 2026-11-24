@@ -153,6 +153,27 @@ impl SparseConv {
         })
     }
 
+    /// [`Self::load_dense`] for a conv without a bias (a zero one).
+    pub fn load_dense_unbiased(
+        cin: usize,
+        cout: usize,
+        dtype: DType,
+        vb: inference_tensor::nn::VarBuilder,
+    ) -> Result<Self> {
+        let weight = vb
+            .get((cout, cin, 3, 3, 3), "weight")?
+            .permute((0, 2, 3, 4, 1))?
+            .reshape((cout, TAPS * cin))?
+            .t()?
+            .contiguous()?
+            .to_dtype(dtype)?;
+        Ok(Self {
+            bias: Tensor::zeros(cout, dtype, weight.device())?,
+            weight,
+            out: cout,
+        })
+    }
+
     /// `feats` `[cells, in]` convolved over `neighbors`: `[cells, out]`, in the weights' dtype.
     pub fn forward(&self, feats: &Tensor, neighbors: &Neighbors) -> Result<Tensor> {
         self.product(feats, neighbors)?.broadcast_add(&self.bias)

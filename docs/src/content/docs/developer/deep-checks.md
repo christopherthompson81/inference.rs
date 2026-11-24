@@ -28,10 +28,12 @@ set in `~/.cargo/config.toml` under `[env]` (build scripts track those variables
 | `INFERENCE_TEST_WORLDMIRROR_IMAGES` | a folder of photos of one scene | `inference-jobs` `worldmirror_job` |
 | `INFERENCE_TEST_JOVOX_MODEL` | JoVox-64 checkpoint folder | `inference-jobs` `voxels_job` |
 | `INFERENCE_TEST_DINOV3_MODEL` | DINOv3 ViT-L/16 checkpoint folder | `inference-jobs` `voxels_job` |
-| `INFERENCE_TEST_BIREFNET_MODEL` | BiRefNet checkpoint folder | `inference-jobs` `voxels_job` |
+| `INFERENCE_TEST_BIREFNET_MODEL` | BiRefNet checkpoint folder | `inference-jobs` `voxels_job`, `image_to_mesh_job` |
 | `INFERENCE_TEST_TRELLIS2_MODEL` | TRELLIS.2-4B folder (`pipeline.json`, `ckpts/`) | `inference-jobs` `voxels_job`, `image_to_3d_job` |
-| `INFERENCE_TEST_TRELLIS_LARGE_MODEL` | TRELLIS-image-large folder (its `ckpts/` structure decoder) | `inference-jobs` `image_to_3d_job` |
-| `INFERENCE_TEST_JOVOX_IMAGE` | a photo of one object on an opaque background | `inference-jobs` `voxels_job`, `image_to_splat_job` |
+| `INFERENCE_TEST_TRELLIS_LARGE_MODEL` | TRELLIS-image-large folder (its `ckpts/` structure decoder, and for LATO.2 its structure flow) | `inference-jobs` `image_to_3d_job`, `image_to_mesh_job` |
+| `INFERENCE_TEST_LATO2_MODEL` | LATO.2 folder (`0x4c48/LATO.2`'s `.pt` checkpoints) | `inference-jobs` `image_to_mesh_job` |
+| `INFERENCE_TEST_DINOV2_REG_MODEL` | `facebook/dinov2-with-registers-large` folder | `inference-jobs` `image_to_mesh_job` |
+| `INFERENCE_TEST_JOVOX_IMAGE` | a photo of one object on an opaque background | `inference-jobs` `voxels_job`, `image_to_splat_job`, `image_to_mesh_job` |
 | `INFERENCE_TEST_IDOL_MODEL` | Idol folder (`denoiser`, `decoder`, `decoder_gs`, `birefnet` safetensors) | `inference-jobs` `image_to_splat_job` |
 | `INFERENCE_TEST_DINOV3_HPLUS_MODEL` | DINOv3 ViT-H+/16 `model.safetensors` | `inference-jobs` `image_to_splat_job` |
 | `INFERENCE_TEST_FLUX2_VAE` | a FLUX.2 VAE's `diffusion_pytorch_model.safetensors` | `inference-jobs` `image_to_splat_job` |

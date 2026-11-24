@@ -68,6 +68,19 @@ impl RmsNorm {
     }
 }
 
+// a norm's gain for the fused head pass
+#[cfg(feature = "cuda")]
+fn gain(norm: &Option<RmsNorm>) -> Option<&Tensor> {
+    norm.as_ref().map(|n| &n.scale)
+}
+
+fn norm_heads(norm: Option<&RmsNorm>, xs: &Tensor) -> Result<Tensor> {
+    match norm {
+        Some(norm) => norm.forward(xs),
+        None => Ok(xs.clone()),
+    }
+}
+
 /// Per-token rotations `[1, tokens, 1, head_dim / 2, 1]` (f32), pairs of adjacent channels rotated together.
 pub struct Rope {
     cos: Tensor,
@@ -136,25 +149,33 @@ pub struct DitSpec {
     pub heads: usize,
     pub mlp: usize,
     pub share_mod: bool,
+    /// Per-head RMS norms on the self-attention's q and k
+    pub qk_norm: bool,
+    /// Per-head RMS norms on the cross-attention's q and k
+    pub cross_qk_norm: bool,
+    /// Rotate q and k before their norms (LATO.2's V-Flow) rather than after (TRELLIS.2)
+    pub rope_first: bool,
 }
 
-/// `ModulatedSparseTransformerCrossBlock`: AdaLN self-attention with RoPE, cross-attention to the condition, AdaLN MLP.
+/// `ModulatedSparseTransformerCrossBlock`: AdaLN self-attention (with RoPE when given one), cross-attention to the
+/// condition, AdaLN MLP.
 pub(crate) struct Block {
     modulation: Modulation,
     qkv: AmpLinear,
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    q_norm: Option<RmsNorm>,
+    k_norm: Option<RmsNorm>,
     self_out: AmpLinear,
     norm2: LayerNorm,
     cross_q: AmpLinear,
     cross_kv: AmpLinear,
-    cross_q_norm: RmsNorm,
-    cross_k_norm: RmsNorm,
+    cross_q_norm: Option<RmsNorm>,
+    cross_k_norm: Option<RmsNorm>,
     cross_out: AmpLinear,
     fc1: AmpLinear,
     fc2: AmpLinear,
     plain: LayerNorm,
     heads: usize,
+    rope_first: bool,
     dtype: DType,
 }
 
@@ -247,6 +268,8 @@ impl Block {
         let head_dim = c / heads;
         let (sa, ca) = (vb.pp("self_attn"), vb.pp("cross_attn"));
         let norm2 = vb.pp("norm2");
+        let norm =
+            |on: bool, vb: VarBuilder| on.then(|| RmsNorm::load(heads, head_dim, vb)).transpose();
         let modulation = if spec.share_mod {
             Modulation::Shared(vb.get(6 * c, "modulation")?)
         } else {
@@ -261,19 +284,20 @@ impl Block {
         Ok(Self {
             modulation,
             qkv: AmpLinear::load(c, 3 * c, true, dtype, sa.pp("to_qkv"))?,
-            q_norm: RmsNorm::load(heads, head_dim, sa.pp("q_rms_norm"))?,
-            k_norm: RmsNorm::load(heads, head_dim, sa.pp("k_rms_norm"))?,
+            q_norm: norm(spec.qk_norm, sa.pp("q_rms_norm"))?,
+            k_norm: norm(spec.qk_norm, sa.pp("k_rms_norm"))?,
             self_out: AmpLinear::load(c, c, true, dtype, sa.pp("to_out"))?,
             norm2: LayerNorm::new(norm2.get(c, "weight")?, norm2.get(c, "bias")?, BLOCK_EPS),
             cross_q: AmpLinear::load(c, c, true, dtype, ca.pp("to_q"))?,
             cross_kv: AmpLinear::load(spec.cond_channels, 2 * c, true, dtype, ca.pp("to_kv"))?,
-            cross_q_norm: RmsNorm::load(heads, head_dim, ca.pp("q_rms_norm"))?,
-            cross_k_norm: RmsNorm::load(heads, head_dim, ca.pp("k_rms_norm"))?,
+            cross_q_norm: norm(spec.cross_qk_norm, ca.pp("q_rms_norm"))?,
+            cross_k_norm: norm(spec.cross_qk_norm, ca.pp("k_rms_norm"))?,
             cross_out: AmpLinear::load(c, c, true, dtype, ca.pp("to_out"))?,
             fc1: AmpLinear::load(c, spec.mlp, true, dtype, vb.pp("mlp").pp("mlp").pp(0))?,
             fc2: AmpLinear::load(spec.mlp, c, true, dtype, vb.pp("mlp").pp("mlp").pp(2))?,
             plain,
             heads,
+            rope_first: spec.rope_first,
             dtype,
         })
     }
@@ -284,14 +308,25 @@ impl Block {
             .cross_kv
             .forward(cond)?
             .reshape((b, l, 2, self.heads, ()))?;
-        let k = self
-            .cross_k_norm
-            .forward(&kv.narrow(2, 0, 1)?.squeeze(2)?)?;
+        let k = norm_heads(self.cross_k_norm.as_ref(), &kv.narrow(2, 0, 1)?.squeeze(2)?)?;
         let v = kv.narrow(2, 1, 1)?.squeeze(2)?;
         Ok(CrossKv {
             k: k.transpose(1, 2)?.contiguous()?,
             v: v.transpose(1, 2)?.contiguous()?,
         })
+    }
+
+    // `xs` `[b, n, heads, d]` normed and rotated in the block's order
+    fn position(&self, norm: Option<&RmsNorm>, rope: Option<&Rope>, xs: &Tensor) -> Result<Tensor> {
+        let rotate = |xs: Tensor| match rope {
+            Some(rope) => rope.apply(&xs),
+            None => Ok(xs),
+        };
+        if self.rope_first {
+            norm_heads(norm, &rotate(xs.clone())?)
+        } else {
+            rotate(norm_heads(norm, xs)?)
+        }
     }
 
     // the plain LayerNorm in f32, back to the stream's dtype
@@ -305,11 +340,12 @@ impl Block {
         &self,
         xs: &Tensor,
         t_emb: &Tensor,
-        rope: &Rope,
+        rope: Option<&Rope>,
         kv: &CrossKv,
     ) -> Result<Tensor> {
+        // the fused head pass rotates only normalized heads
         #[cfg(feature = "cuda")]
-        if super::dit_cuda::applies(xs) {
+        if super::dit_cuda::applies(xs) && (rope.is_none() || self.q_norm.is_some()) {
             return self.forward_fused(xs, t_emb, rope, kv);
         }
         self.forward_inspect(xs, t_emb, rope, kv, &mut |_, _| {})
@@ -333,7 +369,7 @@ impl Block {
         &self,
         xs: &Tensor,
         t_emb: &Tensor,
-        rope: &Rope,
+        rope: Option<&Rope>,
         kv: &CrossKv,
     ) -> Result<Tensor> {
         use super::dit_cuda::{Rotation, bias_gelu, heads, ln_mod, residual};
@@ -350,14 +386,14 @@ impl Block {
         let h = ln_mod(xs, None, Some((&m, SCALE_MSA, SHIFT_MSA)), ln_eps)?;
         let (qkv, qkv_bias) = unbiased(&self.qkv, &h)?;
         let qkv = qkv.reshape((b, n, 3, self.heads, ()))?;
-        let rot = Some(Rotation {
+        let rot = rope.map(|rope| Rotation {
             cos: &rope.cos,
             sin: &rope.sin,
             per_head: false,
-            first: false,
+            first: self.rope_first,
         });
-        let q = heads(&qkv, qkv_bias, 0, Some(&self.q_norm.scale), rot, rms_eps)?;
-        let k = heads(&qkv, qkv_bias, 1, Some(&self.k_norm.scale), rot, rms_eps)?;
+        let q = heads(&qkv, qkv_bias, 0, gain(&self.q_norm), rot, rms_eps)?;
+        let k = heads(&qkv, qkv_bias, 1, gain(&self.k_norm), rot, rms_eps)?;
         let v = heads(&qkv, qkv_bias, 2, None, None, rms_eps)?;
         let attn = sdpa(&q, &k, &v)?;
         let (attn, out_bias) =
@@ -371,7 +407,7 @@ impl Block {
         let h = ln_mod(&xs, Some((self.norm2.weight(), bias)), None, ln_eps)?;
         let (q, q_bias) = unbiased(&self.cross_q, &h)?;
         let q = q.reshape((b, n, 1, self.heads, ()))?;
-        let q = heads(&q, q_bias, 0, Some(&self.cross_q_norm.scale), None, rms_eps)?;
+        let q = heads(&q, q_bias, 0, gain(&self.cross_q_norm), None, rms_eps)?;
         let attn = sdpa(&q, &kv.k, &kv.v)?;
         let (attn, out_bias) =
             unbiased(&self.cross_out, &attn.transpose(1, 2)?.reshape((b, n, c))?)?;
@@ -388,7 +424,7 @@ impl Block {
         &self,
         xs: &Tensor,
         t_emb: &Tensor,
-        rope: &Rope,
+        rope: Option<&Rope>,
         kv: &CrossKv,
         inspect: &mut dyn FnMut(&str, &Tensor),
     ) -> Result<Tensor> {
@@ -404,8 +440,16 @@ impl Block {
             .broadcast_mul(&(scale_msa + 1.0)?)?
             .broadcast_add(&shift_msa)?;
         let qkv = self.qkv.forward(&h)?.reshape((b, n, 3, self.heads, ()))?;
-        let q = rope.apply(&self.q_norm.forward(&qkv.narrow(2, 0, 1)?.squeeze(2)?)?)?;
-        let k = rope.apply(&self.k_norm.forward(&qkv.narrow(2, 1, 1)?.squeeze(2)?)?)?;
+        let q = self.position(
+            self.q_norm.as_ref(),
+            rope,
+            &qkv.narrow(2, 0, 1)?.squeeze(2)?,
+        )?;
+        let k = self.position(
+            self.k_norm.as_ref(),
+            rope,
+            &qkv.narrow(2, 1, 1)?.squeeze(2)?,
+        )?;
         let v = qkv.narrow(2, 2, 1)?.squeeze(2)?;
         inspect("q_rope", &q);
         let attn = sdpa(
@@ -420,9 +464,10 @@ impl Block {
         let xs = (xs + attn.broadcast_mul(&gate_msa)?)?;
 
         let h = self.norm(&self.norm2, &xs)?;
-        let q = self
-            .cross_q_norm
-            .forward(&self.cross_q.forward(&h)?.reshape((b, n, self.heads, ()))?)?;
+        let q = norm_heads(
+            self.cross_q_norm.as_ref(),
+            &self.cross_q.forward(&h)?.reshape((b, n, self.heads, ()))?,
+        )?;
         let attn = sdpa(&q.transpose(1, 2)?, &kv.k, &kv.v)?;
         let attn = self
             .cross_out

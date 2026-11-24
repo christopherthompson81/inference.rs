@@ -26,6 +26,7 @@ use crate::reconstruction::{
 };
 
 pub mod image_to_3d;
+pub mod image_to_mesh;
 pub mod image_to_splat;
 pub mod print;
 pub mod reconstruction;
@@ -57,6 +58,9 @@ const VOXELS_NEED_BYTES: u64 = 12 << 30;
 // an image-to-3D job's: one flow at a time, but two decoders' 1024^3 levels
 const IMAGE_TO_3D_NEED_BYTES: u64 = 16 << 30;
 const IMAGE_TO_3D_DIR: &str = "model";
+// the structure flow, V-Flow and the decoders one at a time; the largest stage peaks near this
+const IMAGE_TO_MESH_NEED_BYTES: u64 = 8 << 30;
+const IMAGE_TO_MESH_DIR: &str = "mesh";
 // Idol's 8.1 GB peak at its default Gaussian count, and room for the decoder's batches at a million
 const IMAGE_TO_SPLAT_NEED_BYTES: u64 = 10 << 30;
 const IMAGE_TO_SPLAT_DIR: &str = "splat";
@@ -74,6 +78,8 @@ pub(crate) const BIREFNET_DIR: &str = "BiRefNet";
 pub(crate) const TRELLIS2_DIR: &str = "TRELLIS.2-4B";
 pub(crate) const TRELLIS_LARGE_DIR: &str = "TRELLIS-image-large";
 pub(crate) const IDOL_DIR: &str = "idol";
+pub(crate) const LATO2_DIR: &str = "LATO.2";
+pub(crate) const DINOV2_REG_DIR: &str = "dinov2-with-registers-large";
 pub(crate) const DINOV3_HPLUS_FILE: &str = "dinov3-vith16plus-pretrain-lvd1689m/model.safetensors";
 pub(crate) const FLUX2_VAE_FILE: &str = "FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors";
 /// Where JoVox-64 is fetched from when no checkpoint is configured.
@@ -84,6 +90,10 @@ pub const DINOV3_REPO: &str = "facebook/dinov3-vitl16-pretrain-lvd1689m";
 pub const TRELLIS2_REPO: &str = "microsoft/TRELLIS.2-4B";
 /// Where the sparse-structure decoder TRELLIS.2 reuses is fetched from.
 pub const TRELLIS_LARGE_REPO: &str = "microsoft/TRELLIS-image-large";
+/// Where LATO.2 (image to mesh) is fetched from.
+pub const LATO2_REPO: &str = "0x4c48/LATO.2";
+/// Where DINOv2 ViT-L/14 with registers, LATO.2's and TRELLIS's image encoder, is fetched from.
+pub const DINOV2_REG_REPO: &str = "facebook/dinov2-with-registers-large";
 /// Where BiRefNet is fetched from.
 pub const BIREFNET_REPO: &str = "ZhengPeng7/BiRefNet";
 /// Where Idol (image to Gaussian splats) is fetched from.
@@ -168,6 +178,12 @@ pub struct JobsConfig {
     /// Idol's folder, for image-to-splat jobs; fetched from its repository when unset
     #[schema(value_type = Option<String>)]
     pub idol: Option<PathBuf>,
+    /// LATO.2's folder (its `.pt` checkpoints), for image-to-mesh jobs; fetched from its repository when unset
+    #[schema(value_type = Option<String>)]
+    pub lato2: Option<PathBuf>,
+    /// DINOv2 ViT-L/14 with registers' folder, LATO.2's image encoder; fetched from its repository when unset
+    #[schema(value_type = Option<String>)]
+    pub dinov2_reg: Option<PathBuf>,
     /// DINOv3 ViT-H+/16's `model.safetensors`, Idol's image encoder; fetched from its gated repository when unset
     #[schema(value_type = Option<String>)]
     pub dinov3_hplus: Option<PathBuf>,
@@ -202,6 +218,8 @@ impl Default for JobsConfig {
             trellis2: None,
             trellis_large: None,
             idol: None,
+            lato2: None,
+            dinov2_reg: None,
             dinov3_hplus: None,
             flux2_vae: None,
             models_repo: None,
@@ -217,7 +235,8 @@ impl JobsConfig {
     /// The checkpoints found under `root` in their repositories' layout: `WorldStereo/worldstereo-memory-dmd`,
     /// `Wan2.1-I2V-14B-480P-Diffusers`, `moge-2-vitl-normal`, `HY-World-2.0/HY-WorldMirror-2.0`,
     /// `lpips-vgg/lpips_vgg.safetensors`, `JoVox-64`, `dinov3-vitl16-pretrain-lvd1689m`, `BiRefNet`, `TRELLIS.2-4B`,
-    /// `TRELLIS-image-large`, `idol`, `dinov3-vith16plus-pretrain-lvd1689m/model.safetensors` and
+    /// `TRELLIS-image-large`, `idol`, `LATO.2`, `dinov2-with-registers-large`,
+    /// `dinov3-vith16plus-pretrain-lvd1689m/model.safetensors` and
     /// `FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors`; a missing one stays unset.
     pub fn with_models_root(mut self, root: &Path) -> Self {
         let found = |relative: &str| {
@@ -235,6 +254,8 @@ impl JobsConfig {
         self.trellis2 = found(TRELLIS2_DIR);
         self.trellis_large = found(TRELLIS_LARGE_DIR);
         self.idol = found(IDOL_DIR);
+        self.lato2 = found(LATO2_DIR);
+        self.dinov2_reg = found(DINOV2_REG_DIR);
         self.dinov3_hplus = found(DINOV3_HPLUS_FILE);
         self.flux2_vae = found(FLUX2_VAE_FILE);
         self
@@ -600,6 +621,29 @@ pub struct TextureMeshJob {
     pub placement: Option<Placement>,
 }
 
+/// LATO.2's mesh (artist-like topology, untextured) of the object in the job's one image.
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
+pub struct ImageToMeshJob {
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// The vertex count to aim for, 200 to 5000 (2000 by default); the mesh lands near it
+    #[serde(default)]
+    pub vertices: Option<u32>,
+    /// Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always
+    /// has it removed)
+    #[serde(default)]
+    pub remove_background: Option<bool>,
+    /// The vertex flow's sampling steps, 1 to 100 (24 by default)
+    #[serde(default)]
+    pub vertex_steps: Option<u32>,
+    /// The topology flow's sampling steps, 1 to 200 (50 by default)
+    #[serde(default)]
+    pub topology_steps: Option<u32>,
+    /// How much it may displace to run, in place of the server's setting
+    #[serde(default)]
+    pub placement: Option<Placement>,
+}
+
 /// What a job does.
 #[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -613,6 +657,8 @@ pub enum JobRequest {
     /// TRELLIS.2's textured mesh of the object in one image
     #[serde(rename = "image_to_3d")]
     ImageTo3d(ImageTo3dJob),
+    /// LATO.2's untextured mesh with artist-like topology of the object in one image
+    ImageToMesh(ImageToMeshJob),
     /// A mesh painted from an image with TRELLIS.2
     TextureMesh(TextureMeshJob),
     /// Idol's Gaussian splats of the object in one image
@@ -626,6 +672,7 @@ impl JobRequest {
             Self::Reconstruct(_) => "reconstruct",
             Self::Voxels(_) => "voxels",
             Self::ImageTo3d(_) => "image_to_3d",
+            Self::ImageToMesh(_) => "image_to_mesh",
             Self::TextureMesh(_) => "texture_mesh",
             Self::ImageToSplat(_) => "image_to_splat",
         }
@@ -1652,6 +1699,98 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
     Ok((prepare, work))
 }
 
+// the largest step counts a job takes for the flows LATO.2 samples
+const MAX_VERTEX_STEPS: u32 = 100;
+const MAX_TOPOLOGY_STEPS: u32 = 200;
+
+fn image_to_mesh_work(
+    config: &JobsConfig,
+    job: ImageToMeshJob,
+) -> Result<(Prepare, Work), ApiError> {
+    use crate::image_to_mesh::{
+        DEFAULT_VERTICES, ImageToMeshOptions, Settings, TOPO_STEPS, VERTEX_SAMPLER, VERTICES_RANGE,
+        VertexSampler, fetch_models, generate_mesh_on,
+    };
+    let vertices = job.vertices.map_or(DEFAULT_VERTICES, |v| v as usize);
+    if !VERTICES_RANGE.contains(&vertices) {
+        return Err(ApiError::invalid_request(format!(
+            "vertices must be in {}..={}",
+            VERTICES_RANGE.start(),
+            VERTICES_RANGE.end()
+        )));
+    }
+    for (name, steps, max) in [
+        ("vertex_steps", job.vertex_steps, MAX_VERTEX_STEPS),
+        ("topology_steps", job.topology_steps, MAX_TOPOLOGY_STEPS),
+    ] {
+        if steps.is_some_and(|s| !(1..=max).contains(&s)) {
+            return Err(ApiError::invalid_request(format!(
+                "{name} must be 1 to {max}"
+            )));
+        }
+    }
+    let options = ImageToMeshOptions {
+        lato2: Settings {
+            vertices,
+            seed: job.seed.unwrap_or(0),
+            vertex: VertexSampler {
+                steps: job
+                    .vertex_steps
+                    .map_or(VERTEX_SAMPLER.steps, |s| s as usize),
+                ..VERTEX_SAMPLER
+            },
+            topology_steps: job.topology_steps.map_or(TOPO_STEPS, |s| s as usize),
+            ..Settings::default()
+        },
+        remove_background: job.remove_background.unwrap_or(false),
+    };
+    let fetched = Arc::new(std::sync::OnceLock::new());
+    let (base, slot) = (config.clone(), fetched.clone());
+    let prepare: Prepare = Box::new(move |ctx: &JobContext| {
+        let birefnet = match ctx.inputs().first() {
+            Some(image) => {
+                crate::voxels::needs_background_removal(image, options.remove_background)?
+            }
+            None => false,
+        };
+        let models = fetch_models(
+            base.lato2.clone(),
+            base.trellis_large.clone(),
+            base.dinov2_reg.clone(),
+            birefnet.then(|| base.birefnet.clone()),
+            ctx,
+        )?;
+        let _ = slot.set(models);
+        Ok(())
+    });
+    let work: Work = Box::new(move |ctx: &JobContext| {
+        let models = fetched.get().expect("prepared before the work runs");
+        let device = ctx.device()?.clone();
+        let image = ctx
+            .inputs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("an image-to-mesh job takes one image"))?;
+        let out = ctx.dir().join(IMAGE_TO_MESH_DIR);
+        let report = generate_mesh_on(models, &image, &out, &options, ctx, &device)?;
+        let dir = ctx.dir();
+        let outputs = [
+            ("model", crate::image_to_mesh::GLB_FILE),
+            ("mesh (obj)", crate::image_to_mesh::OBJ_FILE),
+            ("conditioning image", crate::image_to_mesh::CONDITION_FILE),
+            ("meta", crate::image_to_mesh::META_FILE),
+        ]
+        .into_iter()
+        .filter_map(|(name, file)| output(dir, &format!("{IMAGE_TO_MESH_DIR}/{file}"), name))
+        .collect();
+        Ok(JobResult {
+            outputs,
+            report: serde_json::to_value(report)?,
+        })
+    });
+    Ok((prepare, work))
+}
+
 // a job's printable size, the default when not given
 fn print_size(asked: Option<f64>) -> Result<f64, ApiError> {
     let size = asked.unwrap_or(crate::print::DEFAULT_PRINT_SIZE_MM);
@@ -1891,6 +2030,16 @@ impl JobQueue {
                 let placement = job.placement;
                 let work = image_to_3d_work(&config, job)?;
                 (JobNeed::Bytes(IMAGE_TO_3D_NEED_BYTES), placement, work)
+            }
+            JobRequest::ImageToMesh(job) => {
+                if inputs.len() != 1 {
+                    return Err(ApiError::invalid_request(
+                        "an image-to-mesh job takes one image",
+                    ));
+                }
+                let placement = job.placement;
+                let work = image_to_mesh_work(&config, job)?;
+                (JobNeed::Bytes(IMAGE_TO_MESH_NEED_BYTES), placement, work)
             }
             JobRequest::TextureMesh(job) => {
                 let names: Vec<PathBuf> = inputs

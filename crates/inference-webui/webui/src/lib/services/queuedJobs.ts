@@ -1,6 +1,7 @@
 import { apiRoot, authedFetch } from "./auth";
 
-export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type JobStatus =
+  "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 /** How much a job may unload to run; null leaves it to the server. */
 export type Placement = "fastest" | "when_quiet" | "no_eviction";
@@ -123,7 +124,9 @@ export interface VoxelOptions {
 }
 
 export function isFinished(status: JobStatus): boolean {
-  return status === "succeeded" || status === "failed" || status === "cancelled";
+  return (
+    status === "succeeded" || status === "failed" || status === "cancelled"
+  );
 }
 
 function url(path: string): string {
@@ -147,10 +150,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 // drops the options left to the server's defaults
 function given(options: object): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(options).filter(([, value]) => value != null && value !== ""));
+  return Object.fromEntries(
+    Object.entries(options).filter(
+      ([, value]) => value != null && value !== "",
+    ),
+  );
 }
 
-async function submit(kind: string, options: object, files: File[]): Promise<JobRecord> {
+async function submit(
+  kind: string,
+  options: object,
+  files: File[],
+): Promise<JobRecord> {
   const form = new FormData();
   form.append("request", JSON.stringify({ kind, ...given(options) }));
   for (const file of files) form.append("file", file);
@@ -158,23 +169,51 @@ async function submit(kind: string, options: object, files: File[]): Promise<Job
 }
 
 /** A world from an equirectangular panorama: keyframes along camera paths, a reconstruction, then splats. */
-export function submitWorld(panorama: File, options: WorldOptions): Promise<JobRecord> {
+export function submitWorld(
+  panorama: File,
+  options: WorldOptions,
+): Promise<JobRecord> {
   return submit("world", options, [panorama]);
 }
 
 /** Cameras, depth, points and splats from photos of one scene, or a video. */
-export function submitReconstruct(files: File[], options: ReconstructOptions): Promise<JobRecord> {
+export function submitReconstruct(
+  files: File[],
+  options: ReconstructOptions,
+): Promise<JobRecord> {
   return submit("reconstruct", options, files);
 }
 
 /** TRELLIS.2's textured mesh (GLB) of the object in one image. */
-export function submitImageTo3d(image: File, options: ImageTo3dOptions): Promise<JobRecord> {
+export function submitImageTo3d(
+  image: File,
+  options: ImageTo3dOptions,
+): Promise<JobRecord> {
   return submit("image_to_3d", options, [image]);
 }
 
 /** Idol's Gaussian splats of the object in one image. */
-export function submitImageToSplat(image: File, options: ImageToSplatOptions): Promise<JobRecord> {
+export function submitImageToSplat(
+  image: File,
+  options: ImageToSplatOptions,
+): Promise<JobRecord> {
   return submit("image_to_splat", options, [image]);
+}
+
+export interface ImageToMeshOptions {
+  seed: number | null;
+  vertices: number | null;
+  remove_background: boolean | null;
+  vertex_steps: number | null;
+  topology_steps: number | null;
+  placement: Placement | null;
+}
+
+export function submitImageToMesh(
+  image: File,
+  options: ImageToMeshOptions,
+): Promise<JobRecord> {
+  return submit("image_to_mesh", options, [image]);
 }
 
 export interface TextureMeshOptions {
@@ -188,12 +227,19 @@ export interface TextureMeshOptions {
 }
 
 /** A mesh (glb, obj or ply) painted from an image with TRELLIS.2's texturing pipeline. */
-export function submitTextureMesh(mesh: File, image: File, options: TextureMeshOptions): Promise<JobRecord> {
+export function submitTextureMesh(
+  mesh: File,
+  image: File,
+  options: TextureMeshOptions,
+): Promise<JobRecord> {
   return submit("texture_mesh", options, [mesh, image]);
 }
 
 /** JoVox's 64^3 voxel structure of the object in one image, meshed by TRELLIS.2 unless `mesh` is false. */
-export function submitVoxels(image: File, options: VoxelOptions): Promise<JobRecord> {
+export function submitVoxels(
+  image: File,
+  options: VoxelOptions,
+): Promise<JobRecord> {
   return submit("voxels", options, [image]);
 }
 
@@ -206,11 +252,15 @@ export function getJob(id: string): Promise<JobRecord> {
 }
 
 export function cancelJob(id: string): Promise<JobRecord> {
-  return request<JobRecord>(`v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+  return request<JobRecord>(`v1/jobs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  });
 }
 
 export function deleteJob(id: string): Promise<void> {
-  return request<void>(`v1/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+  return request<void>(`v1/jobs/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 /** Where a preview or output of the job is served. */
@@ -226,10 +276,17 @@ export function followJob(
   onEvent: (event: JobEvent) => void,
   onDropped: () => void,
 ): () => void {
-  const source = new EventSource(url(`v1/jobs/${encodeURIComponent(id)}/events`));
-  source.addEventListener("record", (message) => onRecord(JSON.parse((message as MessageEvent).data)));
+  const source = new EventSource(
+    url(`v1/jobs/${encodeURIComponent(id)}/events`),
+  );
+  source.addEventListener("record", (message) =>
+    onRecord(JSON.parse((message as MessageEvent).data)),
+  );
   // missed changes: the record as it stands now catches up
-  source.addEventListener("lagged", () => void getJob(id).then(onRecord, () => {}));
+  source.addEventListener(
+    "lagged",
+    () => void getJob(id).then(onRecord, () => {}),
+  );
   source.onmessage = (message) => {
     const event = JSON.parse(message.data) as JobEvent;
     onEvent(event);

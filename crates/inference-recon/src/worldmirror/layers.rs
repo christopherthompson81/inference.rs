@@ -33,6 +33,17 @@ impl AmpLinear {
         })
     }
 
+    /// From a weight `[out, in]` and bias, cast to `dtype`.
+    pub(crate) fn from_parts(weight: Tensor, bias: Option<Tensor>, dtype: DType) -> Result<Self> {
+        Ok(Self {
+            inner: Linear::new(
+                weight.to_dtype(dtype)?,
+                bias.map(|b| b.to_dtype(dtype)).transpose()?,
+            ),
+            dtype,
+        })
+    }
+
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         self.inner.forward(&xs.to_dtype(self.dtype)?.contiguous()?)
     }

@@ -104,6 +104,33 @@ impl Dinov2 {
         images: &Tensor,
         layers: &[usize],
     ) -> Result<Vec<(Tensor, Tensor)>> {
+        let (mut xs, (hp, wp), specials) = self.tokens(images)?;
+        let last = layers.iter().copied().max().unwrap_or(0);
+        let mut out = Vec::with_capacity(layers.len());
+        for (i, block) in self.blocks.iter().enumerate().take(last + 1) {
+            xs = block.forward(&xs, None)?;
+            if layers.contains(&i) {
+                let normed = self.norm.forward(&xs)?;
+                out.push((
+                    normed.narrow(1, specials, hp * wp)?,
+                    normed.narrow(1, 0, 1)?.squeeze(1)?,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every token (class, registers, patches) after the last block, before the final norm: `x_prenorm`, f32.
+    pub(crate) fn forward_prenorm(&self, images: &Tensor) -> Result<Tensor> {
+        let (mut xs, _, _) = self.tokens(images)?;
+        for block in &self.blocks {
+            xs = block.forward(&xs, None)?;
+        }
+        xs.to_dtype(DType::F32)
+    }
+
+    // the embedded tokens (class, registers, patches), the patch grid and the count of tokens before the patches
+    fn tokens(&self, images: &Tensor) -> Result<(Tensor, (usize, usize), usize)> {
         let (frames, _, h, w) = images.dims4()?;
         let (hp, wp) = (h / self.patch, w / self.patch);
         let patches = images
@@ -122,21 +149,9 @@ impl Dinov2 {
             parts.push(registers.broadcast_as((frames, registers.dim(1)?, dim))?);
         }
         parts.push(tokens.narrow(1, CLS_TOKENS, hp * wp)?);
-        let mut xs = Tensor::cat(&parts, 1)?;
+        let xs = Tensor::cat(&parts, 1)?;
         let specials = CLS_TOKENS + self.register_tokens.as_ref().map_or(Ok(0), |r| r.dim(1))?;
-        let last = layers.iter().copied().max().unwrap_or(0);
-        let mut out = Vec::with_capacity(layers.len());
-        for (i, block) in self.blocks.iter().enumerate().take(last + 1) {
-            xs = block.forward(&xs, None)?;
-            if layers.contains(&i) {
-                let normed = self.norm.forward(&xs)?;
-                out.push((
-                    normed.narrow(1, specials, hp * wp)?,
-                    normed.narrow(1, 0, 1)?.squeeze(1)?,
-                ));
-            }
-        }
-        Ok(out)
+        Ok((xs, (hp, wp), specials))
     }
 
     // The position embedding for an `hp x wp` patch grid: cls kept, the 37 x 37 grid resampled as `pos_interp` says

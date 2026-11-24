@@ -2,7 +2,7 @@
 title: "inference update"
 description: "Update or migrate an install using the installer"
 sidebar:
-  order: 23
+  order: 24
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

@@ -1477,6 +1477,18 @@ class ImageTo3dJob:
 
 
 @dataclass(kw_only=True)
+class ImageToMeshJob:
+    """LATO.2's mesh (artist-like topology, untextured) of the object in the job's one image."""
+
+    placement: Placement | None = None
+    remove_background: bool | None = None
+    seed: int | None = None
+    topology_steps: int | None = None
+    vertex_steps: int | None = None
+    vertices: int | None = None
+
+
+@dataclass(kw_only=True)
 class ImageToSplatJob:
     """Idol's Gaussian splats of the object in the job's one image."""
 
@@ -1635,6 +1647,7 @@ class JobsConfig:
 
     birefnet: str | None = None
     devices: list[int] | None = None
+    dinov2_reg: str | None = None
     dinov3: str | None = None
     dinov3_hplus: str | None = None
     dir: str | None = None
@@ -1642,6 +1655,7 @@ class JobsConfig:
     flux2_vae: str | None = None
     idol: str | None = None
     jovox: str | None = None
+    lato2: str | None = None
     lpips: str | None = None
     models_repo: str | None = None
     moge: str | None = None

@@ -629,6 +629,71 @@ pub enum Command {
         cpu: bool,
     },
 
+    /// A mesh with artist-like topology of the object in one image with LATO.2: about as many vertices as asked, joined
+    /// by predicted edges, as model.glb and mesh.obj (untextured, y up), beside the crop the models see and a meta.json;
+    /// an image without a transparent background has it removed with BiRefNet
+    #[command(name = "image-to-mesh")]
+    ImageToMesh {
+        /// The image (png, jpg, webp)
+        #[arg(long)]
+        image: PathBuf,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// The vertex count to aim for, 200 to 5000 (the result lands near it, not on it)
+        #[arg(long, default_value_t = inference_jobs::image_to_mesh::DEFAULT_VERTICES)]
+        vertices: usize,
+
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+
+        /// The vertex flow's sampling steps
+        #[arg(long, default_value_t = inference_jobs::image_to_mesh::VERTEX_SAMPLER.steps)]
+        vertex_steps: usize,
+
+        /// The vertex flow's guidance strength (0: none)
+        #[arg(long, default_value_t = inference_jobs::image_to_mesh::VERTEX_SAMPLER.cfg_strength)]
+        vertex_guidance: f64,
+
+        /// The topology flow's sampling steps
+        #[arg(long, default_value_t = inference_jobs::image_to_mesh::TOPO_STEPS)]
+        topology_steps: usize,
+
+        /// The scaffold flow's sampling steps
+        #[arg(long, default_value_t = inference_jobs::image_to_mesh::STRUCTURE_SAMPLER.steps)]
+        structure_steps: usize,
+
+        /// Fill open rings of up to this many edges (below 4: leave the holes)
+        #[arg(long, default_value_t = inference_jobs::image_to_mesh::MAX_RING)]
+        max_ring: usize,
+
+        /// The LATO.2 folder (its .pt checkpoints); fetched from 0x4c48/LATO.2 when unset
+        #[arg(long)]
+        lato2: Option<PathBuf>,
+
+        /// The TRELLIS-image-large folder (its structure flow and decoder); fetched when unset
+        #[arg(long)]
+        trellis_large: Option<PathBuf>,
+
+        /// The DINOv2 ViT-L/14-reg folder; fetched from facebook/dinov2-with-registers-large when unset
+        #[arg(long)]
+        dinov2: Option<PathBuf>,
+
+        /// The BiRefNet folder; fetched from ZhengPeng7/BiRefNet when unset and the background needs removing
+        #[arg(long)]
+        birefnet: Option<PathBuf>,
+
+        /// Remove the background even when the image has transparency of its own
+        #[arg(long)]
+        remove_background: bool,
+
+        /// Run on the CPU (very slow) instead of the first CUDA device
+        #[arg(long)]
+        cpu: bool,
+    },
+
     /// Generate a 3D world from an equirectangular panorama with WorldStereo-2: keyframes along camera trajectories,
     /// then WorldMirror 2.0 on them for cameras, depth, points and 3D Gaussian splats
     Worldgen {
