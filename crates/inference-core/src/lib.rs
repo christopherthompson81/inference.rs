@@ -103,8 +103,15 @@ mod chat_collector;
 mod engine;
 mod gguf_imatrix;
 mod gguf_write;
+mod inkling2_recipe;
 pub use gguf_imatrix::{HessianDir, ImatrixMapping, cimatrix_for_gguf, hessians_for_gguf};
 pub use inference_gguf::official_checkpoint_experts;
+pub use inkling2_recipe::{
+    INKLING2_RECIPE_C, Inkling2Recipe, ensure_inkling2_recipe, inkling2_checkpoint_dir,
+    inkling2_recipe_bytes, inkling2_recipe_path, is_inkling2_checkpoint,
+};
+#[cfg(feature = "models-other")]
+pub use inkling2_recipe::{Inkling2CheckpointSource, write_inkling2_recipe};
 
 /// While it lives, a CUDA device's memory pool keeps what it frees instead of handing it back to the driver at the
 /// next sync, as a running engine's does: a long tool reallocating large buffers (a GGUF quantize, a streamed

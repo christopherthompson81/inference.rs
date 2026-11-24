@@ -64,6 +64,10 @@ const WEIGHT_STD: f32 = 0.2;
 const WEIGHT_SEED: u64 = 0x696e_6b6c;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
+// the GGUF load's kernels against the checkpoint load's, the same weights (an unquantized recipe scored ~1e-3 off)
+const RECIPE_LOGPROB_TOLERANCE: f32 = 5e-3;
+const RECIPE_FILE: &str = "recipe.gguf";
+const RECIPE_PROMPT_TOKENS: u32 = 24;
 // Vulkan's ops sum in other orders than the CPU's
 const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
 // CUDA's matmuls and the fused attention sum in other orders too
@@ -282,9 +286,11 @@ fn checkpoint() -> anyhow::Result<tempfile::TempDir> {
 
 fn builder(dir: &tempfile::TempDir, device: Option<&str>) -> TextModelBuilder {
     // no prefix cache, so a scoring request is one prefill rather than a suffix over the decode steps' state
+    // the checkpoint as stored: these tests are of its own load, which a recipe would replace
     let builder = TextModelBuilder::new(dir.path().to_string_lossy())
         .with_dtype(ModelDType::F32)
-        .with_prefix_cache_n(None);
+        .with_prefix_cache_n(None)
+        .with_load_recipes(false);
     match device {
         Some(device) => builder.with_device(device),
         None => builder.with_force_cpu(),
@@ -924,6 +930,87 @@ fn ensure_close(got: &[f32], want: &[f32], tolerance: f32) -> anyhow::Result<()>
     Ok(())
 }
 
+// the official checkpoint loads as its recipe, built once into the recipe directory and read from there after
+#[tokio::test]
+async fn an_official_checkpoint_loads_as_its_recipe_once_built() -> anyhow::Result<()> {
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
+    let (official, _) = official_weights(false)?;
+    let dir = official_checkpoint(&official)?;
+    let recipes = tempfile::tempdir()?;
+    let built = || -> anyhow::Result<Vec<std::path::PathBuf>> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(recipes.path())? {
+            for file in std::fs::read_dir(entry?.path())? {
+                files.push(file?.path());
+            }
+        }
+        Ok(files)
+    };
+    let recipe = || {
+        builder(&dir, None)
+            .with_load_recipes(true)
+            .with_recipe_dir(recipes.path())
+    };
+    let model = recipe().build().await?;
+    let files = built()?;
+    anyhow::ensure!(
+        files.len() == 1 && files[0].extension().is_some_and(|e| e == "gguf"),
+        "one recipe GGUF, built {files:?}"
+    );
+    // ids rather than text: the fixture's vocabulary is no gpt2 byte-level one for the GGUF tokenizer to split into
+    let tokens = (0..RECIPE_PROMPT_TOKENS).collect::<Vec<u32>>();
+    let first = prompt_logprobs(&model, tokens.clone()).await?;
+    drop(model);
+    let modified = std::fs::metadata(&files[0])?.modified()?;
+    let again = recipe().build().await?;
+    anyhow::ensure!(
+        built()? == files && std::fs::metadata(&files[0])?.modified()? == modified,
+        "a second load reads the built recipe"
+    );
+    ensure_close(
+        &prompt_logprobs(&again, tokens).await?,
+        &first,
+        LOGPROB_TOLERANCE,
+    )
+}
+
+// the checkpoint written with its dense tensors unquantized, under the GGUF's names and layouts, scores the
+// checkpoint's tokens as the checkpoint does (the recipe's mapping; recipe C quantizes the same tensors)
+#[tokio::test]
+async fn an_unquantized_recipe_scores_as_its_checkpoint() -> anyhow::Result<()> {
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
+    let (official, _) = official_weights(false)?;
+    let dir = official_checkpoint(&official)?;
+    let stored = builder(&dir, None).build().await?;
+    let tokens = stored
+        .tokenize_chat(ChatRequest::from(chat("say something long")).request)
+        .await?
+        .tokens;
+    let want = prompt_logprobs(&stored, tokens.clone()).await?;
+    drop(stored);
+    let out = tempfile::tempdir()?;
+    inference_api::gguf_requantize::write_inkling2_recipe(
+        dir.path(),
+        &out.path().join(RECIPE_FILE),
+        inference_api::gguf_requantize::Inkling2Recipe::Unquantized,
+        None,
+        |_, _, _| {},
+    )?;
+    let gguf = inference::GgufModelBuilder::new(out.path().to_string_lossy(), vec![RECIPE_FILE])
+        .with_dtype(ModelDType::F32)
+        .with_prefix_cache_n(None)
+        .with_force_cpu()
+        .build()
+        .await?;
+    ensure_close(
+        &prompt_logprobs(&gguf, tokens).await?,
+        &want,
+        RECIPE_LOGPROB_TOLERANCE,
+    )
+}
+
 // the official checkpoint's experts load as stored, their second-level scales apart: it scores as its decoded weights
 // in the model's own layout
 #[tokio::test]
@@ -1076,6 +1163,7 @@ async fn paged_trace_on(
 ) -> anyhow::Result<traces::Trace> {
     // BF16: the drafter's paged attention reads half-precision caches (or q8 ones)
     let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
+        .with_load_recipes(false)
         .with_dtype(ModelDType::BF16)
         .with_prefix_cache_n(None)
         .with_paged_attn(

@@ -180,9 +180,11 @@ pub struct ImatrixConvertOptions {
 
 #[derive(Args, Clone)]
 pub struct GgufQuantizeOptions {
-    /// The source `.gguf` (F32, F16 or BF16 tensors)
-    #[arg(short = 'm', long)]
-    pub model: PathBuf,
+    /// The source `.gguf` (F32, F16 or BF16 tensors). Without one, `--checkpoint` names Inkling 2's own checkpoint and
+    /// the output is recipe C written from it alone (the head and embedding Q6_K, the projections Q8_0, the NVFP4
+    /// experts as stored, the others' gate/up Q6_K and down Q8_0)
+    #[arg(short = 'm', long, required_unless_present = "checkpoint")]
+    pub model: Option<PathBuf>,
 
     /// Output `.gguf` path
     #[arg(short = 'o', long = "output")]
@@ -190,7 +192,11 @@ pub struct GgufQuantizeOptions {
 
     /// `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`,
     /// `iq4_ks`, ...); tensors none matches are copied as they are
-    #[arg(long = "tensor-type", required_unless_present = "checkpoint")]
+    #[arg(
+        long = "tensor-type",
+        required_unless_present = "checkpoint",
+        requires = "model"
+    )]
     pub tensor_types: Vec<String>,
 
     /// The checkpoint the GGUF was made from (Inkling 2's own), read in place of its expert stacks: NVFP4 ones written

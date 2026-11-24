@@ -182,6 +182,102 @@ fn bind_reshaped(
     Ok(())
 }
 
+// the GGUF roles of a layer's tensors by the model's names under the layer, as `build_inkling2_bindings` binds them
+const LAYER_ROLES: [(&str, &str); 22] = [
+    ("self_attn.q_proj.weight", "attn_q.weight"),
+    ("self_attn.k_proj.weight", "attn_k.weight"),
+    ("self_attn.v_proj.weight", "attn_v.weight"),
+    ("self_attn.o_proj.weight", "attn_output.weight"),
+    ("self_attn.gate_proj.weight", "attn_gate.weight"),
+    ("self_attn.r_proj.weight", "attn_rel.weight"),
+    ("self_attn.sink_proj.weight", "attn_sink_proj.weight"),
+    ("self_attn.q_l2_clip.scale", "attn_q_clip.weight"),
+    ("self_attn.rel_l2_clip.scale", "attn_rel_clip.weight"),
+    ("self_attn.k_sconv.weight", "attn_k_conv.weight"),
+    ("self_attn.v_sconv.weight", "attn_v_conv.weight"),
+    (
+        "self_attn.k_sconv.weight_proj.weight",
+        "attn_k_conv_proj.weight",
+    ),
+    (
+        "self_attn.v_sconv.weight_proj.weight",
+        "attn_v_conv_proj.weight",
+    ),
+    ("post_attention_convolution.weight", "attn_post_conv.weight"),
+    ("post_mlp_convolution.weight", "ffn_post_conv.weight"),
+    ("input_layernorm.weight", "attn_norm.weight"),
+    ("q_input_layernorm.weight", "attn_q_inp_norm.weight"),
+    ("k_input_layernorm.weight", "attn_k_inp_norm.weight"),
+    ("v_input_layernorm.weight", "attn_v_inp_norm.weight"),
+    ("post_attention_layernorm.weight", "ffn_norm.weight"),
+    ("mlp.gate.weight", "ffn_gate_inp.weight"),
+    ("mlp.gate.e_score_correction_bias", "exp_probs_b.bias"),
+];
+
+/// A tensor the model reads, as llama.cpp's GGUF stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inkling2GgufTensor {
+    pub name: String,
+    pub dims: Vec<usize>,
+    /// Stored as the transpose of the model's `[rows, cols]`.
+    pub transposed: bool,
+}
+
+/// The GGUF tensor `build_inkling2_bindings` binds to the model's `name` of `shape`, the routed experts aside: the
+/// inverse of its bindings, for writing a GGUF from a checkpoint read by the model's names.
+pub fn inkling2_gguf_tensor(name: &str, shape: &[usize]) -> Option<Inkling2GgufTensor> {
+    let plain = |gguf: String| {
+        Some(Inkling2GgufTensor {
+            name: gguf,
+            dims: shape.to_vec(),
+            transposed: false,
+        })
+    };
+    // a query of one row is stored as its vector
+    let query = |gguf: String| {
+        let dims = match shape {
+            [1, width] => vec![*width],
+            _ => shape.to_vec(),
+        };
+        Some(Inkling2GgufTensor {
+            name: gguf,
+            dims,
+            transposed: false,
+        })
+    };
+    if let Some((gguf, _)) = ROOT.iter().find(|(_, native)| *native == name) {
+        return plain(gguf.to_string());
+    }
+    if name == "model.final_input.query" {
+        return query(FINAL_QUERY.to_string());
+    }
+    let (layer, tail) = name.strip_prefix("model.layers.")?.split_once('.')?;
+    let blk = |role: &str| format!("blk.{layer}.{role}");
+    if let Some((_, role)) = LAYER_ROLES.iter().find(|(native, _)| *native == tail) {
+        return plain(blk(role));
+    }
+    match tail {
+        "self_attn.rel_logits_proj.proj" => {
+            let &[rows, cols] = shape else { return None };
+            Some(Inkling2GgufTensor {
+                name: blk("attn_rel_bias.weight"),
+                dims: vec![cols, rows],
+                transposed: true,
+            })
+        }
+        "attention_input.query" => query(blk("attn_res_query.weight")),
+        "mlp_input.query" => query(blk("ffn_res_query.weight")),
+        "loop.msg_query" => plain(blk("loop_msg_query.weight")),
+        _ => {
+            let (controller, part) = tail
+                .strip_prefix("loop.")?
+                .strip_suffix(".weight")?
+                .split_once('.')?;
+            plain(blk(&format!("loop_{controller}_ctrl_{part}.weight")))
+        }
+    }
+}
+
 // the official checkpoint's names: a layer's experts, its fused gate/up stack (gate and up rows interleaved) and its
 // down stack
 const OFFICIAL_EXPERTS: &str = "model.llm.layers";
@@ -235,6 +331,54 @@ pub fn official_checkpoint_experts(
 
 #[cfg(test)]
 mod tests {
+    // each tensor the model reads goes back to the GGUF name and layout its binding reads it from
+    #[test]
+    fn the_models_names_go_back_to_the_gguf_tensors_they_bind() {
+        use super::{Inkling2GgufTensor, inkling2_gguf_tensor};
+        let gguf = |name: &str, shape: &[usize]| inkling2_gguf_tensor(name, shape).unwrap();
+        let tensor = |name: &str, dims: &[usize], transposed| Inkling2GgufTensor {
+            name: name.to_string(),
+            dims: dims.to_vec(),
+            transposed,
+        };
+        assert_eq!(
+            gguf("lm_head.weight", &[8, 4]),
+            tensor("output.weight", &[8, 4], false)
+        );
+        assert_eq!(
+            gguf("model.final_input.query", &[1, 4]),
+            tensor("output_res_query.weight", &[4], false)
+        );
+        assert_eq!(
+            gguf("model.layers.3.self_attn.sink_proj.weight", &[2, 4]),
+            tensor("blk.3.attn_sink_proj.weight", &[2, 4], false)
+        );
+        assert_eq!(
+            gguf("model.layers.3.self_attn.rel_logits_proj.proj", &[16, 1024]),
+            tensor("blk.3.attn_rel_bias.weight", &[1024, 16], true)
+        );
+        assert_eq!(
+            gguf("model.layers.5.attention_input.query", &[3, 4]),
+            tensor("blk.5.attn_res_query.weight", &[3, 4], false)
+        );
+        assert_eq!(
+            gguf("model.layers.4.attention_input.query", &[1, 4]),
+            tensor("blk.4.attn_res_query.weight", &[4], false)
+        );
+        assert_eq!(
+            gguf("model.layers.7.loop.ffn.forget.weight", &[1, 4]),
+            tensor("blk.7.loop_ffn_ctrl_forget.weight", &[1, 4], false)
+        );
+        assert_eq!(
+            gguf("model.layers.7.mlp.gate.e_score_correction_bias", &[8]),
+            tensor("blk.7.exp_probs_b.bias", &[8], false)
+        );
+        assert!(
+            inkling2_gguf_tensor("model.layers.7.mlp.experts.gate_proj.weight", &[2, 4, 4])
+                .is_none()
+        );
+    }
+
     #[test]
     fn gguf_expert_stacks_name_the_official_stacks() {
         let stack = super::official_stack("blk.7.ffn_gate_up_exps.weight").unwrap();

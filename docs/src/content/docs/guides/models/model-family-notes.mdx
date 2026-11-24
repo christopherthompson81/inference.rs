@@ -166,6 +166,30 @@ K-EXAONE (`ExaoneMoeForCausalLM`, e.g. `LGAI-EXAONE/K-EXAONE-236B-A23B`) loads t
 
 ByteDance's Seed-OSS (`SeedOssForCausalLM`, e.g. `ByteDance-Seed/Seed-OSS-36B-Instruct`) loads through auto-detection, from safetensors or from llama.cpp's `seed_oss` GGUFs. Its reasoning (`<seed:think>...</seed:think>`) comes back as `reasoning_content`, the `<seed:cot_budget_reflect>` notes its template asks for included, and its `<seed:tool_call>` calls as tool calls. Turning thinking off (`enable_thinking: false` or `reasoning_effort: "none"`) renders the template with `thinking_budget` 0, its no-reasoning mode.
 
+## Inkling 2
+
+thinkingmachines' own Inkling 2 checkpoints (NVFP4 experts, MXFP8 on the last layers) load as recipe C, a GGUF built
+from the checkpoint on its first load and read from a cache after. Recipe C keeps the NVFP4 experts as stored, writes
+the MXFP8 ones as Q6_K (gate and up) and Q8_0 (down), and writes the projections at Q8_0, the head and embedding at
+Q6_K and the rest at F32. The engine's Inkling 2 speed and context figures were measured on this file. For Inkling-2-Mini the build takes about a minute and a half and writes 15.6 GiB
+to `~/.cache/inference-rs/recipes`. Set `INFERENCE_RS_RECIPE_DIR` (or `runtime.recipe_dir` in a spec) to keep it
+elsewhere. The same file can be written ahead of time with `inference quantize gguf --checkpoint <dir> -o <file>`.
+
+A load that asks for in-situ quantization, UQFF or calibration keeps the checkpoint as it is stored, and so does
+`INFERENCE_RS_NO_RECIPE=1` (or `runtime.load_recipes: false`).
+
+The checkpoint's drafter sits beside it (`mtp.safetensors`). On a 24 GB card, the setup the speed figures in
+[speculative decoding](/guides/perf/speculative-decoding/) come from is:
+
+```bash
+inference serve -m thinkingmachines/Inkling-2-Mini \
+  --mtp-model thinkingmachines/Inkling-2-Mini --mtp-n-predict 7 --mtp-auto-depth \
+  --pa-cache-type q8 --pa-context-len 229376
+```
+
+Beside a GGUF target, the drafter's projections default to Q8_0. With q8 KV the full 262,144-token context fits for
+one sequence; how much fits beside four depends on how much of the card other programs hold.
+
 ## LFM2 and LFM2.5
 
 LiquidAI LFM2 and LFM2.5 dense and MoE checkpoints are supported. LFM2-VL and LFM2.5-VL are supported for image input.

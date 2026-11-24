@@ -372,8 +372,7 @@ fn load_gptq(
     t: &Planned<'_>,
     hessians: &dyn HessianSource,
     checkpoint: Option<&dyn CheckpointSource>,
-    reader: &mut BufReader<File>,
-    offset: u64,
+    source: &dyn RequantizeSource,
     device: &Device,
 ) -> Result<Option<GptqInput>> {
     let experts = if t.dims.len() == 3 { t.dims[0] } else { 1 };
@@ -404,8 +403,7 @@ fn load_gptq(
         }));
     }
     let mut bytes = vec![0u8; t.source_bytes];
-    reader.seek(SeekFrom::Start(offset))?;
-    reader.read_exact(&mut bytes)?;
+    source.read(t.name, 0, &mut bytes)?;
     let dtype = match t.source_type {
         0 => inference_tensor::DType::F32,
         1 => inference_tensor::DType::F16,
@@ -707,26 +705,89 @@ fn gpu_quantize(
     }
 }
 
+/// What `requantize_source` rewrites: a GGUF file, or a checkpoint laid out as one.
+pub trait RequantizeSource: Sync {
+    /// The tensors in order, each with its dims and the GGUF type it is stored at (the offsets unread).
+    fn header(&self) -> &Header;
+    /// The metadata entries as GGUF bytes, and how many.
+    fn metadata(&self) -> Result<(Vec<u8>, usize)>;
+    /// `buf.len()` bytes of tensor `name` as stored, from `offset` into it.
+    fn read(&self, name: &str, offset: u64, buf: &mut [u8]) -> Result<()>;
+}
+
+/// A GGUF file as a [`RequantizeSource`].
+pub struct GgufFileSource {
+    header: Header,
+    file: std::sync::Mutex<BufReader<File>>,
+}
+
+impl GgufFileSource {
+    pub fn open(path: &Path) -> Result<Self> {
+        let mut file = BufReader::new(File::open(path)?);
+        let header = Header::read_summary(&mut file)?;
+        if header
+            .metadata
+            .get("general.alignment")
+            .is_some_and(|v| v.to_u32().ok() != Some(GGUF_ALIGNMENT as u32))
+        {
+            inference_tensor::bail!(
+                "{}: only 32-byte aligned GGUFs are rewritten",
+                path.display()
+            );
+        }
+        Ok(Self {
+            header,
+            file: std::sync::Mutex::new(file),
+        })
+    }
+}
+
+impl RequantizeSource for GgufFileSource {
+    fn header(&self) -> &Header {
+        &self.header
+    }
+
+    fn metadata(&self) -> Result<(Vec<u8>, usize)> {
+        let mut file = self.file.lock().expect("source file poisoned");
+        let span = &self.header.metadata_span;
+        let mut kv_bytes = vec![0u8; (span.end - span.start) as usize];
+        file.seek(SeekFrom::Start(span.start))?;
+        file.read_exact(&mut kv_bytes)?;
+        file.seek(SeekFrom::Start(16))?;
+        let mut count = [0u8; 8];
+        file.read_exact(&mut count)?;
+        Ok((kv_bytes, u64::from_le_bytes(count) as usize))
+    }
+
+    fn read(&self, name: &str, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let mut file = self.file.lock().expect("source file poisoned");
+        let start = self.header.tensor_data_offset + self.header.tensor_infos[name].offset;
+        file.seek(SeekFrom::Start(start + offset))?;
+        file.read_exact(buf)?;
+        Ok(())
+    }
+}
+
 /// `src` rewritten to `dst` under `plan`; its metadata copied as it is. `progress` hears each tensor's name as it
 /// starts.
 pub fn requantize_gguf(
     src: &Path,
     dst: &Path,
     plan: &RequantizePlan,
+    progress: impl FnMut(usize, usize, &str),
+) -> Result<RequantizeSummary> {
+    requantize_source(&GgufFileSource::open(src)?, dst, plan, progress)
+}
+
+/// `source` written to `dst` under `plan`, its metadata as it gives it. `progress` hears each tensor's name as it
+/// starts.
+pub fn requantize_source(
+    source: &dyn RequantizeSource,
+    dst: &Path,
+    plan: &RequantizePlan,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<RequantizeSummary> {
-    let mut reader = BufReader::new(File::open(src)?);
-    let header = Header::read_summary(&mut reader)?;
-    if header
-        .metadata
-        .get("general.alignment")
-        .is_some_and(|v| v.to_u32().ok() != Some(GGUF_ALIGNMENT as u32))
-    {
-        inference_tensor::bail!(
-            "{}: only 32-byte aligned GGUFs are rewritten",
-            src.display()
-        );
-    }
+    let header = source.header();
     // a source's per-expert scales for a stack the checkpoint rewrites: dropped, the stack taking its own (or none)
     let rewritten_scales = plan.checkpoint.as_ref().map_or_else(HashSet::new, |c| {
         header
@@ -741,18 +802,10 @@ pub fn requantize_gguf(
         .iter()
         .filter(|name| plan.only.as_ref().is_none_or(|only| only.is_match(name)))
         .filter(|name| !rewritten_scales.contains(name.as_str()))
-        .map(|name| plan_tensor(name, &header, plan))
+        .map(|name| plan_tensor(name, header, plan))
         .collect::<Result<Vec<_>>>()?;
 
-    let mut kv_bytes = vec![0u8; (header.metadata_span.end - header.metadata_span.start) as usize];
-    reader.seek(SeekFrom::Start(header.metadata_span.start))?;
-    reader.read_exact(&mut kv_bytes)?;
-    let mut kv_count = {
-        reader.seek(SeekFrom::Start(16))?;
-        let mut count = [0u8; 8];
-        reader.read_exact(&mut count)?;
-        u64::from_le_bytes(count) as usize
-    };
+    let (mut kv_bytes, mut kv_count) = source.metadata()?;
     if plan.only.is_some() {
         let architecture = header
             .metadata
@@ -837,7 +890,6 @@ pub fn requantize_gguf(
             let mut order = gptq_targets.iter().copied().collect::<Vec<_>>();
             order.sort_unstable();
             let tensors = &tensors;
-            let header = &header;
             let checkpoint = plan.checkpoint.as_deref();
             let loader = std::thread::Builder::new().name(GPTQ_LOADER_THREAD.into());
             let device = plan.gpu.clone();
@@ -848,16 +900,11 @@ pub fn requantize_gguf(
                         Err(inference_tensor::Error::msg("GPTQ runs on a GPU")),
                     )));
                 };
-                let mut reader = match File::open(src) {
-                    Ok(file) => BufReader::new(file),
-                    Err(e) => return drop(tx.send((usize::MAX, Err(e.into())))),
-                };
                 for i in order {
                     let t = &tensors[i];
-                    let offset = header.tensor_data_offset + header.tensor_infos[t.name].offset;
                     let span = profile::span("gptq.load", None);
                     let checkpoint = t.from_values.then_some(()).and(checkpoint);
-                    let loaded = load_gptq(t, hessians, checkpoint, &mut reader, offset, &device);
+                    let loaded = load_gptq(t, hessians, checkpoint, source, &device);
                     drop(span);
                     // a send fails only once the loop has stopped, which ends this thread too
                     if tx.send((i, loaded)).is_err() {
@@ -871,8 +918,7 @@ pub fn requantize_gguf(
         let prefetched = prefetched.transpose()?;
         for (i, t) in tensors.iter().enumerate() {
             progress(i, tensors.len(), t.name);
-            let info = &header.tensor_infos[t.name];
-            reader.seek(SeekFrom::Start(header.tensor_data_offset + info.offset))?;
+            let mut read_at = 0u64;
             let cols = *t.dims.last().unwrap_or(&1);
             let rows = t.dims.iter().product::<usize>() / cols.max(1);
             let source_row = t.source_bytes / rows.max(1);
@@ -1029,7 +1075,10 @@ pub fn requantize_gguf(
                 bytes.resize(n * source_row, 0);
                 match &mut values {
                     Some(values) => values.read_exact(&mut bytes)?,
-                    None => reader.read_exact(&mut bytes)?,
+                    None => {
+                        source.read(t.name, read_at, &mut bytes)?;
+                        read_at += bytes.len() as u64;
+                    }
                 }
                 let Some(ty) = t.target else {
                     writer.write_all(&bytes)?;

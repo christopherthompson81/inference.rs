@@ -259,6 +259,55 @@ pub fn bind(cfg: &Config, vb: ShardedVarBuilder) -> Result<ShardedVarBuilder> {
     if !vb.contains_tensor(MARKER) {
         return Ok(vb);
     }
+    let inner = Arc::new(sources(cfg, &vb)?);
+    Ok(
+        ShardedSafeTensors::wrap(Tensors(inner.clone()), vb.dtype(), vb.device().clone())
+            .with_embeddings_on_host(vb.embeddings_on_host())
+            .with_moe_expert_cache(vb.moe_expert_cache())
+            .with_weight_source(Arc::new(Experts(inner))),
+    )
+}
+
+/// One of Inkling 2's own checkpoints as the tensors the model reads by its names, other than the routed experts:
+/// each one's shape, and its values as the checkpoint load reads them.
+pub struct OfficialTensors(Inner);
+
+impl OfficialTensors {
+    /// `vb`'s checkpoint, if it is one of Inkling 2's own.
+    pub fn open(cfg: &Config, vb: ShardedVarBuilder) -> Result<Option<Self>> {
+        if !vb.contains_tensor(MARKER) {
+            return Ok(None);
+        }
+        Ok(Some(Self(sources(cfg, &vb)?)))
+    }
+
+    /// The model's names for the tensors, sorted, each with its shape.
+    pub fn tensors(&self) -> Vec<(&str, &[usize])> {
+        let mut tensors = self
+            .0
+            .sources
+            .iter()
+            .map(|(name, (_, shape))| (name.as_str(), shape.as_slice()))
+            .collect::<Vec<_>>();
+        tensors.sort_unstable();
+        tensors
+    }
+
+    /// `name`'s values at F32 on the host.
+    pub fn values(&self, name: &str) -> Result<Tensor> {
+        let (source, _) =
+            self.0
+                .sources
+                .get(name)
+                .ok_or_else(|| inference_tensor::Error::CannotFindTensor {
+                    path: name.to_string(),
+                })?;
+        self.0.load(source, DType::F32, &Device::Cpu)
+    }
+}
+
+// the model's names for a checkpoint's tensors, each with where it comes from and its shape
+fn sources(cfg: &Config, vb: &ShardedVarBuilder) -> Result<Inner> {
     let names = vb
         .tensor_names()
         .ok_or_else(|| inference_tensor::Error::Msg("Inkling 2: no tensor listing".to_string()))?;
@@ -286,13 +335,7 @@ pub fn bind(cfg: &Config, vb: ShardedVarBuilder) -> Result<ShardedVarBuilder> {
     for (target, shape) in shapes {
         inner.sources.get_mut(&target).expect("listed above").1 = shape;
     }
-    let inner = Arc::new(inner);
-    Ok(
-        ShardedSafeTensors::wrap(Tensors(inner.clone()), vb.dtype(), vb.device().clone())
-            .with_embeddings_on_host(vb.embeddings_on_host())
-            .with_moe_expert_cache(vb.moe_expert_cache())
-            .with_weight_source(Arc::new(Experts(inner))),
-    )
+    Ok(inner)
 }
 
 fn shape_of(inner: &Inner, source: &Source, cfg: &Config) -> Result<Vec<usize>> {

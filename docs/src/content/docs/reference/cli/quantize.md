@@ -226,12 +226,12 @@ inference quantize worldgen [OPTIONS] --models <MODELS> --output <OUTPUT_PATH>
 A float GGUF to a quantized GGUF: per-tensor types by name pattern, weighed by an imatrix
 
 ```
-inference quantize gguf [OPTIONS] --model <MODEL> --output <OUTPUT_PATH>
+inference quantize gguf [OPTIONS] --output <OUTPUT_PATH>
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `-m, --model <MODEL>` | required | The source `.gguf` (F32, F16 or BF16 tensors) |
+| `-m, --model <MODEL>` |  | The source `.gguf` (F32, F16 or BF16 tensors). Without one, `--checkpoint` names Inkling 2's own checkpoint and the output is recipe C written from it alone (the head and embedding Q6_K, the projections Q8_0, the NVFP4 experts as stored, the others' gate/up Q6_K and down Q8_0) |
 | `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path |
 | `--tensor-type <TENSOR_TYPES>` |  | `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`, `iq4_ks`, ...); tensors none matches are copied as they are |
 | `--checkpoint <CHECKPOINT>` |  | The checkpoint the GGUF was made from (Inkling 2's own), read in place of its expert stacks: NVFP4 ones written as stored, in llama.cpp's NVFP4 blocks with their per-expert `<weight>.scale`, unless a rule names another type; those and MXFP8 ones quantized by the rules from their values (the source's own scales for them dropped) |

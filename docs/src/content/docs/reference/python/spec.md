@@ -764,6 +764,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | `hf_revision` | `str \| None` | optional |
 | `isq` | `str \| None` | optional |
 | `jinja_explicit` | `str \| None` | optional |
+| `load_recipes` | `bool \| None` | optional |
 | `log` | `str \| None` | optional |
 | `max_decode_steps_before_prefill` | `int \| None` | optional |
 | `max_model_len` | `int \| None` | optional |
@@ -781,6 +782,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | `prefix_cache_disk_ttl_mins` | `int \| None` | optional |
 | `prefix_cache_n` | `int \| None` | optional |
 | `prefix_cache_ram_gib` | `int \| None` | optional |
+| `recipe_dir` | `str \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `throughput_logging` | `bool \| None` | optional |
 | `token_source` | `str \| None` | optional |

@@ -125,6 +125,30 @@ pub fn run_hidream_quantize(options: HiDreamQuantizeOptions, global: GlobalOptio
 /// Rewrites a float GGUF with the given per-tensor types.
 pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
     initialize_logging();
+    let gpu = (!options.cpu || options.hessians.is_some())
+        .then(|| inference_tensor::Device::new_cuda(0).ok())
+        .flatten();
+    let Some(model) = options.model.clone() else {
+        let dir = options
+            .checkpoint
+            .as_deref()
+            .expect("clap requires a checkpoint without a model");
+        let write = || {
+            gguf_requantize::write_inkling2_recipe(
+                dir,
+                &options.output_path,
+                gguf_requantize::Inkling2Recipe::C,
+                gpu.clone(),
+                |i, n, name| info!("[{}/{n}] {name}", i + 1),
+            )
+        };
+        let summary = match inference_tensor::utils::smt_gemm_pool() {
+            Some(pool) => pool.install(write)?,
+            None => write()?,
+        };
+        report_requantize(&options.output_path, &summary);
+        return Ok(());
+    };
     let rules = options
         .tensor_types
         .iter()
@@ -156,25 +180,22 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         quantizer,
         reuse: options.reuse.clone(),
         only: options.only.as_deref().map(regex::Regex::new).transpose()?,
-        gpu: (!options.cpu || options.hessians.is_some())
-            .then(|| inference_tensor::Device::new_cuda(0).ok())
-            .flatten()
-            .inspect(|device| {
-                #[cfg(feature = "cuda")]
-                if let inference_tensor::Device::Cuda(dev) = device {
-                    // SAFETY: every quantizer runs on the device's one stream, so no use crosses streams; the
-                    // per-buffer events otherwise cost a create and destroy each (most of a stack's GPTQ setup)
-                    unsafe { dev.disable_event_tracking() };
-                }
-                #[cfg(not(feature = "cuda"))]
-                let _ = device;
-            }),
+        gpu: gpu.inspect(|device| {
+            #[cfg(feature = "cuda")]
+            if let inference_tensor::Device::Cuda(dev) = device {
+                // SAFETY: every quantizer runs on the device's one stream, so no use crosses streams; the
+                // per-buffer events otherwise cost a create and destroy each (most of a stack's GPTQ setup)
+                unsafe { dev.disable_event_tracking() };
+            }
+            #[cfg(not(feature = "cuda"))]
+            let _ = device;
+        }),
         hessians: options
             .hessians
             .as_deref()
             .map(|path| -> Result<Box<dyn gguf_requantize::HessianSource>> {
                 if path.is_dir() {
-                    let dir = gguf_requantize::hessians_for_gguf(path, &options.model)?;
+                    let dir = gguf_requantize::hessians_for_gguf(path, &model)?;
                     if !dir.unmatched.is_empty() {
                         warn!(
                             "{} Hessians bind to no tensor of the GGUF: {}",
@@ -200,7 +221,7 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
             .map(|dir| -> Result<Box<dyn gguf_requantize::HessianSource>> {
                 Ok(Box::new(gguf_requantize::hessians_for_gguf(
                     Path::new(&dir),
-                    &options.model,
+                    &model,
                 )?))
             })
             .transpose()?,
@@ -222,18 +243,20 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
             .transpose()?,
     };
     let requantize = || {
-        gguf_requantize::requantize_gguf(
-            &options.model,
-            &options.output_path,
-            &plan,
-            |i, n, name| info!("[{}/{n}] {name}", i + 1),
-        )
+        gguf_requantize::requantize_gguf(&model, &options.output_path, &plan, |i, n, name| {
+            info!("[{}/{n}] {name}", i + 1)
+        })
     };
     // every logical CPU: the scale searches gain ~1.26x from the hyperthreads, the gemm pool's reason too
     let summary = match inference_tensor::utils::smt_gemm_pool() {
         Some(pool) => pool.install(requantize)?,
         None => requantize()?,
     };
+    report_requantize(&options.output_path, &summary);
+    Ok(())
+}
+
+fn report_requantize(output: &Path, summary: &gguf_requantize::RequantizeSummary) {
     if !summary.without_imatrix.is_empty() {
         warn!(
             "{} quantized tensors had no imatrix entry: {}",
@@ -249,14 +272,13 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         .join(", ");
     info!(
         "Wrote {} ({:.2} GiB from {:.2} GiB, {} of {} tensors quantized, {} reused): {types}",
-        options.output_path.display(),
+        output.display(),
         summary.bytes_out as f64 / MIB / 1024.0,
         summary.bytes_in as f64 / MIB / 1024.0,
         summary.quantized,
         summary.tensors,
         summary.reused,
     );
-    Ok(())
 }
 
 /// Converts a `.cimatrix` to llama.cpp's imatrix under a GGUF's tensor names.

@@ -2092,7 +2092,7 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     }
 
     /// Stacked experts' scale each (F32 `[experts]`), applied to every output of the expert, which the kernels reading
-    /// [`Self::kernel_weight`] leave to the caller.
+    /// `kernel_weight` (a CUDA build's) leave to the caller.
     fn expert_scales(&self) -> Option<&Tensor> {
         None
     }

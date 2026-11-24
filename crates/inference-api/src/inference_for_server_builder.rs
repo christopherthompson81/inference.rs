@@ -263,6 +263,7 @@ pub struct InferenceRsForServerBuilder {
 
     /// In-situ quantization to apply.
     in_situ_quant: Option<String>,
+    recipes: inference_selection::recipes::RecipeOptions,
 
     /// Hub revision of the single model; listed models carry their own.
     hf_revision: Option<String>,
@@ -359,6 +360,7 @@ impl Default for InferenceRsForServerBuilder {
             prefix_store: None,
             num_device_layers: defaults::NUM_DEVICE_LAYERS,
             in_situ_quant: defaults::IN_SITU_QUANT,
+            recipes: Default::default(),
             hf_revision: None,
             paged_attn_gpu_mem: defaults::PAGED_ATTN_GPU_MEM,
             paged_attn_gpu_mem_usage: defaults::PAGED_ATTN_GPU_MEM_USAGE,
@@ -623,6 +625,12 @@ impl InferenceRsForServerBuilder {
         self
     }
 
+    /// Whether loads take their checkpoints' recipes, and where built ones are kept.
+    pub fn with_recipes(mut self, recipes: inference_selection::recipes::RecipeOptions) -> Self {
+        self.recipes = recipes;
+        self
+    }
+
     /// Sets the in-situ quantization method if provided.
     pub fn with_in_situ_quant_optional(mut self, in_situ_quant: Option<String>) -> Self {
         if let Some(in_situ_quant) = in_situ_quant {
@@ -854,6 +862,7 @@ impl InferenceRsForServerBuilder {
             token_source: self.token_source.clone(),
             num_device_layers: self.num_device_layers.clone(),
             in_situ_quant: self.in_situ_quant.clone(),
+            recipes: self.recipes.clone(),
             chat_template: self.chat_template.clone(),
             jinja_explicit: self.jinja_explicit.clone(),
             max_model_len: self.max_model_len,
@@ -1375,6 +1384,7 @@ pub struct ModelLoadSettings {
     token_source: TokenSource,
     num_device_layers: Option<Vec<String>>,
     in_situ_quant: Option<String>,
+    recipes: inference_selection::recipes::RecipeOptions,
     chat_template: Option<String>,
     jinja_explicit: Option<String>,
     max_model_len: Option<usize>,
@@ -1411,6 +1421,16 @@ impl ModelLoadSettings {
     /// Whether listed models inherit an ISQ setting, which a `quant` choice would land on top of.
     pub fn has_isq(&self) -> bool {
         self.in_situ_quant.is_some()
+    }
+
+    /// The in-situ quantization a model added later inherits.
+    pub fn in_situ_quant(&self) -> Option<&str> {
+        self.in_situ_quant.as_deref()
+    }
+
+    /// Whether a model added later takes its checkpoint's recipe, and where built ones are kept.
+    pub fn recipes(&self) -> &inference_selection::recipes::RecipeOptions {
+        &self.recipes
     }
 
     fn loader_config(
