@@ -3,6 +3,7 @@
     managerStore,
     SLOTS,
     CACHE_TYPES,
+    DEFAULT_STEER_SCALE,
     displayName,
     baseName,
     formatBytes,
@@ -284,6 +285,73 @@
               </select>
             </label>
           {/if}
+        {/if}
+        {#if spec.steer}
+        <div class="flex basis-full flex-wrap items-end gap-3">
+          <label
+            class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300"
+            title="A control vector derived on the model from contrasting texts, added to every layer's output: it steers tone or mood without a fine-tune"
+          >
+            <input type="checkbox" class="accent-blue-600" bind:checked={form.steer} onchange={() => managerStore.persistForms()} disabled={activity.busy} />
+            Steering
+          </label>
+          {#if form.steer}
+            <label class="flex min-w-56 flex-1 flex-col gap-1" title="One text a line, each the counterpart of the negative text on its line">
+              <span class="text-[11px] text-gray-500 dark:text-gray-400">Toward (one a line)</span>
+              <textarea
+                rows="3"
+                class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+                placeholder="I feel wonderful and full of joy!"
+                bind:value={form.steerPositive}
+                onchange={() => managerStore.persistForms()}
+                disabled={activity.busy}
+              ></textarea>
+            </label>
+            <label class="flex min-w-56 flex-1 flex-col gap-1" title="One text a line, each the counterpart of the positive text on its line">
+              <span class="text-[11px] text-gray-500 dark:text-gray-400">Away from (one a line)</span>
+              <textarea
+                rows="3"
+                class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+                placeholder="I feel miserable and full of despair."
+                bind:value={form.steerNegative}
+                onchange={() => managerStore.persistForms()}
+                disabled={activity.busy}
+              ></textarea>
+            </label>
+            <label class="flex flex-col gap-1" title="The vector's directions are unit length: about 4 nudges, 8 is strong, 16 overwhelms; a negative scale steers the other way">
+              <span class="text-[11px] text-gray-500 dark:text-gray-400">Scale</span>
+              <input
+                type="number"
+                step="0.5"
+                class="w-20 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+                placeholder={String(DEFAULT_STEER_SCALE)}
+                bind:value={form.steerScale}
+                onchange={() => managerStore.persistForms()}
+                disabled={activity.busy}
+              />
+            </label>
+            <label class="flex flex-col gap-1" title="first-last (0-based) to steer only those layers; empty steers every layer">
+              <span class="text-[11px] text-gray-500 dark:text-gray-400">Layers</span>
+              <input
+                class="w-20 rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs dark:border-gray-700 dark:bg-gray-950"
+                placeholder="all"
+                bind:value={form.steerLayers}
+                onchange={() => managerStore.persistForms()}
+                disabled={activity.busy}
+              />
+            </label>
+          {/if}
+          {#if served}
+            <button
+              class="mb-0.5 rounded-md border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+              onclick={() => managerStore.steer(slot)}
+              disabled={activity.busy}
+              title="Steer the loaded model by these settings from its next request, without a reload (or stop, with steering off)"
+            >
+              Apply now
+            </button>
+          {/if}
+        </div>
         {/if}
         <label class="flex flex-col gap-1" title="How the KV cache stores keys: q8/q4 (8-bit K, 4-bit V) keeps quality at 2.5x less memory than bf16">
           <span class="text-[11px] text-gray-500 dark:text-gray-400">K cache</span>

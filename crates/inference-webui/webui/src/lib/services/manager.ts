@@ -56,6 +56,21 @@ export interface ManagedModel {
   status: "loaded" | "unloaded" | "reloading";
 }
 
+/** A control vector derived on the model: line i of `positive` pairs with line i of `negative`. */
+export interface DerivedControlVector {
+  positive: string[];
+  negative: string[];
+  scale?: number;
+}
+
+/** What a model is steered by; empty, it is not. */
+export interface ControlVectors {
+  files?: { path: string; scale?: number }[];
+  derived?: DerivedControlVector[];
+  /** The first and last layer steered (0-based); every layer when absent. */
+  layer_range?: [number, number] | null;
+}
+
 export interface LoadRequest {
   source: string;
   model_id: string;
@@ -69,6 +84,7 @@ export interface LoadRequest {
   mmproj?: string;
   vad?: string;
   device?: string;
+  control_vectors?: ControlVectors;
 }
 
 /** A load the server keeps under its model id, and whether it loads it again at startup. */
@@ -242,6 +258,10 @@ export async function loadModel(
 }
 
 export const unloadModel = (model_id: string) => postJson<void>("v1/manager/unload", { model_id });
+
+/** Steers a loaded model from its next step; empty `vectors` stops. A derived vector is derived on it first. */
+export const setControlVectors = (model: string, vectors: ControlVectors) =>
+  postJson<{ vectors: ControlVectors }>("control_vectors/set", { model, vectors });
 
 export const savedModels = () =>
   getJson<{ saved: Record<string, SavedModel> }>("v1/manager/saved").then((r) => r.saved);

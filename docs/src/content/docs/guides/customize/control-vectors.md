@@ -25,6 +25,10 @@ The two files hold one text a line (`\n` for a newline inside one), and line N o
 
 Deriving takes one prompt pass per text, well under a second for a handful of short pairs on a GPU. The derived directions are unit length, so the scale is absolute: on Inkling 2 about 4 nudges, 8 is strong and 16 overwhelms the model. A negative scale steers the other way.
 
+## In the web UI
+
+On the Models tab, the Chat model slot (the Chat and Code tabs share it) has a **Steering** section: the texts to steer toward and away from (one a line, paired by line), a scale and an optional layer range (`6-17`). A load takes them with the slot, and the server keeps them with its settings. On a loaded model, **Apply now** derives the vector and steers the model from its next request without a reload. With steering unchecked, it stops.
+
 ## On a loaded model
 
 ```bash
