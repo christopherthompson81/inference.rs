@@ -706,6 +706,57 @@ async fn a_cuda_model_reports_its_memory() -> anyhow::Result<()> {
     Ok(())
 }
 
+// A removed CUDA model's memory is back on the device when the removal returns: a load right after counts on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_cuda_model_frees_its_memory_before_returning() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    #[cfg(feature = "cuda")]
+    {
+        use inference_nn::utils::memory_usage::MemoryUsage;
+        // a KV pool well above the device's fixed per-process costs (cuBLAS workspace, kernel modules), which stay
+        const KV_MB: usize = 256;
+        let checkpoint = tiny_llama_checkpoint()?;
+        let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_paged_attn(
+                inference::PagedAttentionMetaBuilder::default()
+                    .with_gpu_memory(inference::MemoryGpuConfig::MbAmount(KV_MB))
+                    .build()?,
+            )
+            .build()
+            .await?;
+        let id = model
+            .models()?
+            .data
+            .into_iter()
+            .find(|m| m.default == Some(true))
+            .map(|m| m.id)
+            .ok_or_else(|| anyhow::anyhow!("no default model"))?;
+        let op = || inference::ModelOperationRequest {
+            model_id: id.clone(),
+        };
+        greedy_ids(&model).await?;
+        let loaded = model
+            .model_status(op())?
+            .memory
+            .ok_or_else(|| anyhow::anyhow!("no memory reported"))?;
+        let free = || -> anyhow::Result<u64> {
+            Ok(MemoryUsage.query(&Device::new_cuda(0)?)?.available() as u64)
+        };
+        let before = free()?;
+        model.remove_model(op()).await?;
+        let returned = free()?.saturating_sub(before);
+        assert!(
+            returned >= loaded.bytes / 2,
+            "{returned} of {} returned",
+            loaded.bytes
+        );
+    }
+    Ok(())
+}
+
 // With the device nearly full, a request for a lazy model evicts the idle resident model to load; with room again, the
 // evicted model loads back beside it on its next request.
 #[tokio::test(flavor = "multi_thread")]

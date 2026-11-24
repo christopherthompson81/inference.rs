@@ -245,3 +245,120 @@ A full-context call reads ~223 MB of q8 K and V: 540 us is ~410 GB/s, under half
 the grid size was the limit: the inner loop loads q8 rows 4 bytes a lane and dequantizes every value for three dots,
 so the kernel is bound by its instructions. Next step for long context, if wanted: 8-byte loads and int8 dot products
 on the q8 keys (queries quantized per group), an inner-loop rewrite rather than a launch change.
+
+## Run 11 - 2026-11-24 10:00
+
+A kernel benchmark beside the reference cases (`bench_q8_long_context_decode`, ignored): Inkling 2's full-context
+decode shape (24 heads over 8, head dim 128, log scale) over a 102,400-key q8 cache, one sequence, 50 calls timed.
+
+```
+rows (t)     before (decode kernel)
+1              538 us   414 GB/s
+8             3646 us    61 GB/s
+```
+
+A 7-draft verify's 8 rows cost 6.8x a decode row: the decode kernel's blocks take one query each, so every row reads
+the whole cache again. A drafted step at 102K pays ~29 ms of full-context attention (8 calls) against ~4.3 ms plain,
+which is most of why drafting loses past ~64K (Run 9).
+
+A tensor-core verify kernel (`verify_mma_kernel`, sm80+, non-f32 caches, t > 1 and t x heads-a-KV-head <= 32): a
+block every query and head of one KV head over a split of the keys, S and PV by m16n8k16 f16 mma with q and P split
+into an f16 part and its remainder; a q8 cache staged as the exact integers 2b - 255, its group scales applied to the
+f32 sums (K) and folded into P (V), so the reference cases still pass at the f32 tolerance (1e-4).
+
+```
+step                                                     t=2      t=4      t=8
+first version (one chunk a load, V^T stored by halves)   1996     2016     2077 us
+loads for the next tile in registers, V by ldmatrix.trans 1845    1873     2051
+row addresses once a tile in shared (no per-chunk table
+lookups and block-size divisions)                         1030     1058     1129
+q fragments in shared memory, 32-key tiles (255 regs and
+3.4M local loads before: spills were 2/3 of DRAM traffic)  727      755      814
+```
+
+ncu at the third step: 96M instructions, 6.6M of them mma; DRAM 63% busy for 207 GB/s of K/V, the rest spill traffic.
+Next: whether a decode row (t = 1, 3 of a tile's 16 rows) does better on this kernel too.
+
+A decode row on the verify kernel (3 of 16 rows a tile): 702 us against the decode kernel's 538, so t = 1 stays on
+the decode kernel. ncu on the verify kernel now: no local loads, 255 registers (2 blocks, 8 warps an SM), top stall
+math pipe throttle; 96M instructions for 6.6M mma.
+
+The decode kernel's q8 inner loop: bytes to f32 as b - 128 by a byte permute under 2^23's bits and one add (was a
+shift, mask and quarter-rate int-to-float a value), K's scale once a key after the dot with the +0.5 from a
+precomputed sum of q, V's scale folded into the weight with the +0.5 as one running sum a head, and a group's two
+keys under one rescale of the sums. Reference cases pass at the f32 tolerance.
+
+```
+t = 1     538 us -> 505 us   (414 -> 440 GB/s)
+```
+
+ncu at 505 us: 180 registers (1 block of 8 warps an SM), issue 40% active, DRAM 50%; long-scoreboard stalls lead.
+
+Two other projects with fast Inkling 2 / long-context decode, read for ideas (llamAmpere, a llama.cpp fork tuned for
+the 3090; basalt's Inkling 2 branch, sm120). Both read q8-like KV caches on tensor cores at depth, a decode row
+included: codes staged as exact f16 through the same 0x64 exponent trick, the K scale applied to per-group f32 sums
+after the mma, small blocks at high occupancy with cp.async or register prefetch. llamAmpere's numbers (its own,
+unverified here) for the same KV bytes a token at 100K: ~320 us a q8 call, 429 us for 8 verify rows. Their layout
+puts keys on the mma's 16-row side and query heads on its 8 columns, so a decode row wastes 5 of 8 columns rather
+than 13 of 16 rows and an 8-row verify of 3 heads is exactly three column tiles. Basalt rounds q to f16 and scales P
+by 2^15 for the PV product (one mma each, where ours splits both into two); it measured that reader's quality on
+131K-token prompts as about the cost of an f16 cache. Its drafter window is chosen by expected tokens a millisecond,
+drafting off when it stops paying.
+
+## Run 12 - 2026-11-24 11:00
+
+End to end with both kernels (`ctx_decode.py`, the same method as Run 9; the prompts are this repo's source again, so
+each cut is a little longer than then). The chat slot drafted (DSpark 7, auto depth, q8_0 drafter, q8 KV), then
+loaded plain:
+
+```
+context    drafted (7, auto)    plain        Run 10 (drafted / plain, at 2.4/17.6/35/69/102K)
+  2.4K          88.5            102.9
+ 18.8K          88.0             94.1
+ 38.8K         114.0             88.8
+ 74.3K          73.2             78.8        68.4 drafted at 102K
+108.4K         104.1             76.7        71.5 plain at 102K
+```
+
+Drafted replies differ in length and acceptance (a second drafted 108K run read 70.4 for 116 tokens), so that column
+is noisy; plain decoding at 108K is 76.7 against 71.5 at 102K before, and drafting no longer loses at depth.
+
+The plain load after a drafted one failed twice in this session: once its first prompt step erred ("the fused
+attention did not take these inputs"), once the load itself ("cannot fit ... within 450 MB of usable capacity"). The
+same load a moment later fit. `/v1/manager/unload` removes a model through `InferenceRs::remove_model`, which sent the
+engine its terminate and returned: the engine thread dropped the pipeline whenever it got there, and its freed memory
+stayed in the allocator pool's cache. The unload that keeps reload state already joined the thread and trimmed the
+pool; removal now does both. A new test (`a_removed_cuda_model_frees_its_memory_before_returning`) failed without it
+("0 of 301989888 returned") and passes with it. This is likely the plain-to-drafted replace failure seen once before.
+
+## Run 13 - 2026-11-24 12:30
+
+The full CUDA suite on these kernels: three tiny Inkling 2 drafter tests failed (`the_checkpoint_drafter_keeps_greedy_
+output_on_cuda`, its q8 twin, `auto_depth_keeps_greedy_output_through_plain_steps_on_cuda`), the drafted trace's
+logprob off the plain one by 0.07-0.38 at one step with every step before it equal. With the verify kernel off they
+passed.
+
+Two causes, found in turn:
+
+1. f16 range. The kernel cases at K and V of 1e-4 (q at 1e4) missed the tolerance on a bf16 cache: values under f16's
+   6e-5 lose their bits, in q's f16 split, in bf16 K/V staged as f16, and in a q8 cache's probability times its V
+   scale (folded before the f16 split). Now each query row is scaled by a power of 2 to [0.5, 1) before its split (the
+   factor back on its scores), non-q8 K and V take a power-of-2 scale a key and 32-value group as q8's do, and the PV
+   weights are taken relative to the warp's largest V scale a group, that power of 2 back on the f32 sums. New
+   cases at magnitudes 1e-4 and 1e3 on bf16, f16 and q8. The q8 drafter test passed after this.
+2. Bit-for-bit rows. The bf16 one still failed. A temporary check beside every eager verify call, each row against
+   the same row decoded alone (230 calls, ring and paged), found the largest relative difference 7.6e-7: the attention
+   is right. Before these kernels a short verify's rows went through the decode kernel and summed as a decode row
+   does, so a drafted step reproduced the plain one bit for bit; differences of 1e-7 in the tiny random model flip a
+   hidden near-tie (the logprob jumps with no token change), past the test's allowance for token flips. Both other
+   projects keep their tensor-core reader for depth (basalt from 32K keys). Here a sequence's verify rows take it from
+   8192 keys (`VERIFY_MIN_KEYS`); under that the decode kernel's, now split as the call's partials were sized (the
+   decode row's own count), so its rows are a decode's bit for bit. The key count is on the device (graphs), so both
+   kernels launch, each taking the sequences of its length. A new case checks the bit-for-bit rows at 2000 keys; the
+   verify cases moved past the threshold, a ring of two blocks among them.
+
+Kernel benchmark after both (102,400 keys):
+
+```
+t=1  500 us    t=2  765 us    t=4  796 us    t=8  860 us   (was 813 before the rescaling and the second launch)
+```
