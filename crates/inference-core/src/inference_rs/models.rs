@@ -378,7 +378,7 @@ impl InferenceRs {
             .map_err(|_| "Failed to acquire write lock on engines")?;
 
         match engines.remove(&resolved_model_id) {
-            Some(engine_instance) => {
+            Some(mut engine_instance) => {
                 // If this was the default engine, set a new default
                 let mut default_lock = self
                     .default_engine_id
@@ -403,6 +403,19 @@ impl InferenceRs {
 
                 // Sent with no lock held: a full request channel would otherwise stall every lookup until it drained.
                 let _ = engine_instance.sender.blocking_send(Request::Terminate);
+                // a load right after reads free memory, so the removed model's goes back before this returns
+                engine_instance.join_until(Instant::now() + ENGINE_DROP_JOIN_TIMEOUT);
+                #[cfg(feature = "cuda")]
+                let device = engine_instance
+                    .reboot_state
+                    .loader_config
+                    .as_ref()
+                    .map(|config| config.device.clone());
+                drop(engine_instance);
+                #[cfg(feature = "cuda")]
+                if let Some(device) = device {
+                    release_device_memory(&device);
+                }
                 Ok(())
             }
             None => {
