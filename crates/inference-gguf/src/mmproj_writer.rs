@@ -28,6 +28,8 @@ pub enum Source {
     Tensor(String),
     /// The same elements under another (row-major) shape.
     Reshape(Box<Source>, Vec<usize>),
+    /// The dims reordered (a linear patch embedding laid out as llama.cpp's conv).
+    Permute(Box<Source>, Vec<usize>),
     /// `len` rows from `start` of the outermost dim (one of q, k, v from a fused qkv).
     Rows {
         input: Box<Source>,
@@ -51,6 +53,10 @@ impl Source {
         Self::Reshape(Box::new(self), dims)
     }
 
+    pub fn permute(self, dims: Vec<usize>) -> Self {
+        Self::Permute(Box::new(self), dims)
+    }
+
     pub fn grid(self, side: usize) -> Self {
         Self::Grid {
             input: Box::new(self),
@@ -72,6 +78,10 @@ impl Source {
                 .load(name, &Device::Cpu)
                 .with_context(|| format!("checkpoint tensor `{name}`"))?,
             Self::Reshape(input, dims) => input.materialize(weights)?.reshape(dims.as_slice())?,
+            Self::Permute(input, dims) => input
+                .materialize(weights)?
+                .permute(dims.as_slice())?
+                .contiguous()?,
             Self::Grid { input, side } => {
                 let table = input.materialize(weights)?.to_dtype(DType::F32)?;
                 let width = *table.dims().last().unwrap_or(&1);
@@ -223,7 +233,11 @@ fn shard_files(dir: &Path, index: Option<serde_json::Value>) -> Result<Vec<PathB
 
 // families by the checkpoint's `architectures[0]`
 type SpecBuilder = fn(&Checkpoint) -> Result<MmprojSpec>;
-const FAMILIES: [(&str, SpecBuilder); 2] = [
+const FAMILIES: [(&str, SpecBuilder); 3] = [
+    (
+        "Inkling2LoopForConditionalGeneration",
+        super::inkling2_vision_bindings::inkling2_mmproj_spec,
+    ),
     (
         "NemotronH_Nano_Omni_Reasoning_V3",
         super::nemotron_omni_bindings::nano_omni_mmproj_spec,

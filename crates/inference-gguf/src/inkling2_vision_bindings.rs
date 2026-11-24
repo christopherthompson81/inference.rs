@@ -156,3 +156,158 @@ fn inkling2_vision_config(
     });
     Ok(config.to_string())
 }
+
+const CHECKPOINT_TOWER: &str = "model.visual";
+// the processor's own pixel normalization: v / 127.5 - 1
+const IMAGE_MEAN: f32 = 0.5;
+const IMAGE_STD: f32 = 0.5;
+
+/// llama.cpp's `inkling2v` projector from the official checkpoint's `model.visual.*`, laid out as its converter does.
+pub fn inkling2_mmproj_spec(
+    checkpoint: &crate::mmproj_writer::Checkpoint,
+) -> Result<crate::mmproj_writer::MmprojSpec> {
+    use crate::mmproj_writer::{MmprojSpec, MmprojTensor, Role, Source};
+    let vision = &checkpoint.config["vision_config"];
+    let get = |key: &str| -> Result<usize> {
+        vision[key]
+            .as_u64()
+            .map(|v| v as usize)
+            .ok_or_else(|| anyhow::anyhow!("{FAMILY} `vision_config` has no `{key}`"))
+    };
+    let float = |key: &str| -> Result<f64> {
+        vision[key]
+            .as_f64()
+            .ok_or_else(|| anyhow::anyhow!("{FAMILY} `vision_config` has no `{key}`"))
+    };
+    let (hidden, layers, patch) = (
+        get("hidden_size")?,
+        get("num_hidden_layers")?,
+        get("native_patch_size")?,
+    );
+    let ffn = (hidden as f64 * float("mlp_ratio")?) as usize;
+    let u32_of = |v: usize| Value::U32(v as u32);
+    let mean = Value::Array(vec![Value::F32(IMAGE_MEAN); CHANNELS]);
+    let std = Value::Array(vec![Value::F32(IMAGE_STD); CHANNELS]);
+    let mut spec = MmprojSpec {
+        metadata: vec![
+            ("clip.has_vision_encoder".into(), Value::Bool(true)),
+            (
+                super::multimodal_binding_utils::VISION_PROJECTOR_TYPE.into(),
+                Value::String(PROJECTOR.into()),
+            ),
+            (
+                "clip.vision.projection_dim".into(),
+                u32_of(get("text_hidden_size")?),
+            ),
+            (
+                "clip.vision.image_size".into(),
+                u32_of(get("posemb_grid_size")? * patch),
+            ),
+            ("clip.vision.patch_size".into(), u32_of(patch)),
+            ("clip.vision.embedding_length".into(), u32_of(hidden)),
+            ("clip.vision.feed_forward_length".into(), u32_of(ffn)),
+            ("clip.vision.block_count".into(), u32_of(layers)),
+            (
+                "clip.vision.attention.head_count".into(),
+                u32_of(get("num_attention_heads")?),
+            ),
+            ("clip.vision.image_mean".into(), mean),
+            ("clip.vision.image_std".into(), std),
+            (
+                LAYER_NORM_EPS.into(),
+                Value::F32(float("layer_norm_eps")? as f32),
+            ),
+            (
+                "clip.vision.spatial_merge_size".into(),
+                u32_of(get("adapter_merge_size")?),
+            ),
+        ],
+        tensors: Vec::new(),
+    };
+    let mut put = |name: &str, source: &str, role: Role| {
+        spec.tensors
+            .push(MmprojTensor::new(name, Source::tensor(source), role));
+    };
+    let emb = format!("{CHECKPOINT_TOWER}.backbone.embeddings");
+    put(
+        "v.class_embd",
+        &format!("{emb}.class_embedding"),
+        Role::Float,
+    );
+    put(
+        "v.class_position_embd.weight",
+        &format!("{emb}.cls_position_embedding"),
+        Role::Float,
+    );
+    put(
+        "v.position_embd.weight",
+        &format!("{emb}.position_embedding"),
+        Role::Float,
+    );
+    let backbone = format!("{CHECKPOINT_TOWER}.backbone");
+    for part in ["weight", "bias"] {
+        put(
+            &format!("v.pre_ln.{part}"),
+            &format!("{backbone}.ln_pre.{part}"),
+            Role::Float,
+        );
+    }
+    for layer in 0..layers {
+        let (src, dst) = (
+            format!("{backbone}.layers.{layer}"),
+            format!("v.blk.{layer}"),
+        );
+        for (role, target) in [
+            ("ln1", "ln_1"),
+            ("ln2", "ln_2"),
+            ("attn_q", "self_attn.q_proj"),
+            ("attn_k", "self_attn.k_proj"),
+            ("attn_v", "self_attn.v_proj"),
+            ("attn_out", "self_attn.out_proj"),
+            ("ffn_up", "mlp.c_fc"),
+            ("ffn_down", "mlp.c_proj"),
+        ] {
+            let weight = if role.starts_with("ln") {
+                Role::Float
+            } else {
+                Role::Matrix
+            };
+            put(
+                &format!("{dst}.{role}.weight"),
+                &format!("{src}.{target}.weight"),
+                weight,
+            );
+            put(
+                &format!("{dst}.{role}.bias"),
+                &format!("{src}.{target}.bias"),
+                Role::Float,
+            );
+        }
+        for (role, target) in [("ls1", "ls_1"), ("ls2", "ls_2")] {
+            put(
+                &format!("{dst}.{role}.weight"),
+                &format!("{src}.{target}.gamma"),
+                Role::Float,
+            );
+        }
+    }
+    for (name, source) in [
+        ("mm.1.weight", "proj_in.weight"),
+        ("mm.2.weight", "proj_out.weight"),
+    ] {
+        put(name, &format!("{CHECKPOINT_TOWER}.{source}"), Role::Matrix);
+    }
+    // the linear patch embedding's (py, px, c) rows as the conv llama.cpp's graph reads
+    let patch_name = format!("{emb}.patch_embedding.weight");
+    let &[out, _] = checkpoint.shape(&patch_name)?.as_slice() else {
+        anyhow::bail!("{FAMILY} patch embedding is not a matrix");
+    };
+    spec.tensors.push(MmprojTensor::new(
+        "v.patch_embd.weight",
+        Source::tensor(patch_name)
+            .reshape(vec![out, patch, patch, CHANNELS])
+            .permute(vec![0, 3, 1, 2]),
+        Role::Float,
+    ));
+    Ok(spec)
+}

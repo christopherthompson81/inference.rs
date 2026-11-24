@@ -1281,13 +1281,14 @@ const TOWER_GRID: usize = 4;
 const TOWER_MLP_RATIO: usize = 2;
 const TOWER_PROJECTION: usize = 64;
 const TOWER_SEED: u64 = 0x7669_7369;
-// the tokenizer's next id, inside the padded vocabulary: embedded, never sampled
-const IMAGE_PAD_ID: u32 = 266;
+// the fixture's last added token (`<|video_pad|>`) renamed, inside the vocabulary as the real pad is
+const IMAGE_PAD_ID: u32 = 265;
 const IMAGE_PAD: &str = "<|unused_200054|>";
 // pictures of 3 x 2 and 2 x 2 cells
 const PICTURE: (u32, u32) = (20, 12);
 const OTHER_PICTURE: (u32, u32) = (16, 9);
 const PICTURE_CELLS: usize = 6;
+const OTHER_PICTURE_CELLS: usize = 4;
 const PICTURE_PROMPT: &str = "what is in the picture";
 const VISION_TEMPLATE: &str = "{% for m in messages %}{% if m.content is string %}{{ m.content }}\
 {% else %}{% for p in m.content %}{% if p.type == 'text' %}{{ p.text }}{% else %}<|unused_200054|>{% endif %}\
@@ -1386,13 +1387,17 @@ fn add_tower(
     let tokenizer_path = dir.path().join("tokenizer.json");
     let mut tokenizer: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&tokenizer_path)?)?;
-    tokenizer["added_tokens"]
+    let pad = tokenizer["added_tokens"]
         .as_array_mut()
-        .ok_or_else(|| anyhow::anyhow!("the tokenizer lists no added tokens"))?
-        .push(serde_json::json!({
-            "id": IMAGE_PAD_ID, "content": IMAGE_PAD, "single_word": false, "lstrip": false,
-            "rstrip": false, "normalized": false, "special": true,
-        }));
+        .and_then(|tokens| tokens.iter_mut().find(|t| t["id"] == IMAGE_PAD_ID))
+        .ok_or_else(|| anyhow::anyhow!("the tokenizer has no added token {IMAGE_PAD_ID}"))?;
+    let old = pad["content"].as_str().unwrap_or_default().to_string();
+    pad["content"] = serde_json::json!(IMAGE_PAD);
+    if let Some(vocab) = tokenizer["model"]["vocab"].as_object_mut()
+        && let Some(id) = vocab.remove(&old)
+    {
+        vocab.insert(IMAGE_PAD.to_string(), id);
+    }
     std::fs::write(&tokenizer_path, tokenizer.to_string())?;
     std::fs::write(dir.path().join("chat_template.jinja"), VISION_TEMPLATE)?;
     // the text weights as given (an official checkpoint's experts stay packed bytes)
@@ -1505,4 +1510,72 @@ async fn the_checkpoint_drafter_keeps_greedy_output_after_a_picture_on_cuda() ->
     let plain = trace(Drafting::Off).await?;
     let drafted = trace(Drafting::Fixed).await?;
     ensure_same_greedy(&drafted, &plain)
+}
+
+// asked for, the recipe brings the checkpoint's tower: its projector written once beside the recipe, the load reading
+// pictures through it
+#[tokio::test]
+async fn a_recipe_load_asked_for_vision_writes_the_projector_once_and_reads_pictures()
+-> anyhow::Result<()> {
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
+    let (official, _) = official_weights(false)?;
+    let dir = official_checkpoint(&official)?;
+    add_tower(&dir, &official, OFFICIAL.hidden)?;
+    let recipes = tempfile::tempdir()?;
+    let built = || -> anyhow::Result<Vec<std::path::PathBuf>> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(recipes.path())? {
+            for file in std::fs::read_dir(entry?.path())? {
+                files.push(file?.path());
+            }
+        }
+        files.sort();
+        Ok(files)
+    };
+    let recipe = |vision: bool| {
+        builder(&dir, None)
+            .with_load_recipes(true)
+            .with_recipe_vision(vision)
+            .with_recipe_dir(recipes.path())
+    };
+    // text only by default: no projector written
+    drop(recipe(false).build().await?);
+    anyhow::ensure!(built()?.len() == 1, "a text load wrote {:?}", built()?);
+    let model = recipe(true).build().await?;
+    let files = built()?;
+    anyhow::ensure!(
+        files.len() == 2
+            && files.iter().any(|f| f
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("mmproj-"))),
+        "the recipe and its projector, built {files:?}"
+    );
+    // pictures against each other: the GGUF tokenizer splits none of the fixture's text
+    let mut tokens = Vec::new();
+    for size in [PICTURE, OTHER_PICTURE] {
+        tokens.push(
+            model
+                .send_chat_request(picture_chat(size).set_sampler_max_len(1))
+                .await?
+                .usage
+                .prompt_tokens,
+        );
+    }
+    anyhow::ensure!(
+        tokens[0] - tokens[1] == PICTURE_CELLS - OTHER_PICTURE_CELLS,
+        "prompt tokens {tokens:?}"
+    );
+    drop(model);
+    let modified = files
+        .iter()
+        .map(|f| Ok(std::fs::metadata(f)?.modified()?))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    drop(recipe(true).build().await?);
+    let again = built()?
+        .iter()
+        .map(|f| Ok(std::fs::metadata(f)?.modified()?))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    anyhow::ensure!(again == modified, "a second load reads the built projector");
+    Ok(())
 }

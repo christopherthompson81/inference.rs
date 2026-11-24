@@ -214,6 +214,7 @@ class MultimodalLoaderType(str, Enum):
     NEMOTRON_OMNI = "nemotron_omni"
     GRANITE_SPEECH = "granite_speech"
     LFM2VL = "lfm2vl"
+    INKLING2_VL = "inkling2_vl"
     VLLAMA = "vllama"
     QWEN2VL = "qwen2vl"
     IDEFICS3 = "idefics3"
@@ -1817,6 +1818,7 @@ class ManagedLoadRequest:
     source: str
     tok_model_id: str | None = None
     vad: str | None = None
+    vision: bool | None = None
 
 
 @dataclass(kw_only=True)
@@ -2248,6 +2250,7 @@ class ModelSpec:
     paged_cache_type: PagedCacheType | None = None
     paged_context_len: int | None = None
     pinned: bool | None = None
+    recipe_vision: bool | None = None
 
 
 @dataclass(kw_only=True)
@@ -3207,6 +3210,7 @@ class RuntimeSpec:
     prefix_cache_n: int | None = None
     prefix_cache_ram_gib: int | None = None
     recipe_dir: str | None = None
+    recipe_vision: bool | None = None
     seed: int | None = None
     throughput_logging: bool | None = None
     token_source: str | None = None

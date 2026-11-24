@@ -8813,6 +8813,13 @@
               "null"
             ],
             "description": "For a speech recognition model, a Silero VAD GGUF (an inventory `path`): recordings over 5 minutes are then cut\nat their silences, and run past the 24 minutes one pass takes."
+          },
+          "vision": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "For a checkpoint loaded through its recipe (Inkling 2's), whether its vision tower loads too; unset uses the\nserver's `runtime.recipe_vision`."
           }
         },
         "additionalProperties": false
@@ -10949,6 +10956,13 @@
           "pinned": {
             "type": "boolean",
             "description": "Never evicted to make room for another model; models are evictable by default."
+          },
+          "recipe_vision": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "In place of `runtime.recipe_vision` for this model: a checkpoint loaded through its recipe (Inkling 2's) loads\nits vision tower too."
           }
         },
         "additionalProperties": false
@@ -11090,6 +11104,7 @@
           "nemotron_omni",
           "granite_speech",
           "lfm2vl",
+          "inkling2_vl",
           "vllama",
           "qwen2vl",
           "idefics3",
@@ -15086,6 +15101,13 @@
               "null"
             ],
             "description": "Where built recipes are kept; unset, `INFERENCE_RS_RECIPE_DIR` or `~/.cache/inference-rs/recipes`."
+          },
+          "recipe_vision": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "A checkpoint loaded through its recipe (Inkling 2's) loads its vision tower too, written once beside the recipe\nas a projector; off unless set."
           },
           "seed": {
             "type": [

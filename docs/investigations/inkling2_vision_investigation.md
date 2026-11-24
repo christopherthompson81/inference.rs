@@ -91,3 +91,18 @@ PNG data URL (`vis/ask.py`).
 
 So the wrapper's delegation holds for the paged cache, the prefix cache and the external drafter's verify steps.
 Open: tiny-model tests, the parity script, the official checkpoint's recipe load (no projector written yet).
+
+## Run 4 - 2026-11-24 10:10
+
+Question: does the official checkpoint's own projector match llama.cpp's, and does a recipe load with vision read
+pictures?
+
+- `inference quantize mmproj -m /mnt/data/models/inkling2-mini-official -o ref/mmproj-ours.gguf` (the new `inkling2v`
+  spec in `mmproj_writer`, patch embedding permuted to llama.cpp's conv layout): 422 tensors in 1.8 s, every one
+  byte-identical to `convert_hf_to_gguf.py --mmproj --outtype bf16`'s (types, shapes, data), and every `clip.*` key
+  equal.
+- Opt-in (user's choice, 2026-11-24): `runtime.recipe_vision`, per model `ModelSpec.recipe_vision`, the manager's
+  `vision` field, the SDK's `with_recipe_vision`. Off: the recipe load stays text only and writes no projector.
+- Manager load `{"source": ".../inkling2-mini-official", "vision": true, q8 cache, drafts 7 auto}` on an empty recipe
+  cache: recipe C rebuilt in 101 s, `mmproj-inkling2-mini-official-recipe-c.gguf` written beside it, loaded as
+  `multimodal`. Shapes picture: same reading as before, 144.6 tok/s with the drafter.

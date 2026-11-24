@@ -16,11 +16,15 @@ pub const RECIPE_DIR_ENV: &str = "INFERENCE_RS_RECIPE_DIR";
 pub const NO_RECIPE_ENV: &str = "INFERENCE_RS_NO_RECIPE";
 const RECIPE_SUBDIR: &str = "recipes";
 const CACHE_SUBDIR: &str = "inference-rs";
+const MMPROJ_PREFIX: &str = "mmproj-";
+const PARTIAL_SUFFIX: &str = ".partial";
 
 /// Whether loads take recipes, and where built ones are kept.
 #[derive(Clone, Debug)]
 pub struct RecipeOptions {
     pub enabled: bool,
+    /// The checkpoint's vision tower loads too, from a projector written beside the recipe.
+    pub vision: bool,
     /// Unset: `INFERENCE_RS_RECIPE_DIR`, else `~/.cache/inference-rs/recipes`.
     pub dir: Option<PathBuf>,
 }
@@ -29,6 +33,7 @@ impl Default for RecipeOptions {
     fn default() -> Self {
         Self {
             enabled: true,
+            vision: false,
             dir: None,
         }
     }
@@ -143,6 +148,11 @@ pub fn with_load_recipe(
         }
         inference_core::ensure_inkling2_recipe(&dir, &path, Device::new_cuda(0).ok())?;
     }
+    let mmproj = if options.vision {
+        ensure_projector(&dir, &path)?
+    } else {
+        None
+    };
     let dir_of = |p: &Path| {
         p.parent()
             .map(|d| d.to_string_lossy().into_owned())
@@ -178,7 +188,7 @@ pub fn with_load_recipe(
             quantized_filename: file,
             quant: None,
             tokenizer_json,
-            mmproj_filename: None,
+            mmproj_filename: mmproj,
             mmproj_selection: Default::default(),
             lora_adapters: Vec::new(),
             lora_runtime_config: None,
@@ -202,6 +212,27 @@ pub fn with_load_recipe(
     })
 }
 
+// the checkpoint's projector beside its recipe, written once; `None` for a checkpoint without a tower
+fn ensure_projector(dir: &Path, recipe: &Path) -> anyhow::Result<Option<String>> {
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
+    if config.get("vision_config").is_none() {
+        return Ok(None);
+    }
+    let stem = recipe
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = format!("{MMPROJ_PREFIX}{stem}.gguf");
+    let path = recipe.with_file_name(&name);
+    if !path.is_file() {
+        let partial = recipe.with_file_name(format!("{name}{PARTIAL_SUFFIX}"));
+        inference_core::write_mmproj(dir, &partial, None)?;
+        std::fs::rename(&partial, &path)?;
+    }
+    Ok(Some(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,7 +249,7 @@ mod tests {
         assert!(!may_take_recipe(&run("some/checkpoint"), Some("q4k"), &on));
         let off = RecipeOptions {
             enabled: false,
-            dir: None,
+            ..Default::default()
         };
         assert!(!may_take_recipe(&run("some/checkpoint"), None, &off));
         let uqff: ModelSelected = serde_json::from_value(

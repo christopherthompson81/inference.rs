@@ -44,6 +44,7 @@ fn per_model(model: ModelSelected, options: LoadOptions) -> ModelSpec {
         lazy: false,
         pinned: false,
         control_vectors: runtime.control_vectors,
+        recipe_vision: runtime.recipe_vision,
     }
 }
 

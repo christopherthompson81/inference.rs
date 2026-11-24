@@ -182,6 +182,7 @@ fn build_model_specs(
             lazy: entry.lazy,
             pinned: entry.pinned,
             control_vectors: None,
+            recipe_vision: None,
         });
     }
     Ok((specs, device))

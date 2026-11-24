@@ -512,6 +512,7 @@ A load: what to load, the id requests will name it by, and how to run it.
 | `source` | `str` | required |
 | `tok_model_id` | `str \| None` | optional |
 | `vad` | `str \| None` | optional |
+| `vision` | `bool \| None` | optional |
 
 
 ## `ManagedModel`
