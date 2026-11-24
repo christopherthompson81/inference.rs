@@ -60,6 +60,9 @@ impl Flow {
             heads: spec.heads,
             mlp: MLP_RATIO * c,
             share_mod: false,
+            qk_norm: true,
+            cross_qk_norm: true,
+            rope_first: false,
         };
         let device = vb.device().clone();
         let tri = vb
@@ -171,7 +174,7 @@ impl Flow {
         let scaled: Vec<[f32; 3]> = units.iter().map(|u| u.map(|v| v * ROPE_RES)).collect();
         let rope = Rope::new(&scaled, self.head_dim, &self.device)?;
         for (block, kv) in self.blocks.iter().zip(kv) {
-            xs = block.forward(&xs, &t_emb, &rope, kv)?;
+            xs = block.forward(&xs, &t_emb, Some(&rope), kv)?;
         }
         let xs = self.out_norm.forward(&xs.to_dtype(DType::F32)?)?;
         self.out.forward(&xs)?.reshape((batch, n, SLOTS, CLASSES))

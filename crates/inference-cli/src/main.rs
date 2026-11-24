@@ -265,6 +265,81 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::ImageToMesh {
+            image,
+            out,
+            vertices,
+            seed,
+            vertex_steps,
+            vertex_guidance,
+            topology_steps,
+            structure_steps,
+            max_ring,
+            lato2,
+            trellis_large,
+            dinov2,
+            birefnet,
+            remove_background,
+            cpu,
+        } => {
+            use inference_jobs::image_to_mesh::{
+                ImageToMeshOptions, NoProgress, STRUCTURE_SAMPLER, Settings, StructureSampler,
+                VERTEX_SAMPLER, VERTICES_RANGE, VertexSampler, fetch_models, generate_mesh_on,
+            };
+            use inference_jobs::voxels::needs_background_removal;
+            if !VERTICES_RANGE.contains(&vertices) {
+                anyhow::bail!(
+                    "--vertices must be in {}..={}",
+                    VERTICES_RANGE.start(),
+                    VERTICES_RANGE.end()
+                );
+            }
+            if vertex_steps == 0 || topology_steps == 0 || structure_steps == 0 {
+                anyhow::bail!("the step counts must be at least 1");
+            }
+            let options = ImageToMeshOptions {
+                lato2: Settings {
+                    vertices,
+                    seed,
+                    structure: StructureSampler {
+                        steps: structure_steps,
+                        ..STRUCTURE_SAMPLER
+                    },
+                    vertex: VertexSampler {
+                        steps: vertex_steps,
+                        cfg_strength: vertex_guidance,
+                        ..VERTEX_SAMPLER
+                    },
+                    topology_steps,
+                    max_ring,
+                },
+                remove_background,
+            };
+            let birefnet = needs_background_removal(&image, remove_background)?.then_some(birefnet);
+            let models = fetch_models(lato2, trellis_large, dinov2, birefnet, &NoProgress)?;
+            let device = if cpu {
+                inference_tensor::Device::Cpu
+            } else {
+                inference_tensor::Device::cuda_if_available(0)?
+            };
+            let report = generate_mesh_on(&models, &image, &out, &options, &NoProgress, &device)?;
+            println!(
+                "{} vertices ({} asked), {} edges, {} faces on a {}-cell scaffold, seed {}{}, in {:.1} s -> {}",
+                report.vertices,
+                report.requested_vertices,
+                report.edges,
+                report.faces,
+                report.scaffold_cells,
+                report.seed,
+                if report.background_removed {
+                    ", background removed"
+                } else {
+                    ""
+                },
+                report.total_seconds,
+                out.display()
+            );
+        }
         Command::ImageTo3d {
             image,
             out,

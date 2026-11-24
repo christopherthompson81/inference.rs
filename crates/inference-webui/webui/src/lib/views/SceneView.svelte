@@ -12,6 +12,7 @@
     jobFileUrl,
     listJobs,
     submitImageTo3d,
+    submitImageToMesh,
     submitImageToSplat,
     submitReconstruct,
     submitTextureMesh,
@@ -50,6 +51,8 @@
   const OBJECT_PRINT = "splat/print.stl";
   const OBJECT_MODEL = "splat/model.glb";
   const DEFAULT_PRINT_SIZE_MM = 100;
+  const LOW_POLY_GLB = "mesh/model.glb";
+  const DEFAULT_MESH_VERTICES = 2000;
   const VOXELS_PLY = "voxels/voxels.ply";
   const VOXELS_MESH = "voxels/mesh.ply";
   const DEFAULT_VOXEL_STEPS = 72;
@@ -61,10 +64,11 @@
     failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
     cancelled: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   };
-  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", voxels: "Voxels", texture_mesh: "Textured mesh", image_to_splat: "Image to splats" };
-  type Mode = "world" | "reconstruct" | "image_to_3d" | "voxels" | "texture_mesh" | "image_to_splat";
+  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", image_to_mesh: "Image to mesh", voxels: "Voxels", texture_mesh: "Textured mesh", image_to_splat: "Image to splats" };
+  type Mode = "world" | "reconstruct" | "image_to_3d" | "image_to_mesh" | "voxels" | "texture_mesh" | "image_to_splat";
   const MODES: { id: Mode; label: string }[] = [
     { id: "image_to_3d", label: "Object from an image" },
+    { id: "image_to_mesh", label: "Low-poly mesh from an image" },
     { id: "image_to_splat", label: "Splats from an image" },
     { id: "voxels", label: "Voxels from an image" },
     { id: "texture_mesh", label: "Texture a mesh" },
@@ -117,6 +121,7 @@
   let removeBackground = $state(false);
   let voxelSteps = $state<number | null>(null);
   let voxelMesh = $state(true);
+  let meshVertices = $state<number | null>(null);
   let splatMode = $state<SplatImageMode>("synthetic");
   let gaussians = $state<number | null>(null);
   let splatSteps = $state<number | null>(null);
@@ -276,6 +281,15 @@
           texture_size: textureSize,
           placement: room,
         });
+      case "image_to_mesh":
+        return submitImageToMesh(image as File, {
+          seed,
+          vertices: typeof meshVertices === "number" && Number.isFinite(meshVertices) ? meshVertices : null,
+          remove_background: removeBackground || null,
+          vertex_steps: null,
+          topology_steps: null,
+          placement: room,
+        });
       case "voxels":
         return submitVoxels(image as File, { seed, steps: voxelSteps, remove_background: removeBackground || null, mesh: voxelMesh, placement: room });
     }
@@ -375,6 +389,7 @@
     }
     if (made(OBJECT_MODEL)) out.push({ label: "View textured model", file: OBJECT_MODEL, format: "glb", flat: false });
     if (made(OBJECT_PRINT)) out.push({ label: "View printable", file: OBJECT_PRINT, format: "stl", flat: false });
+    if (made(LOW_POLY_GLB)) out.push({ label: "View mesh", file: LOW_POLY_GLB, format: "glb", flat: true });
     if (made(VOXELS_PLY)) out.push({ label: "View voxels", file: VOXELS_PLY, format: "ply", flat: true });
     if (made(VOXELS_MESH)) out.push({ label: "View mesh", file: VOXELS_MESH, format: "ply", flat: false });
     return out;
@@ -442,7 +457,7 @@
           {/each}
         </div>
 
-        {#if mode === "image_to_3d" || mode === "voxels" || mode === "texture_mesh" || mode === "image_to_splat"}
+        {#if mode === "image_to_3d" || mode === "image_to_mesh" || mode === "voxels" || mode === "texture_mesh" || mode === "image_to_splat"}
           {#if mode === "texture_mesh"}
             <p class="text-sm text-gray-600 dark:text-gray-400">
               TRELLIS.2 paints a mesh you supply from a photo of the object: the mesh is fitted to the unit cube, encoded, given PBR material under the photo, and baked onto its own texture coordinates (or an unwrap) in a GLB. About 20 s at 1024.
@@ -454,6 +469,10 @@
           {:else if mode === "image_to_3d"}
             <p class="text-sm text-gray-600 dark:text-gray-400">
               TRELLIS.2 builds a textured mesh of the object in one photo: its background removed with BiRefNet, then a voxel structure, the shape and its PBR material, baked into a GLB. About 40 s at 1024 on a 24 GB card, with a 6 GB GPU peak.
+            </p>
+          {:else if mode === "image_to_mesh"}
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              LATO.2 builds an untextured mesh with artist-like topology of the object in one photo (its background removed with BiRefNet): vertices placed about as many as asked, then joined by predicted edges, as a GLB and an OBJ. About a minute on a 24 GB card. Texture it with "Texture a mesh".
             </p>
           {:else if mode === "image_to_splat"}
             <p class="text-sm text-gray-600 dark:text-gray-400">
@@ -534,6 +553,11 @@
                     <option value={size}>{size}</option>
                   {/each}
                 </select>
+              </label>
+            {:else if mode === "image_to_mesh"}
+              <label class="flex flex-col gap-1" title="The mesh lands near this count, not on it">
+                <span class="text-[11px] text-gray-500">Vertices</span>
+                <input type="number" min="200" max="5000" step="100" class="w-28 {field}" bind:value={meshVertices} placeholder={String(DEFAULT_MESH_VERTICES)} disabled={busy} />
               </label>
             {:else if mode === "voxels"}
               <label class="flex flex-col gap-1">

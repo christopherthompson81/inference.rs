@@ -36,6 +36,7 @@ const FILE_TYPES: &[(&str, &str)] = &[
     ("spz", "application/octet-stream"),
     ("stl", "model/stl"),
     ("npy", "application/octet-stream"),
+    ("obj", "model/obj"),
 ];
 
 fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError {
@@ -285,12 +286,15 @@ mod tests {
 
     #[test]
     fn every_image_job_output_is_served() {
-        use inference_jobs::{image_to_3d, image_to_splat, print, voxels};
+        use inference_jobs::{image_to_3d, image_to_mesh, image_to_splat, print, voxels};
         for file in [
             image_to_3d::GLB_FILE,
             image_to_3d::MESH_FILE,
             image_to_3d::PREPARED_FILE,
             image_to_3d::META_FILE,
+            image_to_mesh::GLB_FILE,
+            image_to_mesh::OBJ_FILE,
+            image_to_mesh::CONDITION_FILE,
             image_to_splat::PLY_FILE,
             image_to_splat::SPZ_FILE,
             print::PRINT_FILE,

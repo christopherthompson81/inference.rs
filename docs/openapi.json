@@ -7317,6 +7317,65 @@
           }
         }
       },
+      "ImageToMeshJob": {
+        "type": "object",
+        "description": "LATO.2's mesh (artist-like topology, untextured) of the object in the job's one image.",
+        "properties": {
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "How much it may displace to run, in place of the server's setting"
+              }
+            ]
+          },
+          "remove_background": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always\nhas it removed)"
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "topology_steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The topology flow's sampling steps, 1 to 200 (50 by default)",
+            "minimum": 0
+          },
+          "vertex_steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The vertex flow's sampling steps, 1 to 100 (24 by default)",
+            "minimum": 0
+          },
+          "vertices": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The vertex count to aim for, 200 to 5000 (2000 by default); the mesh lands near it",
+            "minimum": 0
+          }
+        }
+      },
       "ImageToSplatJob": {
         "type": "object",
         "description": "Idol's Gaussian splats of the object in the job's one image.",
@@ -7908,6 +7967,29 @@
           {
             "allOf": [
               {
+                "$ref": "#/components/schemas/ImageToMeshJob",
+                "description": "LATO.2's untextured mesh with artist-like topology of the object in one image"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "image_to_mesh"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "LATO.2's untextured mesh with artist-like topology of the object in one image"
+          },
+          {
+            "allOf": [
+              {
                 "$ref": "#/components/schemas/TextureMeshJob",
                 "description": "A mesh painted from an image with TRELLIS.2"
               },
@@ -8041,6 +8123,14 @@
             "description": "The CUDA devices jobs may run on; every visible one when unset",
             "default": null
           },
+          "dinov2_reg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "DINOv2 ViT-L/14 with registers' folder, LATO.2's image encoder; fetched from its repository when unset",
+            "default": null
+          },
           "dinov3": {
             "type": [
               "string",
@@ -8094,6 +8184,14 @@
               "null"
             ],
             "description": "JoVox-64, for voxel jobs; fetched from its repository when unset",
+            "default": null
+          },
+          "lato2": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "LATO.2's folder (its `.pt` checkpoints), for image-to-mesh jobs; fetched from its repository when unset",
             "default": null
           },
           "lpips": {

@@ -25,6 +25,20 @@ TRELLIS.2's textured mesh of the object in the job's one image.
 | `vertex_colors` | `bool \| None` | optional |
 
 
+## `ImageToMeshJob`
+
+LATO.2's mesh (artist-like topology, untextured) of the object in the job's one image.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `placement` | `Placement \| None` | optional |
+| `remove_background` | `bool \| None` | optional |
+| `seed` | `int \| None` | optional |
+| `topology_steps` | `int \| None` | optional |
+| `vertex_steps` | `int \| None` | optional |
+| `vertices` | `int \| None` | optional |
+
+
 ## `ImageToSplatJob`
 
 Idol's Gaussian splats of the object in the job's one image.
@@ -217,6 +231,7 @@ Where jobs keep their folders and which weights they run.
 | --- | --- | --- |
 | `birefnet` | `str \| None` | optional |
 | `devices` | `list[int] \| None` | optional |
+| `dinov2_reg` | `str \| None` | optional |
 | `dinov3` | `str \| None` | optional |
 | `dinov3_hplus` | `str \| None` | optional |
 | `dir` | `str \| None` | optional |
@@ -224,6 +239,7 @@ Where jobs keep their folders and which weights they run.
 | `flux2_vae` | `str \| None` | optional |
 | `idol` | `str \| None` | optional |
 | `jovox` | `str \| None` | optional |
+| `lato2` | `str \| None` | optional |
 | `lpips` | `str \| None` | optional |
 | `models_repo` | `str \| None` | optional |
 | `moge` | `str \| None` | optional |

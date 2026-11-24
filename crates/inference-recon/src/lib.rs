@@ -8,6 +8,7 @@ mod dinov3;
 mod geometry;
 pub mod idol;
 pub mod jovox;
+pub mod lato2;
 pub mod moge;
 pub mod printable;
 pub mod progress;
