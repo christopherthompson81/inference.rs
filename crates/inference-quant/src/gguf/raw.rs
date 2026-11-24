@@ -1295,7 +1295,16 @@ impl QuantMethod for GgufRawMatMul {
     ) -> Result<Arc<dyn QuantMethod>> {
         let Some(dtype) = dtype else {
             let b = self.b.as_ref().map(|b| b.to_device(&device)).transpose()?;
-            return Ok(Arc::new(Self::new(self.w.to_device(&device)?, b)));
+            let scales = self
+                .expert_scales
+                .as_ref()
+                .map(|s| s.to_device(&device))
+                .transpose()?;
+            return Ok(Arc::new(
+                Self::new(self.w.to_device(&device)?, b)
+                    .with_output_scale(self.scale)
+                    .with_expert_scales(scales),
+            ));
         };
         let unquant = Arc::new(crate::UnquantLinear::new(QuantMethodConfig::Unquantized(
             Linear::new(self.dequantize_w()?, self.b.clone()),
@@ -2511,6 +2520,35 @@ mod tests {
                 None => assert_eq!(values, golden.values, "{ty:?}"),
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn moving_a_stack_keeps_its_output_and_expert_scales() -> Result<()> {
+        let (experts, rows, cols) = (2, 2, 32);
+        let ty = GgufType::Q8_0;
+        let bytes = random_blocks(ty, experts * rows * cols / ty.block_size(), 7);
+        let w = RawGgufTensor::new(ty, &[experts, rows, cols], bytes, &Device::Cpu)?;
+        let scales = Tensor::new(&[0.5f32, 3.0], &Device::Cpu)?;
+        let layer = Arc::new(
+            GgufRawMatMul::new(w, None)
+                .with_output_scale(Some(2.0))
+                .with_expert_scales(Some(scales)),
+        );
+        let before = layer.dequantize_w()?;
+        let moved = layer.apply_isq(
+            None,
+            Device::Cpu,
+            &AtomicUsize::new(0),
+            None,
+            QuantizeOntoGuard::new(),
+        )?;
+        assert!(moved.expert_scales().is_some());
+        let diff = (moved.dequantize_w()? - before)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert_eq!(diff, 0.0);
         Ok(())
     }
 }
