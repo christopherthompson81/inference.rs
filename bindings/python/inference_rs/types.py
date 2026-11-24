@@ -1098,8 +1098,9 @@ class ControlVectorFile:
 
 @dataclass(kw_only=True)
 class ControlVectors:
-    """The control vectors a model is steered by: each layer's output gains the files' directions for it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass."""
+    """The control vectors a model is steered by: each layer's output gains the files' (and derived vectors') directions for it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass. A derived vector is reported back as its cached file."""
 
+    derived: list[DerivedControlVector] | None = None
     files: list[ControlVectorFile] | None = None
     layer_range: list[int] | None = None
 
@@ -1172,6 +1173,16 @@ class DefaultModel:
     """The model a request without `model`, or naming `default`, goes to."""
 
     model_id: str
+
+
+@dataclass(kw_only=True)
+class DerivedControlVector:
+    """A control vector derived on the loaded model from contrasting texts (llama.cpp's `cvector-generator` `mean` method): each positive text pairs with the negative one at its index, and the vector is their layer outputs' mean difference, normalized per layer. Derived once and cached, keyed on the model and the texts."""
+
+    method: str | None = None
+    negative: list[str]
+    positive: list[str]
+    scale: float | None = None
 
 
 @dataclass(kw_only=True)

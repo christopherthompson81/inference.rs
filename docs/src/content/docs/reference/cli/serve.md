@@ -80,6 +80,7 @@ inference serve [OPTIONS] [COMMAND]
 | `--max-num-batched-tokens <MAX_NUM_BATCHED_TOKENS>` |  | Maximum tokens processed in one paged-attention scheduler step [default: 4096, or the prompt chunk if longer] |
 | `--no-embeddings-on-host` | `false` | Keep the token embedding in VRAM; by default an untied one lives in pinned host memory the GPU reads over the bus |
 | `--control-vector <FILE[:SCALE]>` |  | Steer the model by a control vector file (llama.cpp's GGUF or a safetensors file, `direction.<layer>`): `FILE` or `FILE:SCALE` (scale 1 when none is given), repeatable, the scaled directions summed |
+| `--control-vector-texts <POSITIVE:NEGATIVE[:SCALE]>` |  | Steer the model by a control vector derived on it from contrasting texts: `POSITIVE:NEGATIVE[:SCALE]`, two files of one text a line (`\n` for a newline in one), the lines pairing by number, as llama.cpp's `cvector-generator` reads them; derived once and cached. Repeatable |
 | `--control-vector-layer-range <START> <END>` |  | Steer only layers START..=END (0-based) by the control vectors |
 | `--moe-expert-cache <EXPERTS>` |  | Keep MoE experts (GGUF or EXL3, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus |
 | `--max-prefill-chunk-tokens <MAX_PREFILL_CHUNK_TOKENS>` |  | CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching [default: 512, or for MoE experts in host memory the longest chunk the expert cache leaves room for, up to 8192] |

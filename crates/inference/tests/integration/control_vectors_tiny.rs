@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use inference::{
-    ControlVectorFile, ControlVectors, ModelDType, PromptInput, PromptLogitsRequest,
-    SetControlVectorsRequest, TextModelBuilder,
+    ControlVectorFile, ControlVectors, DerivedControlVector, ModelDType, PromptInput,
+    PromptLogitsRequest, SetControlVectorsRequest, TextModelBuilder,
 };
 use inference_tensor::{Device, Tensor};
 use rand::{SeedableRng, rngs::StdRng};
@@ -28,6 +28,8 @@ const PROMPT_TOKENS: u32 = 12;
 const GRAPH_HEAD_DIM: usize = 64;
 const MAX_LEN: usize = 6;
 const GRAPH_PROMPT: &str = "the quick brown fox jumps";
+// llama.cpp's derived directions are unit length; the tiny model's states are about this wide
+const DERIVED_SCALE: f32 = 4.0;
 
 fn direction(scale: f32) -> Vec<f32> {
     let mut rng = StdRng::seed_from_u64(DIRECTION_SEED);
@@ -54,6 +56,7 @@ fn vectors(path: &Path, scale: f32, layer_range: Option<[usize; 2]>) -> ControlV
             path: path.to_string_lossy().into_owned(),
             scale,
         }],
+        derived: Vec::new(),
         layer_range,
     }
 }
@@ -217,6 +220,54 @@ async fn a_new_scale_keeps_the_captured_decode_graphs_on_cuda() -> anyhow::Resul
     assert_eq!(
         rescaled.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
         fresh.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+// a vector derived on the model from contrasting texts is written once to the cache and read from it after; it steers,
+// and texts that do not differ derive nothing
+#[tokio::test]
+async fn a_vector_derived_from_texts_is_cached_and_steers() -> anyhow::Result<()> {
+    let cache = tempfile::tempdir()?;
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference::CONTROL_VECTOR_DIR_ENV, cache.path()) };
+    let checkpoint = support::tiny_llama_checkpoint()?;
+    let model = builder(&checkpoint).build().await?;
+    let plain = logprobs(&model).await?;
+    let derived = |positive: &str, negative: &str| ControlVectors {
+        derived: vec![DerivedControlVector {
+            positive: vec![positive.to_string(), format!("{positive} again")],
+            negative: vec![negative.to_string(), format!("{negative} again")],
+            scale: DERIVED_SCALE,
+            method: None,
+        }],
+        ..Default::default()
+    };
+    let set = |vectors| SetControlVectorsRequest {
+        model: None,
+        vectors,
+    };
+    let answered = model
+        .set_control_vectors(set(derived("a b c", "x y z")))
+        .await?;
+    let [file] = answered.vectors.files.as_slice() else {
+        anyhow::bail!("one derived file, answered {:?}", answered.vectors);
+    };
+    anyhow::ensure!(Path::new(&file.path).starts_with(cache.path()) && file.scale == DERIVED_SCALE);
+    let modified = std::fs::metadata(&file.path)?.modified()?;
+    let steered = logprobs(&model).await?;
+    anyhow::ensure!(steered != plain, "the derived vector did not steer");
+    // the same texts again read the cached file
+    model
+        .set_control_vectors(set(derived("a b c", "x y z")))
+        .await?;
+    anyhow::ensure!(std::fs::metadata(&file.path)?.modified()? == modified);
+    assert_eq!(logprobs(&model).await?, steered);
+    assert!(
+        model
+            .set_control_vectors(set(derived("same", "same")))
+            .await
+            .is_err()
     );
     Ok(())
 }

@@ -99,6 +99,20 @@ impl RowOutputs {
         Ok(())
     }
 
+    /// A capture's layer outputs in place of the (one) row's raw logits.
+    fn take_capture(
+        &mut self,
+        pipeline: &(impl Pipeline + ?Sized),
+    ) -> inference_tensor::Result<()> {
+        if let Some(layers) = pipeline
+            .take_layer_capture()
+            .map_err(inference_tensor::Error::msg)?
+        {
+            self.raw_logits[0] = layers.into_iter().map(Some).collect();
+        }
+        Ok(())
+    }
+
     /// Sends raw-logit or embedding responses when the step produced them; the time that took, if it did.
     async fn respond_without_generation(
         &mut self,
@@ -179,6 +193,14 @@ struct ChunkedPrompt<'a> {
 }
 
 impl dyn Pipeline {
+    // a capture request's prompt step records its layer outputs; it runs alone, as every raw-logits row does
+    fn begin_capture_for(&self, seqs: &[&mut Sequence], ctx: &StepCtx<'_>) -> bool {
+        ctx.is_prompt
+            && ctx.return_raw_logits
+            && seqs.iter().any(|seq| seq.capture_layer_outputs)
+            && self.begin_layer_capture()
+    }
+
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn submit_step<'a>(
@@ -280,12 +302,16 @@ impl dyn Pipeline {
 
         let preserve_causal_generation =
             self.preserves_causal_generation(input_seqs, input_seqs.len() > 1, ctx);
+        let capturing = self.begin_capture_for(input_seqs, ctx);
         let start = Instant::now();
         let bf16 = self.get_metadata().bf16_matmuls;
         let result = in_precision(bf16, || self.forward_inputs(inputs, ctx.return_raw_logits))?
             .into_cpu_for_batch(input_seqs.len(), preserve_causal_generation)?;
         let mut exec_duration = start.elapsed();
         outputs.scatter(0, &result, seq_indices, input_seqs)?;
+        if capturing {
+            outputs.take_capture(self)?;
+        }
 
         match post_op {
             CacheInstruction::Out => self.clone_out_cache(input_seqs),
@@ -416,13 +442,20 @@ impl dyn Pipeline {
             #[cfg(feature = "cuda")]
             mut batched_cuda_decode,
             mut exec_duration,
-        } = self.run_paged_forwards(
-            input_seqs,
-            ctx,
-            step_inputs,
-            cuda_decode_lookahead,
-            &speculative_metadata,
-        )?;
+        } = {
+            let capturing = self.begin_capture_for(input_seqs, ctx);
+            let mut forwards = self.run_paged_forwards(
+                input_seqs,
+                ctx,
+                step_inputs,
+                cuda_decode_lookahead,
+                &speculative_metadata,
+            )?;
+            if capturing {
+                forwards.outputs.take_capture(self)?;
+            }
+            forwards
+        };
 
         if let Some(spent) = outputs.respond_without_generation(input_seqs).await? {
             return Ok(StepSubmission::ready(exec_duration + spent));

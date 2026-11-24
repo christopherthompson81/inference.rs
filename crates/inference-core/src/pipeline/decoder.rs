@@ -1340,11 +1340,31 @@ impl Pipeline for DecoderPipeline {
         if self.model.set_control_vectors(set)? {
             self.cleanup_cuda_graphs();
         }
+        // the depths it measured paid off on the model as it was steered before
+        self.core
+            .speculative_autotuner
+            .lock()
+            .expect("speculative autotuner poisoned")
+            .reset();
         Ok(())
     }
 
     fn control_vectors(&self) -> inference_nn::control_vectors::ControlVectorSet {
         self.model.control_vectors()
+    }
+
+    fn begin_layer_capture(&self) -> bool {
+        match &self.model {
+            DecoderModel::Text(model) => model.begin_layer_capture(),
+            DecoderModel::Multimodal(_) => false,
+        }
+    }
+
+    fn take_layer_capture(&self) -> Result<Option<Vec<inference_tensor::Tensor>>> {
+        Ok(match &self.model {
+            DecoderModel::Text(model) => model.take_layer_capture()?,
+            DecoderModel::Multimodal(_) => None,
+        })
     }
 
     fn forward_inputs(

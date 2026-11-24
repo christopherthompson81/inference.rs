@@ -208,6 +208,9 @@ pub struct NormalRequest {
     /// the host per forward.
     #[serde(skip)]
     pub raw_logits_on_device: bool,
+    /// With `return_raw_logits`, the prompt's layer outputs (unsteered) in place of its logits, a tensor a layer.
+    #[serde(skip)]
+    pub capture_layer_outputs: bool,
     pub web_search_options: Option<WebSearchOptions>,
     /// When true, registered code-execution tools are injected and the agentic loop runs.
     #[serde(default)]
@@ -414,6 +417,7 @@ impl NormalRequest {
             sequential_tool_calls: false,
             return_raw_logits: false,
             raw_logits_on_device: false,
+            capture_layer_outputs: false,
             web_search_options: None,
             enable_code_execution: false,
             enable_shell: false,
@@ -479,7 +483,15 @@ pub struct WordTimestampsRequest {
 #[derive(Clone)]
 pub struct ControlVectorRequest {
     pub set: Option<inference_nn::control_vectors::ControlVectorSet>,
-    pub response: Sender<anyhow::Result<inference_nn::control_vectors::ControlVectorSet>>,
+    pub response: Sender<anyhow::Result<ControlVectorState>>,
+}
+
+/// A model's control vectors, and the model's own name (its weights' source), which a vector derived on it is kept
+/// under.
+#[derive(Clone, Debug)]
+pub struct ControlVectorState {
+    pub set: inference_nn::control_vectors::ControlVectorSet,
+    pub model: String,
 }
 
 /// A prompt's normed hidden states (from a raw-logits pass of a joint decision model) and the spans its joint head

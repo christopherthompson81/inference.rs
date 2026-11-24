@@ -104,6 +104,15 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
     fn control_vectors(&self) -> crate::control_vectors::ControlVectorSet {
         Default::default()
     }
+    /// Records each layer's output over the next forwards, unsteered, for deriving control vectors; false for a model
+    /// that takes none.
+    fn begin_layer_capture(&self) -> bool {
+        false
+    }
+    /// The outputs recorded since [`NormalModel::begin_layer_capture`], a layer's visits pooled as rows.
+    fn take_layer_capture(&self) -> inference_tensor::Result<Option<Vec<Tensor>>> {
+        Ok(None)
+    }
     /// How many tokens before each chunk the forward reads from `ModelForwardContext::token_window`; `None` when it
     /// reads no window.
     fn token_window(&self) -> Option<usize> {

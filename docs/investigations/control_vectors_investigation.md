@@ -64,3 +64,44 @@ unsteered repeated (auto depth)           identical each time; drafter against n
 The cleared run's difference under auto depth is the tuner: it learned from the steered steps and drafts at other depths
 after, and the target's verify numerics follow the depth (the drafter-against-none difference). With the depth fixed,
 or no drafter, clearing restores the unsteered text exactly, so no state of the vectors outlives them.
+
+## Run 4 - 2026-11-24 11:30
+
+Vectors derived on the loaded model from texts (`derived` in a set, `--control-vector-texts POS:NEG[:SCALE]`), as
+llama.cpp's `cvector-generator --method mean` does (`tools/cvector-generator/{cvector-generator.cpp,mean.hpp}`): each
+pair tokenized (BOS as the vocabulary adds it, specials parsed, `\n` escapes), the shorter padded with the token for
+`" "`, every layer's output recorded per token, positive minus negative with all-zero rows dropped (the prefix a pair
+shares), averaged over the pairs and normalized; layer L's output names `direction.<L + 1>`, the last layer none.
+Ours records the outputs before any active vector is added (`ControlVectorSlot` capture), from one scoring step per
+prompt (a raw-logits row runs alone), and pools a looped layer's visits as rows. The result is written as llama.cpp's
+control vector GGUF under `~/.cache/inference-rs/control-vectors` (`INFERENCE_RS_CONTROL_VECTOR_DIR`), keyed on the
+model's source, the texts and the method, and read from there after. Changing a model's vectors also resets the
+auto-depth tuner.
+
+TinyLlama Q4_K_M, the parity script's texts, per-layer cosine of the directions:
+
+```
+ours CPU against llama.cpp CPU     min 0.93161  mean 0.96072
+ours CUDA against llama.cpp CPU    min 0.92677  mean 0.95995
+ours CPU against ours CUDA         min 0.95291  mean 0.96412    (llama.cpp's generator crashes with -ngl 99)
+```
+
+The gap to llama.cpp is the size of our own CPU-to-CUDA gap: the pair differences are small against the states they
+come from, so each backend's rounding moves them by this much. Steered by its own derived vector, ours answers as
+happily as llama.cpp does with its file ("I am delighted to hear that you are enjoying your stay ...").
+
+## Run 5 - 2026-11-24 11:45
+
+Inkling 2 (recipe C, drafts 7 auto, q8 KV) with a vector derived live from six happy and six sad sentences, on the
+loaded `chat` slot:
+
+```
+unsteered    I'm functioning well and ready to help. I don't have feelings in the human sense, but ...
+scale 4      I'm feeling great today! I'm excited to help you with whatever you need.      (derived in 0.5 s)
+scale 8      I'm thrilled to be here! 🎉                                                   (cached: 0.0 s)
+scale 16     🎉🎉🎉  ## Celebrating Learning!  Happy learning! 🎉🎉🎉 ...                     (overdone)
+scale -8     I'm feeling miserable and gloomy. It's depressing and I can't seem to stop thinking about it.
+cleared      == unsteered (with the tuner reset, auto depth included)
+```
+
+llama.cpp's directions are unit length, so Inkling's useful scales are ~4-10 on all layers.

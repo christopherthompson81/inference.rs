@@ -175,6 +175,7 @@ GROUPS = [
                 "UnloadLora",
                 "ControlVector",
                 "SetControlVectors",
+                "DerivedControlVector",
                 "File",
                 "ContainerFile",
                 "SourceMeta",

@@ -67,6 +67,7 @@ inference bench [OPTIONS] [COMMAND]
 | `--mtp-draft-isq <MTP_DRAFT_ISQ>` |  | Weight type of the MTP assistant model, or of a built-in MTP head's draft-only lm_head copy, e.g. q5_0 or q8_0; unset, the model's ISQ (q8_0 for a GGUF's assistant model) and the built-in head drafts through the target's lm_head |
 | `--moe-expert-cache <EXPERTS>` |  | Keep MoE experts (GGUF or EXL3, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus |
 | `--control-vector <FILE[:SCALE]>` |  | Steer the model by a control vector file (llama.cpp's GGUF or a safetensors file, `direction.<layer>`): `FILE` or `FILE:SCALE` (scale 1 when none is given), repeatable, the scaled directions summed |
+| `--control-vector-texts <POSITIVE:NEGATIVE[:SCALE]>` |  | Steer the model by a control vector derived on it from contrasting texts: `POSITIVE:NEGATIVE[:SCALE]`, two files of one text a line (`\n` for a newline in one), the lines pairing by number, as llama.cpp's `cvector-generator` reads them; derived once and cached. Repeatable |
 | `--control-vector-layer-range <START> <END>` |  | Steer only layers START..=END (0-based) by the control vectors |
 | `--adapter <ADAPTER>` |  | LoRA adapter alias to benchmark. Omit to benchmark the base model |
 | `--prompt-len <PROMPT_LEN>` | `512` | Input lengths used to measure time to first token. Zero skips TTFT. Accepts comma-separated values for sweeps |

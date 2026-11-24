@@ -207,17 +207,67 @@ impl ControlVectors {
     }
 }
 
-/// Where a model holds its control vectors: empty until a set is attached, rewritten in place after.
+/// Where a model holds its control vectors: empty until a set is attached, rewritten in place after. It also records
+/// each layer's output while a capture is armed, for deriving vectors from the model.
 #[derive(Clone, Default)]
-pub struct ControlVectorSlot(Arc<RwLock<Option<ControlVectors>>>);
+pub struct ControlVectorSlot {
+    vectors: Arc<RwLock<Option<ControlVectors>>>,
+    // each layer's outputs (one entry a visit) while armed
+    capture: Arc<std::sync::Mutex<Option<Vec<Vec<Tensor>>>>>,
+}
 
 impl ControlVectorSlot {
-    /// `xs` after layer `layer`, with its row added when a set is attached.
+    /// `xs` after layer `layer`, with its row added when a set is attached. While a capture is armed it records `xs`
+    /// and adds nothing, so a derivation reads the unsteered model.
     pub fn apply(&self, layer: usize, xs: Tensor) -> Result<Tensor> {
-        match &*self.0.read().expect("control vectors poisoned") {
+        if let Some(capture) = self
+            .capture
+            .lock()
+            .expect("control vector capture poisoned")
+            .as_mut()
+        {
+            let hidden = xs.dim(inference_tensor::D::Minus1)?;
+            if let Some(visits) = capture.get_mut(layer) {
+                visits.push(xs.reshape(((), hidden))?);
+            }
+            return Ok(xs);
+        }
+        match &*self.vectors.read().expect("control vectors poisoned") {
             Some(vectors) => vectors.apply(layer, xs),
             None => Ok(xs),
         }
+    }
+
+    /// Records the next forwards' layer outputs, for `layers` layers.
+    pub fn begin_capture(&self, layers: usize) {
+        *self
+            .capture
+            .lock()
+            .expect("control vector capture poisoned") = Some(vec![Vec::new(); layers]);
+    }
+
+    /// The recorded outputs, a layer's visits pooled as rows (`[rows, hidden]` F32 on the host), and the capture
+    /// disarmed; `None` when none was armed.
+    pub fn take_capture(&self) -> Result<Option<Vec<Tensor>>> {
+        let Some(layers) = self
+            .capture
+            .lock()
+            .expect("control vector capture poisoned")
+            .take()
+        else {
+            return Ok(None);
+        };
+        layers
+            .into_iter()
+            .map(|visits| {
+                let rows = visits
+                    .iter()
+                    .map(|v| v.to_dtype(DType::F32)?.to_device(&Device::Cpu))
+                    .collect::<Result<Vec<_>>>()?;
+                Tensor::cat(&rows, 0)
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some)
     }
 
     /// Attaches `set` (rewriting the rows in place when one is attached already), or detaches with an empty set.
@@ -229,7 +279,7 @@ impl ControlVectorSlot {
         hidden: usize,
         dtype: DType,
     ) -> Result<bool> {
-        let mut slot = self.0.write().expect("control vectors poisoned");
+        let mut slot = self.vectors.write().expect("control vectors poisoned");
         match (slot.as_mut(), set.is_empty()) {
             (Some(_), true) => {
                 *slot = None;
@@ -249,13 +299,132 @@ impl ControlVectorSlot {
 
     /// The attached set, empty when none is.
     pub fn current(&self) -> ControlVectorSet {
-        self.0
+        self.vectors
             .read()
             .expect("control vectors poisoned")
             .as_ref()
             .map(|v| v.set().clone())
             .unwrap_or_default()
     }
+}
+
+/// One prompt's recorded layer outputs (`[rows, hidden]` each, the same rows for a pair's two prompts).
+pub type LayerOutputs = Vec<Tensor>;
+
+/// llama.cpp's `mean` method: for each layer but the last, every pair's per-row difference (positive minus negative)
+/// with the all-zero rows dropped (a prefix the pair shares), averaged over the pairs and normalized; the direction
+/// from layer L's output is `direction.<L + 1>`, as llama.cpp names it. Returns (layer, direction) pairs.
+pub fn mean_directions(pairs: &[(LayerOutputs, LayerOutputs)]) -> Result<Vec<(usize, Vec<f32>)>> {
+    let Some((first, _)) = pairs.first() else {
+        inference_tensor::bail!(
+            "deriving a control vector needs at least one positive and negative pair"
+        );
+    };
+    let layers = first.len();
+    let mut directions = Vec::with_capacity(layers.saturating_sub(1));
+    for layer in 0..layers.saturating_sub(1) {
+        let mut sum: Vec<f64> = Vec::new();
+        let mut rows = 0usize;
+        for (positive, negative) in pairs {
+            let (p, n) = (&positive[layer], &negative[layer]);
+            if p.dims() != n.dims() {
+                inference_tensor::bail!(
+                    "layer {layer}: a pair's outputs are {:?} and {:?}; pad its prompts to one length",
+                    p.dims(),
+                    n.dims()
+                );
+            }
+            let diff = (p - n)?.to_vec2::<f32>()?;
+            for row in diff.iter().filter(|row| row.iter().any(|v| *v != 0.0)) {
+                if sum.is_empty() {
+                    sum = vec![0.0; row.len()];
+                }
+                for (s, v) in sum.iter_mut().zip(row) {
+                    *s += f64::from(*v);
+                }
+                rows += 1;
+            }
+        }
+        if rows == 0 {
+            continue;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let mean = sum.iter().map(|s| s / rows as f64).collect::<Vec<_>>();
+        let norm = mean.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm == 0.0 {
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        directions.push((
+            layer + FIRST_LAYER,
+            mean.iter().map(|v| (v / norm) as f32).collect(),
+        ));
+    }
+    Ok(directions)
+}
+
+const GGUF_F32: u32 = 0;
+const CONTROL_VECTOR_ARCHITECTURE: &str = "controlvector";
+
+/// `directions` written as llama.cpp's control vector GGUF (`direction.<layer>` F32, `controlvector.*` metadata).
+pub fn write_control_vector(
+    path: &Path,
+    directions: &[(usize, Vec<f32>)],
+    model_hint: &str,
+) -> Result<()> {
+    use inference_tensor::quantized::gguf_file::{
+        TensorEntry, Value, metadata_bytes, write_header, write_tensor_padding,
+    };
+    use std::io::Write;
+    let names = directions
+        .iter()
+        .map(|(layer, _)| format!("{DIRECTION_PREFIX}{layer}"))
+        .collect::<Vec<_>>();
+    let dims = directions
+        .iter()
+        .map(|(_, d)| vec![d.len()])
+        .collect::<Vec<_>>();
+    let entries = names
+        .iter()
+        .zip(&dims)
+        .map(|(name, dims)| TensorEntry {
+            name,
+            dims,
+            ggml_dtype: GGUF_F32,
+            size_in_bytes: dims[0] * std::mem::size_of::<f32>(),
+        })
+        .collect::<Vec<_>>();
+    let architecture = Value::String(CONTROL_VECTOR_ARCHITECTURE.to_string());
+    let hint = Value::String(model_hint.to_string());
+    #[allow(clippy::cast_possible_truncation)]
+    let layer_count = Value::U32(directions.len() as u32);
+    let metadata = [
+        ("general.architecture", &architecture),
+        ("controlvector.model_hint", &hint),
+        ("controlvector.layer_count", &layer_count),
+    ];
+    let partial = path.with_extension("gguf.partial");
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(&partial)?);
+    write_header(
+        &mut writer,
+        metadata.len(),
+        &metadata_bytes(&metadata)?,
+        &entries,
+    )?;
+    for (_, direction) in directions {
+        let bytes = direction
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>();
+        writer.write_all(&bytes)?;
+        write_tensor_padding(&mut writer, bytes.len())?;
+    }
+    writer
+        .into_inner()
+        .map_err(|e| e.into_error())?
+        .sync_all()?;
+    std::fs::rename(&partial, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -368,6 +537,41 @@ mod tests {
             slot.apply(1, xs.clone())?.to_vec2::<f32>()?,
             xs.to_vec2::<f32>()?
         );
+        Ok(())
+    }
+
+    // the mean of each pair's row differences with shared (all-zero) rows dropped, normalized; layer L's output names
+    // direction L + 1, and the last layer gives none
+    #[test]
+    fn mean_directions_follow_llama_cpps_mean_method() -> Result<()> {
+        let t = |rows: [[f32; 2]; 2]| Tensor::new(&rows, &Device::Cpu).unwrap();
+        // three layers; row 0 is a shared prefix, identical in both prompts
+        let positive = vec![
+            t([[1.0, 1.0], [3.0, 0.0]]),
+            t([[0.0, 0.0], [0.0, 2.0]]),
+            t([[9.0, 9.0], [9.0, 9.0]]),
+        ];
+        let negative = vec![
+            t([[1.0, 1.0], [0.0, 0.0]]),
+            t([[0.0, 0.0], [0.0, 0.0]]),
+            t([[0.0, 0.0], [0.0, 0.0]]),
+        ];
+        let directions = mean_directions(&[(positive, negative)])?;
+        assert_eq!(directions.len(), 2);
+        assert_eq!(directions[0], (1, vec![1.0, 0.0]));
+        assert_eq!(directions[1], (2, vec![0.0, 1.0]));
+        Ok(())
+    }
+
+    #[test]
+    fn a_written_control_vector_reads_back_as_its_directions() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("written.gguf");
+        let directions = vec![(1, vec![0.6, 0.8, 0.0, 0.0]), (3, vec![0.0, 0.0, 1.0, 0.0])];
+        write_control_vector(&path, &directions, "a tiny model")?;
+        let mut read = read_directions(&path)?;
+        read.sort_by_key(|(layer, _)| *layer);
+        assert_eq!(read, directions);
         Ok(())
     }
 

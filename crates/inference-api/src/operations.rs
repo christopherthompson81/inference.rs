@@ -181,12 +181,29 @@ pub struct ControlVectorFile {
     pub scale: f32,
 }
 
-/// The control vectors a model is steered by: each layer's output gains the files' directions for it, summed at their
-/// scales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass.
+/// A control vector derived on the loaded model from contrasting texts (llama.cpp's `cvector-generator` `mean`
+/// method): each positive text pairs with the negative one at its index, and the vector is their layer outputs' mean
+/// difference, normalized per layer. Derived once and cached, keyed on the model and the texts.
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
+pub struct DerivedControlVector {
+    pub positive: Vec<String>,
+    pub negative: Vec<String>,
+    #[serde(default = "default_scale")]
+    pub scale: f32,
+    /// `mean`, the only method so far, when absent.
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+/// The control vectors a model is steered by: each layer's output gains the files' (and derived vectors') directions
+/// for it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs
+/// on every pass. A derived vector is reported back as its cached file.
 #[derive(Debug, Clone, Default, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ControlVectors {
     #[serde(default)]
     pub files: Vec<ControlVectorFile>,
+    #[serde(default)]
+    pub derived: Vec<DerivedControlVector>,
     /// The first and last layer steered (0-based, inclusive); every layer a file names when absent.
     #[serde(default)]
     pub layer_range: Option<[usize; 2]>,
@@ -217,6 +234,7 @@ impl ControlVectors {
                     scale: f.scale,
                 })
                 .collect(),
+            derived: Vec::new(),
             layer_range: set.layers.map(|(first, last)| [first, last]),
         }
     }
@@ -249,15 +267,35 @@ pub(crate) async fn control_vectors(
     model: Option<&str>,
     vectors: Option<&ControlVectors>,
 ) -> Result<ControlVectorsResponse, ApiError> {
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
-    let request = Request::ControlVectors(ControlVectorRequest {
-        set: vectors.map(ControlVectors::to_set),
-        response: tx,
-    });
-    send(state, model, request).await?;
-    let set = answer(rx, CONTROL_VECTORS_FAILED).await?;
+    let ask = |set| async move {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let request = Request::ControlVectors(ControlVectorRequest { set, response: tx });
+        send(state, model, request).await?;
+        answer(rx, CONTROL_VECTORS_FAILED).await
+    };
+    let set = match vectors {
+        // derived vectors become their cached files, derived on the model first where the cache lacks them
+        Some(vectors) if !vectors.derived.is_empty() => {
+            let model_name = ask(None).await?.model;
+            let mut resolved = vectors.clone();
+            for derived in &vectors.derived {
+                let path =
+                    crate::control_vector_derive::derived_file(state, model, &model_name, derived)
+                        .await?;
+                resolved.files.push(ControlVectorFile {
+                    path: path.to_string_lossy().into_owned(),
+                    scale: derived.scale,
+                });
+            }
+            resolved.derived.clear();
+            Some(resolved.to_set())
+        }
+        Some(vectors) => Some(vectors.to_set()),
+        None => None,
+    };
+    let state = ask(set).await?;
     Ok(ControlVectorsResponse {
-        vectors: ControlVectors::of(&set),
+        vectors: ControlVectors::of(&state.set),
     })
 }
 

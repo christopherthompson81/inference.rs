@@ -5865,8 +5865,14 @@
       },
       "ControlVectors": {
         "type": "object",
-        "description": "The control vectors a model is steered by: each layer's output gains the files' directions for it, summed at their\nscales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass.",
+        "description": "The control vectors a model is steered by: each layer's output gains the files' (and derived vectors') directions\nfor it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs\non every pass. A derived vector is reported back as its cached file.",
         "properties": {
+          "derived": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DerivedControlVector"
+            }
+          },
           "files": {
             "type": "array",
             "items": {
@@ -6112,6 +6118,39 @@
         "properties": {
           "model_id": {
             "type": "string"
+          }
+        }
+      },
+      "DerivedControlVector": {
+        "type": "object",
+        "description": "A control vector derived on the loaded model from contrasting texts (llama.cpp's `cvector-generator` `mean`\nmethod): each positive text pairs with the negative one at its index, and the vector is their layer outputs' mean\ndifference, normalized per layer. Derived once and cached, keyed on the model and the texts.",
+        "required": [
+          "positive",
+          "negative"
+        ],
+        "properties": {
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`mean`, the only method so far, when absent."
+          },
+          "negative": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "positive": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scale": {
+            "type": "number",
+            "format": "float"
           }
         }
       },

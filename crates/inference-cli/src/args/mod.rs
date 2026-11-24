@@ -1179,6 +1179,16 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub control_vectors: Vec<String>,
 
+    /// Steer the model by a control vector derived on it from contrasting texts: `POSITIVE:NEGATIVE[:SCALE]`, two
+    /// files of one text a line (`\n` for a newline in one), the lines pairing by number, as llama.cpp's
+    /// `cvector-generator` reads them; derived once and cached. Repeatable
+    #[arg(
+        long = "control-vector-texts",
+        value_name = "POSITIVE:NEGATIVE[:SCALE]"
+    )]
+    #[serde(default)]
+    pub control_vector_texts: Vec<String>,
+
     /// Steer only layers START..=END (0-based) by the control vectors
     #[arg(long, num_args = 2, value_names = ["START", "END"])]
     #[serde(default)]
@@ -1509,6 +1519,15 @@ pub struct BenchRuntimeOptions {
     #[arg(long = "control-vector", value_name = "FILE[:SCALE]")]
     pub control_vectors: Vec<String>,
 
+    /// Steer the model by a control vector derived on it from contrasting texts: `POSITIVE:NEGATIVE[:SCALE]`, two
+    /// files of one text a line (`\n` for a newline in one), the lines pairing by number, as llama.cpp's
+    /// `cvector-generator` reads them; derived once and cached. Repeatable
+    #[arg(
+        long = "control-vector-texts",
+        value_name = "POSITIVE:NEGATIVE[:SCALE]"
+    )]
+    pub control_vector_texts: Vec<String>,
+
     /// Steer only layers START..=END (0-based) by the control vectors
     #[arg(long, num_args = 2, value_names = ["START", "END"])]
     pub control_vector_layer_range: Option<Vec<usize>>,
@@ -1518,11 +1537,41 @@ pub struct BenchRuntimeOptions {
 /// colon only where what follows is a number, so a path with colons stays whole.
 pub fn control_vectors(
     files: &[String],
+    texts: &[String],
     range: Option<&[usize]>,
-) -> Option<inference_api::operations::ControlVectors> {
-    if files.is_empty() {
-        return None;
+) -> anyhow::Result<Option<inference_api::operations::ControlVectors>> {
+    if files.is_empty() && texts.is_empty() {
+        return Ok(None);
     }
+    let lines = |path: &str| -> anyhow::Result<Vec<String>> {
+        Ok(std::fs::read_to_string(path)
+            .map_err(|error| anyhow::anyhow!("reading `{path}`: {error}"))?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.replace("\\n", "\n"))
+            .collect())
+    };
+    let derived = texts
+        .iter()
+        .map(|spec| {
+            let mut parts = spec.splitn(3, ':');
+            let (Some(positive), Some(negative)) = (parts.next(), parts.next()) else {
+                anyhow::bail!("`--control-vector-texts {spec}` is not POSITIVE:NEGATIVE[:SCALE]");
+            };
+            let scale = match parts.next() {
+                Some(scale) => scale.parse().map_err(|_| {
+                    anyhow::anyhow!("`--control-vector-texts {spec}`: `{scale}` is no scale")
+                })?,
+                None => 1.0,
+            };
+            Ok(inference_api::operations::DerivedControlVector {
+                positive: lines(positive)?,
+                negative: lines(negative)?,
+                scale,
+                method: None,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let files = files
         .iter()
         .map(|file| match file.rsplit_once(':') {
@@ -1538,10 +1587,11 @@ pub fn control_vectors(
             },
         })
         .collect();
-    Some(inference_api::operations::ControlVectors {
+    Ok(Some(inference_api::operations::ControlVectors {
         files,
+        derived,
         layer_range: range.and_then(|r| Some([*r.first()?, *r.get(1)?])),
-    })
+    }))
 }
 
 impl BenchRuntimeOptions {
@@ -1671,6 +1721,7 @@ impl Default for RuntimeOptions {
             max_num_batched_tokens: None,
             no_embeddings_on_host: false,
             control_vectors: Vec::new(),
+            control_vector_texts: Vec::new(),
             control_vector_layer_range: None,
             moe_expert_cache: None,
             max_prefill_chunk_tokens: None,

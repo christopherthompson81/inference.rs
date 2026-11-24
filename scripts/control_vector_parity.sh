@@ -2,7 +2,8 @@
 # One-off parity check of our control vectors against llama.cpp's: a vector llama.cpp's `cvector-generator` writes for
 # a GGUF Llama (mean method, happy against sad), then the same greedy raw completion from llama.cpp's `llama-completion`
 # and from our server, unsteered and steered, both on the CPU. The texts should match each other in both runs, and
-# the steered ones should differ from the unsteered ones.
+# the steered ones should differ from the unsteered ones. Then the same texts derived on our server
+# (`--control-vector-texts`): its vector against llama.cpp's, layer by layer, and its steered completion.
 # Not part of local_ci.sh: it needs a llama.cpp build and a GGUF on disk.
 #
 # Usage: scripts/control_vector_parity.sh <model.gguf> [llama.cpp bin dir]
@@ -76,6 +77,11 @@ sys.stdout.write(json.load(r)["choices"][0]["text"])' "$prompt" "$tokens" "$port
 ours >"$work/ours_plain.txt"
 ours --control-vector "$work/happy.gguf:$scale" --control-vector-layer-range "$first" "$last" >"$work/ours_steered.txt"
 
+export INFERENCE_RS_CONTROL_VECTOR_DIR="$work/derived"
+ours --control-vector-texts "$work/happy.txt:$work/sad.txt:$scale" --control-vector-layer-range "$first" "$last" \
+    >"$work/ours_derived.txt"
+derived=$(ls "$work/derived"/*.gguf)
+
 for run in plain steered; do
     echo "== $run"
     echo "llama.cpp: $(tr '\n' ' ' <"$work/llama_$run.txt")"
@@ -86,3 +92,18 @@ for run in plain steered; do
         echo "texts differ"
     fi
 done
+
+echo "== derived (ours from the texts) against llama.cpp's vector"
+PYTHONPATH="$(dirname "$bin")/../gguf-py" python3 - "$work/happy.gguf" "$derived" <<'PY'
+import sys
+import numpy as np
+import gguf
+def directions(path):
+    return {t.name: np.asarray(t.data, dtype=np.float64) for t in gguf.GGUFReader(path).tensors}
+theirs, ours = directions(sys.argv[1]), directions(sys.argv[2])
+shared = sorted(set(theirs) & set(ours), key=lambda n: int(n.split(".")[1]))
+cosines = [float(theirs[n] @ ours[n] / (np.linalg.norm(theirs[n]) * np.linalg.norm(ours[n]))) for n in shared]
+print(f"{len(shared)} layers (llama.cpp {len(theirs)}, ours {len(ours)}): cosine min {min(cosines):.5f} mean {np.mean(cosines):.5f}")
+PY
+echo "llama.cpp (its file): $(tr '\n' ' ' <"$work/llama_steered.txt")"
+echo "ours (derived):       $(tr '\n' ' ' <"$work/ours_derived.txt")"

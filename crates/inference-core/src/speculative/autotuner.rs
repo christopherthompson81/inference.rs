@@ -185,6 +185,14 @@ fn batch_key(batch: usize) -> usize {
 }
 
 impl SpeculativeAutotuner {
+    /// Forgets everything learned, keeping the candidates: what it measured no longer describes the model.
+    pub fn reset(&mut self) {
+        *self = Self {
+            candidates: std::mem::take(&mut self.candidates),
+            ..Self::default()
+        };
+    }
+
     /// Adopts a new candidate set, forgetting everything learned for the old one.
     pub fn set_candidates(&mut self, candidates: &[usize]) {
         let mut candidates = candidates.to_vec();

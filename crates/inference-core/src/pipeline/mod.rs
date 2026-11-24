@@ -1376,6 +1376,16 @@ pub trait Pipeline:
         Default::default()
     }
 
+    /// Records each layer's output over the next forwards, unsteered; false for a model that takes no control vectors.
+    fn begin_layer_capture(&self) -> bool {
+        false
+    }
+
+    /// The outputs recorded since [`Pipeline::begin_layer_capture`], a tensor a layer.
+    fn take_layer_capture(&self) -> Result<Option<Vec<Tensor>>> {
+        Ok(None)
+    }
+
     /// The task adapters an embedding request may name.
     fn embedding_tasks(&self) -> Option<Arc<inference_nn::embedding::EmbeddingTasks>> {
         None

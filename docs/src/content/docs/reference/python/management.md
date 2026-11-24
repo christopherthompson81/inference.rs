@@ -115,10 +115,11 @@ A control vector file (llama.cpp's GGUF, `direction.<layer>`, or a safetensors f
 
 ## `ControlVectors`
 
-The control vectors a model is steered by: each layer's output gains the files' directions for it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass.
+The control vectors a model is steered by: each layer's output gains the files' (and derived vectors') directions for it, summed at their scales, within `layer_range` when one is given. A looped model's repeated layers add theirs on every pass. A derived vector is reported back as its cached file.
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `derived` | `list[DerivedControlVector] \| None` | optional |
 | `files` | `list[ControlVectorFile] \| None` | optional |
 | `layer_range` | `list[int] \| None` | optional |
 
@@ -139,6 +140,18 @@ The model a request without `model`, or naming `default`, goes to.
 | Field | Type |
 | --- | --- |
 | `model_id` | `str` |
+
+
+## `DerivedControlVector`
+
+A control vector derived on the loaded model from contrasting texts (llama.cpp's `cvector-generator` `mean` method): each positive text pairs with the negative one at its index, and the vector is their layer outputs' mean difference, normalized per layer. Derived once and cached, keyed on the model and the texts.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `method` | `str \| None` | optional |
+| `negative` | `list[str]` | required |
+| `positive` | `list[str]` | required |
+| `scale` | `float \| None` | optional |
 
 
 ## `DetokenizeRequest`

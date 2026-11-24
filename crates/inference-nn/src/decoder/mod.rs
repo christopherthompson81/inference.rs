@@ -2401,6 +2401,15 @@ impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
     fn control_vectors(&self) -> crate::control_vectors::ControlVectorSet {
         self.stack.control_vectors()
     }
+    fn begin_layer_capture(&self) -> bool {
+        self.stack
+            .control_vectors
+            .begin_capture(self.stack.layer_devices.len());
+        true
+    }
+    fn take_layer_capture(&self) -> Result<Option<Vec<Tensor>>> {
+        self.stack.control_vectors.take_capture()
+    }
     fn layer_stream(&self) -> Option<&dyn crate::model::LayerStream> {
         self.stack
             .rebuild

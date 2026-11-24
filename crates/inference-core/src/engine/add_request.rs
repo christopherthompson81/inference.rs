@@ -284,12 +284,14 @@ impl Engine {
             Request::ControlVectors(req) => {
                 let result = {
                     let mut pipeline = get_mut_arcmutex!(self.pipeline);
-                    match req.set {
-                        Some(set) => pipeline
-                            .set_control_vectors(set)
-                            .map(|()| pipeline.control_vectors()),
-                        None => Ok(pipeline.control_vectors()),
-                    }
+                    let applied = match req.set {
+                        Some(set) => pipeline.set_control_vectors(set),
+                        None => Ok(()),
+                    };
+                    applied.map(|()| crate::request::ControlVectorState {
+                        set: pipeline.control_vectors(),
+                        model: pipeline.name(),
+                    })
                 };
                 if let Err(e) = &result {
                     warn!("Setting control vectors failed: {e:?}");
@@ -593,6 +595,7 @@ impl Engine {
             seq.set_cancellation(request.cancellation.clone());
             seq.set_prefix_warmup(request.prefix_warmup);
             seq.raw_logits_on_device = request.raw_logits_on_device;
+            seq.capture_layer_outputs = request.capture_layer_outputs;
             seq.set_trim_leading_whitespace(is_chat);
             seq.set_prefix_cache_ttl(request.prefix_cache_ttl);
             self.enable_template_reasoning(&mut seq);

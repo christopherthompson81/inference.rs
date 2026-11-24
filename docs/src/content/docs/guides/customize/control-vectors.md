@@ -13,6 +13,18 @@ inference serve -m <model> --control-vector happy.gguf:0.8 --control-vector-laye
 
 `--control-vector FILE[:SCALE]` repeats: the files' directions add up, each at its scale (1 when none is given). `--control-vector-layer-range START END` limits the steering to layers START through END (0-based, inclusive). Layer N's direction is added to layer N's output after its residual, as llama.cpp does. The same fields are `runtime.control_vectors` in an engine spec, `control_vectors` on a model spec, and `control_vectors` in the model manager's load request, which the manager saves with a slot so it reloads steered. A model loaded lazily takes its vectors once it has loaded.
 
+## Derived from texts
+
+A vector can also be derived on the loaded model from contrasting texts, with no separate tool:
+
+```bash
+inference serve -m <model> --control-vector-texts happy.txt:sad.txt:6
+```
+
+The two files hold one text a line (`\n` for a newline inside one), and line N of the first pairs with line N of the second. This is the format llama.cpp's `cvector-generator` reads. In a spec or a request, the same is a `derived` entry: `{"positive": [...], "negative": [...], "scale": 6}`. The engine runs each pair through the model, records every layer's output, and takes the mean difference per layer with shared prefixes left out, normalized to unit length, as llama.cpp's `mean` method does. The result is a llama.cpp control vector GGUF, kept in `~/.cache/inference-rs/control-vectors` (or `INFERENCE_RS_CONTROL_VECTOR_DIR`) under a key of the model and the texts. Setting the same texts again reads that file, and a set or a load reports a derived vector as its cached file.
+
+Deriving takes one prompt pass per text, well under a second for a handful of short pairs on a GPU. The derived directions are unit length, so the scale is absolute: on Inkling 2 about 4 nudges, 8 is strong and 16 overwhelms the model. A negative scale steers the other way.
+
 ## On a loaded model
 
 ```bash
@@ -28,7 +40,7 @@ Changing the files or their scales on a model that is already steered rewrites i
 ## Notes
 
 - Cached prompt states depend on the vectors, so the prefix cache keys them on the active set, and steered requests are not written to the disk prefix cache.
-- Speculative decoding drafts from the steered states and verifies against the steered model. Greedy output stays exact against the target. With `--mtp-auto-depth`, the depth a step drafts at moves with what the tuner has measured, steered steps included, and the target's verify numerics move with the depth.
-- Inkling 2's looped core adds a layer's direction on each of its passes. llama.cpp applies no control vectors to Inkling 2, and its `cvector-generator` cannot build one for it.
+- Speculative decoding drafts from the steered states and verifies against the steered model. Greedy output stays exact against the target. Changing the vectors resets the `--mtp-auto-depth` tuner, since what it measured described the model as it was steered before.
+- Inkling 2's looped core adds a layer's direction on each of its passes, and a derived vector pools the passes' outputs. llama.cpp applies no control vectors to Inkling 2, and its `cvector-generator` cannot build one for it; derive one here instead.
 - Text models on the shared decoder and Inkling 2 take control vectors. Other model families and multimodal models refuse them for now.
 - `scripts/control_vector_parity.sh` compares a vector's effect against llama.cpp's on a GGUF Llama.

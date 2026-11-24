@@ -2210,6 +2210,16 @@ impl NormalModel for Model {
         self.control_vectors.current()
     }
 
+    fn begin_layer_capture(&self) -> bool {
+        self.control_vectors
+            .begin_capture(self.cfg.num_hidden_layers);
+        true
+    }
+
+    fn take_layer_capture(&self) -> Result<Option<Vec<Tensor>>> {
+        self.control_vectors.take_capture()
+    }
+
     fn device(&self) -> &Device {
         &self.device
     }
