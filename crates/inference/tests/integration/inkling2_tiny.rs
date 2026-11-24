@@ -1480,6 +1480,42 @@ async fn a_picture_expands_to_its_cells_steers_the_reply_and_repeats_from_the_ca
     Ok(())
 }
 
+// with no prefix cache to reuse, a repeated picture's rows come from the encoder cache and decode the same
+#[tokio::test]
+async fn a_repeated_picture_takes_its_rows_from_the_encoder_cache() -> anyhow::Result<()> {
+    let dir = checkpoint()?;
+    add_tower(&dir, &weights(&TINY)?, TINY.hidden)?;
+    let model = inference::MultimodalModelBuilder::new(dir.path().to_string_lossy())
+        .with_load_recipes(false)
+        .with_dtype(ModelDType::F32)
+        .with_prefix_cache_n(None)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let encoder_cache = |model: &inference::Model| -> anyhow::Result<(usize, usize)> {
+        let stats = model.cache_stats()?;
+        let cache = stats.data[0]
+            .encoder_cache
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no encoder cache"))?;
+        Ok((cache.hits, cache.misses))
+    };
+    let (first, _) = traces::greedy(&model, picture_chat(PICTURE), MAX_LEN).await?;
+    let (hits, misses) = encoder_cache(&model)?;
+    assert!(
+        hits == 0 && misses > 0,
+        "first picture: {hits} hits, {misses} misses"
+    );
+    let (second, _) = traces::greedy(&model, picture_chat(PICTURE), MAX_LEN).await?;
+    let (repeat_hits, repeat_misses) = encoder_cache(&model)?;
+    assert!(
+        repeat_hits > 0 && repeat_misses == misses,
+        "repeated picture: {repeat_hits} hits, {repeat_misses} misses"
+    );
+    assert_eq!(first, second, "cached rows changed the reply");
+    Ok(())
+}
+
 // drafting over a prompt with a picture keeps the greedy output, verify steps rolling the conv states back as without
 #[tokio::test]
 async fn the_checkpoint_drafter_keeps_greedy_output_after_a_picture_on_cuda() -> anyhow::Result<()>

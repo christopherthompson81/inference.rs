@@ -190,6 +190,12 @@ inference serve -m thinkingmachines/Inkling-2-Mini \
 Beside a GGUF target, the drafter's projections default to Q8_0. With q8 KV the full 262,144-token context fits for
 one sequence; how much fits beside four depends on how much of the card other programs hold.
 
+The checkpoint's vision tower (pictures; about 0.35 GB of GPU memory) loads with the recipe when asked:
+`runtime.recipe_vision: true` in a spec, `"vision": true` on a model manager load, or the **Vision** box beside a
+checkpoint in the web UI's model bar. Its projector is written beside the recipe once, as `mmproj-<recipe>.gguf`. A
+picture's encoded rows are kept (the last 32 pictures), so a conversation that sends the same picture again, where the
+prefix cache does not already cover it, skips the tower.
+
 ## LFM2 and LFM2.5
 
 LiquidAI LFM2 and LFM2.5 dense and MoE checkpoints are supported. LFM2-VL and LFM2.5-VL are supported for image input.

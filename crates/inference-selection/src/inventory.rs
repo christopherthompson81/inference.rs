@@ -120,6 +120,9 @@ pub struct InventoryModel {
     /// A model directory whose checkpoint carries a drafter (Inkling 2's `mtp.safetensors`), which a load of the
     /// model, its GGUFs included, names as its drafter.
     pub carries_drafter: bool,
+    /// A model directory that loads through a recipe (Inkling 2's) and holds a vision tower, which a load brings in
+    /// with `vision`.
+    pub recipe_vision: bool,
     /// Why it could not be fully inspected.
     pub error: Option<String>,
 }
@@ -734,6 +737,8 @@ fn dir_model(dir: &Path, origin: Origin<'_>) -> InventoryModel {
             && dir
                 .join(inference_nn::speculative::CHECKPOINT_DRAFTER_WEIGHTS)
                 .is_file();
+        model.recipe_vision =
+            config["vision_config"].is_object() && inference_core::is_inkling2_checkpoint(dir);
         if model
             .architecture
             .as_deref()
@@ -782,6 +787,7 @@ fn base_model_entry(path: PathBuf, format: ModelFormat, origin: Origin<'_>) -> I
         files: Vec::new(),
         projectors: Vec::new(),
         carries_drafter: false,
+        recipe_vision: false,
         error: None,
     }
 }

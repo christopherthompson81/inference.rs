@@ -3,7 +3,7 @@
 pub mod inputs_processor;
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::{Device, Result, Tensor};
@@ -13,12 +13,17 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
-    paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
+    paged_attention::{
+        AttentionImplementation, ModelConfigLike, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+    },
 };
 
 /// `<|unused_200054|>`: one per cell, its embedding replaced by the cell's row.
 pub const IMAGE_PAD_TOKEN: &str = "<|unused_200054|>";
 pub const DEFAULT_IMAGE_TOKEN_ID: u32 = 200054;
+// pictures whose rows stay cached, as the other vision models keep theirs
+const ENCODER_CACHE_PICTURES: usize = 32;
 
 /// The checkpoint's config: the text model's (`text_config`) beside the tower's.
 #[derive(Debug, Clone)]
@@ -47,16 +52,19 @@ impl Config {
     }
 }
 
-/// Each picture's native patch grid, in the order of `pixel_values`' rows.
+/// Each picture's native patch grid, in the order of `pixel_values`' rows, and its content hash when known (the
+/// encoder cache's key).
 #[derive(Default)]
 pub struct Inkling2VlArgs {
     pub grids: Vec<(usize, usize)>,
+    pub hashes: Vec<Option<u64>>,
 }
 
 pub struct Inkling2VlModel {
     text: crate::inkling2::Model,
     tower: VisionTower,
     image_token_id: u32,
+    encoder_cache: Mutex<EncoderCacheManager>,
 }
 
 impl Inkling2VlModel {
@@ -86,17 +94,39 @@ impl Inkling2VlModel {
             text,
             tower,
             image_token_id: cfg.image_token_id,
+            encoder_cache: Mutex::new(EncoderCacheManager::new(ENCODER_CACHE_PICTURES)),
         })
     }
 
-    fn image_rows(&self, pixel_values: &Tensor, grids: &[(usize, usize)]) -> Result<Tensor> {
+    // each picture's rows from the encoder cache, or the tower on a miss (then kept)
+    fn image_rows(&self, pixel_values: &Tensor, args: &Inkling2VlArgs) -> Result<Tensor> {
         let mut start = 0;
-        let rows = grids
+        let rows = args
+            .grids
             .iter()
-            .map(|&(gh, gw)| {
+            .enumerate()
+            .map(|(i, &(gh, gw))| {
                 let patches = pixel_values.narrow(0, start, gh * gw)?;
                 start += gh * gw;
-                self.tower.forward(&patches, gh, gw)
+                let hash = args.hashes.get(i).copied().flatten();
+                if let Some(hash) = hash {
+                    let cached = self
+                        .encoder_cache
+                        .lock()
+                        .expect("encoder cache lock poisoned")
+                        .get(CacheModality::Image, hash);
+                    if let Some(cached) = cached {
+                        return Ok(cached[0].clone());
+                    }
+                }
+                let rows = self.tower.forward(&patches, gh, gw)?;
+                if let Some(hash) = hash {
+                    self.encoder_cache
+                        .lock()
+                        .expect("encoder cache lock poisoned")
+                        .insert(CacheModality::Image, hash, vec![rows.clone()]);
+                }
+                Ok(rows)
             })
             .collect::<Result<Vec<_>>>()?;
         Tensor::cat(&rows, 0)
@@ -129,7 +159,7 @@ impl MultimodalModel for Inkling2VlModel {
                     inference_tensor::Error::msg("Inkling 2 vision takes Inkling2VlArgs")
                 })?;
             let rows = self
-                .image_rows(&pixel_values.to_device(x.device())?, &args.grids)?
+                .image_rows(&pixel_values.to_device(x.device())?, &args)?
                 .to_dtype(x.dtype())?;
             x = crate::media_inputs::media::place_token_features(
                 &x,
@@ -176,6 +206,10 @@ impl MultimodalModel for Inkling2VlModel {
 
     fn device(&self) -> &Device {
         NormalModel::device(&self.text)
+    }
+
+    fn encoder_cache(&self) -> Option<&Mutex<EncoderCacheManager>> {
+        Some(&self.encoder_cache)
     }
 
     fn cache(&self) -> &EitherCache {
