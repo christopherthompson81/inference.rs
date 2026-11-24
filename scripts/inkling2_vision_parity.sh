@@ -91,9 +91,9 @@ y = torch.cat([cls[None], y + pos])
 def ln(v, n): return F.layer_norm(v, (E,), t(n + ".weight"), t(n + ".bias"), cfg["layer_norm_eps"])
 y = ln(y, "backbone.ln_pre")
 dh = E // H
-px = torch.cat([torch.zeros(1), torch.arange(gw).repeat(gh) + 1.0]).to(dev)
-py = torch.cat([torch.zeros(1), torch.arange(gh).repeat_interleave(gw) + 1.0]).to(dev)
-inv = 10000.0 ** (-torch.arange(0, dh // 2, 2, device=dev).float() / (dh // 2))
+px = torch.cat([torch.zeros(1), torch.tensor(range(gw)).repeat(gh) + 1.0]).to(dev)
+py = torch.cat([torch.zeros(1), torch.tensor(range(gh)).repeat_interleave(gw) + 1.0]).to(dev)
+inv = 10000.0 ** (-torch.tensor(range(0, dh // 2, 2), device=dev).float() / (dh // 2))
 def rope(v):
     halves = []
     for half, p in ((v[..., : dh // 2], px), (v[..., dh // 2 :], py)):
