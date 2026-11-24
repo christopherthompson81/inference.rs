@@ -261,7 +261,7 @@ pub fn generate_3d_on(
             }
             ShapeHalf::Colored(mesh) => {
                 let (mesh, attrs) = out.colored(mesh);
-                (to_glb(&mesh, &attrs), mesh)
+                (to_glb(&mesh, &attrs, false), mesh)
             }
         };
         let dir = sample_dir(out_dir, i, samples);

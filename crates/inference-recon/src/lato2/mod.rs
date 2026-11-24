@@ -419,7 +419,8 @@ pub fn generate(
         decoder.edges(&feats, topology::EDGE_THRESHOLD)?
     };
     let cells: Vec<[f32; 3]> = vertices.cells.iter().map(|c| c.map(|v| v as f32)).collect();
-    let faces = faces::faces(n, &edges, &cells, options.max_ring);
+    let mut faces = faces::faces(n, &edges, &cells, options.max_ring);
+    faces::orient(&mut faces, &positions);
     Ok(Generated {
         mesh: Mesh {
             vertices: positions,

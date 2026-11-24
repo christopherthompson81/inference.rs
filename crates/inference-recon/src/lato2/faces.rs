@@ -1,5 +1,6 @@
 //! Faces from predicted edges (`edges_to_faces`): every edge triangle is a face, then chordless rings of 4 to 12 open
-//! edges (fewer than two faces) are filled by a minimum-area triangulation, smallest rings first.
+//! edges (fewer than two faces) are filled by a minimum-area triangulation, smallest rings first. The reference leaves
+//! each face in index order; [`orient`] winds them outward.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -8,6 +9,10 @@ pub const MAX_RING: usize = 12;
 const MIN_RING: usize = 4;
 // a triangle at most this share of the ring's squared extent counts as degenerate
 const DEGENERATE: f64 = 1e-9;
+// rays start this far off a face and count hits past it (the mesh spans about 1)
+const RAY_START: f64 = 1e-6;
+// below this a ray runs along a triangle's plane, or a face has no area
+const PARALLEL: f64 = 1e-12;
 
 fn key(a: u32, b: u32) -> (u32, u32) {
     if a < b { (a, b) } else { (b, a) }
@@ -218,6 +223,110 @@ fn min_area(ring: &[u32], positions: &[[f32; 3]]) -> Vec<[u32; 3]> {
     tris
 }
 
+fn cross(u: [f64; 3], w: [f64; 3]) -> [f64; 3] {
+    [
+        u[1] * w[2] - u[2] * w[1],
+        u[2] * w[0] - u[0] * w[2],
+        u[0] * w[1] - u[1] * w[0],
+    ]
+}
+
+fn dot(u: [f64; 3], w: [f64; 3]) -> f64 {
+    u[0] * w[0] + u[1] * w[1] + u[2] * w[2]
+}
+
+// whether a ray from `origin` along `dir` meets none of `tris` (Moller-Trumbore, hits past RAY_START)
+fn escapes(origin: [f64; 3], dir: [f64; 3], tris: &[[[f64; 3]; 3]]) -> bool {
+    !tris.iter().any(|[a, b, c]| {
+        let (e1, e2) = (sub(*b, *a), sub(*c, *a));
+        let h = cross(dir, e2);
+        let det = dot(e1, h);
+        if det.abs() < PARALLEL {
+            return false;
+        }
+        let s = sub(origin, *a);
+        let u = dot(s, h) / det;
+        let q = cross(s, e1);
+        let v = dot(dir, q) / det;
+        u >= 0.0 && v >= 0.0 && u + v <= 1.0 && dot(e2, q) / det > RAY_START
+    })
+}
+
+/// Winds `faces` outward. A face whose normal leads out of the mesh one way and not the other (a ray from its center
+/// escapes along it and not against it, or the reverse) takes that side; the others, enclosed by other parts, take the
+/// winding of a decided neighbour across an edge the two share alone. The meshes hold folds and nested shells where
+/// winding spread from one face alone would turn whole regions inside out.
+pub fn orient(faces: &mut [[u32; 3]], positions: &[[f32; 3]]) {
+    use rayon::prelude::*;
+    let tris: Vec<[[f64; 3]; 3]> = faces
+        .iter()
+        .map(|f| f.map(|v| positions[v as usize].map(f64::from)))
+        .collect();
+    let votes: Vec<i8> = tris
+        .par_iter()
+        .map(|t| {
+            let n = cross(sub(t[1], t[0]), sub(t[2], t[0]));
+            let len = dot(n, n).sqrt();
+            if len < PARALLEL {
+                return 0;
+            }
+            let n = n.map(|v| v / len);
+            let c: [f64; 3] = std::array::from_fn(|k| (t[0][k] + t[1][k] + t[2][k]) / 3.0);
+            let at = |s: f64| std::array::from_fn(|k| c[k] + s * RAY_START * n[k]);
+            let ahead = escapes(at(1.0), n, &tris);
+            let behind = escapes(at(-1.0), n.map(|v| -v), &tris);
+            i8::from(ahead && !behind) - i8::from(behind && !ahead)
+        })
+        .collect();
+    let mut by_edge: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (i, f) in faces.iter().enumerate() {
+        for (x, y) in [(f[0], f[1]), (f[1], f[2]), (f[2], f[0])] {
+            by_edge.entry(key(x, y)).or_default().push(i);
+        }
+    }
+    let mut decided: Vec<bool> = votes.iter().map(|&v| v != 0).collect();
+    for (f, &v) in faces.iter_mut().zip(&votes) {
+        if v < 0 {
+            f.swap(1, 2);
+        }
+    }
+    // whether face `f` walks edge (x, y) from x to y
+    let walks = |f: &[u32; 3], x: u32, y: u32| (0..3).any(|k| f[k] == x && f[(k + 1) % 3] == y);
+    let mut queue: std::collections::VecDeque<usize> =
+        (0..faces.len()).filter(|&i| decided[i]).collect();
+    // faces no decided one reaches keep the winding the first of them spreads
+    let mut next = 0;
+    loop {
+        while let Some(i) = queue.pop_front() {
+            let f = faces[i];
+            for (x, y) in [(f[0], f[1]), (f[1], f[2]), (f[2], f[0])] {
+                let shared = &by_edge[&key(x, y)];
+                if shared.len() != 2 {
+                    continue;
+                }
+                for &g in shared {
+                    if decided[g] {
+                        continue;
+                    }
+                    if walks(&faces[g], x, y) {
+                        faces[g].swap(1, 2);
+                    }
+                    decided[g] = true;
+                    queue.push_back(g);
+                }
+            }
+        }
+        while next < faces.len() && decided[next] {
+            next += 1;
+        }
+        if next == faces.len() {
+            break;
+        }
+        decided[next] = true;
+        queue.push_back(next);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +336,32 @@ mod tests {
         let edges = [[0, 1], [0, 2], [0, 3], [1, 2], [2, 3]];
         let positions = [[0.0; 3]; 4];
         assert_eq!(faces(4, &edges, &positions, 0), vec![[0, 1, 2], [0, 2, 3]]);
+    }
+
+    #[test]
+    fn a_tetrahedron_written_in_index_order_is_wound_outward() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let edges = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+        let mut tris = faces(4, &edges, &positions, 0);
+        orient(&mut tris, &positions);
+        for [a, b, c] in tris {
+            let [p, q, r] = [a, b, c].map(|v| positions[v as usize]);
+            let n = [
+                (q[1] - p[1]) * (r[2] - p[2]) - (q[2] - p[2]) * (r[1] - p[1]),
+                (q[2] - p[2]) * (r[0] - p[0]) - (q[0] - p[0]) * (r[2] - p[2]),
+                (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]),
+            ];
+            // the centroid's at (0.25, 0.25, 0.25): an outward normal points away from it
+            let out = (0..3)
+                .map(|i| n[i] * ((p[i] + q[i] + r[i]) / 3.0 - 0.25))
+                .sum::<f32>();
+            assert!(out > 0.0, "face {a} {b} {c} points inward");
+        }
     }
 
     #[test]

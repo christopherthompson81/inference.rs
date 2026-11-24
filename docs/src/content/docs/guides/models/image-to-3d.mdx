@@ -97,7 +97,9 @@ ViT-L/14-reg features of the image; V-Flow (a sparse DiT on the scaffold's cells
 decodes, subdividing kept cells down to one 1024^3 cell per vertex with an offset inside it; T-Flow (a DiT over the
 vertices) samples a latent per vertex that the topology VAE turns into a logit for every vertex pair. The pairs above 0
 are the edges, every edge triangle a face, and chordless open rings of up to 12 edges are filled by a minimum-area
-triangulation.
+triangulation. The reference leaves each face wound in index order, so about half point inward; here each face whose
+normal leads out of the mesh one way and not the other takes that side, and the rest take the winding of their
+neighbours (see the investigation log's Run 3).
 
 ```bash
 inference image-to-mesh --image chair.jpg --out chair/
@@ -124,7 +126,7 @@ faces exactly; see `docs/investigations/lato2_investigation.md`).
 
 ```
 chair/
-  model.glb       the mesh, untextured (light grey, fully rough), y up in the unit cube around the origin
+  model.glb       the mesh, untextured (light grey, fully rough, double-sided), y up in the unit cube around the origin
   mesh.obj        the same mesh as OBJ, vertices in the order generated
   condition.png   the 518^2 crop the models see
   meta.json       seed, the vertex count asked and made, scaffold cells, edges, faces, timing

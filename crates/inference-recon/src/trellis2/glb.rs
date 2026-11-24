@@ -149,8 +149,9 @@ fn push_f32s(bin: &mut Vec<u8>, values: impl Iterator<Item = f32>) -> (usize, us
     (start, bin.len() - start)
 }
 
-/// The mesh as a binary glTF (y up) with each vertex's PBR attributes (clamped to [0, 1]; the base color made linear).
-pub fn to_glb(mesh: &Mesh, attrs: &[Pbr]) -> Vec<u8> {
+/// The mesh as a binary glTF (y up) with each vertex's PBR attributes (clamped to [0, 1]; the base color made linear),
+/// its material drawn from both sides when `double_sided`.
+pub fn to_glb(mesh: &Mesh, attrs: &[Pbr], double_sided: bool) -> Vec<u8> {
     let clamp = |v: f32| v.clamp(0.0, 1.0);
     let mut bin = Vec::new();
     let vertices: Vec<[f32; 3]> = mesh.vertices.iter().map(|&v| y_up(v)).collect();
@@ -193,6 +194,7 @@ pub fn to_glb(mesh: &Mesh, attrs: &[Pbr]) -> Vec<u8> {
                 "roughnessFactor": mean(|p| p.roughness),
             },
             "alphaMode": "OPAQUE",
+            "doubleSided": double_sided,
         }],
         "buffers": [{"byteLength": bin.len()}],
         "bufferViews": [
@@ -337,7 +339,7 @@ mod tests {
             vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             faces: vec![[0, 1, 2]],
         };
-        let glb = to_glb(&mesh, &[Pbr::default(); 3]);
+        let glb = to_glb(&mesh, &[Pbr::default(); 3], false);
         let word = |i: usize| u32::from_le_bytes(glb[i..i + 4].try_into().expect("4 bytes"));
         assert_eq!(word(0), GLB_MAGIC);
         assert_eq!(word(8) as usize, glb.len());
