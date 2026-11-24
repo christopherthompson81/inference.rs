@@ -14750,6 +14750,13 @@
               "null"
             ]
           },
+          "load_recipes": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "A checkpoint whose fast paths read another format (Inkling 2's own, as recipe C) loads as that format, built\nfrom it once into a cache; on unless set to false."
+          },
           "log": {
             "type": [
               "string",
@@ -14875,6 +14882,13 @@
             "format": "int64",
             "description": "Host memory for prefix cache entries, in GiB: in front of `prefix_cache_dir`, or on its own without one;\nunset gives 8 (at most an eighth of the machine's memory), 0 keeps none in memory.",
             "minimum": 0
+          },
+          "recipe_dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where built recipes are kept; unset, `INFERENCE_RS_RECIPE_DIR` or `~/.cache/inference-rs/recipes`."
           },
           "seed": {
             "type": [

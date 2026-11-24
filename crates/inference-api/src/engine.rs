@@ -396,6 +396,13 @@ pub struct RuntimeSpec {
     /// output; on unless set to false.
     #[serde(default)]
     pub embeddings_on_host: Option<bool>,
+    /// A checkpoint whose fast paths read another format (Inkling 2's own, as recipe C) loads as that format, built
+    /// from it once into a cache; on unless set to false.
+    #[serde(default)]
+    pub load_recipes: Option<bool>,
+    /// Where built recipes are kept; unset, `INFERENCE_RS_RECIPE_DIR` or `~/.cache/inference-rs/recipes`.
+    #[serde(default)]
+    pub recipe_dir: Option<String>,
     /// MoE experts (GGUF, on CUDA) stay in host memory with this many per layer cached on the GPU, the CPU running
     /// the rest; unset keeps every expert in VRAM.
     #[serde(default)]
@@ -434,6 +441,15 @@ pub struct RuntimeSpec {
     /// Generate to `max_tokens` regardless of end-of-sequence tokens, as a benchmark needs.
     #[serde(default)]
     pub disable_eos_stop: bool,
+}
+
+impl RuntimeSpec {
+    fn recipe_options(&self) -> inference_selection::recipes::RecipeOptions {
+        inference_selection::recipes::RecipeOptions {
+            enabled: self.load_recipes.unwrap_or(true),
+            dir: self.recipe_dir.as_ref().map(std::path::PathBuf::from),
+        }
+    }
 }
 
 fn nonzero(field: &str, value: usize) -> Result<std::num::NonZeroUsize, EngineLoadError> {
@@ -660,7 +676,40 @@ async fn resolve_model_source(
     isq: &mut Option<String>,
     token_source: &TokenSource,
     force_cpu: bool,
+    inherited_isq: Option<&str>,
+    recipes: &inference_selection::recipes::RecipeOptions,
 ) -> Result<ModelSelected, EngineLoadError> {
+    // a checkpoint whose fast paths read another format loads as that format, built once into a cache
+    let isq_applied = isq.as_deref().or(inherited_isq);
+    let model = if inference_selection::recipes::may_take_recipe(&model, isq_applied, recipes) {
+        let requested = inference_selection::recipes::checkpoint_id(&model).map(str::to_string);
+        let (isq, token_source, recipes) = (
+            isq_applied.map(str::to_string),
+            token_source.clone(),
+            recipes.clone(),
+        );
+        let model = tokio::task::spawn_blocking(move || {
+            inference_selection::recipes::with_load_recipe(
+                model,
+                isq.as_deref(),
+                &token_source,
+                None,
+                &recipes,
+            )
+        })
+        .await
+        .map_err(|error| {
+            EngineLoadError::Load(anyhow::anyhow!("the recipe build stopped: {error}"))
+        })?
+        .map_err(EngineLoadError::Load)?;
+        // the model keeps the name it was asked for, not its recipe's cache directory
+        if model_id.is_none() && matches!(model, ModelSelected::GGUF { .. }) {
+            *model_id = requested;
+        }
+        model
+    } else {
+        model
+    };
     if !model.needs_source_resolution() {
         return Ok(model);
     }
@@ -686,9 +735,14 @@ impl EngineSpec {
             .model
             .iter()
             .chain(self.models.iter().map(|spec| &spec.model));
+        let runtime_isq = self.runtime.isq.clone();
+        let recipes = self.runtime.recipe_options();
+        let takes_recipe = |model: &ModelSelected| {
+            inference_selection::recipes::may_take_recipe(model, runtime_isq.as_deref(), &recipes)
+        };
         if !models
             .into_iter()
-            .any(ModelSelected::needs_source_resolution)
+            .any(|model| model.needs_source_resolution() || takes_recipe(model))
         {
             return Ok(());
         }
@@ -704,13 +758,31 @@ impl EngineSpec {
         let force_cpu = self.runtime.device.as_deref() == Some("cpu");
         if let Some(model) = self.model.take() {
             let (model_id, isq) = (&mut self.model_id, &mut self.runtime.isq);
-            self.model =
-                Some(resolve_model_source(model, model_id, isq, &token_source, force_cpu).await?);
+            self.model = Some(
+                resolve_model_source(
+                    model,
+                    model_id,
+                    isq,
+                    &token_source,
+                    force_cpu,
+                    None,
+                    &recipes,
+                )
+                .await?,
+            );
         }
         for mut spec in std::mem::take(&mut self.models) {
             let (model_id, isq) = (&mut spec.model_id, &mut spec.isq);
-            spec.model =
-                resolve_model_source(spec.model, model_id, isq, &token_source, force_cpu).await?;
+            spec.model = resolve_model_source(
+                spec.model,
+                model_id,
+                isq,
+                &token_source,
+                force_cpu,
+                runtime_isq.as_deref(),
+                &recipes,
+            )
+            .await?;
             self.models.push(spec);
         }
         Ok(())
@@ -759,12 +831,14 @@ impl EngineSpec {
             }
             (Some(_), false) => return Err(invalid(ONE_MODEL_SOURCE.to_string())),
         };
+        let recipes = runtime.recipe_options();
         let mut builder = builder
             .with_no_kv_cache(runtime.no_kv_cache)
             .with_chat_template_optional(runtime.chat_template)
             .with_jinja_explicit_optional(runtime.jinja_explicit)
             .with_max_model_len_optional(runtime.max_model_len)
             .with_in_situ_quant_optional(runtime.isq)
+            .with_recipes(recipes)
             .with_hf_revision_optional(runtime.hf_revision)
             .with_seed_optional(runtime.seed)
             .set_paged_attn(runtime.paged_attn)
@@ -1382,6 +1456,8 @@ impl Engine {
             isq,
             self.models.token_source(),
             force_cpu,
+            self.models.in_situ_quant(),
+            self.models.recipes(),
         )
         .await
         .map_err(add_model_error)?;

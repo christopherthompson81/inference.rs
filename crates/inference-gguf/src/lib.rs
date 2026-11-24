@@ -14,7 +14,11 @@ pub mod glm_asr_bindings;
 pub mod granite_multimodal_bindings;
 pub mod idefics3_bindings;
 mod inkling2_bindings;
-pub use inkling2_bindings::official_checkpoint_experts;
+mod inkling2_checkpoint;
+pub use inkling2_bindings::{
+    Inkling2GgufTensor, inkling2_gguf_tensor, official_checkpoint_experts,
+};
+pub use inkling2_checkpoint::inkling2_checkpoint_metadata;
 pub mod lfm2_vl_bindings;
 pub mod llama4_bindings;
 #[cfg(any(test, feature = "models-gemma"))]

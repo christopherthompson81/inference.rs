@@ -3150,6 +3150,7 @@ class RuntimeSpec:
     hf_revision: str | None = None
     isq: str | None = None
     jinja_explicit: str | None = None
+    load_recipes: bool | None = None
     log: str | None = None
     max_decode_steps_before_prefill: int | None = None
     max_model_len: int | None = None
@@ -3167,6 +3168,7 @@ class RuntimeSpec:
     prefix_cache_disk_ttl_mins: int | None = None
     prefix_cache_n: int | None = None
     prefix_cache_ram_gib: int | None = None
+    recipe_dir: str | None = None
     seed: int | None = None
     throughput_logging: bool | None = None
     token_source: str | None = None

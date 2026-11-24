@@ -38,6 +38,7 @@ pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
 pub mod inkling2;
 mod inkling2_official;
+pub use inkling2_official::OfficialTensors as Inkling2OfficialTensors;
 pub mod jamba;
 pub mod jina_v3;
 pub mod kimi_linear;

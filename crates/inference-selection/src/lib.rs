@@ -7,6 +7,7 @@ mod model_loader;
 pub mod model_metadata;
 mod model_selected;
 pub mod quant;
+pub mod recipes;
 pub mod resource_plan;
 mod tuning;
 

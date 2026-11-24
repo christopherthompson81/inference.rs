@@ -269,6 +269,19 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// Whether a checkpoint whose fast paths read another format (Inkling 2's own) loads as that format,
+        /// built from it once into a cache; on by default.
+        pub fn with_load_recipes(mut self, load_recipes: bool) -> Self {
+            self.options.runtime.load_recipes = Some(load_recipes);
+            self
+        }
+
+        /// Where built recipes are kept, in place of `INFERENCE_RS_RECIPE_DIR` or `~/.cache/inference-rs/recipes`.
+        pub fn with_recipe_dir(mut self, dir: impl AsRef<std::path::Path>) -> Self {
+            self.options.runtime.recipe_dir = Some(dir.as_ref().to_string_lossy().into_owned());
+            self
+        }
+
         pub fn with_isq(mut self, isq: $crate::IsqType) -> Self {
             self.options.runtime.isq = Some($crate::load::isq_type(isq));
             self
