@@ -17,11 +17,12 @@ pub struct BashTool;
 
 // Kills the command's whole process group when dropped: on a timeout or an interrupt the shell's children (a server, a
 // game left running, a pipeline) would otherwise outlive the call, holding the CPU, ports or files
+#[cfg(unix)]
 struct ProcessGroup(Option<u32>);
 
+#[cfg(unix)]
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
-        #[cfg(unix)]
         if let Some(pgid) = self.0.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
             // SAFETY: signals only the group this call started; a group already gone just fails with ESRCH
             unsafe { libc::killpg(pgid, libc::SIGKILL) };
@@ -76,6 +77,7 @@ impl Tool for BashTool {
                 Ok(child) => child,
                 Err(error) => return ToolOutcome::error(format!("cannot start {SHELL}: {error}")),
             };
+            #[cfg(unix)]
             let _group = ProcessGroup(child.id());
             let mut stdout = child.stdout.take().expect("stdout is piped");
             let mut output = Vec::new();
