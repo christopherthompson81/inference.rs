@@ -217,3 +217,31 @@ attention runs at about half of it at long context. Drafting gains ~10% up to 35
 So the session's decode slowdown is mostly attention over the growing context, with the drafter costing more than it
 saves past ~64K. Next: where the decode step's time goes at 100K (attention kernel efficiency on q8 KV), and why auto
 depth keeps drafting there.
+
+## Run 10 - 2026-11-24 00:00
+
+Where a 102K-context plain decode step's time goes (nsys, `--cuda-graph-trace=node`, one 129-token reply after the
+prompt was cached): 15.7 ms a token, of which the paged attention decode (`biased_attention.cu` `decode_kernel`, q8
+cache) 5.75 ms, 48 calls a token. Inkling 2 attends with 24 heads over 8 KV heads (head dim 128), 20 of its 24
+layers windowed at 1024 keys; the 8 full-context visits a token (layers 5 and 23 once, 11 and 17 on each of the
+core's 3 passes) took ~640 us each.
+
+Changes, each checked by the kernel's reference cases (a new case at 24 heads over 8, on a view and a q8 cache, split
+pasts and verify rows; and 8 over 1, which keeps the per-head kernel):
+
+1. A block takes every head of its KV head (2-4 of them), reading each K and V row once instead of once a head.
+2. Decode splits are sized by blocks of KV heads, up to 64 a row instead of 16 (62 at one query over 8 KV heads).
+
+```
+                         full-context call   102K plain   69K plain   102K drafted
+before                        ~640 us          67.6         72.5         60.0
+1 (grouped, 16 splits)         578 us          71.4         77.6         58.6
+1 + 2 (62 splits)              540 us          71.5         81.1         68.4
+```
+
+(tok/s; drafted replies vary in length and acceptance, so their column is noisy.)
+
+A full-context call reads ~223 MB of q8 K and V: 540 us is ~410 GB/s, under half the 3090's. Neither re-reads nor
+the grid size was the limit: the inner loop loads q8 rows 4 bytes a lane and dequantizes every value for three dots,
+so the kernel is bound by its instructions. Next step for long context, if wanted: 8-byte loads and int8 dot products
+on the q8 keys (queries quantized per group), an inner-loop rewrite rather than a launch change.
