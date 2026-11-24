@@ -188,7 +188,8 @@ inference serve -m thinkingmachines/Inkling-2-Mini \
 ```
 
 Beside a GGUF target, the drafter's projections default to Q8_0. With q8 KV the full 262,144-token context fits for
-one sequence; how much fits beside four depends on how much of the card other programs hold.
+one sequence; how much fits beside four depends on how much of the card other programs hold. On CUDA the cache can be
+any of `--pa-cache-type` f8e4m3, q8 or q2 to q6, with K and V at one width (`q8/q4` and other mixes fail the load).
 
 ## LFM2 and LFM2.5
 
