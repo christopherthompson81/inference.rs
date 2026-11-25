@@ -8,6 +8,7 @@
     baseName,
     formatBytes,
     loops,
+    passRange,
     type Slot,
     type SlotId,
   } from "../stores/manager.svelte";
@@ -192,6 +193,27 @@
         <label class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300" title="Load the checkpoint's vision tower too, for pictures: its projector is written beside the load's recipe once, and costs about 0.35 GB of GPU memory">
           <input type="checkbox" class="accent-blue-600" bind:checked={form.vision} onchange={() => managerStore.persistForms()} disabled={activity.busy} />
           Vision
+        </label>
+      {/if}
+      {#if spec.chat && passRange(entry)}
+        {@const range = passRange(entry)!}
+        <label
+          class="flex flex-col gap-1"
+          title={range.max > range.trained
+            ? `Passes of the looped core, ${range.trained} as trained when empty: fewer decode faster (about 2.5 ms a token a pass), more think deeper; this model was trained at 1 to ${range.max}. Applies at the next load`
+            : `Passes of the looped core, ${range.trained} as trained when empty: fewer decode faster, but this model was trained at ${range.trained} only and degrades below it. Applies at the next load`}
+        >
+          <span class="text-[11px] text-gray-500 dark:text-gray-400">Passes</span>
+          <input
+            type="number"
+            min="1"
+            max={range.max}
+            class="w-16 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+            placeholder={String(range.trained)}
+            bind:value={form.loopPasses}
+            onchange={() => managerStore.persistForms()}
+            disabled={activity.busy}
+          />
         </label>
       {/if}
       {#if spec.vad && full}

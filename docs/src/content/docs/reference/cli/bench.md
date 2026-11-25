@@ -71,6 +71,7 @@ inference bench [OPTIONS] [COMMAND]
 | `--control-vector-layer-range <START> <END>` |  | Steer only layers START..=END (0-based) by the control vectors |
 | `--loop-guidance <W>` |  | A looped model's (Inkling 2's) loop guidance strength (LoopCD-Hidden; about 0.2 to 0.3 for generation), or with `--loop-guidance-logits` the adaptive strength's ceiling (0.5 is the authors' recipe) |
 | `--loop-guidance-logits` | `false` | Load a looped model for LoopCD-Logits (the coda also runs on the first pass's output; about 11% slower decode) |
+| `--loop-passes <N>` |  | A looped model's (Inkling 2's) passes of its looped core, its trained count when unset (more than trained only on a varloop model) |
 | `--adapter <ADAPTER>` |  | LoRA adapter alias to benchmark. Omit to benchmark the base model |
 | `--prompt-len <PROMPT_LEN>` | `512` | Input lengths used to measure time to first token. Zero skips TTFT. Accepts comma-separated values for sweeps |
 | `--gen-len <GEN_LEN>` | `128` | Output tokens per decode request. Values below 2 skip decode metrics |

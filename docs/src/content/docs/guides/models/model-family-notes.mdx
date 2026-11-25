@@ -197,6 +197,27 @@ checkpoint in the web UI's model bar. Its projector is written beside the recipe
 picture's encoded rows are kept (the last 32 pictures), so a conversation that sends the same picture again, where the
 prefix cache does not already cover it, skips the tower.
 
+### Loop passes
+
+Inkling 2 runs its middle 12 layers three times. `--loop-passes N` runs them N times instead (`with_loop_passes` in the
+Rust SDK, `loop_passes` on a model manager load, **Passes** beside a looped model in the web UI's model bar). Each pass
+costs about 2.5 ms a token on a 3090 on top of about 2.3 ms for the rest of the stack. Inkling-2-Mini was trained at 3
+passes only and degrades below them (at 2 it loses arithmetic and code); it refuses more than 3.
+[TML-d24-varloop-research](https://huggingface.co/thinkingmachines/TML-d24-varloop-research), the same architecture
+trained at 1 to 5 passes, runs any count:
+
+| passes | decode (tok/s, 3090, recipe C, no drafter) |
+|---|---|
+| 1 | 207 |
+| 2 | 136 |
+| 3 | 103 |
+| 4 | 82 |
+| 5 | 68 |
+
+At 2 passes it scored 152 of 156 on MATH-500 levels 4 and 5 (integer answers, thinking on, a 6144-token thinking
+budget), and 153 with `--loop-guidance-logits --loop-guidance 0.5`. Its authors warn it may behave unpredictably at
+counts other than 3. The drafter follows the run's passes.
+
 ## LFM2 and LFM2.5
 
 LiquidAI LFM2 and LFM2.5 dense and MoE checkpoints are supported. LFM2-VL and LFM2.5-VL are supported for image input.

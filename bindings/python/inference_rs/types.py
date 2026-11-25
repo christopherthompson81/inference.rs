@@ -1825,6 +1825,7 @@ class ManagedLoadRequest:
     control_vectors: ControlVectors | None = None
     device: str | None = None
     loop_guidance_logits: bool | None = None
+    loop_passes: int | None = None
     max_seqs: int | None = None
     mmproj: str | None = None
     model_id: str

@@ -8858,6 +8858,15 @@
             ],
             "description": "For a looped model (Inkling 2), load it for LoopCD-Logits: the layers after the loop also run on the first\npass's output (in KV slots of their own, about 11% slower decode), and `loop_guidance` contrasts the logits."
           },
+          "loop_passes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "For a looped model (Inkling 2), the passes of its looped core; its trained count when unset (more than\ntrained only on a varloop model).",
+            "minimum": 1
+          },
           "max_seqs": {
             "type": [
               "integer",
