@@ -504,6 +504,7 @@ A load: what to load, the id requests will name it by, and how to run it.
 | `control_vectors` | `ControlVectors \| None` | optional |
 | `device` | `str \| None` | optional |
 | `loop_guidance_logits` | `bool \| None` | optional |
+| `loop_passes` | `int \| None` | optional |
 | `max_seqs` | `int \| None` | optional |
 | `mmproj` | `str \| None` | optional |
 | `model_id` | `str` | required |

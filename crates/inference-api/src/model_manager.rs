@@ -137,6 +137,11 @@ pub struct ManagedLoadRequest {
     /// pass's output (in KV slots of their own, about 11% slower decode), and `loop_guidance` contrasts the logits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_guidance_logits: Option<bool>,
+    /// For a looped model (Inkling 2), the passes of its looped core; its trained count when unset (more than
+    /// trained only on a varloop model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
+    pub loop_passes: Option<u64>,
 }
 
 /// A load the manager keeps under its model id: the request its last successful load used, and whether the server
@@ -559,13 +564,11 @@ impl ModelManager {
             chat_template: None,
             jinja_explicit: None,
             max_model_len: None,
-            hf_config_overrides: match request.loop_guidance_logits {
-                Some(true) => Some(
-                    inference_core::HfConfigOverrides::new(json!({ "loop_guidance_logits": true }))
-                        .map_err(|error| ApiError::invalid_request(error.to_string()))?,
-                ),
-                _ => None,
-            },
+            hf_config_overrides: inference_core::HfConfigOverrides::with_loop(
+                None,
+                request.loop_guidance_logits == Some(true),
+                request.loop_passes,
+            ),
             device_layers: None,
             isq: None,
             encoder_cache_memory_bytes: None,

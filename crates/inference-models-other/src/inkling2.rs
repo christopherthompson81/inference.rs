@@ -239,11 +239,18 @@ impl Config {
 
     fn validate(&self) -> Result<()> {
         let lc = &self.loop_config;
+        if let Some(run) = lc
+            .run_passes
+            .filter(|&run| run > lc.num_passes && !lc.is_varloop)
+        {
+            inference_tensor::bail!(
+                "Inkling 2: {run} loop passes, but this model was trained at {} only (a varloop model takes more)",
+                lc.num_passes
+            );
+        }
         let block = self.n_layers_per_attn_res_block;
         if lc.num_passes < 1
-            || lc
-                .run_passes
-                .is_some_and(|run| run < 1 || (run > lc.num_passes && !lc.is_varloop))
+            || lc.run_passes.is_some_and(|run| run < 1)
             || lc.core_start == 0
             || lc.core_start >= lc.core_end
             || lc.core_end > self.num_hidden_layers

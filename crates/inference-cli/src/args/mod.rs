@@ -1276,6 +1276,12 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub loop_guidance_logits: bool,
 
+    /// A looped model's (Inkling 2's) passes of its looped core, its trained count when unset: fewer decode faster and
+    /// more think deeper; above the trained count only on a model trained over several (TML's varloop: 1 to 5)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    #[serde(default)]
+    pub loop_passes: Option<u64>,
+
     /// Keep MoE experts (GGUF or EXL3, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs
     /// a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus
     #[arg(long, value_name = "EXPERTS")]
@@ -1622,19 +1628,20 @@ pub struct BenchRuntimeOptions {
     /// Load a looped model for LoopCD-Logits (the coda also runs on the first pass's output; about 11% slower decode)
     #[arg(long)]
     pub loop_guidance_logits: bool,
+
+    /// A looped model's (Inkling 2's) passes of its looped core, its trained count when unset (more than trained only
+    /// on a varloop model)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub loop_passes: Option<u64>,
 }
 
-/// The HF config overrides with `--loop-guidance-logits` merged in.
-pub fn loop_guidance_overrides(
+/// The HF config overrides with `--loop-guidance-logits` and `--loop-passes` merged in.
+pub fn loop_overrides(
     overrides: Option<inference_api::engine::HfConfigOverrides>,
     logits: bool,
-) -> anyhow::Result<Option<inference_api::engine::HfConfigOverrides>> {
-    if !logits {
-        return Ok(overrides);
-    }
-    let mut value = overrides.map_or_else(|| serde_json::json!({}), |o| o.as_value().clone());
-    value["loop_guidance_logits"] = serde_json::Value::Bool(true);
-    Ok(Some(inference_api::engine::HfConfigOverrides::new(value)?))
+    passes: Option<u64>,
+) -> Option<inference_api::engine::HfConfigOverrides> {
+    inference_api::engine::HfConfigOverrides::with_loop(overrides, logits, passes)
 }
 
 /// `--control-vector` values, the layer range and `--loop-guidance` as the engine's control vectors: `FILE:SCALE`
@@ -1831,6 +1838,7 @@ impl Default for RuntimeOptions {
             control_vector_layer_range: None,
             loop_guidance: None,
             loop_guidance_logits: false,
+            loop_passes: None,
             moe_expert_cache: None,
             max_prefill_chunk_tokens: None,
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),

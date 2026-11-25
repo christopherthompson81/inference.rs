@@ -123,6 +123,10 @@ pub struct InventoryModel {
     /// A model directory that loads through a recipe (Inkling 2's) and holds a vision tower, which a load brings in
     /// with `vision`.
     pub recipe_vision: bool,
+    /// A looped model's (Inkling 2's) trained passes of its looped core, which a load runs unless told otherwise.
+    pub loop_passes: Option<u64>,
+    /// A looped model trained over several pass counts (TML's varloop), so a load may run more than `loop_passes`.
+    pub loop_varying: bool,
     /// Why it could not be fully inspected.
     pub error: Option<String>,
 }
@@ -468,6 +472,8 @@ struct GgufFacts {
     imatrix: bool,
     dominant_dtype: Option<String>,
     kv_profile: Option<String>,
+    loop_passes: Option<u64>,
+    loop_varying: bool,
 }
 
 // a GGUF's shape as the loaded model reports it: block_count counts the MTP layers, a hybrid may list KV heads per
@@ -557,6 +563,14 @@ fn gguf_facts(shards: &[PathBuf]) -> Result<GgufFacts> {
         .and_then(|arch| gguf_kv_fingerprint(metadata, arch))
         .and_then(|fingerprint| kv_profile_name(&fingerprint))
         .map(str::to_string);
+    let arch_key = |key: &str| {
+        architecture
+            .as_deref()
+            .and_then(|arch| metadata.get(&format!("{arch}.{key}")))
+    };
+    let loop_passes = arch_key("loop.count").and_then(|value| value.to_u64().ok());
+    let loop_varying =
+        arch_key("loop.varying").is_some_and(|value| value.to_bool().unwrap_or(false));
     Ok(GgufFacts {
         kv_profile,
         name: meta_string(metadata, "general.name"),
@@ -567,6 +581,8 @@ fn gguf_facts(shards: &[PathBuf]) -> Result<GgufFacts> {
         projector,
         imatrix,
         dominant_dtype,
+        loop_passes,
+        loop_varying,
     })
 }
 
@@ -678,6 +694,8 @@ fn gguf_models_in(
             model.context_length = facts.context_length;
             model.base_model = facts.base_model;
             model.kv_profile = facts.kv_profile;
+            model.loop_passes = facts.loop_passes;
+            model.loop_varying = facts.loop_varying;
             model
         })
         .collect()
@@ -739,6 +757,12 @@ fn dir_model(dir: &Path, origin: Origin<'_>) -> InventoryModel {
                 .is_file();
         model.recipe_vision =
             config["vision_config"].is_object() && inference_core::is_inkling2_checkpoint(dir);
+        let loop_config = match &config["text_config"]["loop_config"] {
+            serde_json::Value::Null => &config["loop_config"],
+            nested => nested,
+        };
+        model.loop_passes = loop_config["num_passes"].as_u64();
+        model.loop_varying = loop_config["is_varloop"].as_bool().unwrap_or(false);
         if model
             .architecture
             .as_deref()
@@ -788,6 +812,8 @@ fn base_model_entry(path: PathBuf, format: ModelFormat, origin: Origin<'_>) -> I
         projectors: Vec::new(),
         carries_drafter: false,
         recipe_vision: false,
+        loop_passes: None,
+        loop_varying: false,
         error: None,
     }
 }
@@ -1019,6 +1045,31 @@ mod tests {
         });
         assert!(by_name(&scan, "with-drafter").carries_drafter);
         assert!(!by_name(&scan, "without-drafter").carries_drafter);
+    }
+
+    #[test]
+    fn a_looped_checkpoint_reports_its_passes_and_whether_they_vary() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, varloop) in [("fixed", None), ("varloop", Some(true))] {
+            let mut loop_config =
+                serde_json::json!({"core_start": 6, "core_end": 18, "num_passes": 3});
+            if let Some(varloop) = varloop {
+                loop_config["is_varloop"] = varloop.into();
+            }
+            let config = serde_json::json!({"architectures": ["Inkling2LoopForConditionalGeneration"],
+                "text_config": {"model_type": "inkling2_loop_text", "loop_config": loop_config}});
+            let checkpoint = dir.path().join(name);
+            fs::create_dir(&checkpoint).unwrap();
+            fs::write(checkpoint.join("config.json"), config.to_string()).unwrap();
+            fs::write(checkpoint.join("model.safetensors"), b"").unwrap();
+        }
+        let scan = scan_models(&ScanRequest {
+            folders: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        });
+        let (fixed, varloop) = (by_name(&scan, "fixed"), by_name(&scan, "varloop"));
+        assert_eq!((fixed.loop_passes, fixed.loop_varying), (Some(3), false));
+        assert_eq!((varloop.loop_passes, varloop.loop_varying), (Some(3), true));
     }
 
     #[test]
