@@ -293,6 +293,7 @@ A mesh refined under an image with Hi3D v1.0; the job takes the image and, optio
 | `seed` | `int \| None` | optional |
 | `steps` | `int \| None` | optional |
 | `texture` | `bool \| None` | optional |
+| `up_axis` | `str \| None` | optional |
 
 
 ## `SceneKind`
@@ -332,6 +333,7 @@ A mesh painted from an image with TRELLIS.2's texturing pipeline; the job takes 
 | `texture_sampler` | `Trellis2Sampler \| None` | optional |
 | `texture_size` | `int \| None` | optional |
 | `unwrap` | `bool \| None` | optional |
+| `up_axis` | `str \| None` | optional |
 
 
 ## `Trellis2Sampler`

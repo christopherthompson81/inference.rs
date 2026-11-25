@@ -11,7 +11,7 @@ use inference_recon::hi3d::pipeline::{
 };
 use inference_recon::trellis2::glb::{Pbr, to_glb, y_up};
 use inference_recon::trellis2::mesh::Mesh;
-use inference_recon::trellis2::mesh_io::read_mesh;
+use inference_recon::trellis2::mesh_io::read_mesh_y_up;
 use inference_recon::trellis2::pipeline::{self as trellis2, Variant};
 use inference_tensor::Device;
 use serde::Serialize;
@@ -20,6 +20,7 @@ use crate::image_to_3d::{GLB_FILE, MESH_FILE, META_FILE, fetch_files};
 pub use inference_recon::hi3d::pipeline::{RESOLUTIONS, Settings};
 pub use inference_recon::hi3d::schedule::STEPS;
 pub use inference_recon::progress::{NoProgress, Progress};
+pub use inference_recon::trellis2::mesh::UpAxis;
 
 /// What Hi3D conditions on: the cut-out object framed on white
 pub const CONDITION_FILE: &str = "condition.png";
@@ -59,6 +60,8 @@ pub struct RefineMeshOptions {
     pub remove_background: bool,
     /// Paint the refined mesh with TRELLIS.2's texturing at its own resolution
     pub texture: Option<crate::texture_mesh::TextureMeshOptions>,
+    /// The given mesh's up axis; unset, a PLY's recorded one, else y
+    pub up: Option<UpAxis>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -197,7 +200,13 @@ pub fn refine_mesh_on(
     progress.preview("what Hi3D sees", &condition_path);
 
     let (coarse, generated) = match mesh {
-        Some(path) => (read_mesh(path).map_err(|e| anyhow::anyhow!(e))?.mesh, false),
+        Some(path) => (
+            read_mesh_y_up(path, options.up)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .0
+                .mesh,
+            false,
+        ),
         None => {
             let Some(trellis) = &models.coarse else {
                 anyhow::bail!("no coarse mesh given and TRELLIS.2 not loaded to make one");
@@ -220,7 +229,7 @@ pub fn refine_mesh_on(
                 vertices: shape.vertices.iter().map(|&v| y_up(v)).collect(),
                 faces: shape.faces,
             };
-            std::fs::write(out_dir.join(COARSE_FILE), mesh.to_ply())?;
+            std::fs::write(out_dir.join(COARSE_FILE), mesh.to_ply(UpAxis::Y))?;
             (mesh, true)
         }
     };
@@ -235,7 +244,7 @@ pub fn refine_mesh_on(
     )?;
     progress.stage("export", 0);
     let mesh_path = out_dir.join(MESH_FILE);
-    std::fs::write(&mesh_path, refined.mesh.to_ply())?;
+    std::fs::write(&mesh_path, refined.mesh.to_ply(UpAxis::Y))?;
     let surface = vec![SURFACE; refined.mesh.vertices.len()];
     std::fs::write(
         out_dir.join(GLB_FILE),
@@ -253,6 +262,7 @@ pub fn refine_mesh_on(
                 &dir,
                 &crate::texture_mesh::TextureMeshOptions {
                     remove_background: false,
+                    up: Some(UpAxis::Y),
                     ..*texture_options
                 },
                 progress,

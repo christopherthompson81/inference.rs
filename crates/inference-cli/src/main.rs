@@ -558,6 +558,7 @@ async fn main() -> Result<()> {
             dinov3,
             birefnet,
             remove_background,
+            up,
             cpu,
         } => {
             use inference_jobs::image_to_3d::SamplerChoice;
@@ -587,6 +588,7 @@ async fn main() -> Result<()> {
                 texture_size,
                 unwrap,
                 remove_background,
+                up,
             };
             let birefnet = needs_background_removal(&image, remove_background)?.then_some(birefnet);
             let models = fetch_models(trellis2, dinov3, birefnet, &NoProgress)?;
@@ -633,6 +635,7 @@ async fn main() -> Result<()> {
             dinov3,
             birefnet,
             remove_background,
+            up,
             cpu,
         } => {
             use inference_jobs::refine_mesh::{
@@ -655,6 +658,7 @@ async fn main() -> Result<()> {
                 },
                 remove_background,
                 texture: texture.then(TextureMeshOptions::default),
+                up,
             };
             let jobs = inference_jobs::JobsConfig {
                 hi3d,

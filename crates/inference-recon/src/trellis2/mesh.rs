@@ -67,12 +67,45 @@ pub fn dual_grid_mesh(
     Mesh { vertices, faces }
 }
 
+/// Which axis a mesh file's vertices hold up: glTF's y, or TRELLIS.2's z.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpAxis {
+    Y,
+    Z,
+}
+
+impl UpAxis {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "y" => Some(Self::Y),
+            "z" => Some(Self::Z),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Y => "y",
+            Self::Z => "z",
+        }
+    }
+
+    /// The PLY header line that records it, which [`super::mesh_io::read_mesh`] honors.
+    pub fn ply_comment(self) -> String {
+        format!("comment {PLY_UP_COMMENT} {}\n", self.name())
+    }
+}
+
+/// The PLY comment word ahead of a file's up axis (`comment up z`).
+pub const PLY_UP_COMMENT: &str = "up";
+
 impl Mesh {
-    /// A binary little-endian PLY of the vertices and triangles.
-    pub fn to_ply(&self) -> Vec<u8> {
+    /// A binary little-endian PLY of the vertices and triangles, its header recording which axis is up.
+    pub fn to_ply(&self, up: UpAxis) -> Vec<u8> {
         let mut out = format!(
-            "ply\nformat binary_little_endian 1.0\nelement vertex {}\nproperty float x\nproperty float y\n\
+            "ply\nformat binary_little_endian 1.0\n{}element vertex {}\nproperty float x\nproperty float y\n\
              property float z\nelement face {}\nproperty list uchar uint vertex_indices\nend_header\n",
+            up.ply_comment(),
             self.vertices.len(),
             self.faces.len()
         )

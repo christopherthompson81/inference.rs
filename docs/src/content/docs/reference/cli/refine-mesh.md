@@ -30,5 +30,6 @@ inference refine-mesh [OPTIONS] --image <IMAGE> --out <OUT>
 | `--dinov3 <DINOV3>` |  | The DINOv3 ViT-L/16 folder (coarse mesh, texturing); fetched from facebook/dinov3-vitl16-pretrain-lvd1689m (gated) when unset |
 | `--birefnet <BIREFNET>` |  | The BiRefNet folder; fetched from ZhengPeng7/BiRefNet when unset and the background needs removing |
 | `--remove-background` | `false` | Remove the background even when the image has transparency of its own |
+| `--up <UP>` |  | The mesh's up axis, y (glTF's) or z (TRELLIS.2's PLYs); unset, a PLY's recorded one (`comment up z`), else y |
 | `--cpu` | `false` | Run on the CPU (very slow) instead of the first CUDA device |
 

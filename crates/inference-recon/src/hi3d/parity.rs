@@ -425,7 +425,7 @@ fn a_refinement_runs_end_to_end() -> Result<()> {
     );
     std::fs::write(
         PathBuf::from(out).join(format!("refined_{resolution}.ply")),
-        refined.mesh.to_ply(),
+        refined.mesh.to_ply(crate::trellis2::mesh::UpAxis::Y),
     )?;
     Ok(())
 }

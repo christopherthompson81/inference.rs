@@ -351,8 +351,9 @@ pub fn voxel_ply(voxels: &[[usize; 3]]) -> Vec<u8> {
         }
     }
     let mut out = format!(
-        "ply\nformat binary_little_endian 1.0\nelement vertex {}\nproperty float x\nproperty float y\n\
+        "ply\nformat binary_little_endian 1.0\n{}element vertex {}\nproperty float x\nproperty float y\n\
          property float z\nelement face {}\nproperty list uchar uint vertex_indices\nend_header\n",
+        crate::trellis2::mesh::UpAxis::Z.ply_comment(),
         vertices.len(),
         faces.len()
     )

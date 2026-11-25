@@ -639,6 +639,9 @@ pub struct TextureMeshJob {
     /// Unwrap the mesh even when it has texture coordinates of its own
     #[serde(default)]
     pub unwrap: Option<bool>,
+    /// The mesh's up axis, "y" (glTF's) or "z" (TRELLIS.2's PLYs); unset, a PLY's recorded one, else y
+    #[serde(default)]
+    pub up_axis: Option<String>,
     /// Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always
     /// has it removed)
     #[serde(default)]
@@ -696,6 +699,9 @@ pub struct RefineMeshJob {
     /// Paint the refined mesh with TRELLIS.2's texturing (baked textures)
     #[serde(default)]
     pub texture: Option<bool>,
+    /// The mesh's up axis, "y" (glTF's) or "z" (TRELLIS.2's PLYs); unset, a PLY's recorded one, else y
+    #[serde(default)]
+    pub up_axis: Option<String>,
     /// How much it may displace to run, in place of the server's setting
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -1993,6 +1999,7 @@ fn texture_mesh_work(
             .map_or(defaults.texture_size, |s| s as usize),
         unwrap: job.unwrap.unwrap_or(false),
         remove_background: job.remove_background.unwrap_or(false),
+        up: up_axis(job.up_axis.as_deref())?,
     };
     // the job's mesh and image, told apart by extension
     let split = |inputs: Vec<PathBuf>| -> anyhow::Result<(PathBuf, PathBuf)> {
@@ -2039,6 +2046,16 @@ fn texture_mesh_work(
     Ok((prepare, work))
 }
 
+// a mesh job's `up_axis`: "y", "z" or unset
+fn up_axis(name: Option<&str>) -> Result<Option<crate::refine_mesh::UpAxis>, ApiError> {
+    name.map(|n| {
+        crate::refine_mesh::UpAxis::parse(n).ok_or_else(|| {
+            ApiError::invalid_request(format!("up_axis must be \"y\" or \"z\", not {n:?}"))
+        })
+    })
+    .transpose()
+}
+
 fn refine_mesh_work(
     config: &JobsConfig,
     job: RefineMeshJob,
@@ -2068,6 +2085,7 @@ fn refine_mesh_work(
         },
         remove_background: job.remove_background.unwrap_or(false),
         texture: texture.then(TextureMeshOptions::default),
+        up: up_axis(job.up_axis.as_deref())?,
     };
     // the job's image, and its mesh when it has one, told apart by extension
     let split = |inputs: Vec<PathBuf>| -> anyhow::Result<(Option<PathBuf>, PathBuf)> {

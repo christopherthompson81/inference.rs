@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use inference_recon::trellis2::bake;
 use inference_recon::trellis2::glb::to_textured_glb;
-use inference_recon::trellis2::mesh_io::read_mesh;
+use inference_recon::trellis2::mesh::UpAxis;
+use inference_recon::trellis2::mesh_io::read_mesh_y_up;
 use inference_recon::trellis2::pipeline::Trellis2Paths;
 use inference_recon::trellis2::texturing::{self, fit_mesh, paint};
 use inference_tensor::Device;
@@ -39,6 +40,8 @@ pub struct TextureMeshOptions {
     pub unwrap: bool,
     /// Remove the background even when the image has transparency of its own
     pub remove_background: bool,
+    /// The mesh's up axis; unset, a PLY's recorded one, else y
+    pub up: Option<UpAxis>,
 }
 
 impl Default for TextureMeshOptions {
@@ -48,6 +51,7 @@ impl Default for TextureMeshOptions {
             texture_size: bake::TEXTURE_SIZE,
             unwrap: false,
             remove_background: false,
+            up: None,
         }
     }
 }
@@ -119,7 +123,7 @@ pub fn texture_mesh_on(
 ) -> anyhow::Result<TextureMeshReport> {
     let start = Instant::now();
     std::fs::create_dir_all(out_dir)?;
-    let read = read_mesh(mesh).map_err(|e| anyhow::anyhow!(e))?;
+    let (read, _) = read_mesh_y_up(mesh, options.up).map_err(|e| anyhow::anyhow!(e))?;
     let own_uvs = read.uvs.is_some() && !options.unwrap;
     let uvs = read.uvs.filter(|_| !options.unwrap);
     let mut fitted = read.mesh;

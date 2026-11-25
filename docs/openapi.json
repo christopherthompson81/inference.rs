@@ -13788,6 +13788,13 @@
               "null"
             ],
             "description": "Paint the refined mesh with TRELLIS.2's texturing (baked textures)"
+          },
+          "up_axis": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The mesh's up axis, \"y\" (glTF's) or \"z\" (TRELLIS.2's PLYs); unset, a PLY's recorded one, else y"
           }
         }
       },
@@ -16369,6 +16376,13 @@
               "null"
             ],
             "description": "Unwrap the mesh even when it has texture coordinates of its own"
+          },
+          "up_axis": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The mesh's up axis, \"y\" (glTF's) or \"z\" (TRELLIS.2's PLYs); unset, a PLY's recorded one, else y"
           }
         }
       },

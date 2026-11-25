@@ -222,6 +222,7 @@ export interface TextureMeshOptions {
   texture_size: number | null;
   unwrap: boolean | null;
   remove_background: boolean | null;
+  up_axis: "y" | "z" | null;
   texture_sampler: Trellis2Sampler | null;
   placement: Placement | null;
 }
@@ -241,6 +242,7 @@ export interface RefineMeshOptions {
   steps: number | null;
   remove_background: boolean | null;
   texture: boolean | null;
+  up_axis: "y" | "z" | null;
   placement: Placement | null;
 }
 
