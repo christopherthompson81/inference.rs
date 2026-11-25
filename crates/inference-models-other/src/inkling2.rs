@@ -38,8 +38,8 @@ use crate::{
 serde_default_fn!(usize, default_max_position_embeddings, 1_048_576);
 
 // the unweighted norms of the depth mix and the loop controllers
-// the one quantized cache width the CUDA attention reads
-const QUANT_CACHE_BITS: u32 = 8;
+// the quantized cache widths the CUDA attention reads, K and V alike
+const QUANT_CACHE_BITS: [u32; 6] = [2, 3, 4, 5, 6, 8];
 const UNIT_NORM_EPS: f64 = 1e-6;
 // the L2 clip's guard against a zero norm
 const CLIP_EPS: f64 = 1e-6;
@@ -1664,16 +1664,17 @@ impl Model {
         let layer_devices = (0..2 * slots)
             .map(|i| device_of(i % slots))
             .collect::<Vec<_>>();
-        // the CUDA attention reads q8 rows only; other widths would load and then fail every request
+        // the CUDA attention reads one width for K and V; others would load and then fail every request
         if let Some(PagedKvLayout {
             cache_type: PagedCacheType::Quant { k, v },
             ..
         }) = normal_loading_metadata.paged_kv
             && normal_loading_metadata.real_device.is_cuda()
-            && (k, v) != (QUANT_CACHE_BITS, QUANT_CACHE_BITS)
+            && (k != v || !QUANT_CACHE_BITS.contains(&k))
         {
             inference_tensor::bail!(
-                "Inkling 2 on CUDA reads an auto, f8e4m3 or q8 paged cache, not q{k}/q{v}; pass --pa-cache-type q8"
+                "Inkling 2 on CUDA reads an auto, f8e4m3 or quantized paged cache with K and V at one width (q2..q6 \
+                 or q8), not q{k}/q{v}"
             );
         }
         // on CUDA a sliding slot keeps its window in a ring beside the convolution states, after them in the cache

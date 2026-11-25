@@ -439,6 +439,7 @@ inference_tensor::kernel_library! {
             k_cache: *const c_void,
             v_cache: *const c_void,
             cache_dtype: i32,
+            cache_bits: i32,
             tables: *const u32,
             table_stride: i64,
             table_width: i32,

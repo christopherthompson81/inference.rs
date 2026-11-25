@@ -96,27 +96,72 @@ struct Q8 {
 };
 constexpr int Q8_GROUP = 32;
 constexpr float Q8_MID = 128.0f;
+// a packed cache's row (kv_quant at 2..6 bits, the width a launch's `bits`): each 8 values take `bits` bytes, value v
+// at bit v * bits of them (little-endian), (q + 0.5 - 2^(bits - 1)) / 2^(bits - 1) times its group's f16 scale; the
+// scales after the HD * bits / 8 data bytes, rotated as q8's
+struct Qp {
+  uint8_t byte;
+};
+constexpr int PACK_VALUES = 8;
+constexpr int MIN_PACKED_BITS = 2;
+constexpr int MAX_PACKED_BITS = 6;
 
-// a row's length in its elements: a q8 row carries its scales after its data
 template <typename T>
-__device__ __forceinline__ constexpr int row_len(int hd) {
-  return hd;
+constexpr bool quantized() {
+  return std::is_same<T, Q8>::value || std::is_same<T, Qp>::value;
 }
-template <>
-__device__ __forceinline__ constexpr int row_len<Q8>(int hd) {
-  return hd + hd / Q8_GROUP * 2;
+
+// a row's length in its elements (bytes for the quantized rows, whose scales follow their data)
+template <typename T>
+__device__ __forceinline__ constexpr int row_len(int hd, int bits) {
+  return std::is_same<T, Q8>::value ? hd + hd / Q8_GROUP * 2
+         : std::is_same<T, Qp>::value ? hd * bits / 8 + hd / Q8_GROUP * 2
+                                       : hd;
+}
+
+// a quantized row's group scales
+template <typename T>
+__device__ __forceinline__ const __half* scales_of(const T* row, int hd, int bits) {
+  return reinterpret_cast<const __half*>(row + hd * bits / 8);
+}
+
+// the midpoint of a width's grid, 2^(bits - 1)
+__device__ __forceinline__ float grid_mid(int bits) { return float(1 << (bits - 1)); }
+
+// the 8 values of a packed row's chunk `chunk`, its `bits` bytes in the low bits
+__device__ __forceinline__ uint64_t packed_chunk(const Qp* row, int chunk, int bits) {
+  const uint8_t* p = &row[chunk * bits].byte;
+  uint64_t v = 0;
+  for (int b = 0; b < bits; b++) v |= uint64_t(p[b]) << (8 * b);
+  return v;
+}
+
+// values off..off + 3 of a packed row (off a multiple of 4) as 4 fields of `bits` bits in the low bits
+__device__ __forceinline__ uint32_t packed4(const Qp* row, int off, int bits) {
+  return uint32_t(packed_chunk(row, off / PACK_VALUES, bits) >> ((off % PACK_VALUES) * bits));
 }
 
 // value i of a row of HD values
 template <int HD, typename T>
-__device__ __forceinline__ float load_at(const T* row, int64_t i) {
+__device__ __forceinline__ float load_at(const T* row, int64_t i, int bits) {
   return load(row, i);
 }
 template <int HD>
-__device__ __forceinline__ float load_at(const Q8* row, int64_t i) {
+__device__ __forceinline__ float load_at(const Q8* row, int64_t i, int bits) {
   const float scale = __half2float(reinterpret_cast<const __half*>(row + HD)[i / Q8_GROUP]);
   return (float(row[i].bits) + 0.5f - Q8_MID) * (scale / Q8_MID);
 }
+template <int HD>
+__device__ __forceinline__ float load_at(const Qp* row, int64_t i, int bits) {
+  const float mid = grid_mid(bits);
+  const float scale = __half2float(scales_of(row, HD, bits)[i / Q8_GROUP]);
+  const int q = int((packed_chunk(row, int(i) / PACK_VALUES, bits) >> ((i % PACK_VALUES) * bits)) & ((1u << bits) - 1));
+  return (float(q) + 0.5f - mid) * (scale / mid);
+}
+
+// a quantized row's values off..off + 3 less the grid's midpoint (the +0.5 left to the caller), exact
+template <typename T>
+__device__ __forceinline__ void centered4(const T* row, int off, int bits, float* o);
 
 // a lane's N values (N a multiple of 4), 4 a load
 template <int N, typename T>
@@ -156,6 +201,21 @@ __device__ __forceinline__ float q8_centered(uint32_t raw, int byte) {
   return __uint_as_float(__byte_perm(raw, F32_TWO23_BITS, 0x7540 | byte)) - Q8_F32_OFFSET;
 }
 
+template <>
+__device__ __forceinline__ void centered4<Q8>(const Q8* row, int off, int bits, float* o) {
+  const uint32_t raw = *reinterpret_cast<const uint32_t*>(row + off);
+#pragma unroll
+  for (int b = 0; b < 4; b++) o[b] = q8_centered(raw, b);
+}
+template <>
+__device__ __forceinline__ void centered4<Qp>(const Qp* row, int off, int bits, float* o) {
+  const uint32_t raw = packed4(row, off, bits);
+  const uint32_t top = (1u << bits) - 1;
+  const float mid = grid_mid(bits);
+#pragma unroll
+  for (int b = 0; b < 4; b++) o[b] = float((raw >> (b * bits)) & top) - mid;
+}
+
 // 4 values of a row in one load, as they sit in the cache
 template <int BYTES>
 struct RawOf;
@@ -186,8 +246,7 @@ __device__ __forceinline__ void stage4(const Raw4<T>& raw, __half2& lo, __half2&
 // a byte b under a high byte of 0x64 is the f16 1024 + b; less 1152, times 2, plus 1 is 2b - 255, each step exact
 constexpr unsigned Q8_HALF_HIGH = 0x64646464u;
 constexpr float Q8_HALF_OFFSET = 1152.0f;
-// value = (2b - 255) x scale / Q8_STAGED_DIV
-constexpr float Q8_STAGED_DIV = 2.0f * Q8_MID;
+// value = (2b - 255) x scale / (2 x 128)
 // 4 loaded values of a 32-value group (8 lanes) as f16 pairs under a power of 2 of the group's largest, which it
 // returns as the group's scale: f16 keeps small and large values' bits
 template <typename T>
@@ -215,6 +274,28 @@ __device__ __forceinline__ void stage4<Q8>(const uint32_t& raw, __half2& lo, __h
   hi = __hfma2(__hsub2(*reinterpret_cast<const __half2*>(&b), off), two, one);
 }
 
+// 4 values of a row at value d as the verify kernel stages them: as they sit, a packed row's as 4 fields
+template <typename T>
+__device__ __forceinline__ Raw4<T> fetch4(const T* row, int d, int bits) {
+  return *reinterpret_cast<const Raw4<T>*>(row + d);
+}
+__device__ __forceinline__ uint32_t fetch4(const Qp* row, int d, int bits) { return packed4(row, d, bits); }
+
+// a quantized row's 4 fetched values as f16 pairs of the exact integers 2q - (2^bits - 1), the scale / 2^bits after
+template <typename T>
+__device__ __forceinline__ void stage_quant(const uint32_t& raw, int bits, __half2& lo, __half2& hi) {
+  if constexpr (std::is_same<T, Q8>::value) {
+    stage4<Q8>(raw, lo, hi);
+  } else {
+    const uint32_t top = (1u << bits) - 1;
+    float v[4];
+#pragma unroll
+    for (int r = 0; r < 4; r++) v[r] = float(2 * int((raw >> (r * bits)) & top) - int(top));
+    lo = __floats2half2_rn(v[0], v[1]);
+    hi = __floats2half2_rn(v[2], v[3]);
+  }
+}
+
 // where a (batch, kv head, key)'s row of K or V sits
 template <typename T>
 struct Kv {
@@ -231,6 +312,8 @@ struct Kv {
   // a ring of this many blocks a sequence (its table row holds the ring's first block): key block k sits at block
   // k % ring, which only a window shorter than the ring reads back
   int ring;
+  // a quantized cache's width (8 for Q8, 2..6 for Qp), else unused
+  int bits;
 
   __device__ __forceinline__ const T* row(int b, int h, int key, int hd) const {
     if (tables) {
@@ -357,8 +440,8 @@ __global__ void prefill_kernel(Args<T> a) {
       const int d = e % HD;
       const int key = base + j;
       const bool in = key < keys;
-      kt[j][d] = in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD)), d) : 0.0f;
-      vt[j][d] = in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD)), d) : 0.0f;
+      kt[j][d] = in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits)), d, a.k.bits) : 0.0f;
+      vt[j][d] = in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits)), d, a.v.bits) : 0.0f;
     }
     __syncthreads();
     if (!valid) continue;
@@ -481,8 +564,8 @@ __global__ void __launch_bounds__(MMA_WARPS * WARP) prefill_mma_kernel(Args<T> a
       const int d = e % HD;
       const int key = base + j;
       const bool in = key < keys;
-      ks[j][d] = __float2half(in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD)), d) : 0.0f);
-      vt[d][j] = __float2half(in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD)), d) : 0.0f);
+      ks[j][d] = __float2half(in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits)), d, a.k.bits) : 0.0f);
+      vt[d][j] = __float2half(in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits)), d, a.v.bits) : 0.0f);
     }
     __syncthreads();
     float sc[SN][4];
@@ -627,7 +710,7 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
   const int64_t row0 = (int64_t(batch) * a.t + i) * a.heads + head0;
   // a q8 cache's values read as b - 128 times their group's scale / 128: K's +0.5 comes back through the lane's sum of
   // q, V's through a sum of the weights (c) every value of the lane's group shares
-  constexpr bool QUANT = std::is_same<T, Q8>::value;
+  constexpr bool QUANT = quantized<T>();
   float qr[G][PER], qsum[G];
 #pragma unroll
   for (int g = 0; g < G; g++) {
@@ -666,25 +749,20 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
 #pragma unroll
     for (int k = 0; k < DECODE_KEYS; k++) {
       const int key = min(base + group * DECODE_KEYS + k, last);
-      const T* krow = a.k.row(batch, kvh, key, row_len<T>(HD));
-      const T* vrow = a.v.row(batch, kvh, key, row_len<T>(HD));
+      const T* krow = a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits));
+      const T* vrow = a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits));
       float kv[PER];
       float kscale = 1.0f;
       vscale[k] = 1.0f;
       if constexpr (QUANT) {
 #pragma unroll
         for (int w = 0; w < PER / 4; w++) {
-          const uint32_t kraw = *reinterpret_cast<const uint32_t*>(krow + j * PER + 4 * w);
-          const uint32_t vraw = *reinterpret_cast<const uint32_t*>(vrow + j * PER + 4 * w);
-#pragma unroll
-          for (int b = 0; b < 4; b++) {
-            kv[4 * w + b] = q8_centered(kraw, b);
-            vr[k][4 * w + b] = q8_centered(vraw, b);
-          }
+          centered4<T>(krow, j * PER + 4 * w, a.k.bits, kv + 4 * w);
+          centered4<T>(vrow, j * PER + 4 * w, a.v.bits, vr[k] + 4 * w);
         }
         const int grp = j * PER / Q8_GROUP;
-        kscale = __half2float(reinterpret_cast<const __half*>(krow + HD)[grp]) / Q8_MID;
-        vscale[k] = __half2float(reinterpret_cast<const __half*>(vrow + HD)[grp]) / Q8_MID;
+        kscale = __half2float(scales_of(krow, HD, a.k.bits)[grp]) / grid_mid(a.k.bits);
+        vscale[k] = __half2float(scales_of(vrow, HD, a.v.bits)[grp]) / grid_mid(a.v.bits);
       } else {
         load_span_at<HD, PER>(krow, j * PER, kv);
         load_span_at<HD, PER>(vrow, j * PER, vr[k]);
@@ -826,7 +904,7 @@ __global__ void __launch_bounds__(DECODE_WARPS * WARP) decode_kernel(Args<T> a) 
 template <int R, typename T>
 __global__ void __launch_bounds__(VERIFY_WARPS * WARP) verify_mma_kernel(Args<T> a) {
 #if __CUDA_ARCH__ >= 800
-  constexpr bool QUANT = std::is_same<T, Q8>::value;
+  constexpr bool QUANT = quantized<T>();
   constexpr int HD = R * WARP;
   constexpr int KSTEPS = HD / 16;
   constexpr int GROUPS = HD / Q8_GROUP;
@@ -942,7 +1020,7 @@ __global__ void __launch_bounds__(VERIFY_WARPS * WARP) verify_mma_kernel(Args<T>
     const int j = threadIdx.x % VERIFY_KEYS;
     const int key = min(base + j, s_hi);
     const Kv<T>& kv = threadIdx.x < VERIFY_KEYS ? a.k : a.v;
-    rows[buf][threadIdx.x / VERIFY_KEYS][j] = kv.row(batch, kvh, key, row_len<T>(HD));
+    rows[buf][threadIdx.x / VERIFY_KEYS][j] = kv.row(batch, kvh, key, row_len<T>(HD, kv.bits));
   };
   static_assert(VERIFY_WARPS * WARP >= 2 * VERIFY_KEYS, "a thread a K or V row address");
   Raw4<T> kraw[CHUNKS], vraw[CHUNKS];
@@ -953,16 +1031,17 @@ __global__ void __launch_bounds__(VERIFY_WARPS * WARP) verify_mma_kernel(Args<T>
       const int e = threadIdx.x + c * VERIFY_WARPS * WARP;
       const int j = e / (HD / 4);
       const int d = e % (HD / 4) * 4;
-      kraw[c] = *reinterpret_cast<const Raw4<T>*>(rows[buf][0][j] + d);
-      vraw[c] = *reinterpret_cast<const Raw4<T>*>(rows[buf][1][j] + d);
+      kraw[c] = fetch4(rows[buf][0][j], d, a.k.bits);
+      vraw[c] = fetch4(rows[buf][1][j], d, a.v.bits);
     }
     if constexpr (QUANT) {
 #pragma unroll
       for (int c = 0; c < SCALES; c++) {
         const int e = min(int(threadIdx.x) + c * VERIFY_WARPS * WARP, VERIFY_KEYS * GROUPS - 1);
         const auto scale = [&](int kv) {
-          return __half2float(reinterpret_cast<const __half*>(rows[buf][kv][e / GROUPS] + HD)[e % GROUPS]) /
-                 Q8_STAGED_DIV;
+          const int bits = kv == 0 ? a.k.bits : a.v.bits;
+          return __half2float(scales_of(rows[buf][kv][e / GROUPS], HD, bits)[e % GROUPS]) /
+                 (2.0f * grid_mid(bits));
         };
         kscale[c] = scale(0);
         vscale[c] = scale(1);
@@ -983,8 +1062,8 @@ __global__ void __launch_bounds__(VERIFY_WARPS * WARP) verify_mma_kernel(Args<T>
       const int d = e % (HD / 4) * 4;
       __half2 k01, k23, v01, v23;
       if constexpr (QUANT) {
-        stage4<T>(kraw[c], k01, k23);
-        stage4<T>(vraw[c], v01, v23);
+        stage_quant<T>(kraw[c], a.k.bits, k01, k23);
+        stage_quant<T>(vraw[c], a.v.bits, v01, v23);
       } else {
         const float kup = stage4_scaled<T>(kraw[c], k01, k23);
         const float vup = stage4_scaled<T>(vraw[c], v01, v23);
@@ -1287,6 +1366,17 @@ int dispatch(const Args<T>& a, int batch, int head_dim, bool decode, cudaStream_
   return static_cast<int>(err);
 }
 
+// a packed cache's head sizes: the quantized row format's (a multiple of 64)
+int dispatch_packed(const Args<Qp>& a, int batch, int head_dim, bool decode, cudaStream_t s) {
+  cudaError_t err;
+  switch (head_dim) {
+    case 64: err = launch<2>(a, batch, decode, s); break;
+    case 128: err = launch<4>(a, batch, decode, s); break;
+    default: return -1;
+  }
+  return static_cast<int>(err);
+}
+
 }  // namespace
 
 // the shapes and positions every launch takes
@@ -1338,30 +1428,34 @@ extern "C" int biased_attention_f32(const float* q, const float* k, const float*
 // K/V from a paged cache [blocks, kv_heads, block_size, head_dim] through block tables (batch, table_width) u32, or
 // with `ring` a ring of that many blocks a sequence from each table row's first block;
 // cache_dtype 0 f32, 1 f16, 2 bf16, 3 e4m3, 4 q8 (rows of head_dim + head_dim / 16 bytes; the caller rotates q and
-// the output)
+// the output), 5 packed at `cache_bits` 2..6 (rows of head_dim * bits / 8 + head_dim / 16 bytes, rotated as q8's)
 extern "C" int biased_attention_paged(const float* q, const void* k_cache, const void* v_cache, int cache_dtype,
+                                      int cache_bits,
                                       const uint32_t* tables, int64_t table_stride, int table_width, int block_size,
                                       int ring, const float* table, const float* sinks, float* out,
                                       const BiasedAttentionShape* shape, int64_t stream) {
   const BiasedAttentionShape& p = *shape;
   const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
   const bool decode = p.t <= p.decode_rows;
-#define PAGED(T)                                                                                                   \
+#define PAGED(T, BITS, DISPATCH)                                                                                   \
   {                                                                                                                \
     Args<T> a{q,                                                                                                   \
-              {(const T*)k_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads, ring},          \
-              {(const T*)v_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads, ring},          \
+              {(const T*)k_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads, ring, BITS},    \
+              {(const T*)v_cache, 0, 0, tables, table_stride, table_width, block_size, p.kv_heads, ring, BITS},    \
               table, sinks, out, p.heads, p.kv_heads, p.t, p.past_lens, p.past_sub, p.past, p.extent, p.window,    \
               p.scale, p.log_alpha, p.log_floor, p.partials, p.arrived,                                          \
               alloc_splits(p.batch, p.t, p.heads, p.kv_heads)};                                                    \
-    return dispatch(a, p.batch, p.head_dim, decode, s);                                                            \
+    return DISPATCH(a, p.batch, p.head_dim, decode, s);                                                            \
   }
   switch (cache_dtype) {
-    case 0: PAGED(float)
-    case 1: PAGED(__half)
-    case 2: PAGED(__nv_bfloat16)
-    case 3: PAGED(E4m3)
-    case 4: PAGED(Q8)
+    case 0: PAGED(float, 0, dispatch)
+    case 1: PAGED(__half, 0, dispatch)
+    case 2: PAGED(__nv_bfloat16, 0, dispatch)
+    case 3: PAGED(E4m3, 0, dispatch)
+    case 4: PAGED(Q8, 8, dispatch)
+    case 5:
+      if (cache_bits < MIN_PACKED_BITS || cache_bits > MAX_PACKED_BITS) return -1;
+      PAGED(Qp, cache_bits, dispatch_packed)
     default: return -1;
   }
 #undef PAGED

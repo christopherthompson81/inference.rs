@@ -20,8 +20,10 @@ const CACHE_F16: i32 = 1;
 const CACHE_BF16: i32 = 2;
 const CACHE_E4M3: i32 = 3;
 const CACHE_Q8: i32 = 4;
-// the q8 cache's bits; its other widths (q2..q6) have no read path here
+const CACHE_PACKED: i32 = 5;
+// the q8 cache's bits, read byte by byte; the packed widths below it, read through their 8-value chunks
 const Q8_BITS: u32 = 8;
+const PACKED_BITS: std::ops::RangeInclusive<u32> = 2..=6;
 // rows (batch x queries x heads) a split decode counts its finished splits for; more take one block a row
 const MAX_SPLIT_ROWS: usize = 4096;
 
@@ -198,7 +200,9 @@ pub fn biased_attention(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
         && k_cache.dtype() == DType::U8
     {
         let d = op.q.dim(3)?;
-        if inference_paged_attn::quant_cache_bits(k_cache, v_cache, d) != Some((Q8_BITS, Q8_BITS)) {
+        if !inference_paged_attn::quant_cache_bits(k_cache, v_cache, d)
+            .is_some_and(|(k, v)| k == v && (k == Q8_BITS || PACKED_BITS.contains(&k)))
+        {
             return Ok(None);
         }
         let q =
@@ -388,15 +392,28 @@ fn biased_attention_rows(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
                 ring,
             } => {
                 let (_, cache_heads, block_size, cache_d) = k_cache.dims4()?;
-                let (cache_dtype, row) = match k_cache.dtype() {
-                    DType::F32 => (CACHE_F32, d),
-                    DType::F16 => (CACHE_F16, d),
-                    DType::BF16 => (CACHE_BF16, d),
-                    DType::F8E4M3 => (CACHE_E4M3, d),
-                    DType::U8 => (
-                        CACHE_Q8,
-                        inference_paged_attn::kv_quant::row_bytes(d, Q8_BITS),
-                    ),
+                let (cache_dtype, cache_bits, row) = match k_cache.dtype() {
+                    DType::F32 => (CACHE_F32, 0, d),
+                    DType::F16 => (CACHE_F16, 0, d),
+                    DType::BF16 => (CACHE_BF16, 0, d),
+                    DType::F8E4M3 => (CACHE_E4M3, 0, d),
+                    DType::U8 => {
+                        let Some((bits, _)) =
+                            inference_paged_attn::quant_cache_bits(k_cache, v_cache, d)
+                        else {
+                            return Ok(None);
+                        };
+                        let code = if bits == Q8_BITS {
+                            CACHE_Q8
+                        } else {
+                            CACHE_PACKED
+                        };
+                        (
+                            code,
+                            bits as i32,
+                            inference_paged_attn::kv_quant::row_bytes(d, bits),
+                        )
+                    }
                     _ => return Ok(None),
                 };
                 let tables_l = block_tables.layout();
@@ -428,6 +445,7 @@ fn biased_attention_rows(op: &BiasedAttention<'_>) -> Result<Option<Tensor>> {
                         k_ptr as *const core::ffi::c_void,
                         v_ptr as *const core::ffi::c_void,
                         cache_dtype,
+                        cache_bits,
                         b_ptr as *const u32,
                         i64_of(table_stride)?,
                         i32_of(width)?,
@@ -609,8 +627,9 @@ mod tests {
         Ok((cache, Tensor::from_vec(firsts, (b, 1), device)?))
     }
 
-    // a case's inputs over a q8 cache that paged-attn's writer filled (rotated, 8 bits a value), through shuffled blocks
-    struct Q8Inputs {
+    // a case's inputs over a quantized cache that paged-attn's writer filled (rotated, `bits` a value), through shuffled
+    // blocks
+    struct QuantInputs {
         q: Tensor,
         k_cache: Tensor,
         v_cache: Tensor,
@@ -620,8 +639,8 @@ mod tests {
         sinks: Tensor,
     }
 
-    impl Q8Inputs {
-        fn new(c: &Case, device: &Device) -> Result<(Self, Tensor, Tensor)> {
+    impl QuantInputs {
+        fn new(c: &Case, bits: u32, device: &Device) -> Result<(Self, Tensor, Tensor)> {
             let s = c.past + c.t;
             let rand = |dims: &[usize]| Tensor::randn(0f32, 1.0, dims, device);
             let spread = |dims: &[usize], by: f32| rand(dims)? * f64::from(by);
@@ -645,7 +664,7 @@ mod tests {
                         + (key % TEST_BLOCK_SIZE) as i64
                 })
                 .collect::<Vec<_>>();
-            let row = inference_paged_attn::kv_quant::row_bytes(c.d, Q8_BITS);
+            let row = inference_paged_attn::kv_quant::row_bytes(c.d, bits);
             let cache = || Tensor::zeros((blocks, c.hkv, TEST_BLOCK_SIZE, row), DType::U8, device);
             let (k_cache, v_cache) = (cache()?, cache()?);
             let tokens = |x: &Tensor| -> Result<Tensor> {
@@ -696,13 +715,13 @@ mod tests {
         }
     }
 
-    // the kernel over a q8 cache against the reference over the values its gather reads back
-    fn run_q8(c: &Case) -> Result<()> {
+    // the kernel over a quantized cache of `bits` against the reference over the values its gather reads back
+    fn run_quant(c: &Case, bits: u32) -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
             return Ok(());
         };
         let s = c.past + c.t;
-        let (inputs, _, _) = Q8Inputs::new(c, &device)?;
+        let (inputs, _, _) = QuantInputs::new(c, bits, &device)?;
         let cu = Tensor::from_vec(
             (0..=c.b).map(|i| (i * s) as u32).collect::<Vec<_>>(),
             c.b + 1,
@@ -723,7 +742,7 @@ mod tests {
                 .contiguous()
         };
         let (kg, vg) = (heads_first(kg)?, heads_first(vg)?);
-        let got = biased_attention(&inputs.op(c))?.expect("the kernel takes a q8 cache");
+        let got = biased_attention(&inputs.op(c))?.expect("the kernel takes the quantized cache");
         let want = reference(c, &inputs.q, &kg, &vg, &inputs.table, &inputs.sinks)?;
         let err = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
         let mag = want.abs()?.max_all()?.to_scalar::<f32>()?;
@@ -734,7 +753,7 @@ mod tests {
         };
         assert!(
             err <= tolerance * mag.max(c.magnitude),
-            "t {} past {}: q8 max error {err} of {mag}",
+            "t {} past {}: q{bits} max error {err} of {mag}",
             c.t,
             c.past
         );
@@ -773,7 +792,7 @@ mod tests {
             let shape4 = (blocks, hkv, TEST_BLOCK_SIZE, row);
             let k_cache = Tensor::from_vec(bytes.clone(), shape4, &device)?;
             let v_cache = Tensor::from_vec(bytes, shape4, &device)?;
-            let inputs = Q8Inputs {
+            let inputs = QuantInputs {
                 q: Tensor::randn(0f32, 1.0, (1, t, h, d), &device)?,
                 k_cache,
                 v_cache,
@@ -818,7 +837,39 @@ mod tests {
             shape((2, 8, 2, 4, 300, 64, 32, 0)),
             shape((1, 8, 2, 100, 50, 64, 40, 0)),
         ] {
-            run_q8(&c)?;
+            run_quant(&c, Q8_BITS)?;
+        }
+        Ok(())
+    }
+
+    // the packed widths in every kernel: decode, a split long-past decode, grouped heads, the tensor-core verify rows,
+    // the scalar and the tensor-core prefill
+    fn cuda_paged_packed_widths_match_the_reference() -> Result<()> {
+        let cases = || {
+            let mut long = shape((2, 8, 2, 1, 2000, 128, 256, 1500));
+            long.log_scale = Some((0.1, 64.0));
+            [
+                shape((2, 8, 2, 1, 700, 128, 256, 0)),
+                long,
+                shape((2, 8, 2, 4, 300, 64, 32, 0)),
+                shape((1, 8, 2, 100, 50, 64, 40, 0)),
+                shape((2, 24, 8, 1, 2000, 128, 256, 0)),
+                shape((
+                    1,
+                    24,
+                    8,
+                    DECODE_ROWS as usize,
+                    VERIFY_MIN_KEYS + 100,
+                    128,
+                    256,
+                    0,
+                )),
+            ]
+        };
+        for bits in PACKED_BITS {
+            for c in cases() {
+                run_quant(&c, bits)?;
+            }
         }
         Ok(())
     }
@@ -1041,7 +1092,7 @@ mod tests {
             let mut c = shape((2, 24, 8, t, 2000, 128, 256, 0));
             c.log_scale = Some((0.1, 64.0));
             run(&c, None)?;
-            run_q8(&c)?;
+            run_quant(&c, Q8_BITS)?;
         }
         run(&shape((1, 8, 1, 1, 700, 64, 32, 0)), None)?;
         // past VERIFY_MIN_KEYS the verify rows take the tensor-core kernel
@@ -1057,7 +1108,7 @@ mod tests {
         ));
         long.log_scale = Some((0.1, 64.0));
         run(&long, Some(DType::BF16))?;
-        run_q8(&long)?;
+        run_quant(&long, Q8_BITS)?;
         // a window shorter than the verify's rows, and a bias reaching past it; K and V far below and above 1, q
         // the other way
         for t in [2, DECODE_ROWS as usize] {
@@ -1066,7 +1117,7 @@ mod tests {
                 c.magnitude = magnitude;
                 run(&c, Some(DType::BF16))?;
                 run(&c, Some(DType::F16))?;
-                run_q8(&c)?;
+                run_quant(&c, Q8_BITS)?;
             }
         }
         // the window in a ring of two blocks a sequence that wrapped over the first keys: a decode row and verify rows
@@ -1162,6 +1213,7 @@ mod tests {
             cuda_split_decode_over_long_pasts_matches_the_reference,
             cuda_paged_e4m3_matches_the_reference,
             cuda_paged_q8_matches_the_reference,
+            cuda_paged_packed_widths_match_the_reference,
             cuda_tensor_core_paged_bf16_prefill_matches_the_reference,
             cuda_tensor_core_tiny_shapes_match_the_reference,
             cuda_tensor_core_prefill_after_a_past_matches_the_reference,
