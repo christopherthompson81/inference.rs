@@ -188,6 +188,7 @@ pub fn refine_mesh_on(
         input.pixels.clone(),
     )
     .expect("a whole image");
+    progress.stage("prepare", 0);
     let prepared_path = out_dir.join(PREPARED_FILE);
     rgba.save(&prepared_path)?;
     let condition_path = out_dir.join(CONDITION_FILE);

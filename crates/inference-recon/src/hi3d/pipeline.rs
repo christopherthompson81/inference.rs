@@ -159,7 +159,7 @@ pub fn refine(
         } else {
             "transformer_1024"
         };
-        let label = |what: &str| format!("pass {} of {}: {what}", pass + 1, last + 1);
+        let label = |what: &str| format!("pass {}: {what}", pass + 1);
         progress.stage(&label("voxelizing"), 0);
         let Some((cells, settled)) = voxelize::adaptive(&surface, rung.structure, rung.budget)
         else {
