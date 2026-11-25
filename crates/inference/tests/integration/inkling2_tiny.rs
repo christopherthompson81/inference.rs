@@ -502,28 +502,38 @@ async fn loop_guidance_on_logits_contrasts_the_passes_and_leaves_strength_zero_p
     Ok(())
 }
 
-// fewer passes than trained run (and score differently); the drafter taps the run layout's counterparts of its visits
+// other pass counts than trained run (and score differently): fewer on any checkpoint, one or more than trained on a
+// varloop one only; the drafter taps the run layout's counterparts of its visits
 #[tokio::test]
-async fn fewer_loop_passes_run_and_keep_drafting_on_cuda() -> anyhow::Result<()> {
+async fn other_loop_pass_counts_run_and_keep_drafting_on_cuda() -> anyhow::Result<()> {
     let dir = checkpoint()?;
     let tokens: Vec<u32> = (0..PROMPT_LEN as u32).collect();
-    let two = overrides(serde_json::json!({"loop_config": {"run_passes": PASSES - 1}}));
-    let full = prompt_logprobs(&builder(&dir, None).build().await?, tokens.clone()).await?;
-    let fewer = prompt_logprobs(
-        &builder(&dir, None)
-            .with_hf_config_overrides(two)
+    let passes = |run: usize, varloop: bool| serde_json::json!({"loop_config": {"run_passes": run, "is_varloop": varloop}});
+    let counts = [(PASSES - 1, false), (1, true), (PASSES + 1, true)];
+    anyhow::ensure!(
+        builder(&dir, None)
+            .with_hf_config_overrides(overrides(passes(PASSES + 1, false)))
             .build()
-            .await?,
-        tokens,
-    )
-    .await?;
-    anyhow::ensure!(full != fewer, "a pass fewer scored the same");
+            .await
+            .is_err(),
+        "a fixed loop ran more passes than trained"
+    );
+    let full = prompt_logprobs(&builder(&dir, None).build().await?, tokens.clone()).await?;
+    for (run, varloop) in counts {
+        let other = prompt_logprobs(
+            &builder(&dir, None)
+                .with_hf_config_overrides(overrides(passes(run, varloop)))
+                .build()
+                .await?,
+            tokens.clone(),
+        )
+        .await?;
+        anyhow::ensure!(full != other, "{run} passes scored as {PASSES} did");
+    }
     if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
         return Ok(());
     }
     let drafter = drafter_checkpoint()?;
-    // top-level, as `--loop-guidance-logits` sends its key: the nested checkpoint config takes it too
-    let two = serde_json::json!({"loop_config": {"run_passes": PASSES - 1}});
     let request = || chat("say something long");
     let run = |drafting, passes: Option<serde_json::Value>| {
         let dir = &drafter;
@@ -547,13 +557,18 @@ async fn fewer_loop_passes_run_and_keep_drafting_on_cuda() -> anyhow::Result<()>
             )
         }
     };
-    let plain = run(false, Some(two.clone())).await?;
-    anyhow::ensure!(
-        run(false, None).await? != plain,
-        "the checkpoint ran every pass under `run_passes`"
-    );
-    let drafted = run(true, Some(two)).await?;
-    ensure_same_greedy(&drafted, &plain)
+    let trained = run(false, None).await?;
+    for (count, varloop) in counts {
+        // top-level, as `--loop-guidance-logits` sends its key: the nested checkpoint config takes it too
+        let plain = run(false, Some(passes(count, varloop))).await?;
+        anyhow::ensure!(
+            trained != plain,
+            "the checkpoint ran {PASSES} passes under `run_passes` {count}"
+        );
+        let drafted = run(true, Some(passes(count, varloop))).await?;
+        ensure_same_greedy(&drafted, &plain)?;
+    }
+    Ok(())
 }
 
 // a repeat reuses its prefix (KV and the convolution states' checkpoint) under loop guidance as it does without

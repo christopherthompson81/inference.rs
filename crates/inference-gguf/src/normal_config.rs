@@ -3394,13 +3394,8 @@ fn build_lfm(metadata: &MetadataView<'_>, is_moe: bool) -> SynthesisResult<JsonV
     Ok(JsonValue::Object(config))
 }
 
-// llama.cpp's `inkling2_loop`: a fixed loop over the core, attention heads alike on every layer
+// llama.cpp's `inkling2_loop`: a loop over the core (fixed, or varloop's any count), attention heads alike on every layer
 fn build_inkling2_loop(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
-    if metadata.optional_bool("loop.varying")?.unwrap_or(false) {
-        return Err(NormalConfigSynthesisError::new(
-            "Inkling 2 with a variable loop is not supported",
-        ));
-    }
     let num_hidden_layers = transformer_block_count(metadata)?;
     let local_layer_ids = metadata
         .sliding_pattern(num_hidden_layers)?
@@ -3449,6 +3444,7 @@ fn build_inkling2_loop(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue
             "core_end": usize_key("loop.end")?,
             "num_passes": usize_key("loop.count")?,
             "gate_rank": usize_key("loop.gate_rank")?,
+            "is_varloop": metadata.optional_bool("loop.varying")?.unwrap_or(false),
         },
         "max_position_embeddings": usize_key("context_length")?,
         "quantization_config": null,

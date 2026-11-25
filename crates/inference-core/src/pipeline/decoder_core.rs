@@ -22,6 +22,7 @@ pub(crate) struct DecoderCore {
     pub tokenizer: Arc<Tokenizer>,
     pub chat_template: Arc<ChatTemplate>,
     pub model_id: String,
+    pub config_overrides: Option<super::HfConfigOverrides>,
     pub metadata: Arc<GeneralMetadata>,
     pub mapper: Box<dyn DeviceMapper + Send + Sync>,
     #[cfg(feature = "cuda")]
@@ -51,6 +52,8 @@ pub(crate) struct LoadedModelView<'a> {
 }
 
 pub(crate) struct DecoderCoreArgs<'a> {
+    // the load's config overrides (a looped model's pass count, say), which change what a derived vector reads
+    pub config_overrides: Option<super::HfConfigOverrides>,
     pub model: LoadedModelView<'a>,
     pub tokenizer: Tokenizer,
     pub chat_template: ChatTemplate,
@@ -190,6 +193,7 @@ impl DecoderCore {
             tokenizer: args.tokenizer.into(),
             chat_template: Arc::new(args.chat_template),
             model_id: args.model_id,
+            config_overrides: args.config_overrides,
             mapper: args.mapper,
             #[cfg(feature = "cuda")]
             cuda_decode_graph: StdMutex::new(CudaDecodeGraphState::default()),

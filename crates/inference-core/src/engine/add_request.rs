@@ -290,7 +290,7 @@ impl Engine {
                     };
                     applied.map(|()| crate::request::ControlVectorState {
                         set: pipeline.control_vectors(),
-                        model: pipeline.name(),
+                        derive_key: pipeline.derived_vector_key(),
                     })
                 };
                 if let Err(e) = &result {

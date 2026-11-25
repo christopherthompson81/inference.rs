@@ -1369,6 +1369,11 @@ pub trait Pipeline:
         anyhow::bail!("this pipeline takes no control vectors")
     }
 
+    /// What a vector derived on this model is cached under: its name, and whatever else changes its layer outputs.
+    fn derived_vector_key(&self) -> String {
+        self.name()
+    }
+
     /// The control vectors the model is steered by, empty when none are.
     fn control_vectors(&self) -> inference_nn::control_vectors::ControlVectorSet {
         Default::default()

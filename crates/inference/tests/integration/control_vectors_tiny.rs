@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use inference::{
-    ControlVectorFile, ControlVectors, DerivedControlVector, ModelDType, PromptInput,
-    PromptLogitsRequest, SetControlVectorsRequest, TextModelBuilder,
+    ControlVectorFile, ControlVectors, DerivedControlVector, HfConfigOverrides, ModelDType,
+    PromptInput, PromptLogitsRequest, SetControlVectorsRequest, TextModelBuilder,
 };
 use inference_tensor::{Device, Tensor};
 use rand::{SeedableRng, rngs::StdRng};
@@ -27,6 +27,8 @@ const PROMPT_TOKENS: u32 = 12;
 // the flash decode kernels' head dim, so the GPU model decodes in CUDA graphs
 const GRAPH_HEAD_DIM: usize = 64;
 const MAX_LEN: usize = 6;
+// an rms_norm_eps other than the tiny checkpoint's
+const OVERRIDDEN_EPS: f64 = 1e-2;
 const GRAPH_PROMPT: &str = "the quick brown fox jumps";
 // llama.cpp's derived directions are unit length; the tiny model's states are about this wide
 const DERIVED_SCALE: f32 = 4.0;
@@ -290,6 +292,24 @@ async fn a_vector_derived_from_texts_is_cached_and_steers() -> anyhow::Result<()
             .set_control_vectors(set(derived("same", "same")))
             .await
             .is_err()
+    );
+    drop(model);
+    // config overrides change the layer outputs, so the same texts on an overridden load derive a file of their own
+    let overridden = builder(&checkpoint)
+        .with_hf_config_overrides(HfConfigOverrides::new(
+            serde_json::json!({"rms_norm_eps": OVERRIDDEN_EPS}),
+        )?)
+        .build()
+        .await?;
+    let answered = overridden
+        .set_control_vectors(set(derived("a b c", "x y z")))
+        .await?;
+    let [other] = answered.vectors.files.as_slice() else {
+        anyhow::bail!("one derived file, answered {:?}", answered.vectors);
+    };
+    anyhow::ensure!(
+        other.path != file.path,
+        "an overridden load read the plain load's vector"
     );
     Ok(())
 }

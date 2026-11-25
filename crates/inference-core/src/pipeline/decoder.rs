@@ -1351,6 +1351,13 @@ impl Pipeline for DecoderPipeline {
         self.model.control_vectors()
     }
 
+    fn derived_vector_key(&self) -> String {
+        match &self.core.config_overrides {
+            Some(overrides) => format!("{} {}", self.core.model_id, serde_json::json!(overrides)),
+            None => self.core.model_id.clone(),
+        }
+    }
+
     fn begin_layer_capture(&self) -> bool {
         match &self.model {
             DecoderModel::Text(model) => model.begin_layer_capture(),
