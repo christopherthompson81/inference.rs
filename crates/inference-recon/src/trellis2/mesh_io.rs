@@ -1,12 +1,14 @@
 //! Meshes read from files for the texturing pipeline: binary glTF (`.glb`, every triangle primitive of the default
 //! scene placed by its nodes' transforms), Wavefront `.obj` and `.ply` (ASCII or binary). Vertices are kept as the file
 //! splits them, so seams stay seams. Texture coordinates come back with row 0 at v = 0 (glTF's convention; OBJ's and
-//! PLY's are flipped), and only when one primitive carries them all, since several would share one atlas.
+//! PLY's are flipped), and only when one primitive carries them all, since several would share one atlas. A PLY may
+//! record its up axis in a `comment up z` header line, as this engine's z-up PLYs do.
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::mesh::Mesh;
+use super::glb::y_up;
+use super::mesh::{Mesh, PLY_UP_COMMENT, UpAxis};
 
 const GLB_MAGIC: u32 = 0x4654_6c67;
 const CHUNK_JSON: u32 = 0x4e4f_534a;
@@ -21,6 +23,8 @@ const COMPONENT_F32: u64 = 5126;
 pub struct ReadMesh {
     pub mesh: Mesh,
     pub uvs: Option<Vec<[f32; 2]>>,
+    /// The up axis the file records (a PLY's `comment up` line), when it records one
+    pub up: Option<UpAxis>,
 }
 
 type IoResult<T> = std::result::Result<T, String>;
@@ -47,6 +51,19 @@ pub fn read_mesh(path: &Path) -> IoResult<ReadMesh> {
         return Err(format!("{} holds no triangles", path.display()));
     }
     Ok(read)
+}
+
+/// [`read_mesh`] with y up: a mesh that holds z up (as `up` says, else as the file records; y when neither) turned
+/// so (`(x, y, z)` to `(x, z, -y)`), and the axis it was read as.
+pub fn read_mesh_y_up(path: &Path, up: Option<UpAxis>) -> IoResult<(ReadMesh, UpAxis)> {
+    let mut read = read_mesh(path)?;
+    let axis = up.or(read.up).unwrap_or(UpAxis::Y);
+    if axis == UpAxis::Z {
+        for v in &mut read.mesh.vertices {
+            *v = y_up(*v);
+        }
+    }
+    Ok((read, axis))
 }
 
 // row 0 at v = 0 from OpenGL's v up
@@ -126,6 +143,7 @@ fn read_obj(text: &str) -> IoResult<ReadMesh> {
     Ok(ReadMesh {
         mesh: Mesh { vertices, faces },
         uvs: (all_textured && !texcoords.is_empty()).then_some(uvs),
+        up: None,
     })
 }
 
@@ -213,6 +231,7 @@ fn read_ply(bytes: &[u8]) -> IoResult<ReadMesh> {
         + 1;
     let header = String::from_utf8_lossy(&bytes[..end]);
     let mut format = None;
+    let mut up = None;
     let mut elements: Vec<PlyElement> = Vec::new();
     for line in header.lines() {
         let t: Vec<&str> = line.split_whitespace().collect();
@@ -239,6 +258,7 @@ fn read_ply(bytes: &[u8]) -> IoResult<ReadMesh> {
                     kind: kind.to_string(),
                     list: Some(count.to_string()),
                 }),
+            ["comment", word, axis] if *word == PLY_UP_COMMENT => up = UpAxis::parse(axis),
             ["property", kind, name] => elements
                 .last_mut()
                 .ok_or("ply property before an element")?
@@ -320,6 +340,7 @@ fn read_ply(bytes: &[u8]) -> IoResult<ReadMesh> {
     Ok(ReadMesh {
         mesh: Mesh { vertices, faces },
         uvs: textured.then_some(uvs),
+        up,
     })
 }
 
@@ -603,12 +624,61 @@ fn read_glb(bytes: &[u8]) -> IoResult<ReadMesh> {
     Ok(ReadMesh {
         mesh: Mesh { vertices, faces },
         uvs: (primitives == 1 && textured == 1).then_some(uvs),
+        up: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // a triangle standing along z, so its height says which axis was taken as up
+    fn tall() -> Mesh {
+        Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 2.0]],
+            faces: vec![[0, 1, 2]],
+        }
+    }
+
+    #[test]
+    fn a_z_up_ply_records_its_axis_and_reads_back_y_up() -> IoResult<()> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let marked = dir.path().join("marked.ply");
+        std::fs::write(&marked, tall().to_ply(UpAxis::Z)).map_err(|e| e.to_string())?;
+        let (read, axis) = read_mesh_y_up(&marked, None)?;
+        assert_eq!((read.up, axis), (Some(UpAxis::Z), UpAxis::Z));
+        assert_eq!(
+            read.mesh.vertices[2],
+            [0.0, 2.0, -0.0],
+            "the z height becomes y"
+        );
+        // asked for y, the file is taken as written
+        let (read, axis) = read_mesh_y_up(&marked, Some(UpAxis::Y))?;
+        assert_eq!((axis, read.mesh.vertices[2]), (UpAxis::Y, [0.0, 0.0, 2.0]));
+        Ok(())
+    }
+
+    #[test]
+    fn an_unmarked_ply_is_y_up_unless_asked_otherwise() -> IoResult<()> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let plain = dir.path().join("plain.ply");
+        let mut bytes = tall().to_ply(UpAxis::Y);
+        let comment = UpAxis::Y.ply_comment();
+        let at = bytes
+            .windows(comment.len())
+            .position(|w| w == comment.as_bytes())
+            .expect("the marker");
+        bytes.drain(at..at + comment.len());
+        std::fs::write(&plain, bytes).map_err(|e| e.to_string())?;
+        let (read, axis) = read_mesh_y_up(&plain, None)?;
+        assert_eq!(
+            (read.up, axis, read.mesh.vertices[2]),
+            (None, UpAxis::Y, [0.0, 0.0, 2.0])
+        );
+        let (read, axis) = read_mesh_y_up(&plain, Some(UpAxis::Z))?;
+        assert_eq!((axis, read.mesh.vertices[2]), (UpAxis::Z, [0.0, 2.0, -0.0]));
+        Ok(())
+    }
 
     #[test]
     fn an_obj_splits_vertices_at_texture_seams_and_flips_v() {

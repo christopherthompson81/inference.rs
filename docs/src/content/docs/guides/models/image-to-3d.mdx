@@ -80,7 +80,7 @@ chair/
   meta.json      variant, resolution, cell and face counts, the print's size, faces and volume, timing
 ```
 
-The GLB sits in the unit cube centered on the origin, y up as glTF expects (the PLY keeps TRELLIS's z up). The baked
+The GLB sits in the unit cube centered on the origin, y up as glTF expects (the PLY keeps TRELLIS's z up, and says so with a `comment up z` header line that `texture-mesh` and `refine-mesh` read). The baked
 material is opaque, and double-sided unless remeshed. With `--vertex-colors`, glTF viewers show `COLOR_0`, and the material's metallic
 and roughness factors are the vertices' means.
 
@@ -155,7 +155,8 @@ inference texture-mesh --mesh chair.glb --image chair.jpg --out chair-painted/
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--mesh` | required | The mesh: `.glb` (every triangle primitive of its default scene, placed by its nodes), `.obj` or `.ply` (ASCII or binary). glTF and OBJ are y up; a PLY is read as written, so give it y up too |
+| `--mesh` | required | The mesh: `.glb` (every triangle primitive of its default scene, placed by its nodes), `.obj` or `.ply` (ASCII or binary). glTF and OBJ are y up; a PLY is y up unless its header says `comment up z`, as this engine's z-up PLYs do |
+| `--up` | from the file | The mesh's up axis, `y` or `z`, over what the file says (for a z-up PLY written before the marker, or by another tool) |
 | `--resolution` | 1024 | The grid the mesh is encoded at, 512 or 1024 (512: about a third of the time, coarser) |
 | `--texture-size` | 2048 | The baked textures' width and height |
 | `--unwrap` | off | Lay out new texture coordinates even when the mesh has its own |
@@ -175,7 +176,7 @@ not cleaned or simplified.
 and 6.3 s at 512 (5.7 GB); the reference's pipeline takes 40 s at 1024 with a 10.9 GB peak.
 
 As a server job: `{"kind": "texture_mesh"}` with two files, the mesh (by its extension) and the image, optionally
-`seed`, `resolution`, `texture_size`, `unwrap`, `remove_background` and `texture_sampler`; outputs under `model/`. The
+`seed`, `resolution`, `texture_size`, `unwrap`, `remove_background`, `up_axis` (`"y"` or `"z"`) and `texture_sampler`; outputs under `model/`. The
 web UI's 3D tab has it as **Texture a mesh**.
 
 ## Refining a mesh (Hi3D)
@@ -196,7 +197,8 @@ inference refine-mesh --image dragon.png --mesh coarse.glb --out dragon/ --resol
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--mesh` | TRELLIS.2's | The coarse mesh: `.glb`, `.obj` or `.ply`, y up. Without it, TRELLIS.2 makes one at 512 (Hi3D's first pass reads it on a 64^3 grid, so finer coarse meshes add nothing) |
+| `--mesh` | TRELLIS.2's | The coarse mesh: `.glb`, `.obj` or `.ply`, read up as [`texture-mesh`](#painting-a-mesh) reads it. Without it, TRELLIS.2 makes one at 512 (Hi3D's first pass reads it on a 64^3 grid, so finer coarse meshes add nothing) |
+| `--up` | from the file | The mesh's up axis, `y` or `z`, over what the file says. Hi3D refines the mesh as it stands against the image, so a mesh lying on its side comes out on its side and wrongly shaped |
 | `--resolution` | 1024 | 512, 1024 or 1536: one, two or three passes |
 | `--steps` | 25 | Heun steps each pass takes (1 to 100) |
 | `--texture` | off | Paint the refined mesh with TRELLIS.2's texturing ([painting a mesh](#painting-a-mesh)) at 1024 |
@@ -231,7 +233,7 @@ applies to every use. A refined mesh that contains no Hi3D code or weights is yo
 This port is not an official Hi3D product.
 
 As a server job: `{"kind": "refine_mesh"}` with the image and optionally the mesh (by its extension), optionally
-`seed`, `resolution`, `steps`, `remove_background`, `texture` and `placement`; outputs under `refined/`. The web UI's 3D
+`seed`, `resolution`, `steps`, `remove_background`, `texture`, `up_axis` (`"y"` or `"z"`) and `placement`; outputs under `refined/`. The web UI's 3D
 tab has it as **Refine a mesh**. With `--world-models <folder>`, checkpoints found there as `Hi3Dv1.0`, `dinov2-large`
 and `clip-vit-large-patch14` are used instead of fetching them.
 
@@ -379,7 +381,7 @@ chair/
   meta.json      voxel count, mesh counts, settings and timings
 ```
 
-Both sit in the unit cube centered on the origin, z up: voxel `(x, y, z)` spans `(x, y, z) / 64 - 0.5` to
+Both sit in the unit cube centered on the origin, z up (each PLY says so in its header): voxel `(x, y, z)` spans `(x, y, z) / 64 - 0.5` to
 `(x + 1, y + 1, z + 1) / 64 - 0.5`. The mesh is geometry only (no texture or vertex colors).
 
 ## As a server job

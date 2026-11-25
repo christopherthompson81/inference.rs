@@ -68,6 +68,16 @@ async fn a_refine_mesh_job_takes_an_image_and_at_most_one_mesh() -> anyhow::Resu
         vec![file("photo.png"), file("coarse.obj")],
     );
     assert!(refused.is_err_and(|e| e.to_string().contains("steps must be")));
+    let sideways = RefineMeshJob {
+        up_axis: Some("x".into()),
+        ..Default::default()
+    };
+    let refused = queue.submit(
+        &model,
+        job(sideways),
+        vec![file("photo.png"), file("coarse.ply")],
+    );
+    assert!(refused.is_err_and(|e| e.to_string().contains("up_axis must be")));
     let parsed: JobRequest = serde_json::from_value(
         serde_json::json!({"kind": "refine_mesh", "resolution": 1536, "texture": true}),
     )?;

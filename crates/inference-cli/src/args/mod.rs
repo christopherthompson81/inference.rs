@@ -383,6 +383,10 @@ pub enum Command {
         #[arg(long)]
         remove_background: bool,
 
+        /// The mesh's up axis, y (glTF's) or z (TRELLIS.2's PLYs); unset, a PLY's recorded one (`comment up z`), else y
+        #[arg(long, value_parser = parse_up_axis)]
+        up: Option<inference_jobs::refine_mesh::UpAxis>,
+
         /// Run on the CPU (very slow) instead of the first CUDA device
         #[arg(long)]
         cpu: bool,
@@ -453,6 +457,10 @@ pub enum Command {
         /// Remove the background even when the image has transparency of its own
         #[arg(long)]
         remove_background: bool,
+
+        /// The mesh's up axis, y (glTF's) or z (TRELLIS.2's PLYs); unset, a PLY's recorded one (`comment up z`), else y
+        #[arg(long, value_parser = parse_up_axis)]
+        up: Option<inference_jobs::refine_mesh::UpAxis>,
 
         /// Run on the CPU (very slow) instead of the first CUDA device
         #[arg(long)]
@@ -1143,6 +1151,11 @@ impl ModelType {
             Self::Diffusion { .. } | Self::Speech { .. } => None,
         }
     }
+}
+
+fn parse_up_axis(s: &str) -> Result<inference_jobs::refine_mesh::UpAxis, String> {
+    inference_jobs::refine_mesh::UpAxis::parse(s)
+        .ok_or_else(|| format!("`{s}`: the up axis is y or z"))
 }
 
 fn parse_arch(s: &str) -> Result<inference_api::engine::NormalLoaderType, String> {

@@ -2908,6 +2908,7 @@ class RefineMeshJob:
     seed: int | None = None
     steps: int | None = None
     texture: bool | None = None
+    up_axis: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -3537,6 +3538,7 @@ class TextureMeshJob:
     texture_sampler: Trellis2Sampler | None = None
     texture_size: int | None = None
     unwrap: bool | None = None
+    up_axis: str | None = None
 
 
 @dataclass(kw_only=True)

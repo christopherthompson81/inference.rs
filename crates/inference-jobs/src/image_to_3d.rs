@@ -9,7 +9,7 @@ use std::time::Instant;
 use inference_recon::printable::{Solid, VOXEL_GRID};
 use inference_recon::trellis2::bake;
 use inference_recon::trellis2::glb::{to_glb, to_textured_glb};
-use inference_recon::trellis2::mesh::Mesh;
+use inference_recon::trellis2::mesh::{Mesh, UpAxis};
 use inference_recon::trellis2::pipeline::{self, Trellis2Paths};
 use inference_tensor::Device;
 use serde::Serialize;
@@ -267,7 +267,7 @@ pub fn generate_3d_on(
         let dir = sample_dir(out_dir, i, samples);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(GLB_FILE), glb)?;
-        std::fs::write(dir.join(MESH_FILE), mesh.to_ply())?;
+        std::fs::write(dir.join(MESH_FILE), mesh.to_ply(UpAxis::Z))?;
         progress.stage("printable solid", 0);
         // the decoder's cells: the meshes leave gaps where a cell's neighbours are missing
         let started = Instant::now();

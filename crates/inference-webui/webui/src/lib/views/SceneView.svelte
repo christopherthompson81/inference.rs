@@ -99,6 +99,8 @@
   let unwrap = $state(false);
   let refineResolution = $state(1024);
   let refineTexture = $state(false);
+  // the uploaded mesh's up axis; "" lets a PLY's own marker decide, else y
+  let upAxis = $state<"" | "y" | "z">("");
   let samples = $state<number | null>(null);
   // pipeline.json's samplers, shown as placeholders
   const SAMPLER_STAGES = [
@@ -274,6 +276,7 @@
           texture_size: textureSize,
           unwrap: unwrap || null,
           remove_background: removeBackground || null,
+          up_axis: upAxis || null,
           texture_sampler: changed(samplers.texture),
           placement: room,
         });
@@ -284,6 +287,7 @@
           steps: null,
           remove_background: removeBackground || null,
           texture: refineTexture || null,
+          up_axis: meshFile ? upAxis || null : null,
           placement: room,
         });
       case "image_to_splat":
@@ -593,6 +597,16 @@
               <label class="flex items-center gap-1.5 pb-1.5 text-sm">
                 <input type="checkbox" class="accent-blue-600" bind:checked={voxelMesh} disabled={busy} />
                 Mesh it with TRELLIS.2
+              </label>
+            {/if}
+            {#if (mode === "refine_mesh" && meshFile) || mode === "texture_mesh"}
+              <label class="flex flex-col gap-1" title="Which way the uploaded mesh stands: glTF and OBJ files are y up; this app's own PLYs say so in their header, older ones are z up">
+                <span class="text-[11px] text-gray-500">Mesh up axis</span>
+                <select class={field} bind:value={upAxis} disabled={busy}>
+                  <option value="">Auto (y unless the file says)</option>
+                  <option value="y">y up (glTF, OBJ)</option>
+                  <option value="z">z up (TRELLIS.2's PLY)</option>
+                </select>
               </label>
             {/if}
             {#if mode === "refine_mesh"}

@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use inference_recon::birefnet::BiRefNet;
 use inference_recon::jovox::{self, JoVox, Rgba, SampleOptions};
+use inference_recon::trellis2::mesh::UpAxis;
 use inference_recon::trellis2::{self, ShapeStage, bake, cleanup};
 use inference_tensor::{DType, Device};
 use serde::Serialize;
@@ -274,7 +275,7 @@ pub fn generate_voxels_on(
             let raw_faces = mesh.faces.len();
             progress.stage("cleanup", 0);
             let (mesh, _) = bake::clean(&mesh, cleanup::SIMPLIFY_TARGET, device)?;
-            std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply())?;
+            std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply(UpAxis::Z))?;
             Some(MeshReport {
                 raw_faces,
                 vertices: mesh.vertices.len(),
