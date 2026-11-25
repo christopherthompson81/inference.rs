@@ -122,6 +122,7 @@ The control vectors a model is steered by: each layer's output gains the files' 
 | `derived` | `list[DerivedControlVector] \| None` | optional |
 | `files` | `list[ControlVectorFile] \| None` | optional |
 | `layer_range` | `list[int] \| None` | optional |
+| `loop_guidance` | `float \| None` | optional |
 
 
 ## `ControlVectorsResponse`

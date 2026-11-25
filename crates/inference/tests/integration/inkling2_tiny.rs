@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use inference::{
-    ChatRequest, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder, TextMessageRole,
-    TextMessages, TextModelBuilder,
+    ChatRequest, ControlVectors, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder,
+    SetControlVectorsRequest, TextMessageRole, TextMessages, TextModelBuilder,
 };
 use inference_tensor::{DType, Device, Tensor};
 use rand::{SeedableRng, rngs::StdRng};
@@ -62,6 +62,10 @@ const EXPERTS: usize = 4;
 const TOP_K: usize = 2;
 const WEIGHT_STD: f32 = 0.2;
 const WEIGHT_SEED: u64 = 0x696e_6b6c;
+// a loop guidance strength in the paper's generation range
+const GUIDANCE: f32 = 0.3;
+// tokens a scoring prompt takes
+const PROMPT_LEN: usize = 24;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
 // the GGUF load's kernels against the checkpoint load's, the same weights (an unquantized recipe scored ~1e-3 off)
@@ -413,6 +417,106 @@ async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
         return Ok(());
     }
     long_prompt_scores_as_on_the_cpu("cuda:0", CUDA_LOGPROB_TOLERANCE).await
+}
+
+fn guided(strength: Option<f32>) -> SetControlVectorsRequest {
+    SetControlVectorsRequest {
+        model: None,
+        vectors: ControlVectors {
+            loop_guidance: strength,
+            ..Default::default()
+        },
+    }
+}
+
+// loop guidance (LoopCD-Hidden) moves the scores as a load with it does; 0 and clearing it leave the plain model's bits
+#[tokio::test]
+async fn loop_guidance_moves_the_scores_and_clearing_it_restores_them() -> anyhow::Result<()> {
+    let dir = checkpoint()?;
+    let tokens: Vec<u32> = (0..PROMPT_LEN as u32).collect();
+    let model = builder(&dir, None).build().await?;
+    let plain = prompt_logprobs(&model, tokens.clone()).await?;
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    model.set_control_vectors(guided(Some(0.0))).await?;
+    assert_eq!(
+        bits(&prompt_logprobs(&model, tokens.clone()).await?),
+        bits(&plain)
+    );
+    model.set_control_vectors(guided(Some(GUIDANCE))).await?;
+    let live = prompt_logprobs(&model, tokens.clone()).await?;
+    anyhow::ensure!(
+        bits(&live) != bits(&plain),
+        "guidance left the scores as they were"
+    );
+    let loaded = builder(&dir, None)
+        .with_loop_guidance(GUIDANCE)
+        .build()
+        .await?;
+    assert_eq!(
+        bits(&prompt_logprobs(&loaded, tokens.clone()).await?),
+        bits(&live)
+    );
+    model.set_control_vectors(guided(None)).await?;
+    assert_eq!(bits(&prompt_logprobs(&model, tokens).await?), bits(&plain));
+    Ok(())
+}
+
+// a new strength rewrites the scalar the captured decode graphs read: no capture again, the fresh load's tokens
+#[tokio::test]
+async fn a_new_loop_guidance_strength_keeps_the_captured_graphs_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let dir = checkpoint()?;
+    let gpu = |strength| {
+        TextModelBuilder::new(dir.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_prefix_cache_n(None)
+            .with_load_recipes(false)
+            .with_paged_attn(
+                inference::PagedAttentionMetaBuilder::default()
+                    .build()
+                    .expect("default paged attention"),
+            )
+            .with_loop_guidance(strength)
+    };
+    let model = gpu(GUIDANCE).build().await?;
+    decode_graphs::prompt_trace(&model, decode_graphs::GRAPH_PROMPTS[0], MAX_LEN).await?;
+    let captures = |counters: &decode_graphs::Counters| {
+        counters.total(decode_graphs::EVENTS, &[("event", "capture")])
+    };
+    anyhow::ensure!(
+        captures(&decode_graphs::Counters::take(&snapshotter)) > 0,
+        "the decode steps captured no graph"
+    );
+    model
+        .set_control_vectors(guided(Some(2.0 * GUIDANCE)))
+        .await?;
+    let stronger =
+        decode_graphs::prompt_trace(&model, decode_graphs::GRAPH_PROMPTS[0], MAX_LEN).await?;
+    let after = decode_graphs::Counters::take(&snapshotter);
+    assert_eq!(
+        captures(&after),
+        0,
+        "the new strength captured again: {after:?}"
+    );
+    anyhow::ensure!(
+        after.total(decode_graphs::EVENTS, &[("event", "replay")]) > 0,
+        "the stronger decode replayed no graph: {after:?}"
+    );
+    drop(model);
+    let fresh = decode_graphs::prompt_trace(
+        &gpu(2.0 * GUIDANCE).build().await?,
+        decode_graphs::GRAPH_PROMPTS[0],
+        MAX_LEN,
+    )
+    .await?;
+    assert_eq!(
+        stronger.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+        fresh.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+    );
+    Ok(())
 }
 
 async fn paged_model(dtype: ModelDType) -> anyhow::Result<(tempfile::TempDir, inference::Model)> {

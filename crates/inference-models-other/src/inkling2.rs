@@ -2110,6 +2110,9 @@ impl Model {
         // every pass starts from the prelude's output
         let prelude = x.clone();
         let prelude_blocks = blocks.clone();
+        // LoopCD-Hidden: the first pass's output kept to push the last pass's away from
+        let guidance = self.control_vectors.loop_guidance();
+        let mut first_pass = None;
         for pass in 0..lc.num_passes {
             // the previous pass's bank: its blocks after the first core block (the prelude's output), and its output
             let mut bank = (pass > 0).then(|| {
@@ -2136,6 +2139,13 @@ impl Model {
                 };
                 x = run(layer, slot, &x, &mut blocks, messages.as_ref())?;
             }
+            if pass == 0 && guidance.is_some() && lc.num_passes > 1 {
+                first_pass = Some(x.clone());
+            }
+        }
+        if let (Some(w), Some(first)) = (&guidance, &first_pass) {
+            let w = w.to_device(x.device())?.to_dtype(x.dtype())?;
+            x = (&x + (&x - first)?.broadcast_mul(&w)?)?;
         }
         for layer in lc.core_end..cfg.num_hidden_layers {
             x = run(layer, layer, &x, &mut blocks, None)?;
@@ -2206,8 +2216,15 @@ impl NormalModel for Model {
         &self,
         set: inference_nn::control_vectors::ControlVectorSet,
     ) -> Result<bool> {
-        self.control_vectors
-            .replace(set, &self.control_devices, self.cfg.hidden_size, self.dtype)
+        // the guidance applies at the coda's input, on its first layer's device
+        let coda = &self.control_devices[self.cfg.loop_config.core_end];
+        self.control_vectors.replace(
+            set,
+            &self.control_devices,
+            self.cfg.hidden_size,
+            self.dtype,
+            Some(coda),
+        )
     }
 
     fn control_vectors(&self) -> inference_nn::control_vectors::ControlVectorSet {

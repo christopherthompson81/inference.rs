@@ -207,6 +207,10 @@ pub struct ControlVectors {
     /// The first and last layer steered (0-based, inclusive); every layer a file names when absent.
     #[serde(default)]
     pub layer_range: Option<[usize; 2]>,
+    /// A looped model's (Inkling 2's) loop guidance strength, LoopCD-Hidden (arXiv:2610.02185): the coda's input
+    /// pushed away from the first pass's output, `h + w (h - h1)`. About 0.2 to 0.3 for generation; absent, none.
+    #[serde(default)]
+    pub loop_guidance: Option<f32>,
 }
 
 impl ControlVectors {
@@ -221,6 +225,7 @@ impl ControlVectors {
                 })
                 .collect(),
             layers: self.layer_range.map(|[first, last]| (first, last)),
+            loop_guidance: self.loop_guidance,
         }
     }
 
@@ -236,6 +241,7 @@ impl ControlVectors {
                 .collect(),
             derived: Vec::new(),
             layer_range: set.layers.map(|(first, last)| [first, last]),
+            loop_guidance: set.loop_guidance,
         }
     }
 }

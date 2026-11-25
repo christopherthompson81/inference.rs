@@ -69,6 +69,7 @@ inference bench [OPTIONS] [COMMAND]
 | `--control-vector <FILE[:SCALE]>` |  | Steer the model by a control vector file (llama.cpp's GGUF or a safetensors file, `direction.<layer>`): `FILE` or `FILE:SCALE` (scale 1 when none is given), repeatable, the scaled directions summed |
 | `--control-vector-texts <POSITIVE:NEGATIVE[:SCALE]>` |  | Steer the model by a control vector derived on it from contrasting texts: `POSITIVE:NEGATIVE[:SCALE]`, two files of one text a line (`\n` for a newline in one), the lines pairing by number, as llama.cpp's `cvector-generator` reads them; derived once and cached. Repeatable |
 | `--control-vector-layer-range <START> <END>` |  | Steer only layers START..=END (0-based) by the control vectors |
+| `--loop-guidance <W>` |  | A looped model's (Inkling 2's) loop guidance strength (LoopCD-Hidden; about 0.2 to 0.3 for generation) |
 | `--adapter <ADAPTER>` |  | LoRA adapter alias to benchmark. Omit to benchmark the base model |
 | `--prompt-len <PROMPT_LEN>` | `512` | Input lengths used to measure time to first token. Zero skips TTFT. Accepts comma-separated values for sweeps |
 | `--gen-len <GEN_LEN>` | `128` | Output tokens per decode request. Values below 2 skip decode metrics |

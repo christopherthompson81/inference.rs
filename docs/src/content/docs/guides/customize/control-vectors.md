@@ -41,6 +41,25 @@ curl 'localhost:1234/control_vectors?model=chat'
 
 Changing the files or their scales on a model that is already steered rewrites its vectors in place. CUDA graphs captured for it keep running, with no capture again. Attaching vectors to a model that has none, or removing them, captures its graphs again on the next steps.
 
+## Loop guidance
+
+A looped model (Inkling 2, whose middle 12 layers run three times) can also be steered by loop guidance, LoopCD-Hidden
+from [Decoding Looped Transformers Better for (Almost) Free](https://arxiv.org/abs/2610.02185): the last pass's output
+is pushed away from the first pass's before the layers after the loop, `h + w (h - h1)`. The first pass is a weaker
+prediction of the same token, so the push sharpens choices where the passes disagree. It costs one tensor and no
+extra layers. The paper found about 0.2 to 0.3 safe for generation (larger values compound over the tokens); measure
+on your own tasks before relying on it.
+
+```bash
+inference serve -m thinkingmachines/Inkling-2-Mini --loop-guidance 0.25
+curl localhost:1234/control_vectors/set -H 'Content-Type: application/json' -d '{"model": "chat", "vectors": {"loop_guidance": 0.25}}'
+```
+
+It travels with the control vectors: `loop_guidance` beside `files` (on its own or with them), `--loop-guidance` at
+load, **Loop guidance** in the web UI's Steering section for an Inkling 2 slot, `with_loop_guidance` in the Rust SDK.
+A new strength rewrites the value its CUDA graphs read; attaching or removing it captures them again. A model that runs
+each layer once refuses it.
+
 ## Notes
 
 - Cached prompt states depend on the vectors, so the prefix cache keys them on the active set, and steered requests are not written to the disk prefix cache.

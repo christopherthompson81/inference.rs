@@ -49,6 +49,7 @@ fn bench_spec(
                 &runtime.control_vectors,
                 &runtime.control_vector_texts,
                 runtime.control_vector_layer_range.as_deref(),
+                runtime.loop_guidance,
             )?,
             log: None,
             ..model_runtime

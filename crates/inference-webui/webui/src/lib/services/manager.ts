@@ -71,6 +71,8 @@ export interface ControlVectors {
   derived?: DerivedControlVector[];
   /** The first and last layer steered (0-based); every layer when absent. */
   layer_range?: [number, number] | null;
+  /** A looped model's (Inkling 2's) loop guidance strength: the coda's input pushed away from the first pass's. */
+  loop_guidance?: number | null;
 }
 
 export interface LoadRequest {

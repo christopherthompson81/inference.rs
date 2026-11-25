@@ -298,6 +298,17 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// A looped model's (Inkling 2's) loop guidance strength (LoopCD-Hidden: the coda's input pushed away from
+        /// the first pass's output; about 0.2 to 0.3 for generation).
+        pub fn with_loop_guidance(mut self, strength: f32) -> Self {
+            self.options
+                .runtime
+                .control_vectors
+                .get_or_insert_with(Default::default)
+                .loop_guidance = Some(strength);
+            self
+        }
+
         /// Whether a checkpoint whose fast paths read another format (Inkling 2's own) loads as that format,
         /// built from it once into a cache; on by default.
         pub fn with_load_recipes(mut self, load_recipes: bool) -> Self {

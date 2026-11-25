@@ -5898,6 +5898,14 @@
               "minimum": 0
             },
             "description": "The first and last layer steered (0-based, inclusive); every layer a file names when absent."
+          },
+          "loop_guidance": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "A looped model's (Inkling 2's) loop guidance strength, LoopCD-Hidden (arXiv:2610.02185): the coda's input\npushed away from the first pass's output, `h + w (h - h1)`. About 0.2 to 0.3 for generation; absent, none."
           }
         }
       },
