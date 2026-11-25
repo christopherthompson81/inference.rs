@@ -230,6 +230,7 @@ impl GGUFSpecificConfig {
             hf_cache_path: self.hf_cache_path.clone(),
             matformer_config_path: self.matformer_config_path.clone(),
             matformer_slice_name: self.matformer_slice_name.clone(),
+            hf_config_overrides: self.hf_config_overrides.clone(),
             ..Default::default()
         }
     }
