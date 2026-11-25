@@ -21,7 +21,7 @@ const CLIP_SIZE: u32 = 224;
 const DINO_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const DINO_STD: [f32; 3] = [0.229, 0.224, 0.225];
 const CLIP_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
-const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_58, 0.275_777_1];
+const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 // F.normalize's floor
 const NORM_EPS: f64 = 1e-12;
 const DINO_LAYERS: usize = 24;

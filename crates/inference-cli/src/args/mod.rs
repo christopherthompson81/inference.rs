@@ -388,6 +388,77 @@ pub enum Command {
         cpu: bool,
     },
 
+    /// A coarse mesh refined under an image with Hi3D v1.0 (Sparc3D): model.glb (untextured, or painted by TRELLIS.2's
+    /// texturing with --texture), mesh.ply (y up, centred, radius 1), the conditioning image and a meta.json. Without
+    /// --mesh, TRELLIS.2 makes the coarse mesh from the image first. Hi3D is under the Hi3D Open License Agreement v1.0
+    /// (its Acceptable Use Policy applies; a commercial product built on it shows "Powered by Hi3D 1.0")
+    #[command(name = "refine-mesh")]
+    RefineMesh {
+        /// The image the refinement follows (png, jpg, webp)
+        #[arg(long)]
+        image: PathBuf,
+
+        /// The coarse mesh (glb, obj, ply); made by TRELLIS.2 from the image when unset
+        #[arg(long)]
+        mesh: Option<PathBuf>,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// The surface resolution: 512, 1024 or 1536 (one, two or three passes; 1536 takes ~18 GB)
+        #[arg(long, default_value_t = 1024)]
+        resolution: usize,
+
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+
+        /// Sampling steps each pass takes
+        #[arg(long, default_value_t = inference_jobs::refine_mesh::STEPS)]
+        steps: usize,
+
+        /// Paint the refined mesh with TRELLIS.2's texturing (baked textures)
+        #[arg(long)]
+        texture: bool,
+
+        /// The Hi3D v1.0 folder; fetched from hi3d-official/Hi3Dv1.0 when unset
+        #[arg(long)]
+        hi3d: Option<PathBuf>,
+
+        /// The DINOv2-large transformers folder; fetched from facebook/dinov2-large when unset
+        #[arg(long)]
+        dinov2: Option<PathBuf>,
+
+        /// The CLIP ViT-L/14 transformers folder; fetched from openai/clip-vit-large-patch14 when unset
+        #[arg(long)]
+        clip: Option<PathBuf>,
+
+        /// The TRELLIS.2-4B folder (coarse mesh, texturing); fetched from microsoft/TRELLIS.2-4B when unset
+        #[arg(long)]
+        trellis2: Option<PathBuf>,
+
+        /// The TRELLIS-image-large folder (its structure decoder, for the coarse mesh); fetched when unset
+        #[arg(long)]
+        trellis_large: Option<PathBuf>,
+
+        /// The DINOv3 ViT-L/16 folder (coarse mesh, texturing); fetched from facebook/dinov3-vitl16-pretrain-lvd1689m
+        /// (gated) when unset
+        #[arg(long)]
+        dinov3: Option<PathBuf>,
+
+        /// The BiRefNet folder; fetched from ZhengPeng7/BiRefNet when unset and the background needs removing
+        #[arg(long)]
+        birefnet: Option<PathBuf>,
+
+        /// Remove the background even when the image has transparency of its own
+        #[arg(long)]
+        remove_background: bool,
+
+        /// Run on the CPU (very slow) instead of the first CUDA device
+        #[arg(long)]
+        cpu: bool,
+    },
+
     /// The 3D shape of the object in one image: JoVox's 64^3 voxel structure (voxels.ply, as cubes), meshed by
     /// TRELLIS.2's second stage (mesh.ply), beside the prepared image and a meta.json; an image without a transparent
     /// background has it removed with BiRefNet

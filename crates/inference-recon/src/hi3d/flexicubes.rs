@@ -187,8 +187,11 @@ mod tests {
     const SIDE: i32 = 12;
     const RADIUS: f32 = 4.3;
 
+    // a grid's vertices, their scalar, its cubes and their coordinates
+    type Grid = (Vec<[f32; 3]>, Vec<f32>, Vec<[u32; 8]>, Vec<[i32; 3]>);
+
     // a sphere's distance sampled on a grid's vertices, every cube of the grid present
-    fn sphere() -> (Vec<[f32; 3]>, Vec<f32>, Vec<[u32; 8]>, Vec<[i32; 3]>) {
+    fn sphere() -> Grid {
         let n = SIDE + 1;
         let vid = |x: i32, y: i32, z: i32| ((x * n + y) * n + z) as u32;
         let mut vertices = Vec::new();

@@ -1648,13 +1648,16 @@ class JobsConfig:
     """Where jobs keep their folders and which weights they run."""
 
     birefnet: str | None = None
+    clip_large: str | None = None
     devices: list[int] | None = None
+    dinov2_large: str | None = None
     dinov2_reg: str | None = None
     dinov3: str | None = None
     dinov3_hplus: str | None = None
     dir: str | None = None
     drain_timeout_secs: int | None = 120
     flux2_vae: str | None = None
+    hi3d: str | None = None
     idol: str | None = None
     jovox: str | None = None
     lato2: str | None = None
@@ -2893,6 +2896,18 @@ class ReconstructJob:
     max_frames: int | None = None
     placement: Placement | None = None
     target_size: int | None = None
+
+
+@dataclass(kw_only=True)
+class RefineMeshJob:
+    """A mesh refined under an image with Hi3D v1.0; the job takes the image and, optionally, the coarse mesh (glb, obj or ply). Without one, TRELLIS.2 makes it from the image first."""
+
+    placement: Placement | None = None
+    remove_background: bool | None = None
+    resolution: int | None = None
+    seed: int | None = None
+    steps: int | None = None
+    texture: bool | None = None
 
 
 @dataclass(kw_only=True)

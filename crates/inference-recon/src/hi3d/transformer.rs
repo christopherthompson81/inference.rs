@@ -320,7 +320,7 @@ impl Transformer {
     }
 
     /// The first DiT block on pooled tokens `x` `[pooled, 2112]`, unfused, handing `inspect` its parts.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cuda"))]
     pub(crate) fn block0_inspect(
         &self,
         x: &Tensor,
@@ -341,7 +341,7 @@ impl Transformer {
     }
 
     /// The first residual block's norm, SiLU and first convolution on input-layer outputs `[cells, 256]` (f32).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cuda"))]
     pub(crate) fn in0_conv1(&self, h: &Tensor, grid: &Grid) -> Result<Tensor> {
         let b = &self.input_blocks[0];
         let h = norm(&b.norm1, &h.to_dtype(self.dtype)?, self.dtype)?.silu()?;

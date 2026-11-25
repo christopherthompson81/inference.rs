@@ -55,8 +55,10 @@ pub fn point_to_mesh(decoded: &Decoded, structure: &[[i32; 3]]) -> Result<Mesh> 
         .map(|(i, &c)| (key(c), i as u32))
         .collect();
     let cubes: Vec<[u32; 8]> = corners
-        .chunks_exact(CORNERS)
-        .map(|c| std::array::from_fn(|k| index[&key(c[k])]))
+        .as_chunks::<CORNERS>()
+        .0
+        .iter()
+        .map(|c| c.map(|v| index[&key(v)]))
         .collect();
 
     // per vertex: the mean sign probability, distance and deformation over the corners that land on it

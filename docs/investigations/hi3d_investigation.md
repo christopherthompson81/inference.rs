@@ -116,3 +116,24 @@ reference (`render.py`, `/mnt/data/models/hi3d-ref/ours/compare{512,1024}.png`) 
 neck, teeth and horn ridges the coarse mesh lacks.
 
 Next: the CLI, job and web UI, chaining TRELLIS.2's geometry, then speed (pass 3 samples for 297 s).
+
+## Run 4 - 2026-11-25 13:27
+
+The CLI (`refine-mesh`), the `refine_mesh` job, the web UI's **Refine a mesh** mode, and TRELLIS.2 for the coarse
+mesh when none is given. Question: does the whole chain hold together from an image alone?
+
+```
+inference refine-mesh --image example.png --out cli1024 --resolution 1024 --texture  (local checkpoint flags)
+```
+
+- 160 s end to end: TRELLIS.2's 512 shape as the coarse mesh (1.31M faces, 7,954 cells at 64^3), two Hi3D passes
+  (36,898 cells at 128^3, 2.50M decoded), 993K faces after the debris filter and simplification, then TRELLIS.2's
+  texturing at 1024 (22 s).
+- TRELLIS.2 works z up and Hi3D in the coarse mesh's own axes (the reference reads glTF as written, y up): the coarse
+  mesh turns y up before refining, and the export turns it back for `to_glb`. Renders of `coarse.ply` and the textured
+  `model.glb` line up.
+- The job test on real weights (`refine_mesh_job::a_refine_mesh_job_writes_a_refined_mesh`: the robot photo, opaque,
+  so BiRefNet; TRELLIS.2's coarse mesh; one pass at 512) passes in 31 s.
+
+Speed is left for later: sampling dominates (pass 2 85 s, pass 3 297 s), and it is compute-bound in attention over
+the pooled tokens (about 22K at pass 3, 24 blocks, ~80 calls), already ahead of the reference's 107 s for pass 2.

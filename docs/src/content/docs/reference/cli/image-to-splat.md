@@ -2,7 +2,7 @@
 title: "inference image-to-splat"
 description: "Gaussian splats of the object in one image with Idol: splat.ply (standard 3DGS), splat.spz, the image the model saw and a meta.json with the input's predicted camera; an image without a transparent background has it removed with the BiRefNet Idol ships"
 sidebar:
-  order: 17
+  order: 18
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

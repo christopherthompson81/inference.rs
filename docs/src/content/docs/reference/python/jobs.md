@@ -231,13 +231,16 @@ Where jobs keep their folders and which weights they run.
 | Field | Type | Default |
 | --- | --- | --- |
 | `birefnet` | `str \| None` | optional |
+| `clip_large` | `str \| None` | optional |
 | `devices` | `list[int] \| None` | optional |
+| `dinov2_large` | `str \| None` | optional |
 | `dinov2_reg` | `str \| None` | optional |
 | `dinov3` | `str \| None` | optional |
 | `dinov3_hplus` | `str \| None` | optional |
 | `dir` | `str \| None` | optional |
 | `drain_timeout_secs` | `int \| None` | `120` |
 | `flux2_vae` | `str \| None` | optional |
+| `hi3d` | `str \| None` | optional |
 | `idol` | `str \| None` | optional |
 | `jovox` | `str \| None` | optional |
 | `lato2` | `str \| None` | optional |
@@ -276,6 +279,20 @@ WorldMirror 2.0 on the job's inputs: images, or one video.
 | `max_frames` | `int \| None` | optional |
 | `placement` | `Placement \| None` | optional |
 | `target_size` | `int \| None` | optional |
+
+
+## `RefineMeshJob`
+
+A mesh refined under an image with Hi3D v1.0; the job takes the image and, optionally, the coarse mesh (glb, obj or ply). Without one, TRELLIS.2 makes it from the image first.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `placement` | `Placement \| None` | optional |
+| `remove_background` | `bool \| None` | optional |
+| `resolution` | `int \| None` | optional |
+| `seed` | `int \| None` | optional |
+| `steps` | `int \| None` | optional |
+| `texture` | `bool \| None` | optional |
 
 
 ## `SceneKind`

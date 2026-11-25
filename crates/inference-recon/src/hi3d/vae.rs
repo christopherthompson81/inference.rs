@@ -201,7 +201,7 @@ impl Serialization {
         }
         let mut scatter = vec![0u32; n];
         for (j, &cell) in order.iter().enumerate() {
-            let row = if n % PATCH == 0 || j < tail || n <= PATCH {
+            let row = if n.is_multiple_of(PATCH) || j < tail || n <= PATCH {
                 j
             } else {
                 (windows - 1) * PATCH + j - (n - PATCH)

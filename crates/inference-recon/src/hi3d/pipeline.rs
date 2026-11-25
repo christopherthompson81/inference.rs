@@ -45,6 +45,12 @@ const RUNGS: [Rung; 3] = [
 ];
 /// The resolutions a refinement can stop at.
 pub const RESOLUTIONS: [usize; 3] = [512, 1024, 1536];
+/// The checkpoints the first pass reads, and those the later ones add.
+pub const FIRST_PASS_FILES: [&str; 2] =
+    ["transformer_512/model.safetensors", "vae/model.safetensors"];
+pub const LATER_PASS_FILES: [&str; 1] = ["transformer_1024/model.safetensors"];
+/// The encoders' files, in their transformers folders.
+pub const ENCODER_FILES: [&str; 2] = ["config.json", "model.safetensors"];
 // decoded cells past which another pass would not fit
 const DECODE_CEILING: usize = 12_000_000;
 // components with a smaller share of the faces are dropped as debris (the largest always stays)
@@ -59,6 +65,7 @@ struct Rung {
 
 /// Hi3D's folder (`transformer_512`, `transformer_1024`, `vae`) and the transformers folders of DINOv2-large and CLIP
 /// ViT-L/14.
+#[derive(Clone, Debug)]
 pub struct Hi3dPaths {
     pub hi3d: PathBuf,
     pub dinov2: PathBuf,
@@ -160,7 +167,7 @@ pub fn refine(
         };
         if model.as_ref().is_none_or(|(p, _)| (*p == 0) != (pass == 0)) {
             // one transformer resident at a time
-            model = None;
+            drop(model.take());
             let vb = weights(&paths.hi3d.join(name).join("model.safetensors"), device)?;
             model = Some((pass, Transformer::load(dtype, vb)?));
         }

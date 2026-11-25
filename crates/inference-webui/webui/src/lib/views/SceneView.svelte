@@ -15,6 +15,7 @@
     submitImageToMesh,
     submitImageToSplat,
     submitReconstruct,
+    submitRefineMesh,
     submitTextureMesh,
     submitVoxels,
     submitWorld,
@@ -52,6 +53,9 @@
   const OBJECT_MODEL = "splat/model.glb";
   const DEFAULT_PRINT_SIZE_MM = 100;
   const LOW_POLY_GLB = "mesh/model.glb";
+  const REFINED_GLB = "refined/model.glb";
+  const COARSE_PLY = "refined/coarse.ply";
+  const REFINE_RESOLUTIONS = [512, 1024, 1536];
   const DEFAULT_MESH_VERTICES = 2000;
   const VOXELS_PLY = "voxels/voxels.ply";
   const VOXELS_MESH = "voxels/mesh.ply";
@@ -64,14 +68,15 @@
     failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
     cancelled: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   };
-  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", image_to_mesh: "Image to mesh", voxels: "Voxels", texture_mesh: "Textured mesh", image_to_splat: "Image to splats" };
-  type Mode = "world" | "reconstruct" | "image_to_3d" | "image_to_mesh" | "voxels" | "texture_mesh" | "image_to_splat";
+  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", image_to_mesh: "Image to mesh", voxels: "Voxels", texture_mesh: "Textured mesh", refine_mesh: "Refined mesh", image_to_splat: "Image to splats" };
+  type Mode = "world" | "reconstruct" | "image_to_3d" | "image_to_mesh" | "voxels" | "texture_mesh" | "refine_mesh" | "image_to_splat";
   const MODES: { id: Mode; label: string }[] = [
     { id: "image_to_3d", label: "Object from an image" },
     { id: "image_to_mesh", label: "Low-poly mesh from an image" },
     { id: "image_to_splat", label: "Splats from an image" },
     { id: "voxels", label: "Voxels from an image" },
     { id: "texture_mesh", label: "Texture a mesh" },
+    { id: "refine_mesh", label: "Refine a mesh" },
     { id: "world", label: "World from a panorama" },
     { id: "reconstruct", label: "Scene from photos or a video" },
   ];
@@ -92,6 +97,8 @@
   let meshFile = $state<File | null>(null);
   let paintResolution = $state(1024);
   let unwrap = $state(false);
+  let refineResolution = $state(1024);
+  let refineTexture = $state(false);
   let samples = $state<number | null>(null);
   // pipeline.json's samplers, shown as placeholders
   const SAMPLER_STAGES = [
@@ -270,6 +277,15 @@
           texture_sampler: changed(samplers.texture),
           placement: room,
         });
+      case "refine_mesh":
+        return submitRefineMesh(image as File, meshFile, {
+          seed,
+          resolution: refineResolution,
+          steps: null,
+          remove_background: removeBackground || null,
+          texture: refineTexture || null,
+          placement: room,
+        });
       case "image_to_splat":
         return submitImageToSplat(image as File, {
           seed,
@@ -390,6 +406,8 @@
     if (made(OBJECT_MODEL)) out.push({ label: "View textured model", file: OBJECT_MODEL, format: "glb", flat: false });
     if (made(OBJECT_PRINT)) out.push({ label: "View printable", file: OBJECT_PRINT, format: "stl", flat: false });
     if (made(LOW_POLY_GLB)) out.push({ label: "View mesh", file: LOW_POLY_GLB, format: "glb", flat: true });
+    if (made(REFINED_GLB)) out.push({ label: "View refined mesh", file: REFINED_GLB, format: "glb", flat: false });
+    if (made(COARSE_PLY)) out.push({ label: "View coarse mesh", file: COARSE_PLY, format: "ply", flat: false });
     if (made(VOXELS_PLY)) out.push({ label: "View voxels", file: VOXELS_PLY, format: "ply", flat: true });
     if (made(VOXELS_MESH)) out.push({ label: "View mesh", file: VOXELS_MESH, format: "ply", flat: false });
     return out;
@@ -457,8 +475,16 @@
           {/each}
         </div>
 
-        {#if mode === "image_to_3d" || mode === "image_to_mesh" || mode === "voxels" || mode === "texture_mesh" || mode === "image_to_splat"}
-          {#if mode === "texture_mesh"}
+        {#if mode === "image_to_3d" || mode === "image_to_mesh" || mode === "voxels" || mode === "texture_mesh" || mode === "refine_mesh" || mode === "image_to_splat"}
+          {#if mode === "refine_mesh"}
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              Hi3D v1.0 refines a coarse mesh under a photo of the object, adding the fine detail the photo shows: one pass at 512, two at 1024, three at 1536. Without a mesh, TRELLIS.2 makes one from the photo first. About 2 minutes at 1024 on a 24 GB card (8 at 1536, with an 18 GB GPU peak). Hi3D is under the Hi3D Open License Agreement v1.0; a commercial product built on it shows "Powered by Hi3D 1.0".
+            </p>
+            <label class="flex cursor-pointer items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-300 p-3 text-sm text-gray-500 hover:border-blue-400 dark:border-gray-700">
+              <span>{meshFile ? meshFile.name : "Choose the coarse mesh (glb, obj or ply; y up), or leave it for TRELLIS.2"}</span>
+              <input type="file" accept=".glb,.obj,.ply" class="hidden" onchange={(e) => (meshFile = e.currentTarget.files?.[0] ?? null)} disabled={busy} />
+            </label>
+          {:else if mode === "texture_mesh"}
             <p class="text-sm text-gray-600 dark:text-gray-400">
               TRELLIS.2 paints a mesh you supply from a photo of the object: the mesh is fitted to the unit cube, encoded, given PBR material under the photo, and baked onto its own texture coordinates (or an unwrap) in a GLB. About 20 s at 1024.
             </p>
@@ -567,6 +593,20 @@
               <label class="flex items-center gap-1.5 pb-1.5 text-sm">
                 <input type="checkbox" class="accent-blue-600" bind:checked={voxelMesh} disabled={busy} />
                 Mesh it with TRELLIS.2
+              </label>
+            {/if}
+            {#if mode === "refine_mesh"}
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Resolution</span>
+                <select class={field} bind:value={refineResolution} disabled={busy}>
+                  {#each REFINE_RESOLUTIONS as r (r)}
+                    <option value={r}>{r}{r === 1024 ? " (default)" : r === 512 ? " (one pass)" : " (finest; 18 GB)"}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="Paint the refined mesh from the photo with TRELLIS.2's texturing">
+                <input type="checkbox" class="accent-blue-600" bind:checked={refineTexture} disabled={busy} />
+                Texture it
               </label>
             {/if}
             {#if mode === "texture_mesh"}
