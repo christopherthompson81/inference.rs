@@ -76,3 +76,29 @@ loop_guidance_logits, w_max 0.5           72.4     66.6    (-32%)
 
 The active contrast costs 3.3 ms a token where a second lm_head read and a few vocabulary-wide ops should cost about
 0.5 ms: something in it leaves the CUDA graph or syncs with the host. Next: profile it.
+
+## Run 3 - 2026-11-25 06:30
+
+Why the active contrast cost 3.3 ms a token. `nsys` (`--cuda-graph-trace=node`, 64 decode tokens, logits mode at 0.5
+against logits mode at 0): `softmax_f32` 627 ms over 257 calls, 2.4 ms each, a one-row softmax over 200058 logits
+(one block a row); the second lm_head read (`mmvq_gguf_q6_k_f32`) 0.5 ms. The graph captured fine; nothing left it.
+
+`p1 - p2` needs no softmax: `(1 - e^(z2 - z1)) / sum e^(z - z1)` from a max, a sum of exps and a second max. Then
+`fast_max_f32` took 178 us a call against `fast_sum_f32`'s 15 us on the same row: the f32 sum had been given a contiguous
+float4 path, max and min still ran `get_strided_index` (a divide per dimension) on every element. A contiguous path with
+a register accumulator in `fast_max`/`fast_min` (reduce.cu): 47 us.
+
+```
+recipe C, q8 KV, one sequence                  d8      d8192
+plain                                          106.2   95.3
+logits mode loaded, strength 0                 94.9    85.2
+logits mode, w_max 0.5, softmax (Run 2)        72.4    66.6
+  margin from reductions                       87.7    79.4
+  + contiguous max/min                         89.6    80.8   (-16% against plain; the rest is the head's second read)
+```
+
+Also: `--loop-guidance-logits` (CLI) and `with_loop_guidance_logits` (SDK) set the mode, as a config override. A
+checkpoint config nests the text model's under `text_config` and a GGUF's is flat, so the loader reads the top-level
+`loop_guidance_logits` and `loop_config` into the nested one. Checked that Run 2's arms ran what they were labelled:
+the eval servers' KV allocations were 1224 MB (logits mode, 3 passes) and 952 MB (logits mode, 2 passes), 42/54 of the
+slots, so the override reached the model in both.

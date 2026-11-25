@@ -60,6 +60,22 @@ load, **Loop guidance** in the web UI's Steering section for an Inkling 2 slot, 
 A new strength rewrites the value its CUDA graphs read; attaching or removing it captures them again. A model that runs
 each layer once refuses it.
 
+### LoopCD-Logits
+
+The paper's other form contrasts the two passes' predictions instead: the layers after the loop also run on the first
+pass's output, and the logits become `z + w (z - z1)`. The strength adapts per token, `w = w_max (1 - (p1 - p2))` from
+the last pass's top two probabilities, so it pushes hardest where the choice is close. The model's authors recommend
+this form for Inkling 2 with `w_max = 0.5`. The extra layers keep their own KV cache, so the mode is chosen at load:
+
+```bash
+inference serve -m thinkingmachines/Inkling-2-Mini --loop-guidance-logits --loop-guidance 0.5
+```
+
+`with_loop_guidance_logits` in the Rust SDK. While loaded, decode runs about 11% slower at strength 0, and about 16%
+slower with guidance on (the second read of the output head); the strength still switches live. The control tokens
+(message, block and tool-call markers) keep the last pass's logits. On MATH-500 levels 4 and 5 (integer answers,
+thinking on, a 6144-token thinking budget), Inkling 2 Mini went from 150 to 153 of 156 with `w_max = 0.5`.
+
 ## Notes
 
 - Cached prompt states depend on the vectors, so the prefix cache keys them on the active set, and steered requests are not written to the disk prefix cache.

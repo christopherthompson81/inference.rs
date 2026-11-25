@@ -2257,10 +2257,15 @@ impl Model {
 /// from CONTROL_TOKENS_START: message, block and tool-call markers) keep the last pass's logits.
 fn loop_contrast(z: &Tensor, z1: &Tensor, w_max: &Tensor) -> Result<Tensor> {
     let vocab = z.dim(D::Minus1)?;
-    let p = inference_tensor::nn::ops::softmax_last_dim(z)?;
-    let p1 = p.max_keepdim(D::Minus1)?;
-    let p2 = (p.broadcast_lt(&p1)?.to_dtype(DType::F32)? * &p)?.max_keepdim(D::Minus1)?;
-    let w = (((p1 - p2)? * -1.0)? + 1.0)?
+    // p1 - p2 = (1 - e^(z2 - z1)) / sum e^(z - z1): reductions, not a one-row softmax over the vocabulary (~2.4 ms)
+    let shifted = z.broadcast_sub(&z.max_keepdim(D::Minus1)?)?;
+    let total = shifted.exp()?.sum_keepdim(D::Minus1)?;
+    let below = shifted.lt(0.0)?;
+    let second = below
+        .where_cond(&shifted, &shifted.affine(0.0, f64::from(f32::MIN))?)?
+        .max_keepdim(D::Minus1)?;
+    let margin = ((second.exp()? * -1.0)? + 1.0)?.div(&total)?;
+    let w = ((margin * -1.0)? + 1.0)?
         .broadcast_mul(&w_max.to_device(z.device())?.to_dtype(DType::F32)?)?;
     let text = CONTROL_TOKENS_START.min(vocab);
     let steered = z.narrow(D::Minus1, 0, text)?.add(

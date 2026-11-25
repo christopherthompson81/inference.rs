@@ -475,10 +475,7 @@ async fn loop_guidance_on_logits_contrasts_the_passes_and_leaves_strength_zero_p
     let tokens: Vec<u32> = (0..PROMPT_LEN as u32).collect();
     let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     let plain = prompt_logprobs(&builder(&dir, None).build().await?, tokens.clone()).await?;
-    let logits_mode = || {
-        builder(&dir, None)
-            .with_hf_config_overrides(overrides(serde_json::json!({"loop_guidance_logits": true})))
-    };
+    let logits_mode = || builder(&dir, None).with_loop_guidance_logits();
     let model = logits_mode().build().await?;
     assert_eq!(
         bits(&prompt_logprobs(&model, tokens.clone()).await?),
@@ -525,18 +522,20 @@ async fn fewer_loop_passes_run_and_keep_drafting_on_cuda() -> anyhow::Result<()>
         return Ok(());
     }
     let drafter = drafter_checkpoint()?;
-    let two = serde_json::json!({"text_config": {"loop_config": {"run_passes": PASSES - 1}}});
+    // top-level, as `--loop-guidance-logits` sends its key: the nested checkpoint config takes it too
+    let two = serde_json::json!({"loop_config": {"run_passes": PASSES - 1}});
     let request = || chat("say something long");
-    let run = |drafting| {
+    let run = |drafting, passes: Option<serde_json::Value>| {
         let dir = &drafter;
-        let two = two.clone();
         async move {
             let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
                 .with_load_recipes(false)
                 .with_dtype(ModelDType::BF16)
                 .with_prefix_cache_n(None)
-                .with_hf_config_overrides(overrides(two))
                 .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+            if let Some(passes) = passes {
+                builder = builder.with_hf_config_overrides(overrides(passes));
+            }
             if drafting {
                 builder =
                     builder.with_mtp_model(dir.path().to_string_lossy(), Some(DRAFT_BLOCK - 1));
@@ -548,8 +547,12 @@ async fn fewer_loop_passes_run_and_keep_drafting_on_cuda() -> anyhow::Result<()>
             )
         }
     };
-    let plain = run(false).await?;
-    let drafted = run(true).await?;
+    let plain = run(false, Some(two.clone())).await?;
+    anyhow::ensure!(
+        run(false, None).await? != plain,
+        "the checkpoint ran every pass under `run_passes`"
+    );
+    let drafted = run(true, Some(two)).await?;
     ensure_same_greedy(&drafted, &plain)
 }
 

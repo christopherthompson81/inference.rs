@@ -299,13 +299,29 @@ macro_rules! load_options_methods {
         }
 
         /// A looped model's (Inkling 2's) loop guidance strength (LoopCD-Hidden: the coda's input pushed away from
-        /// the first pass's output; about 0.2 to 0.3 for generation).
+        /// the first pass's output; about 0.2 to 0.3 for generation), or after
+        /// `with_loop_guidance_logits` the adaptive strength's ceiling (0.5 is the authors' recipe).
         pub fn with_loop_guidance(mut self, strength: f32) -> Self {
             self.options
                 .runtime
                 .control_vectors
                 .get_or_insert_with(Default::default)
                 .loop_guidance = Some(strength);
+            self
+        }
+
+        /// Load a looped model for LoopCD-Logits: the coda also runs on the first pass's output, in KV slots of its
+        /// own, and loop guidance contrasts the two passes' logits (about 11% slower decode while loaded).
+        pub fn with_loop_guidance_logits(mut self) -> Self {
+            let mut value = self
+                .options
+                .runtime
+                .hf_config_overrides
+                .take()
+                .map_or_else(|| serde_json::json!({}), |o| o.as_value().clone());
+            value["loop_guidance_logits"] = serde_json::Value::Bool(true);
+            self.options.runtime.hf_config_overrides =
+                Some($crate::load::Overrides::new(value).expect("a JSON object"));
             self
         }
 
