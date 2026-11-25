@@ -556,6 +556,46 @@ async fn fewer_loop_passes_run_and_keep_drafting_on_cuda() -> anyhow::Result<()>
     ensure_same_greedy(&drafted, &plain)
 }
 
+// a repeat reuses its prefix (KV and the convolution states' checkpoint) under loop guidance as it does without
+#[tokio::test]
+async fn a_repeat_reuses_its_prefix_under_loop_guidance_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = checkpoint()?;
+    let prompt = "a long enough prompt to fill several cache blocks ".repeat(8);
+    for (logits, strength) in [
+        (false, None),
+        (false, Some(GUIDANCE)),
+        (true, None),
+        (true, Some(LOGITS_GUIDANCE)),
+    ] {
+        let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
+            .with_dtype(ModelDType::F32)
+            .with_load_recipes(false)
+            .with_device("cuda:0")
+            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+        if logits {
+            builder = builder.with_loop_guidance_logits();
+        }
+        if let Some(strength) = strength {
+            builder = builder.with_loop_guidance(strength);
+        }
+        let model = builder.build().await?;
+        let (first, _) = traces::greedy(&model, chat(&prompt), MAX_LEN).await?;
+        let (repeat, cached) = traces::greedy(&model, chat(&prompt), MAX_LEN).await?;
+        anyhow::ensure!(
+            cached > 0,
+            "logits mode {logits}, strength {strength:?}: the repeat reused nothing"
+        );
+        assert_eq!(
+            first.iter().map(|t| t.0).collect::<Vec<_>>(),
+            repeat.iter().map(|t| t.0).collect::<Vec<_>>()
+        );
+    }
+    Ok(())
+}
+
 // a new strength rewrites the scalar the captured decode graphs read: no capture again, the fresh load's tokens
 #[tokio::test]
 async fn a_new_loop_guidance_strength_keeps_the_captured_graphs_on_cuda() -> anyhow::Result<()> {
