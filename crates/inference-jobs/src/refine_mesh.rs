@@ -27,8 +27,6 @@ pub const CONDITION_FILE: &str = "condition.png";
 pub use crate::image_to_3d::PREPARED_FILE;
 /// The coarse mesh TRELLIS.2 made, when none was given
 pub const COARSE_FILE: &str = "coarse.ply";
-// texturing writes its own files into a folder of its own, then its model takes the untextured one's place
-const TEXTURED_DIR: &str = "textured";
 /// The most sampling steps a pass may take
 pub const MAX_STEPS: usize = 100;
 // the untextured GLB's surface: light grey, fully rough
@@ -253,13 +251,12 @@ pub fn refine_mesh_on(
 
     let texture = match (&models.texture, &options.texture) {
         (Some(models), Some(texture_options)) => {
-            let dir = out_dir.join(TEXTURED_DIR);
-            // the object already cut out: texturing finds its transparency and keeps it
+            // in this folder: its model replaces the untextured one, its cut-out stays where its preview points
             let report = crate::texture_mesh::texture_mesh_on(
                 models,
                 &mesh_path,
                 &prepared_path,
-                &dir,
+                out_dir,
                 &crate::texture_mesh::TextureMeshOptions {
                     remove_background: false,
                     up: Some(UpAxis::Y),
@@ -268,8 +265,6 @@ pub fn refine_mesh_on(
                 progress,
                 device,
             )?;
-            std::fs::rename(dir.join(GLB_FILE), out_dir.join(GLB_FILE))?;
-            std::fs::remove_dir_all(&dir)?;
             Some(report)
         }
         _ => None,
