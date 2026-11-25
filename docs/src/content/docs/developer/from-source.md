@@ -48,6 +48,7 @@ Common per-platform flag strings:
 | macOS / Metal | `metal` |
 | CUDA | `cuda` |
 | CUDA multi-GPU | `cuda nccl` |
+| Vulkan (AMD, iGPUs) | `vulkan` (needs `glslc` from shaderc on `PATH`) |
 
 The full flag list, per-hardware recommendations, and per-flag effects live in the [cargo features reference](/reference/cargo-features/). Add `nccl` on Linux when NCCL is installed and you want CUDA multi-GPU tensor parallelism.
 
