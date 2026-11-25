@@ -192,9 +192,7 @@ use tokenizers::Tokenizer;
 use anyhow::Result;
 use inference_tensor::{DType, Device, IndexOp, Tensor, Var};
 
-use crate::paged_attention::block_hash::{
-    MultimodalAttentionPolicy, adapter_generation_key, compute_block_hashes,
-};
+use crate::paged_attention::block_hash::{MultimodalAttentionPolicy, compute_block_hashes};
 use crate::sequence::Sequence;
 
 use prompt_chunks::{PromptChunkPlan, next_prompt_chunk_group};
@@ -1604,12 +1602,12 @@ pub trait Pipeline:
             self.flush_recurrent_speculative_transitions(&[*seq.id()])?;
         }
 
-        let adapter_key = adapter_generation_key(seq.adapter_generation());
+        // the keys lookups use: an adapter's or control vectors' states are cached apart from the plain model's
         let block_hashes = compute_block_hashes(
             seq.get_toks(),
             block_size,
             seq.mm_features(),
-            adapter_key.as_slice(),
+            &seq.block_hash_keys(),
         );
         let n_blocks = cached_tokens / block_size;
         if block_hashes.len() < n_blocks {
@@ -1662,6 +1660,7 @@ pub trait Pipeline:
             .copied()
             .expect("recurrent prefix owner requires a full block");
         if write_through
+            && !seq.custom_states()
             && let Some(disk) = prefix_cacher.disk_tier().cloned()
             && let Err(error) = self.write_prefix_through(
                 &disk,
