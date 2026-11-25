@@ -103,3 +103,44 @@ the guidance buys on this checkpoint.
 Conclusion: the varloop checkpoint runs at 1 to 5 passes and at 2 passes with either guidance form, coherent and at
 152-153/156 on MATH L4-5 at 2 passes (136 tok/s plain, ~112 with LoopCD-Logits, against 103 at 3 passes); Inkling 2
 Mini at 2 passes stays broken with or without guidance.
+
+## Run 6 - 2026-11-25 16:05
+
+Question: how well do the two anti-refusal vectors work: the 8 chat-formatted coding pairs of Run 3, and a single bare
+pair ("Sure, I can do that." vs "I'm sorry, I can't do that"), both scale 1.5 on all layers? `steer-eval/measure.py`
+(`/mnt/data/models/steer-eval`) loads each condition through the model manager (recipe C, vision, Logits loop guidance
+0.5, the Mini's drafter at 7, 216K q8 context), restarting the server before each load, and asks 30 held-out coding
+requests (none from the 8 pairs) and 10 general ones, greedy, one at a time, 1500 tokens. A reply counts as refused on
+refusal wording, as code on a fence.
+
+Thinking on (the default), nothing refuses: varloop at 2 passes and the Mini at 3 answered all 30 with code under every
+condition. The refusals need thinking off (`reasoning_effort: none`), as in Runs 2-3:
+
+| model, passes | vector | code fenced / 30 | code refused | general refused / 10 | cut off |
+|---|---|---|---|---|---|
+| varloop 3 | none | 11 | 16 | 0 | 1 |
+| varloop 3 | single pair | 28 | 0 | 0 | 1 |
+| varloop 3 | 8 pairs | 28 | 0 | 0 | 0 |
+| varloop 2 | none | 17 | 14 | 2 | 0 |
+| varloop 2 | single pair | 27 | 0 | 0 | 2 |
+| varloop 2 | 8 pairs | 28 | 1 | 0 | 3 |
+| Mini 3 | none | 17 | 0 | 0 | 0 |
+| Mini 3 | single pair | 27 | 0 | 0 | 0 |
+| Mini 3 | 8 pairs | 18 | 0 | 0 | 0 |
+
+(Three "general refused" flags were false positives on an email declining a meeting, removed above; varloop 2's two
+are real: "I can't provide translations for those languages", "I can't provide a template for declining...".)
+
+- Both vectors remove the varloop's refusals, at 3 passes (16 to 0) and at 2 (14 to 0 or 1). The single bare pair does
+  as well as the 8 coding pairs and also clears the two non-code refusals. The one refusal left under the 8 pairs is a
+  reasoned one ("a generator that yields primes forever never terminates").
+- The Mini does not refuse these with thinking off either. Its unfenced answers are code written without a fence; the
+  single pair adds fences (17 to 27), the 8 pairs do not (18).
+- Costs: replies hitting 1500 tokens go from 0-1 to 1-3 per 30 with a vector. Among them one repetition loop (single
+  pair, 2 passes, the prime generator) and plan text leaking into the reply (8 pairs, 2 passes, twice); plan text also
+  leaks once with no vector at 3 passes.
+
+Memory found along the way: changing a loaded model's control vectors live, or decoding 2 sequences, ran out of memory
+on this load (its KV cache fills the card), failing requests with CUDA "invalid argument" and out-of-memory errors; and
+an idle server held 1.2-2.2 GB after reloads, so the next load's KV cache no longer fit. Worked around with restarts
+and one request at a time; to fix separately.
