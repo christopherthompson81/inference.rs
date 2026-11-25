@@ -6,6 +6,7 @@ mod conv;
 mod dinov2;
 mod dinov3;
 mod geometry;
+pub mod hi3d;
 pub mod idol;
 pub mod jovox;
 pub mod lato2;

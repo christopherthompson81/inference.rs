@@ -1,0 +1,41 @@
+Hi3D v1.0 (Sparc3D) in inference.rs
+===================================
+
+The files in this folder reimplement in Rust the Hi3D v1.0 second-stage inference code (the Python package
+`sparc3d`, https://github.com/hi3d-official/Hi3Dv1.0) and run its model files
+(https://huggingface.co/hi3d-official/Hi3Dv1.0). Modified: the pipeline, transformer, sparse VAE decoder, sampler,
+mesh voxelizer, FlexiCubes extraction and hole filling were rewritten in Rust for this engine; the final mesh is
+simplified with the engine's own edge-collapse simplifier instead of pyfqmr. This port is not an official Hi3D product
+and is not endorsed by OCEANO HK HOLDING LIMITED.
+
+These files, as a derivative of the Hi3D Materials, are subject to the Hi3D Open License Agreement Version 1.0 in
+LICENSE beside this notice, including its Acceptable Use Policy (Schedule 1). A commercial product or service that
+integrates them must display "Powered by Hi3D 1.0" as Section 7 of that Agreement describes.
+
+Hi3D Open License Agreement Version 1.0 notice
+----------------------------------------------
+Hi3D is licensed under the Hi3D Open License Agreement Version 1.0. Copyright © 2026 OCEANO HK HOLDING LIMITED. All rights not expressly granted are reserved. The Hi3D trademarks are owned by OCEANO HK HOLDING LIMITED or its applicable affiliate(s).
+
+Original notices retained from Hi3D v1.0
+----------------------------------------
+SPARC3D
+Copyright 2026 The SPARC3D Authors
+
+  * Microsoft TRELLIS (MIT License)
+    Copyright (c) Microsoft Corporation.
+    https://github.com/microsoft/TRELLIS
+
+  * Pointcept / Point Transformer V3 (MIT License)
+    Copyright (c) 2023 Pointcept
+    https://github.com/Pointcept/Pointcept
+
+  * O-CNN, ocnn-pytorch (MIT License)
+    Copyright (c) 2022 Peng-Shuai Wang <wangps@hotmail.com>
+    https://github.com/octree-nn/ocnn-pytorch
+
+  * NVIDIA FlexiCubes (Apache License 2.0)
+    Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
+    https://github.com/nv-tlabs/FlexiCubes
+    The lookup tables in flexicubes_tables.rs are its data, unmodified; its license is in LICENSE-FlexiCubes.
+
+GPU surface voxelization descends from the PyTorch extension written by Zhihao Li (a Sparc3D author).

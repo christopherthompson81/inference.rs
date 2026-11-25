@@ -58,7 +58,8 @@ __device__ void ln_mod(const T* x, const float* w, const float* bias, const T* m
     }
 }
 
-// one warp a (batch, token, head) row of `d` (a multiple of 64): read at `src + token_row * token_stride + offset +
+// one warp a (batch, token, head) row of `d` (even, up to 256; each lane an even share, the last lanes idle when
+// they would be empty): read at `src + token_row * token_stride + offset +
 // head * d` plus the linear's `bias` there (rounded); F.normalize'd times `gain` [heads, d] (when given) and rounded,
 // and rotated by `cos` / `sin` (when given, adjacent channel pairs, pair p of (b, t, h) at `b * cos_b + t * cos_t +
 // h * cos_h + p`) and rounded, the rotation first when `rope_first`; written to `out` [batch, heads, tokens, d]
@@ -75,14 +76,17 @@ __device__ void head_norm_rope(const T* src, const T* bias, long token_stride, l
     const int bi = bt / tokens;
     const T* s = src + bt * token_stride + offset + (long)h * d;
     T* o = out + (((long)bi * heads + h) * tokens + t) * d;
-    const int per = d / 32;
-    // each lane owns adjacent pairs, so a rotation stays within the lane
+    // each lane owns adjacent pairs, so a rotation stays within the lane: d = 96 takes 4 a lane over 24 lanes
+    int per = (d + 31) / 32;
+    per += per & 1;
+    const bool active = lane * per < d;
     float v[8];
     const T* bh = bias + offset + (long)h * d;
-    for (int k = 0; k < per; k++) v[k] = f(__hadd(s[lane * per + k], bh[lane * per + k]));
+    for (int k = 0; k < per; k++) v[k] = active ? f(__hadd(s[lane * per + k], bh[lane * per + k])) : 0.0f;
     const float* cs = cos_t ? cos_t + bi * cos_b + t * cos_tok + h * cos_h : nullptr;
     const float* sn = sin_t ? sin_t + bi * cos_b + t * cos_tok + h * cos_h : nullptr;
     auto rotate = [&]() {
+        if (!active) return;
         for (int k = 0; k < per; k += 2) {
             const int pair = (lane * per + k) / 2;
             const float c = cs[pair], s1 = sn[pair];
@@ -97,10 +101,12 @@ __device__ void head_norm_rope(const T* src, const T* bias, long token_stride, l
         for (int k = 0; k < per; k++) sq += v[k] * v[k];
         for (int off = 16; off > 0; off >>= 1) sq += __shfl_xor_sync(0xffffffffu, sq, off);
         const float norm = fmaxf(sqrtf(sq), eps);
-        for (int k = 0; k < per; k++) v[k] = f(to<T>(v[k] / norm * gain[h * d + lane * per + k]));
+        if (active)
+            for (int k = 0; k < per; k++) v[k] = f(to<T>(v[k] / norm * gain[h * d + lane * per + k]));
     }
     if (cs && !rope_first) rotate();
-    for (int k = 0; k < per; k++) o[lane * per + k] = to<T>(v[k]);
+    if (active)
+        for (int k = 0; k < per; k++) o[lane * per + k] = to<T>(v[k]);
 }
 
 // x + (y + bias) * gate (each product and sum rounded), the gate read from row `row / rows_per_batch` of `mod` at

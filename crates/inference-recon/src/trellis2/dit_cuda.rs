@@ -15,6 +15,8 @@ static IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dit.fatbin"));
 const LN_BLOCK: u32 = 256;
 const BLOCK: u32 = 256;
 const WARP: u32 = 32;
+// 8 values a lane over a warp
+const MAX_HEAD_DIM: usize = 256;
 // a null device pointer, for an input a kernel goes without
 const NULL: u64 = 0;
 
@@ -199,6 +201,10 @@ fn heads_as<T: Elem>(
     eps: f32,
 ) -> Result<Tensor> {
     let (batch, tokens, parts, heads, d) = src.dims5()?;
+    // the kernel holds up to 8 values a lane in pairs
+    if d % 2 != 0 || d > MAX_HEAD_DIM {
+        inference_tensor::bail!("fused heads take an even head dim up to {MAX_HEAD_DIM}, not {d}");
+    }
     let dev = cuda_device(src)?;
     let src = src.contiguous()?;
     view!(src, T, sg, sv);
