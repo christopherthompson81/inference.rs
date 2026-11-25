@@ -47,6 +47,7 @@ const BLOCK: usize = 2;
 // the looped core, layers 2 and 3, run three times
 const CORE: (usize, usize) = (2, 4);
 const PASSES: usize = 3;
+const PROMPT_IDS: [u32; 8] = [3, 9, 4, 17, 6, 11, 8, 2];
 const GATE_RANK: usize = 8;
 const SLIDING: [usize; 4] = [0, 1, 3, 4];
 const HEADS: usize = 2;
@@ -1875,5 +1876,36 @@ async fn a_recipe_load_asked_for_vision_writes_the_projector_once_and_reads_pict
         .map(|f| Ok(std::fs::metadata(f)?.modified()?))
         .collect::<anyhow::Result<Vec<_>>>()?;
     anyhow::ensure!(again == modified, "a second load reads the built projector");
+    Ok(())
+}
+
+// a vision recipe load takes the config overrides as a text one does: fewer passes move the scores
+#[tokio::test]
+async fn a_vision_recipe_load_runs_the_asked_pass_count() -> anyhow::Result<()> {
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
+    let (official, _) = official_weights(false)?;
+    let dir = official_checkpoint(&official)?;
+    add_tower(&dir, &official, OFFICIAL.hidden)?;
+    let recipes = tempfile::tempdir()?;
+    let recipe = || {
+        builder(&dir, None)
+            .with_load_recipes(true)
+            .with_recipe_vision(true)
+            .with_recipe_dir(recipes.path())
+    };
+    // token ids, not text: the GGUF tokenizer splits none of the fixture's text
+    let scores =
+        |model: inference::Model| async move { prompt_logprobs(&model, PROMPT_IDS.to_vec()).await };
+    let trained = scores(recipe().build().await?).await?;
+    let fewer = scores(recipe().with_loop_passes(PASSES as u64 - 1).build().await?).await?;
+    anyhow::ensure!(
+        trained
+            .iter()
+            .zip(&fewer)
+            .any(|(a, b)| (a - b).abs() > RECIPE_LOGPROB_TOLERANCE),
+        "{} passes scored as {PASSES}",
+        PASSES - 1
+    );
     Ok(())
 }
