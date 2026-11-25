@@ -8851,6 +8851,13 @@
             ],
             "description": "For a layout detector, `cpu` or `cuda:N`; unset uses the engine's device. Other models run on the engine's."
           },
+          "loop_guidance_logits": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "For a looped model (Inkling 2), load it for LoopCD-Logits: the layers after the loop also run on the first\npass's output (in KV slots of their own, about 11% slower decode), and `loop_guidance` contrasts the logits."
+          },
           "max_seqs": {
             "type": [
               "integer",

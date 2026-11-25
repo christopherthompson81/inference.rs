@@ -115,6 +115,8 @@ export interface SlotForm {
   steerLayers?: string;
   /** A looped model's loop guidance strength (about 0.2 to 0.3); null or 0 for none. */
   loopGuidance?: number | null;
+  /** Load a looped model for LoopCD-Logits (loop guidance then contrasts the passes' logits; 0.5 is the authors'). */
+  loopLogits?: boolean;
 }
 
 /** The steering a slot's form sets up, or null when it sets none. */
@@ -292,6 +294,7 @@ class ManagerStore {
         mtpAutoDepth: request.mtp?.auto_depth ?? false,
         mmproj: request.mmproj ?? "",
         vision: request.vision ?? false,
+        loopLogits: request.loop_guidance_logits ?? false,
         vad: (SLOTS[slot] as Slot).vad ? (request.vad ?? "") : form.vad,
         device: request.device ?? "auto",
         cacheK,
@@ -324,6 +327,9 @@ class ManagerStore {
       const cache = cacheType(form);
       if (cache) request.paged_cache_type = cache;
       if (form.cacheLayers.trim()) request.paged_cache_layers = form.cacheLayers.trim();
+      if (form.loopLogits && loops(this.entry(request.source))) {
+        request.loop_guidance_logits = true;
+      }
       const vectors = spec.steer ? controlVectors(form) : null;
       if (vectors) request.control_vectors = vectors;
     }

@@ -88,6 +88,8 @@ export interface LoadRequest {
   mmproj?: string;
   /** A recipe-loaded checkpoint's vision tower loads too (its projector written beside the recipe once). */
   vision?: boolean;
+  /** A looped model loads for LoopCD-Logits (its loop guidance then contrasts the passes' logits). */
+  loop_guidance_logits?: boolean;
   vad?: string;
   device?: string;
   control_vectors?: ControlVectors;
