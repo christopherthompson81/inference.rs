@@ -362,6 +362,10 @@
                 disabled={activity.busy}
               />
             </label>
+            <label class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300" title="Load for LoopCD-Logits, the model authors' recipe: the final layers also run on the first pass, and loop guidance (0.5 is theirs) then contrasts the two passes' predictions, strongest where the choice is close. About 11% slower decode while loaded; applies at the next load">
+              <input type="checkbox" class="accent-blue-600" bind:checked={form.loopLogits} onchange={() => managerStore.persistForms()} disabled={activity.busy} />
+              Logits
+            </label>
           {/if}
           {#if served}
             <button
