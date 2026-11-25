@@ -1503,3 +1503,30 @@ beats plain decoding at 4 requests (222-229 against 214), +19% over master there
 graph (eager 0), batched verifies included: the vLLM failure HyperInkling hit does not occur. Test: the indexed matvec
 case gains a 32-token route. Still short of HyperInkling's scaling (686 at 6 requests); 6 needs a capacity past 4.
 
+
+## Run 51 - 2026-11-25 00:10
+
+Question: what do the packed KV widths (q2..q6, new read path in the biased-attention kernels) cost Inkling 2 Mini in
+quality and speed, and how much context do they buy?
+
+Recipe C, `quantize kld --resident --pa-cache-type <type>` against the official base (40 chunks of 512), and
+`inference bench --pa-cache-type <type> --prompt-len 0 --gen-len 128 --depth 8,8192` (one sequence, no drafter; the
+context is what the bench's cache sizing fitted on the 3090 with ~1 GB held by desktop apps):
+
+```
+KV cache   KLD       same top   PPL      decode d8   decode d8192   context fitted
+auto bf16  0.00382   97.35%     6.7652   107.8       95.0           173,568
+q8         0.00403   97.20%     6.7687   105.3       94.3           347,936
+q6         0.00487   97.06%     6.7725   102.3       84.9           455,008
+q5         0.00637   96.60%     6.7844
+q4         0.01095   95.43%     6.7985   102.7       87.0           604,640
+q3         0.02535   93.22%     6.8836   103.4       89.0           736,864
+q2         0.09197   86.91%     7.2911
+```
+
+q4 and q3 keep layer 5 (the first cached layer) at q8, per the general KV profile rule; q6 and q8 are uniform. q8 is
+unchanged from Run 21 (0.00403), which checks the measurement. q6 costs 0.0008 KLD over q8 for 31% more context; q4
+0.007 (about the IQ4_NL weights' whole error) for 74% more; q3 and q2 cost more than the weights do. Decode at 8K keys is
+8-10% slower on the packed widths than on q8 (84.9-89.0 against 94.3): the decode and verify kernels unpack a row's
+chunks a byte at a time where q8 reads 32-bit words; at 8 keys the difference is 2-3%. q8 stays the default
+recommendation; q6 or q4 when the context matters more than the last digits.
