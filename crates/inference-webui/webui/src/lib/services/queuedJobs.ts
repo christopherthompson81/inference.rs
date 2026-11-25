@@ -235,6 +235,24 @@ export function submitTextureMesh(
   return submit("texture_mesh", options, [mesh, image]);
 }
 
+export interface RefineMeshOptions {
+  seed: number | null;
+  resolution: number | null;
+  steps: number | null;
+  remove_background: boolean | null;
+  texture: boolean | null;
+  placement: Placement | null;
+}
+
+/** A coarse mesh refined under an image with Hi3D v1.0; without a mesh, TRELLIS.2 makes one from the image first. */
+export function submitRefineMesh(
+  image: File,
+  mesh: File | null,
+  options: RefineMeshOptions,
+): Promise<JobRecord> {
+  return submit("refine_mesh", options, mesh ? [mesh, image] : [image]);
+}
+
 /** JoVox's 64^3 voxel structure of the object in one image, meshed by TRELLIS.2 unless `mesh` is false. */
 export function submitVoxels(
   image: File,

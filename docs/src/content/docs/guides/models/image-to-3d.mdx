@@ -1,13 +1,15 @@
 ---
 title: 3D models from an image
-description: TRELLIS.2 turns one image of an object into a textured mesh (GLB), or paints a mesh you supply from an image; LATO.2 makes a low-poly mesh with artist-like topology; Idol turns it into 3D Gaussian splats; JoVox generates its voxel structure, which TRELLIS.2's second stage can mesh. BiRefNet removes the background first.
+description: TRELLIS.2 turns one image of an object into a textured mesh (GLB), or paints a mesh you supply from an image; Hi3D refines a coarse mesh under the image; LATO.2 makes a low-poly mesh with artist-like topology; Idol turns it into 3D Gaussian splats; JoVox generates its voxel structure, which TRELLIS.2's second stage can mesh. BiRefNet removes the background first.
 ---
 
-Five commands turn an image of an object into 3D:
+Six commands turn an image of an object into 3D:
 
 - `inference image-to-3d` runs TRELLIS.2 end to end: a textured mesh (`model.glb`, its PBR volume baked into base
   color and metallic-roughness textures) from its own sparse structure, shape and texture stages.
 - `inference texture-mesh` paints a mesh you already have from the image, with TRELLIS.2's texturing pipeline.
+- `inference refine-mesh` runs Hi3D v1.0: a coarse mesh (yours, or TRELLIS.2's) refined under the image to a surface
+  at up to 1536^3, untextured or painted by TRELLIS.2.
 - `inference image-to-mesh` runs LATO.2: an untextured mesh with artist-like topology (a few thousand vertices joined
   by predicted edges, not an extracted surface), as GLB and OBJ.
 - `inference image-to-splat` runs Idol: the object as 3D Gaussian splats (PLY and SPZ), with the camera the image was
@@ -15,7 +17,7 @@ Five commands turn an image of an object into 3D:
 - `inference voxels` runs JoVox for the object's voxel structure and meshes it with TRELLIS.2's shape stage
   (geometry only).
 
-All five remove the background of an opaque image with BiRefNet first, and take an object on a transparent background as
+All six remove the background of an opaque image with BiRefNet first, and take an object on a transparent background as
 it is. `image-to-3d` and `image-to-splat` also write the object as a closed solid to 3D print
 ([Printable STL](#printable-stl)).
 
@@ -176,6 +178,63 @@ As a server job: `{"kind": "texture_mesh"}` with two files, the mesh (by its ext
 `seed`, `resolution`, `texture_size`, `unwrap`, `remove_background` and `texture_sampler`; outputs under `model/`. The
 web UI's 3D tab has it as **Texture a mesh**.
 
+## Refining a mesh (Hi3D)
+
+[Hi3D v1.0](https://huggingface.co/hi3d-official/Hi3Dv1.0) (Sparc3D, [arXiv 2505.14521](https://arxiv.org/abs/2505.14521))
+adds the detail an image shows to a coarse mesh of the same object. The mesh is voxelized; a sparse flow transformer
+samples latents on its cells under the image (DINOv2-large's tokens beside CLIP ViT-L/14's embedding); a sparse VAE
+decodes them to signed distances and deformations at 8x the grid, and FlexiCubes meshes them. Each pass revoxelizes the
+last one's surface on a finer grid: one pass at 512, two at 1024, three at 1536.
+
+```bash
+# TRELLIS.2 makes the coarse mesh from the image first
+inference refine-mesh --image dragon.png --out dragon/
+
+# your own coarse mesh, at the finest rung, painted afterwards
+inference refine-mesh --image dragon.png --mesh coarse.glb --out dragon/ --resolution 1536 --texture
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--mesh` | TRELLIS.2's | The coarse mesh: `.glb`, `.obj` or `.ply`, y up. Without it, TRELLIS.2 makes one at 512 (Hi3D's first pass reads it on a 64^3 grid, so finer coarse meshes add nothing) |
+| `--resolution` | 1024 | 512, 1024 or 1536: one, two or three passes |
+| `--steps` | 25 | Heun steps each pass takes (1 to 100) |
+| `--texture` | off | Paint the refined mesh with TRELLIS.2's texturing ([painting a mesh](#painting-a-mesh)) at 1024 |
+| `--seed` | 0 | The noise each pass samples from |
+| `--hi3d`, `--dinov2`, `--clip` | fetched | Hi3D's folder, and the transformers folders of `facebook/dinov2-large` and `openai/clip-vit-large-patch14` |
+| `--trellis2`, `--trellis-large`, `--dinov3` | fetched | For the coarse mesh and `--texture` |
+| `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
+
+```
+dragon/
+  model.glb       the refined mesh, y up (untextured light grey and double-sided, or textured with --texture)
+  mesh.ply        the refined surface, y up, centered on its vertices' mean with its farthest vertex at radius 1
+  coarse.ply      the coarse mesh TRELLIS.2 made, when none was given
+  prepared.png    the cut-out object
+  condition.png   what Hi3D sees: the object squared on white, filling 1/1.2 of the side
+  meta.json       settings, each pass's cells (and the grid they settled on), the counts and the timing
+```
+
+Each pass voxelizes its surface on its grid (64^3, 128^3, 192^3), shrinking the grid 5% at a time until at most 80,000,
+90,000 or 110,000 cells are occupied. Guidance runs from t = 0.7 up, against a blank image. The last surface drops
+components under 0.5% of its faces and is simplified to a million faces (two million at 1536). On an RTX 3090 a
+dragon bust takes 20 s at 512, about 2 minutes at 1024 (the reference's pipeline 159 s) and 8 minutes at 1536 with a
+17.5 GB GPU peak (the authors measured 1536 only on a 96 GB card). The transformers run in f16, the encoders and the
+decoder's coarsest level in f32, the finer decoder levels in f16, as the reference's autocast keeps them.
+
+Hi3D is released under the Hi3D Open License Agreement v1.0 (`crates/inference-recon/src/hi3d/LICENSE`), which covers
+its inference code and architecture as well as its weights. Commercial use is permitted: a commercial product or
+service that integrates it must display "Powered by Hi3D 1.0", linked to [hi3d.ai](http://hi3d.ai/), in its interface,
+an About page or acknowledgements (or, without an interface, its technical documentation), and one past 200,000
+monthly active users or USD 1,000,000 monthly revenue needs a separate license. Its Acceptable Use Policy (Schedule 1)
+applies to every use. A refined mesh that contains no Hi3D code or weights is yours to use without these conditions.
+This port is not an official Hi3D product.
+
+As a server job: `{"kind": "refine_mesh"}` with the image and optionally the mesh (by its extension), optionally
+`seed`, `resolution`, `steps`, `remove_background`, `texture` and `placement`; outputs under `refined/`. The web UI's 3D
+tab has it as **Refine a mesh**. With `--world-models <folder>`, checkpoints found there as `Hi3Dv1.0`, `dinov2-large`
+and `clip-vit-large-patch14` are used instead of fetching them.
+
 ## Idol Gaussian splats
 
 `inference image-to-splat` runs [Idol](https://huggingface.co/speridlabs/idol): a flow transformer samples the
@@ -276,6 +335,8 @@ a 1024^3 flexible dual grid and extracts a mesh, its small holes filled and its 
 | TRELLIS-image-large (structure decoder, `image-to-3d` only) | [microsoft/TRELLIS-image-large](https://huggingface.co/microsoft/TRELLIS-image-large) | MIT |
 | Idol (`image-to-splat`) | [speridlabs/idol](https://huggingface.co/speridlabs/idol) | Apache-2.0 |
 | DINOv3 ViT-H+/16 (`image-to-splat`) | [facebook/dinov3-vith16plus-pretrain-lvd1689m](https://huggingface.co/facebook/dinov3-vith16plus-pretrain-lvd1689m) | DINOv3 License (gated, as above) |
+| Hi3D v1.0 (`refine-mesh`) | [hi3d-official/Hi3Dv1.0](https://huggingface.co/hi3d-official/Hi3Dv1.0) | Hi3D Open License Agreement v1.0 (see [Refining a mesh](#refining-a-mesh-hi3d)) |
+| DINOv2-large, CLIP ViT-L/14 (`refine-mesh`) | [facebook/dinov2-large](https://huggingface.co/facebook/dinov2-large), [openai/clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14) | Apache-2.0, MIT |
 | FLUX.2 VAE (`image-to-splat`) | [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) `vae/` | Apache-2.0 (the same VAE as FLUX.2 [dev]'s) |
 
 Each is fetched into the Hugging Face cache on first use unless its folder is given (`--jovox`, `--dinov3`,

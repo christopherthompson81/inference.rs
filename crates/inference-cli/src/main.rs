@@ -617,6 +617,104 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::RefineMesh {
+            image,
+            mesh,
+            out,
+            resolution,
+            seed,
+            steps,
+            texture,
+            hi3d,
+            dinov2,
+            clip,
+            trellis2,
+            trellis_large,
+            dinov3,
+            birefnet,
+            remove_background,
+            cpu,
+        } => {
+            use inference_jobs::refine_mesh::{
+                MAX_STEPS, NoProgress, RESOLUTIONS, RefineMeshOptions, Settings, fetch_models,
+                refine_mesh_on,
+            };
+            use inference_jobs::texture_mesh::TextureMeshOptions;
+            use inference_jobs::voxels::needs_background_removal;
+            if !RESOLUTIONS.contains(&resolution) {
+                anyhow::bail!("--resolution must be one of {RESOLUTIONS:?}");
+            }
+            if !(1..=MAX_STEPS).contains(&steps) {
+                anyhow::bail!("--steps must be 1 to {MAX_STEPS}");
+            }
+            let options = RefineMeshOptions {
+                settings: Settings {
+                    resolution,
+                    steps,
+                    seed,
+                },
+                remove_background,
+                texture: texture.then(TextureMeshOptions::default),
+            };
+            let jobs = inference_jobs::JobsConfig {
+                hi3d,
+                dinov2_large: dinov2,
+                clip_large: clip,
+                trellis2,
+                trellis_large,
+                dinov3,
+                birefnet,
+                ..Default::default()
+            };
+            let needs_birefnet = needs_background_removal(&image, remove_background)?;
+            let models = fetch_models(
+                &jobs,
+                resolution,
+                needs_birefnet,
+                mesh.is_none(),
+                texture,
+                &NoProgress,
+            )?;
+            let device = if cpu {
+                inference_tensor::Device::Cpu
+            } else {
+                inference_tensor::Device::cuda_if_available(0)?
+            };
+            let report = refine_mesh_on(
+                &models,
+                mesh.as_deref(),
+                &image,
+                &out,
+                &options,
+                &NoProgress,
+                &device,
+            )?;
+            let cells: Vec<String> = report
+                .passes
+                .iter()
+                .map(|p| format!("{} at {}^3", p.cells, p.structure))
+                .collect();
+            println!(
+                "{} vertices, {} faces at {} ({} cells{}{}) in {} ({:.1} s)",
+                report.vertices,
+                report.faces,
+                report.resolution,
+                cells.join(", "),
+                if report.coarse_generated {
+                    "; coarse mesh by TRELLIS.2"
+                } else {
+                    ""
+                },
+                if report.texture.is_some() {
+                    "; textured"
+                } else {
+                    ""
+                },
+                out.display(),
+                report.total_seconds
+            );
+        }
+
         Command::Voxels {
             image,
             out,

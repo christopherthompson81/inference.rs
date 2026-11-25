@@ -6,6 +6,7 @@ mod image_to_3d_job;
 mod image_to_mesh_job;
 mod image_to_splat_job;
 mod jobs;
+mod refine_mesh_job;
 mod voxels_job;
 mod world_job;
 mod worldmirror_job;

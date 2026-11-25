@@ -91,11 +91,26 @@ impl Rope {
     /// Each token's 3D position, 21 frequencies an axis for head dim 128 (the last pairs unrotated), as TRELLIS.2's
     /// `SparseRotaryPositionEmbedder` phases them.
     pub(crate) fn new(positions: &[[f32; 3]], head_dim: usize, device: &Device) -> Result<Self> {
+        Self::with_freqs(positions, head_dim, &Self::freqs(head_dim), device)
+    }
+
+    /// The `head_dim / 6` frequencies an axis rotates at.
+    pub(crate) fn freqs(head_dim: usize) -> Vec<f32> {
         let freq_dim = head_dim / 2 / AXES;
-        let pairs = head_dim / 2;
-        let freqs: Vec<f32> = (0..freq_dim)
+        (0..freq_dim)
             .map(|i| 1.0 / ROPE_BASE.powf(i as f32 / freq_dim as f32))
-            .collect();
+            .collect()
+    }
+
+    /// [`Self::new`] at given per-axis frequencies.
+    pub(crate) fn with_freqs(
+        positions: &[[f32; 3]],
+        head_dim: usize,
+        freqs: &[f32],
+        device: &Device,
+    ) -> Result<Self> {
+        let freq_dim = freqs.len();
+        let pairs = head_dim / 2;
         let mut cos = vec![1f32; positions.len() * pairs];
         let mut sin = vec![0f32; positions.len() * pairs];
         for (t, p) in positions.iter().enumerate() {
@@ -271,7 +286,16 @@ impl Block {
         let norm =
             |on: bool, vb: VarBuilder| on.then(|| RmsNorm::load(heads, head_dim, vb)).transpose();
         let modulation = if spec.share_mod {
-            Modulation::Shared(vb.get(6 * c, "modulation")?)
+            // `[6c]`, or `[1, 6c]` as Hi3D stores it
+            let offset = vb.get_unchecked("modulation")?.flatten_all()?;
+            if offset.dim(0)? != 6 * c {
+                inference_tensor::bail!(
+                    "modulation holds {} values, not {}",
+                    offset.dim(0)?,
+                    6 * c
+                );
+            }
+            Modulation::Shared(offset)
         } else {
             Modulation::Own(AmpLinear::load(
                 c,

@@ -30,6 +30,7 @@ pub mod image_to_mesh;
 pub mod image_to_splat;
 pub mod print;
 pub mod reconstruction;
+pub mod refine_mesh;
 pub mod texture_mesh;
 pub mod voxels;
 pub mod worldgen_package;
@@ -64,6 +65,10 @@ const IMAGE_TO_MESH_DIR: &str = "mesh";
 // Idol's 8.1 GB peak at its default Gaussian count, and room for the decoder's batches at a million
 const IMAGE_TO_SPLAT_NEED_BYTES: u64 = 10 << 30;
 const IMAGE_TO_SPLAT_DIR: &str = "splat";
+// a refinement's peak above idle at each target resolution: one f16 transformer and the encoders, then the decode of
+// the finest level (17.5 GB measured at 1536)
+const REFINE_NEED_BYTES: [(usize, u64); 3] = [(512, 10 << 30), (1024, 14 << 30), (1536, 20 << 30)];
+const REFINE_DIR: &str = "refined";
 // files read as a video rather than images
 const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "m4v", "mov", "avi", "mkv", "webm", "gif"];
 // the checkpoints' places under a models root, as their repositories lay them out
@@ -82,6 +87,9 @@ pub(crate) const LATO2_DIR: &str = "LATO.2";
 pub(crate) const DINOV2_REG_DIR: &str = "dinov2-with-registers-large";
 pub(crate) const DINOV3_HPLUS_FILE: &str = "dinov3-vith16plus-pretrain-lvd1689m/model.safetensors";
 pub(crate) const FLUX2_VAE_FILE: &str = "FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors";
+pub(crate) const HI3D_DIR: &str = "Hi3Dv1.0";
+pub(crate) const DINOV2_LARGE_DIR: &str = "dinov2-large";
+pub(crate) const CLIP_LARGE_DIR: &str = "clip-vit-large-patch14";
 /// Where JoVox-64 is fetched from when no checkpoint is configured.
 pub const JOVOX_REPO: &str = "xiangjuntang/JoVox-64";
 /// Where DINOv3 ViT-L/16 is fetched from (gated: the token's account needs access).
@@ -102,6 +110,12 @@ pub const IDOL_REPO: &str = "speridlabs/idol";
 pub const DINOV3_HPLUS_REPO: &str = "facebook/dinov3-vith16plus-pretrain-lvd1689m";
 /// Where FLUX.2's VAE, Idol's other image encoder, is fetched from: FLUX.2-klein-4B's copy (ungated).
 pub const FLUX2_VAE_REPO: &str = "black-forest-labs/FLUX.2-klein-4B";
+/// Where Hi3D v1.0 (mesh refinement) is fetched from.
+pub const HI3D_REPO: &str = "hi3d-official/Hi3Dv1.0";
+/// Where DINOv2-large, one of Hi3D's image encoders, is fetched from.
+pub const DINOV2_LARGE_REPO: &str = "facebook/dinov2-large";
+/// Where CLIP ViT-L/14, Hi3D's other image encoder, is fetched from.
+pub const CLIP_LARGE_REPO: &str = "openai/clip-vit-large-patch14";
 /// Where WorldMirror 2.0 is fetched from when no checkpoint is configured.
 pub const WORLDMIRROR_REPO: &str = "tencent/HY-World-2.0";
 const WORLDMIRROR_FILES: [&str; 2] = ["config.json", "model.safetensors"];
@@ -190,6 +204,15 @@ pub struct JobsConfig {
     /// A FLUX.2 VAE's `diffusion_pytorch_model.safetensors`, Idol's other encoder; fetched when unset
     #[schema(value_type = Option<String>)]
     pub flux2_vae: Option<PathBuf>,
+    /// Hi3D v1.0's folder, for refine-mesh jobs; fetched from its repository when unset
+    #[schema(value_type = Option<String>)]
+    pub hi3d: Option<PathBuf>,
+    /// DINOv2-large's transformers folder, one of Hi3D's encoders; fetched when unset
+    #[schema(value_type = Option<String>)]
+    pub dinov2_large: Option<PathBuf>,
+    /// CLIP ViT-L/14's transformers folder, Hi3D's other encoder; fetched when unset
+    #[schema(value_type = Option<String>)]
+    pub clip_large: Option<PathBuf>,
     /// A Hugging Face repo laid out as a models root, fetched into the hub cache before a job that needs a checkpoint
     /// the fields above leave unset
     pub models_repo: Option<String>,
@@ -222,6 +245,9 @@ impl Default for JobsConfig {
             dinov2_reg: None,
             dinov3_hplus: None,
             flux2_vae: None,
+            hi3d: None,
+            dinov2_large: None,
+            clip_large: None,
             models_repo: None,
             worldmirror_repo: Some(WORLDMIRROR_REPO.to_string()),
             devices: None,
@@ -236,8 +262,9 @@ impl JobsConfig {
     /// `Wan2.1-I2V-14B-480P-Diffusers`, `moge-2-vitl-normal`, `HY-World-2.0/HY-WorldMirror-2.0`,
     /// `lpips-vgg/lpips_vgg.safetensors`, `JoVox-64`, `dinov3-vitl16-pretrain-lvd1689m`, `BiRefNet`, `TRELLIS.2-4B`,
     /// `TRELLIS-image-large`, `idol`, `LATO.2`, `dinov2-with-registers-large`,
-    /// `dinov3-vith16plus-pretrain-lvd1689m/model.safetensors` and
-    /// `FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors`; a missing one stays unset.
+    /// `dinov3-vith16plus-pretrain-lvd1689m/model.safetensors`,
+    /// `FLUX.2-klein-4B/vae/diffusion_pytorch_model.safetensors`, `Hi3Dv1.0`, `dinov2-large` and
+    /// `clip-vit-large-patch14`; a missing one stays unset.
     pub fn with_models_root(mut self, root: &Path) -> Self {
         let found = |relative: &str| {
             let path = root.join(relative);
@@ -258,6 +285,9 @@ impl JobsConfig {
         self.dinov2_reg = found(DINOV2_REG_DIR);
         self.dinov3_hplus = found(DINOV3_HPLUS_FILE);
         self.flux2_vae = found(FLUX2_VAE_FILE);
+        self.hi3d = found(HI3D_DIR);
+        self.dinov2_large = found(DINOV2_LARGE_DIR);
+        self.clip_large = found(CLIP_LARGE_DIR);
         self
     }
 
@@ -647,6 +677,30 @@ pub struct ImageToMeshJob {
     pub placement: Option<Placement>,
 }
 
+/// A mesh refined under an image with Hi3D v1.0; the job takes the image and, optionally, the coarse mesh (glb, obj
+/// or ply). Without one, TRELLIS.2 makes it from the image first.
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
+pub struct RefineMeshJob {
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// The surface resolution to refine to: 512, 1024 (the default) or 1536, one to three passes
+    #[serde(default)]
+    pub resolution: Option<u32>,
+    /// Sampling steps each pass takes, 1 to 100 (25 by default)
+    #[serde(default)]
+    pub steps: Option<u32>,
+    /// Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always
+    /// has it removed)
+    #[serde(default)]
+    pub remove_background: Option<bool>,
+    /// Paint the refined mesh with TRELLIS.2's texturing (baked textures)
+    #[serde(default)]
+    pub texture: Option<bool>,
+    /// How much it may displace to run, in place of the server's setting
+    #[serde(default)]
+    pub placement: Option<Placement>,
+}
+
 /// What a job does.
 #[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -664,6 +718,8 @@ pub enum JobRequest {
     ImageToMesh(ImageToMeshJob),
     /// A mesh painted from an image with TRELLIS.2
     TextureMesh(TextureMeshJob),
+    /// A coarse mesh (given, or made by TRELLIS.2) refined under an image with Hi3D v1.0
+    RefineMesh(RefineMeshJob),
     /// Idol's Gaussian splats of the object in one image
     ImageToSplat(ImageToSplatJob),
 }
@@ -677,6 +733,7 @@ impl JobRequest {
             Self::ImageTo3d(_) => "image_to_3d",
             Self::ImageToMesh(_) => "image_to_mesh",
             Self::TextureMesh(_) => "texture_mesh",
+            Self::RefineMesh(_) => "refine_mesh",
             Self::ImageToSplat(_) => "image_to_splat",
         }
     }
@@ -1982,6 +2039,87 @@ fn texture_mesh_work(
     Ok((prepare, work))
 }
 
+fn refine_mesh_work(
+    config: &JobsConfig,
+    job: RefineMeshJob,
+) -> Result<(u64, (Prepare, Work)), ApiError> {
+    use crate::refine_mesh::{
+        MAX_STEPS, RESOLUTIONS, RefineMeshOptions, STEPS, Settings, fetch_models, refine_mesh_on,
+    };
+    use crate::texture_mesh::{TextureMeshOptions, is_mesh};
+    let resolution = job.resolution.map_or(1024, |r| r as usize);
+    let Some(&(_, need)) = REFINE_NEED_BYTES.iter().find(|(r, _)| *r == resolution) else {
+        return Err(ApiError::invalid_request(format!(
+            "resolution must be one of {RESOLUTIONS:?}"
+        )));
+    };
+    let steps = job.steps.map_or(STEPS, |s| s as usize);
+    if !(1..=MAX_STEPS).contains(&steps) {
+        return Err(ApiError::invalid_request(format!(
+            "steps must be 1 to {MAX_STEPS}"
+        )));
+    }
+    let texture = job.texture.unwrap_or(false);
+    let options = RefineMeshOptions {
+        settings: Settings {
+            resolution,
+            steps,
+            seed: job.seed.unwrap_or(0),
+        },
+        remove_background: job.remove_background.unwrap_or(false),
+        texture: texture.then(TextureMeshOptions::default),
+    };
+    // the job's image, and its mesh when it has one, told apart by extension
+    let split = |inputs: Vec<PathBuf>| -> anyhow::Result<(Option<PathBuf>, PathBuf)> {
+        let (meshes, images): (Vec<_>, Vec<_>) = inputs.into_iter().partition(|p| is_mesh(p));
+        match (meshes.as_slice(), images.as_slice()) {
+            ([], [image]) => Ok((None, image.clone())),
+            ([mesh], [image]) => Ok((Some(mesh.clone()), image.clone())),
+            _ => anyhow::bail!("a refine-mesh job takes one image and at most one mesh"),
+        }
+    };
+    let fetched = Arc::new(std::sync::OnceLock::new());
+    let (base, slot) = (config.clone(), fetched.clone());
+    let prepare: Prepare = Box::new(move |ctx: &JobContext| {
+        let (mesh, image) = split(ctx.inputs())?;
+        let birefnet = crate::voxels::needs_background_removal(&image, options.remove_background)?;
+        let models = fetch_models(&base, resolution, birefnet, mesh.is_none(), texture, ctx)?;
+        let _ = slot.set(models);
+        Ok(())
+    });
+    let work: Work = Box::new(move |ctx: &JobContext| {
+        let models = fetched.get().expect("prepared before the work runs");
+        let device = ctx.device()?.clone();
+        let (mesh, image) = split(ctx.inputs())?;
+        let out = ctx.dir().join(REFINE_DIR);
+        let report = refine_mesh_on(
+            models,
+            mesh.as_deref(),
+            &image,
+            &out,
+            &options,
+            ctx,
+            &device,
+        )?;
+        let dir = ctx.dir();
+        let outputs = [
+            ("model", crate::image_to_3d::GLB_FILE),
+            ("mesh (ply)", crate::image_to_3d::MESH_FILE),
+            ("coarse mesh", crate::refine_mesh::COARSE_FILE),
+            ("conditioning image", crate::refine_mesh::CONDITION_FILE),
+            ("meta", crate::image_to_3d::META_FILE),
+        ]
+        .into_iter()
+        .filter_map(|(name, file)| output(dir, &format!("{REFINE_DIR}/{file}"), name))
+        .collect();
+        Ok(JobResult {
+            outputs,
+            report: serde_json::to_value(report)?,
+        })
+    });
+    Ok((need, (prepare, work)))
+}
+
 impl JobQueue {
     /// Sets where jobs keep their folders and which weights they run; takes effect for jobs submitted afterwards.
     pub fn configure(&self, config: JobsConfig) {
@@ -2062,6 +2200,20 @@ impl JobQueue {
                 let placement = job.placement;
                 let work = texture_mesh_work(&config, job)?;
                 (JobNeed::Bytes(IMAGE_TO_3D_NEED_BYTES), placement, work)
+            }
+            JobRequest::RefineMesh(job) => {
+                let meshes = inputs
+                    .iter()
+                    .filter(|i| crate::texture_mesh::is_mesh(Path::new(&input_name(i))))
+                    .count();
+                if !(1..=2).contains(&inputs.len()) || inputs.len() - meshes != 1 {
+                    return Err(ApiError::invalid_request(
+                        "a refine-mesh job takes one image and at most one mesh (glb, obj or ply)",
+                    ));
+                }
+                let placement = job.placement;
+                let (need, work) = refine_mesh_work(&config, job)?;
+                (JobNeed::Bytes(need), placement, work)
             }
             JobRequest::ImageToSplat(job) => {
                 if inputs.len() != 1 {

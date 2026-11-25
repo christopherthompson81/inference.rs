@@ -2,7 +2,7 @@
 title: "inference image-to-mesh"
 description: "A mesh with artist-like topology of the object in one image with LATO.2: about as many vertices as asked, joined by predicted edges, as model.glb and mesh.obj (untextured, y up), beside the crop the models see and a meta.json; an image without a transparent background has it removed with BiRefNet"
 sidebar:
-  order: 19
+  order: 20
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
