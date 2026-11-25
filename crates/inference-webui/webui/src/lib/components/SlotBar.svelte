@@ -243,8 +243,12 @@
             class="w-24 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
             bind:value={form.contextLength}
             onchange={() => managerStore.persistForms()}
-            disabled={activity.busy}
+            disabled={activity.busy || form.fitContext}
           />
+        </label>
+        <label class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300" title="Size the context to the GPU memory free at load, keeping 0.5 GB for other programs; the number beside it is then ignored">
+          <input type="checkbox" class="accent-blue-600" bind:checked={form.fitContext} onchange={() => managerStore.persistForms()} disabled={activity.busy} />
+          Fit to VRAM
         </label>
         <label class="flex flex-col gap-1" title="Requests the model runs at once; each holds memory while it runs">
           <span class="text-[11px] text-gray-500 dark:text-gray-400">Sequences (0: server's)</span>

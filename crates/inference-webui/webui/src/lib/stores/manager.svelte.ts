@@ -81,6 +81,8 @@ export type SlotId = keyof typeof SLOTS;
 export interface SlotForm {
   source: string;
   contextLength: number;
+  /** Leave the context unset, so the server sizes the KV cache to the free VRAM (its 0.5 GB floor kept free). */
+  fitContext?: boolean;
   /** Sequences the model serves at once; 0 leaves the server's `--max-seqs`. */
   maxSeqs: number;
   mtp: boolean;
@@ -297,6 +299,7 @@ class ManagerStore {
       Object.assign(form, {
         source: request.source,
         contextLength: request.paged_context_len ?? form.contextLength,
+        fitContext: request.paged_context_len == null,
         maxSeqs: request.max_seqs ?? 0,
         mtp: request.mtp != null,
         mtpDrafts: request.mtp?.n_predict ?? 0,
@@ -325,7 +328,7 @@ class ManagerStore {
     const form = this.form(slot);
     const request: manager.LoadRequest = { source: form.source.trim(), model_id: spec.id };
     if (spec.chat) {
-      if (form.contextLength > 0) request.paged_context_len = form.contextLength;
+      if (!form.fitContext && form.contextLength > 0) request.paged_context_len = form.contextLength;
       if (form.maxSeqs > 0) request.max_seqs = form.maxSeqs;
       if (form.mtp) {
         request.mtp = {};
