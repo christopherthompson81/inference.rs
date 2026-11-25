@@ -313,15 +313,18 @@ macro_rules! load_options_methods {
         /// Load a looped model for LoopCD-Logits: the coda also runs on the first pass's output, in KV slots of its
         /// own, and loop guidance contrasts the two passes' logits (about 11% slower decode while loaded).
         pub fn with_loop_guidance_logits(mut self) -> Self {
-            let mut value = self
-                .options
-                .runtime
-                .hf_config_overrides
-                .take()
-                .map_or_else(|| serde_json::json!({}), |o| o.as_value().clone());
-            value["loop_guidance_logits"] = serde_json::Value::Bool(true);
+            let overrides = self.options.runtime.hf_config_overrides.take();
             self.options.runtime.hf_config_overrides =
-                Some($crate::load::Overrides::new(value).expect("a JSON object"));
+                $crate::load::Overrides::with_loop(overrides, true, None);
+            self
+        }
+
+        /// A looped model's (Inkling 2's) passes of its looped core, its trained count by default: fewer decode faster,
+        /// more think deeper (above the trained count only on a model trained over several, TML's varloop).
+        pub fn with_loop_passes(mut self, passes: u64) -> Self {
+            let overrides = self.options.runtime.hf_config_overrides.take();
+            self.options.runtime.hf_config_overrides =
+                $crate::load::Overrides::with_loop(overrides, false, Some(passes));
             self
         }
 

@@ -43,6 +43,27 @@ impl HfConfigOverrides {
     pub fn as_value(&self) -> &Value {
         &self.0
     }
+
+    /// `overrides` with a looped model's (Inkling 2's) load options merged in: LoopCD-Logits and the passes to run,
+    /// as top-level keys the loader lays over a nested `text_config`.
+    pub fn with_loop(overrides: Option<Self>, logits: bool, passes: Option<u64>) -> Option<Self> {
+        let mut loop_options = serde_json::Map::new();
+        if logits {
+            loop_options.insert("loop_guidance_logits".into(), Value::Bool(true));
+        }
+        if let Some(passes) = passes {
+            loop_options.insert(
+                "loop_config".into(),
+                serde_json::json!({ "run_passes": passes }),
+            );
+        }
+        if loop_options.is_empty() {
+            return overrides;
+        }
+        let mut value = overrides.map_or_else(|| Value::Object(Default::default()), |o| o.0);
+        merge_json(&mut value, &Value::Object(loop_options));
+        Some(Self(value))
+    }
 }
 
 impl FromStr for HfConfigOverrides {
@@ -73,6 +94,24 @@ fn merge_json(target: &mut Value, overrides: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loop_options_merge_into_other_overrides() -> Result<()> {
+        let overrides: HfConfigOverrides =
+            r#"{"loop_config": {"core_start": 6}, "rope_theta": 1}"#.parse()?;
+        assert_eq!(
+            HfConfigOverrides::with_loop(Some(overrides.clone()), false, None),
+            Some(overrides.clone())
+        );
+        assert_eq!(HfConfigOverrides::with_loop(None, false, None), None);
+        let merged = HfConfigOverrides::with_loop(Some(overrides), true, Some(2)).expect("options");
+        assert_eq!(
+            merged.as_value(),
+            &serde_json::json!({"loop_config": {"core_start": 6, "run_passes": 2}, "rope_theta": 1,
+                "loop_guidance_logits": true})
+        );
+        Ok(())
+    }
 
     #[test]
     fn recursively_merges_nested_objects() -> Result<()> {

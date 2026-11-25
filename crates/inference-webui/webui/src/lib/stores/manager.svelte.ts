@@ -117,6 +117,8 @@ export interface SlotForm {
   loopGuidance?: number | null;
   /** Load a looped model for LoopCD-Logits (loop guidance then contrasts the passes' logits; 0.5 is the authors'). */
   loopLogits?: boolean;
+  /** A looped model's passes of its looped core; null for its trained count. */
+  loopPasses?: number | null;
 }
 
 /** The steering a slot's form sets up, or null when it sets none. */
@@ -142,6 +144,15 @@ export function controlVectors(form: SlotForm): manager.ControlVectors | null {
 /** Whether a model loops part of its stack (Inkling 2), so it takes loop guidance. */
 export function loops(model: InventoryModel | undefined): boolean {
   return /inkling2/i.test(model?.architecture ?? "");
+}
+
+/** The most passes a varloop model's form offers (TML's varloop was trained at 1 to 5); a fixed loop offers its trained count. */
+export const MAX_VARYING_PASSES = 5;
+
+/** The pass counts a looped model's form offers, or null for a model that doesn't loop. */
+export function passRange(model: InventoryModel | undefined): { trained: number; max: number } | null {
+  if (!loops(model) || model?.loop_passes == null) return null;
+  return { trained: model.loop_passes, max: model.loop_varying ? MAX_VARYING_PASSES : model.loop_passes };
 }
 
 /** The scale a new slot's steering starts at. */
@@ -295,6 +306,7 @@ class ManagerStore {
         mmproj: request.mmproj ?? "",
         vision: request.vision ?? false,
         loopLogits: request.loop_guidance_logits ?? false,
+        loopPasses: request.loop_passes ?? null,
         vad: (SLOTS[slot] as Slot).vad ? (request.vad ?? "") : form.vad,
         device: request.device ?? "auto",
         cacheK,
@@ -327,9 +339,12 @@ class ManagerStore {
       const cache = cacheType(form);
       if (cache) request.paged_cache_type = cache;
       if (form.cacheLayers.trim()) request.paged_cache_layers = form.cacheLayers.trim();
-      if (form.loopLogits && loops(this.entry(request.source))) {
+      const looped = this.entry(request.source);
+      if (form.loopLogits && loops(looped)) {
         request.loop_guidance_logits = true;
       }
+      const passes = form.loopPasses ?? 0;
+      if (passes > 0 && loops(looped) && passes !== looped?.loop_passes) request.loop_passes = passes;
       const vectors = spec.steer ? controlVectors(form) : null;
       if (vectors) request.control_vectors = vectors;
     }

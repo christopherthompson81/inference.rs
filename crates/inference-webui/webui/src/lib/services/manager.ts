@@ -38,6 +38,10 @@ export interface InventoryModel {
   carries_drafter: boolean;
   /** A model directory that loads through a recipe (Inkling 2's) and holds a vision tower, which `vision` brings in. */
   recipe_vision: boolean;
+  /** A looped model's (Inkling 2's) trained passes of its looped core, which a load runs unless told otherwise. */
+  loop_passes: number | null;
+  /** A looped model trained over several pass counts (TML's varloop), so a load may run more than `loop_passes`. */
+  loop_varying: boolean;
   error: string | null;
 }
 
@@ -90,6 +94,8 @@ export interface LoadRequest {
   vision?: boolean;
   /** A looped model loads for LoopCD-Logits (its loop guidance then contrasts the passes' logits). */
   loop_guidance_logits?: boolean;
+  /** A looped model's passes of its looped core; its trained count when unset. */
+  loop_passes?: number;
   vad?: string;
   device?: string;
   control_vectors?: ControlVectors;

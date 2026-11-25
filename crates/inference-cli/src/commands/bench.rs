@@ -51,10 +51,11 @@ fn bench_spec(
                 runtime.control_vector_layer_range.as_deref(),
                 runtime.loop_guidance,
             )?,
-            hf_config_overrides: crate::args::loop_guidance_overrides(
+            hf_config_overrides: crate::args::loop_overrides(
                 model_runtime.hf_config_overrides.clone(),
                 runtime.loop_guidance_logits,
-            )?,
+                runtime.loop_passes,
+            ),
             log: None,
             ..model_runtime
         },
