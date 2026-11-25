@@ -159,8 +159,10 @@ impl SpecState {
 
 impl Model {
     // every layer visit, then the normed output
-    fn tap_points(&self) -> usize {
-        self.cfg.cache_slots() + 1
+    // the visits of the trained layout (every pass) and the output
+    fn trained_tap_points(&self) -> usize {
+        let lc = &self.cfg.loop_config;
+        self.cfg.num_hidden_layers + (lc.num_passes - 1) * (lc.core_end - lc.core_start) + 1
     }
 
     pub fn embed(&self, ids: &Tensor) -> Result<Tensor> {
@@ -185,7 +187,8 @@ impl Model {
             config,
             DrafterAttach {
                 load: DFlashLoadTarget {
-                    num_layers: self.tap_points(),
+                    // its tap ids name the trained layout's visits; a run of fewer passes maps them below
+                    num_layers: self.trained_tap_points(),
                     hidden_size: self.cfg.hidden_size,
                     // the drafter brings its own RoPE; the target has none
                     yarn_rope_config: None,
@@ -200,13 +203,25 @@ impl Model {
                 recurrent_pad_slots: crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS,
             },
         )?;
-        let output = self.tap_points() - 1;
+        // the drafter names visits of the trained layout; a run of fewer passes taps their counterparts
+        let trained_output = self.cfg.num_hidden_layers
+            + (self.cfg.loop_config.num_passes - 1)
+                * (self.cfg.loop_config.core_end - self.cfg.loop_config.core_start);
         let ids = &drafter.target_layer_ids;
-        if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
-            inference_tensor::bail!("Inkling 2 taps layer visits in order, got {ids:?}");
+        let visits: Vec<usize> = ids
+            .iter()
+            .filter(|&&id| id < trained_output)
+            .map(|&id| self.cfg.run_visit(id))
+            .collect();
+        if ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || visits.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            inference_tensor::bail!(
+                "Inkling 2 taps layer visits in order, got {ids:?} (run as {visits:?})"
+            );
         }
-        self.spec.visits = ids.iter().copied().filter(|&id| id < output).collect();
-        self.spec.output = ids.contains(&output);
+        self.spec.visits = visits;
+        self.spec.output = ids.contains(&trained_output);
         self.spec.draft_lm_head = config
             .draft_lm_head_isq
             .map(|ty| {

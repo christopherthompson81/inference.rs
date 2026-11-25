@@ -294,6 +294,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             | ModelSelected::Run { .. }
             | ModelSelected::Lora { .. }
             | ModelSelected::MultimodalPlain { .. }
+            | ModelSelected::GGUF { .. }
     );
     if args.hf_config_overrides.is_some() && !supports_hf_config_overrides {
         anyhow::bail!("HF config overrides are supported only for text and multimodal models");
@@ -601,6 +602,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                     matformer_config_path,
                     matformer_slice_name,
                     mtp: args.mtp,
+                    hf_config_overrides: args.hf_config_overrides.clone(),
                 },
                 args.no_kv_cache,
                 args.jinja_explicit,

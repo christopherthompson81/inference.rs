@@ -54,6 +54,8 @@ const K_GROUP: &str = "k_group";
 // prefill rows a sliding visit writes and attends at once: a longer chunk goes through in pieces of this
 const WINDOW_SUB_CHUNK: usize = 512;
 const V_GROUP: &str = "v_group";
+// the first special (control) token: the tokenizer's added specials are the vocabulary's tail from here
+const CONTROL_TOKENS_START: usize = 199_998;
 
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct LoopConfig {
@@ -61,6 +63,9 @@ pub struct LoopConfig {
     pub core_end: usize,
     pub num_passes: usize,
     pub gate_rank: usize,
+    /// Passes to run, fewer than trained (`num_passes`) to trade quality for speed; all when unset
+    #[serde(default)]
+    pub run_passes: Option<usize>,
 }
 
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
@@ -93,6 +98,10 @@ pub struct Config {
     pub loop_config: LoopConfig,
     #[serde(default = "default_max_position_embeddings")]
     pub max_position_embeddings: usize,
+    /// LoopCD-Logits: the coda also runs on the first pass's output, in cache slots of its own, so loop guidance
+    /// contrasts the two passes' logits (adaptively) rather than their hidden states
+    #[serde(default)]
+    pub loop_guidance_logits: bool,
     #[serde(default)]
     pub quantization_config: Option<QuantizedConfig>,
 }
@@ -106,9 +115,46 @@ impl Config {
         self.loop_config.core_end - self.loop_config.core_start
     }
 
-    /// The cache slots: a layer's first pass in its own, each later pass of the looped core in one after them.
+    /// The passes of the looped core a forward runs.
+    pub fn passes(&self) -> usize {
+        self.loop_config
+            .run_passes
+            .unwrap_or(self.loop_config.num_passes)
+    }
+
+    fn coda_len(&self) -> usize {
+        self.num_hidden_layers - self.loop_config.core_end
+    }
+
+    /// The layer visits a forward makes: every layer once and the core again for each later pass.
+    pub fn visits(&self) -> usize {
+        self.num_hidden_layers + (self.passes() - 1) * self.core_len()
+    }
+
+    /// The cache slots: a visit's each (a layer's first pass in its own, each later pass of the looped core in one
+    /// after them), then with LoopCD-Logits the first pass's coda in its own.
     pub fn cache_slots(&self) -> usize {
-        self.num_hidden_layers + (self.loop_config.num_passes - 1) * self.core_len()
+        self.visits()
+            + if self.loop_guidance_logits {
+                self.coda_len()
+            } else {
+                0
+            }
+    }
+
+    /// A layer visit of the trained layout (`num_passes` passes) as the run one's: a later pass than it runs maps to
+    /// its last, the coda moves up by the passes it skips.
+    pub fn run_visit(&self, trained: usize) -> usize {
+        let (start, len) = (self.loop_config.core_start, self.core_len());
+        let trained_core_end = start + self.loop_config.num_passes * len;
+        if trained < start {
+            trained
+        } else if trained < trained_core_end {
+            let (pass, layer) = ((trained - start) / len, (trained - start) % len);
+            start + pass.min(self.passes() - 1) * len + layer
+        } else {
+            trained - (self.loop_config.num_passes - self.passes()) * len
+        }
     }
 
     /// The slots whose visits attend over a sliding window.
@@ -186,6 +232,9 @@ impl Config {
         let lc = &self.loop_config;
         let block = self.n_layers_per_attn_res_block;
         if lc.num_passes < 1
+            || lc
+                .run_passes
+                .is_some_and(|run| run < 1 || run > lc.num_passes)
             || lc.core_start == 0
             || lc.core_start >= lc.core_end
             || lc.core_end > self.num_hidden_layers
@@ -2110,10 +2159,13 @@ impl Model {
         // every pass starts from the prelude's output
         let prelude = x.clone();
         let prelude_blocks = blocks.clone();
-        // LoopCD-Hidden: the first pass's output kept to push the last pass's away from
+        // LoopCD: the first pass's output (and its blocks) kept; LoopCD-Hidden pushes the last pass's away from it,
+        // LoopCD-Logits runs the coda on it too (always, so its cache slots stay whole) and contrasts the logits
         let guidance = self.control_vectors.loop_guidance();
+        let logits_mode = cfg.loop_guidance_logits && cfg.passes() > 1;
+        let hidden = guidance.clone().filter(|_| !cfg.loop_guidance_logits);
         let mut first_pass = None;
-        for pass in 0..lc.num_passes {
+        for pass in 0..cfg.passes() {
             // the previous pass's bank: its blocks after the first core block (the prelude's output), and its output
             let mut bank = (pass > 0).then(|| {
                 let states = blocks.states[prelude_blocks.states.len() + 1..].to_vec();
@@ -2139,22 +2191,34 @@ impl Model {
                 };
                 x = run(layer, slot, &x, &mut blocks, messages.as_ref())?;
             }
-            if pass == 0 && guidance.is_some() && lc.num_passes > 1 {
-                first_pass = Some(x.clone());
+            if pass == 0 && cfg.passes() > 1 && (hidden.is_some() || logits_mode) {
+                first_pass = Some((x.clone(), blocks.clone()));
             }
         }
-        if let (Some(w), Some(first)) = (&guidance, &first_pass) {
+        if let (Some(w), Some((first, _))) = (&hidden, &first_pass) {
             let w = w.to_device(x.device())?.to_dtype(x.dtype())?;
             x = (&x + (&x - first)?.broadcast_mul(&w)?)?;
         }
         for layer in lc.core_end..cfg.num_hidden_layers {
             x = run(layer, layer, &x, &mut blocks, None)?;
         }
+        let reference = match first_pass.filter(|_| logits_mode) {
+            Some((mut x1, mut blocks1)) => {
+                for layer in lc.core_end..cfg.num_hidden_layers {
+                    x1 = run(layer, reference_slot(cfg, layer), &x1, &mut blocks1, None)?;
+                }
+                Some((x1, blocks1))
+            }
+            None => None,
+        };
         drop(cache);
 
-        let x = self.mapper.cast_nm_device(&x, false)?;
-        let x = mixed(&mut blocks, &x, &self.final_query, 0, self.dtype, &stacks)?;
-        let x = self.norm.forward(&x)?;
+        let head = |x: &Tensor, blocks: &mut Blocks| -> Result<Tensor> {
+            let x = self.mapper.cast_nm_device(x, false)?;
+            let x = mixed(blocks, &x, &self.final_query, 0, self.dtype, &stacks)?;
+            self.norm.forward(&x)
+        };
+        let x = head(&x, &mut blocks)?;
         let mut taps = taps.into_inner();
         if self.spec.taps_output() {
             taps.push(x.clone());
@@ -2171,11 +2235,44 @@ impl Model {
             return Ok(logits);
         }
         let cap = cfg.final_logit_softcapping;
-        let logits = ((logits.to_dtype(DType::F32)? / cap)?.tanh()? * cap)?;
-        logits
-            .narrow(D::Minus1, 0, cfg.unpadded_vocab_size)?
-            .contiguous()
+        let capped = |logits: Tensor| -> Result<Tensor> {
+            ((logits.to_dtype(DType::F32)? / cap)?.tanh()? * cap)?
+                .narrow(D::Minus1, 0, cfg.unpadded_vocab_size)?
+                .contiguous()
+        };
+        let logits = capped(logits)?;
+        match (reference, guidance) {
+            (Some((x1, mut blocks1)), Some(w)) => {
+                let x1 = ctx.logits(&head(&x1, &mut blocks1)?)?;
+                let first = capped(ctx.lm_head(&*self.lm_head, &x1)?)?;
+                loop_contrast(&logits, &first, &w)
+            }
+            _ => Ok(logits),
+        }
     }
+}
+
+/// LoopCD-Logits with the adaptive strength: `z + w (z - z1)`, `w = w_max (1 - (p1 - p2))` from the last pass's top
+/// two probabilities, so guidance is strongest where the choice is close; the control tokens (the vocabulary's tail
+/// from CONTROL_TOKENS_START: message, block and tool-call markers) keep the last pass's logits.
+fn loop_contrast(z: &Tensor, z1: &Tensor, w_max: &Tensor) -> Result<Tensor> {
+    let vocab = z.dim(D::Minus1)?;
+    let p = inference_tensor::nn::ops::softmax_last_dim(z)?;
+    let p1 = p.max_keepdim(D::Minus1)?;
+    let p2 = (p.broadcast_lt(&p1)?.to_dtype(DType::F32)? * &p)?.max_keepdim(D::Minus1)?;
+    let w = (((p1 - p2)? * -1.0)? + 1.0)?
+        .broadcast_mul(&w_max.to_device(z.device())?.to_dtype(DType::F32)?)?;
+    let text = CONTROL_TOKENS_START.min(vocab);
+    let steered = z.narrow(D::Minus1, 0, text)?.add(
+        &(z.narrow(D::Minus1, 0, text)? - z1.narrow(D::Minus1, 0, text)?)?.broadcast_mul(&w)?,
+    )?;
+    if text == vocab {
+        return Ok(steered);
+    }
+    Tensor::cat(
+        &[&steered, &z.narrow(D::Minus1, text, vocab - text)?],
+        D::Minus1,
+    )
 }
 
 /// The weights a cache slot runs: its own layer's, or, for a later pass of the core, the core layer's.
@@ -2183,9 +2280,16 @@ fn physical_layer(cfg: &Config, slot: usize) -> usize {
     let n = cfg.num_hidden_layers;
     if slot < n {
         slot
-    } else {
+    } else if slot < cfg.visits() {
         cfg.loop_config.core_start + (slot - n) % cfg.core_len()
+    } else {
+        cfg.loop_config.core_end + (slot - cfg.visits())
     }
+}
+
+// a coda layer's slot for its run on the first pass's output (LoopCD-Logits)
+fn reference_slot(cfg: &Config, layer: usize) -> usize {
+    cfg.visits() + (layer - cfg.loop_config.core_end)
 }
 
 fn slot_of(cfg: &Config, pass: usize, layer: usize) -> usize {
