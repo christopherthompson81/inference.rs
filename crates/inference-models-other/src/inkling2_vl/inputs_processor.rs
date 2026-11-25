@@ -286,9 +286,21 @@ impl MultimodalInputsProcessor for Inkling2VlInputsProcessor {
                 } else {
                     seq.count_prefix_cached_mm_items_by_kind(MultimodalKind::Image)..count
                 };
-                for (values, grid) in Self::select(&processed, range)? {
+                // every picture's hash in order, from the features the prompt's expansion recorded
+                let hashes: Vec<u64> = seq
+                    .mm_features()
+                    .iter()
+                    .filter(|f| f.kind == MultimodalKind::Image)
+                    .flat_map(|f| f.hashes.iter().copied())
+                    .collect();
+                let first = range.start;
+                for (i, (values, grid)) in Self::select(&processed, range)?.into_iter().enumerate()
+                {
                     patches.push(values);
                     args.grids.push(grid);
+                    // without a hash for every picture, they are encoded rather than cached under a wrong one
+                    args.hashes
+                        .push((hashes.len() == count).then(|| hashes[first + i]));
                 }
             }
         }

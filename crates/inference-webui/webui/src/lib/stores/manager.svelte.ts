@@ -92,6 +92,8 @@ export interface SlotForm {
   /** Whether each step drafts or decodes plainly, whichever the drafter's recent acceptance says is faster. */
   mtpAutoDepth?: boolean;
   mmproj: string;
+  /** Load a recipe-loaded checkpoint's vision tower too */
+  vision?: boolean;
   /** The voice activity model to load beside it: unset takes the first the inventory lists, "" none. */
   vad?: string;
   device: string;
@@ -280,6 +282,7 @@ class ManagerStore {
         mtpDraftIsq: request.mtp?.draft_isq ?? "",
         mtpAutoDepth: request.mtp?.auto_depth ?? false,
         mmproj: request.mmproj ?? "",
+        vision: request.vision ?? false,
         vad: (SLOTS[slot] as Slot).vad ? (request.vad ?? "") : form.vad,
         device: request.device ?? "auto",
         cacheK,
@@ -308,6 +311,7 @@ class ManagerStore {
         if (form.mtpAutoDepth) request.mtp.auto_depth = true;
       }
       if (form.mmproj) request.mmproj = form.mmproj;
+      if (form.vision && this.entry(request.source)?.recipe_vision) request.vision = true;
       const cache = cacheType(form);
       if (cache) request.paged_cache_type = cache;
       if (form.cacheLayers.trim()) request.paged_cache_layers = form.cacheLayers.trim();

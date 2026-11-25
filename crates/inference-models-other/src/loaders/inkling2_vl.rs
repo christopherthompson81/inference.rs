@@ -46,6 +46,9 @@ impl MultimodalModelLoader for Inkling2VlLoader {
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
+    fn supports_encoder_cache(&self, _config: &str) -> bool {
+        true
+    }
     fn modalities(&self, _config: &str) -> Result<Modalities> {
         Ok(Modalities {
             input: vec![SupportedModality::Text, SupportedModality::Vision],

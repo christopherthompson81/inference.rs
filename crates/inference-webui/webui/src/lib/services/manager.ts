@@ -36,6 +36,8 @@ export interface InventoryModel {
   projectors: string[];
   /** A model directory whose checkpoint carries a drafter (Inkling 2's `mtp.safetensors`), named as a load's drafter. */
   carries_drafter: boolean;
+  /** A model directory that loads through a recipe (Inkling 2's) and holds a vision tower, which `vision` brings in. */
+  recipe_vision: boolean;
   error: string | null;
 }
 
@@ -82,6 +84,8 @@ export interface LoadRequest {
   max_seqs?: number;
   mtp?: { n_predict?: number; model?: string; draft_isq?: string; auto_depth?: boolean };
   mmproj?: string;
+  /** A recipe-loaded checkpoint's vision tower loads too (its projector written beside the recipe once). */
+  vision?: boolean;
   vad?: string;
   device?: string;
   control_vectors?: ControlVectors;

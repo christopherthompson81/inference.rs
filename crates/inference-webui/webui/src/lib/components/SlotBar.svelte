@@ -187,6 +187,12 @@
           </select>
         </label>
       {/if}
+      {#if entry?.recipe_vision}
+        <label class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300" title="Load the checkpoint's vision tower too, for pictures: its projector is written beside the load's recipe once, and costs about 0.35 GB of GPU memory">
+          <input type="checkbox" class="accent-blue-600" bind:checked={form.vision} onchange={() => managerStore.persistForms()} disabled={activity.busy} />
+          Vision
+        </label>
+      {/if}
       {#if spec.vad && full}
         <label class="flex flex-col gap-1">
           <span class="text-[11px] text-gray-500 dark:text-gray-400">VAD (long audio)</span>
