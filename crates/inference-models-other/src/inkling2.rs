@@ -63,7 +63,10 @@ pub struct LoopConfig {
     pub core_end: usize,
     pub num_passes: usize,
     pub gate_rank: usize,
-    /// Passes to run, fewer than trained (`num_passes`) to trade quality for speed; all when unset
+    /// Trained over a range of pass counts (TML's varloop: 1 to 5), so any `run_passes` from 1 up runs
+    #[serde(default)]
+    pub is_varloop: bool,
+    /// Passes to run, `num_passes` when unset: fewer trade quality for speed, more (varloop only) the reverse
     #[serde(default)]
     pub run_passes: Option<usize>,
 }
@@ -142,18 +145,24 @@ impl Config {
             }
     }
 
-    /// A layer visit of the trained layout (`num_passes` passes) as the run one's: a later pass than it runs maps to
-    /// its last, the coda moves up by the passes it skips.
+    /// A layer visit of the trained layout (`num_passes` passes) as the run one's: the last trained pass and any
+    /// later than it runs map to its last, the coda moves by the passes it skips or adds.
     pub fn run_visit(&self, trained: usize) -> usize {
         let (start, len) = (self.loop_config.core_start, self.core_len());
-        let trained_core_end = start + self.loop_config.num_passes * len;
+        let (trained_passes, passes) = (self.loop_config.num_passes, self.passes());
+        let trained_core_end = start + trained_passes * len;
         if trained < start {
             trained
         } else if trained < trained_core_end {
             let (pass, layer) = ((trained - start) / len, (trained - start) % len);
-            start + pass.min(self.passes() - 1) * len + layer
+            let pass = if pass + 1 == trained_passes {
+                passes - 1
+            } else {
+                pass.min(passes - 1)
+            };
+            start + pass * len + layer
         } else {
-            trained - (self.loop_config.num_passes - self.passes()) * len
+            trained - trained_passes * len + passes * len
         }
     }
 
@@ -234,7 +243,7 @@ impl Config {
         if lc.num_passes < 1
             || lc
                 .run_passes
-                .is_some_and(|run| run < 1 || run > lc.num_passes)
+                .is_some_and(|run| run < 1 || (run > lc.num_passes && !lc.is_varloop))
             || lc.core_start == 0
             || lc.core_start >= lc.core_end
             || lc.core_end > self.num_hidden_layers

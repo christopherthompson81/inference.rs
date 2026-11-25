@@ -282,7 +282,7 @@ pub(crate) async fn control_vectors(
     let set = match vectors {
         // derived vectors become their cached files, derived on the model first where the cache lacks them
         Some(vectors) if !vectors.derived.is_empty() => {
-            let model_name = ask(None).await?.model;
+            let model_name = ask(None).await?.derive_key;
             let mut resolved = vectors.clone();
             for derived in &vectors.derived {
                 let path =

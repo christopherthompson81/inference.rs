@@ -486,12 +486,11 @@ pub struct ControlVectorRequest {
     pub response: Sender<anyhow::Result<ControlVectorState>>,
 }
 
-/// A model's control vectors, and the model's own name (its weights' source), which a vector derived on it is kept
-/// under.
+/// A model's control vectors, and the key a vector derived on it is kept under (its name and config overrides).
 #[derive(Clone, Debug)]
 pub struct ControlVectorState {
     pub set: inference_nn::control_vectors::ControlVectorSet,
-    pub model: String,
+    pub derive_key: String,
 }
 
 /// A prompt's normed hidden states (from a raw-logits pass of a joint decision model) and the spans its joint head

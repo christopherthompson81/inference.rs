@@ -408,6 +408,7 @@ impl NormalLoader {
         );
 
         let core = DecoderCore::new(DecoderCoreArgs {
+            config_overrides: self.config.hf_config_overrides.clone(),
             model: LoadedModelView {
                 target: &*model,
                 cache: model.cache(),
