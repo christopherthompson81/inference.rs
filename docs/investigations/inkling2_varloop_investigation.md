@@ -67,3 +67,39 @@ Found: the derived vector cache key is the model name plus the texts, not the co
 read the vector derived on 3 passes (one file, d829bf47ae297af4.gguf). It still worked, but a vector derived at one
 pass count is reused at another, whose layer outputs differ.
 Fixed in the same change: the key now includes the load's config overrides (`derived_vector_key`), tested by an overridden tiny Llama load deriving a file of its own (fails without the fix).
+
+## Run 4 - 2026-11-25 07:45
+
+Question: LoopCD at reduced depth (the paper's Section 4.3: half the loops plus guidance matched or beat the unguided
+full depth on Huginn, Parcae and Looped-Qwen3, multiple-choice only) at 2 of 3 passes. Coherence screen first:
+`varloop/screen.sh` loads each model at `run_passes` 2 (with `--loop-guidance-logits` for the logits rows) and runs
+`probe.py W` (sets `loop_guidance` W, then the three Run 2 prompts, greedy, thinking off).
+
+- varloop, Logits 0 / 0.5 and Hidden 0.25: coherent prose; trip "2 hours and 35 minutes" (right) in all; Rust request
+  still refused (guided: one line, "I can't provide a function that returns the n-th Fibonacci number."). tok/s
+  (prefill included) sky 105.8 at Logits 0, 111.9 at 0.5, 126.9 Hidden.
+- Mini, Logits 0 / 0.5 and Hidden 0.25: trip "3 hours and 40 minutes" (wrong) in all three; Rust broken in all
+  (`let mut b: u  = 0;`, `let mut result: u 0;`, `let mut b: u a = 1;`) and running to the 512-token limit; prose
+  slips ("nitrogen and nitrogen molecules" plain, "The reason the sunlight is blue" at Logits 0.5).
+
+Guidance does not rescue Inkling 2 Mini at 2 passes (its third pass is not optional the way the paper's later loops
+were); the varloop checkpoint passes the screen, so it goes on to MATH-500 L4-5 (`varloop/math_sweep.sh`): 2 passes
+plain / Logits 0.5 (one logits load) / Hidden 0.25, then 3 passes plain.
+
+## Run 5 - 2026-11-25 08:40
+
+`varloop/math_sweep.sh`: `lato/math_budget.py` (MATH-500 levels 4-5, integer answers, 156 problems, greedy, thinking on,
+`thinking_budget` 6144, 4 at a time) on the varloop checkpoint at 2 passes, strengths switched live on one
+`--loop-guidance-logits` load.
+
+- 2 passes plain: 152/156 (0.974), mean 1636 tokens, 2 cut off; 19 min.
+- 2 passes LoopCD-Logits w_max 0.5: 153/156 (0.981), mean 1548 tokens, 0 cut off; 3 fixed, 2 broken against plain.
+
+Stopped there (Hidden 0.25 and 3 passes plain not run): plain 2 passes nearly saturates this set, with 4 problems left
+to gain and per-problem flips (3 fixed, 2 broken) as large as any gap the arms could show, so it cannot separate 2 from
+3 passes or guided from plain. A harder set (MMLU-Pro subset, AIME) would be needed to measure what the third pass or
+the guidance buys on this checkpoint.
+
+Conclusion: the varloop checkpoint runs at 1 to 5 passes and at 2 passes with either guidance form, coherent and at
+152-153/156 on MATH L4-5 at 2 passes (136 tok/s plain, ~112 with LoopCD-Logits, against 103 at 3 passes); Inkling 2
+Mini at 2 passes stays broken with or without guidance.
