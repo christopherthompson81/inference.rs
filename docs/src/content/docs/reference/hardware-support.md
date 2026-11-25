@@ -12,9 +12,26 @@ Use this page to check whether a prebuilt binary exists for your accelerator. If
 | Linux x86_64 + NVIDIA GPU | CUDA (Ampere and newer) | yes, per compute capability and driver CUDA support |
 | Linux aarch64 + NVIDIA GPU | CUDA (Grace: GH200/GB200/GB10) | yes, sm90/100/121, per driver CUDA support |
 | Apple Silicon (macOS arm64) | Metal | yes |
+| Linux x86_64 + Vulkan GPU (AMD discrete or iGPU, NVIDIA) | [Vulkan](#vulkan) | no (source build with `vulkan`) |
 | Linux x86_64 / aarch64, no GPU | CPU | yes |
 | Windows x86_64 | CPU | yes |
 | Intel Mac, unlisted GPU | source build | no |
+
+## Vulkan
+
+A build with the `vulkan` feature runs on Vulkan with `--vulkan` (`vulkan = true` on a model in a config file). It
+picks a discrete GPU where there is one, else an integrated one; `inference doctor` lists the devices it can open as
+`vulkan:N`. The device needs `VK_EXT_external_memory_host`, `VK_KHR_push_descriptor` and
+`VK_KHR_shader_integer_dot_product`. Cooperative-matrix extensions are used where the driver offers them, including
+RDNA3's int8 matrix cores.
+
+On an iGPU, the GPU reads host memory in place, so weights are not copied into a separate pool; a discrete GPU holds
+them in its own memory. Paged attention and MTP drafting run on Vulkan. The text models with Vulkan kernels are the Qwen
+families, Gemma 4 and Inkling 2 from GGUF; the speech models (Parakeet, diarization and the rest) run on it too.
+An op without a Vulkan kernel runs on the CPU, so an untuned model still works, only slower.
+
+Measured on a Radeon 780M iGPU: Gemma 4 26B-A4B's QAT q4_0 GGUF decodes at about 26 tok/s, and about 35 with its MTP
+assistant drafting 2 (see [speculative decoding](/guides/perf/speculative-decoding/)).
 
 ## NVIDIA compute capabilities
 

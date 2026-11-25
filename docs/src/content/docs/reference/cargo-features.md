@@ -14,6 +14,7 @@ inference.rs uses Cargo features to gate platform-specific and optional function
 | `flash-attn-v3` | `inference-cli`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi`, `inference-selection` | Flash attention v3 (Hopper, requires `cuda`). Not exposed by the top-level `inference` crate. |
 | `cutile` | `inference-cli`, `inference`, `inference-core`, `inference-ffi`, `inference-api`, `inference-selection` | cuTile acceleration for quantized linears, MoE, and routed LoRA. Enables `cuda`. Requires CUDA >= 13.2 on Ampere/Ada and Blackwell+, CUDA >= 13.3 on Hopper, and a compatible `tileiras` installation. [NVFP4](/reference/quantization-types/#nvfp4) requires Blackwell and CUDA >= 13.3. See [cuTile setup](/developer/moe-backends/). |
 | `metal` | as above | Apple Silicon GPU support via Metal. |
+| `vulkan` | `inference-cli`, `inference`, `inference-core`, `inference-api`, `inference-ffi` | Vulkan compute (`--vulkan`) for discrete GPUs and unified-memory iGPUs, such as AMD's Radeon 780M. The build compiles its shaders with `glslc` from shaderc (`GLSLC` names another binary). See [hardware support](/reference/hardware-support/#vulkan). |
 | `accelerate` | as above | Apple Accelerate framework for CPU math. |
 | `mkl` | as above | Intel MKL for CPU math. |
 | `nccl` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi` | NCCL single-machine CUDA multi-GPU support. Requires the NCCL runtime library at build and runtime. |
@@ -24,6 +25,8 @@ Typical combinations:
 - NVIDIA Ampere or Ada: `cuda` (add `cutile` with CUDA >= 13.2)
 - NVIDIA Blackwell with CUDA >= 13.2 and a compatible `tileiras`: `cuda cutile`
 - Apple Silicon: `metal`
+- AMD GPUs and iGPUs: `vulkan`
+- NVIDIA with Vulkan beside CUDA: `cuda vulkan`
 - Intel CPU with MKL: `mkl`
 
 For Linux CUDA multi-GPU, add `nccl` when NCCL is installed. The Linux installer and CUDA wheel builder add it automatically when they detect `libnccl`.
