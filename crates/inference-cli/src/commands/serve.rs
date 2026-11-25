@@ -200,6 +200,11 @@ pub(crate) fn runtime_options_spec(
             &runtime.control_vectors,
             &runtime.control_vector_texts,
             runtime.control_vector_layer_range.as_deref(),
+            runtime.loop_guidance,
+        )?,
+        hf_config_overrides: crate::args::loop_guidance_overrides(
+            base.hf_config_overrides.clone(),
+            runtime.loop_guidance_logits,
         )?,
         moe_expert_cache: runtime.moe_expert_cache,
         max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),

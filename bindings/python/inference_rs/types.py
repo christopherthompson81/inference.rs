@@ -1105,6 +1105,7 @@ class ControlVectors:
     derived: list[DerivedControlVector] | None = None
     files: list[ControlVectorFile] | None = None
     layer_range: list[int] | None = None
+    loop_guidance: float | None = None
 
 
 @dataclass(kw_only=True)

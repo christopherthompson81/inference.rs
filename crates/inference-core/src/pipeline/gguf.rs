@@ -212,6 +212,9 @@ pub struct GGUFSpecificConfig {
     pub matformer_slice_name: Option<String>,
     /// Load the checkpoint's built-in MTP head (`nextn` layers) for speculative decoding.
     pub mtp: bool,
+    /// Recursively merged into the config the GGUF's metadata synthesizes (or the external one), as a checkpoint's
+    /// `config.json` takes them.
+    pub hf_config_overrides: Option<super::HfConfigOverrides>,
 }
 
 impl GGUFSpecificConfig {
@@ -1236,6 +1239,10 @@ impl GGUFLoader {
                 config
             }
             None => synthesize_normal_config(&loader_type, archive.metadata(), &tensor_names)?,
+        };
+        let config = match &self.config.hf_config_overrides {
+            Some(overrides) => overrides.apply(&config)?,
+            None => config,
         };
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
         let bindings = build_normal_bindings(&archive, &loader_type, descriptor.architecture)?;

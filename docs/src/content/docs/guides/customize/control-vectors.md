@@ -41,6 +41,41 @@ curl 'localhost:1234/control_vectors?model=chat'
 
 Changing the files or their scales on a model that is already steered rewrites its vectors in place. CUDA graphs captured for it keep running, with no capture again. Attaching vectors to a model that has none, or removing them, captures its graphs again on the next steps.
 
+## Loop guidance
+
+A looped model (Inkling 2, whose middle 12 layers run three times) can also be steered by loop guidance, LoopCD-Hidden
+from [Decoding Looped Transformers Better for (Almost) Free](https://arxiv.org/abs/2610.02185): the last pass's output
+is pushed away from the first pass's before the layers after the loop, `h + w (h - h1)`. The first pass is a weaker
+prediction of the same token, so the push sharpens choices where the passes disagree. It costs one tensor and no
+extra layers. The paper found about 0.2 to 0.3 safe for generation (larger values compound over the tokens); measure
+on your own tasks before relying on it.
+
+```bash
+inference serve -m thinkingmachines/Inkling-2-Mini --loop-guidance 0.25
+curl localhost:1234/control_vectors/set -H 'Content-Type: application/json' -d '{"model": "chat", "vectors": {"loop_guidance": 0.25}}'
+```
+
+It travels with the control vectors: `loop_guidance` beside `files` (on its own or with them), `--loop-guidance` at
+load, **Loop guidance** in the web UI's Steering section for an Inkling 2 slot, `with_loop_guidance` in the Rust SDK.
+A new strength rewrites the value its CUDA graphs read; attaching or removing it captures them again. A model that runs
+each layer once refuses it.
+
+### LoopCD-Logits
+
+The paper's other form contrasts the two passes' predictions instead: the layers after the loop also run on the first
+pass's output, and the logits become `z + w (z - z1)`. The strength adapts per token, `w = w_max (1 - (p1 - p2))` from
+the last pass's top two probabilities, so it pushes hardest where the choice is close. The model's authors recommend
+this form for Inkling 2 with `w_max = 0.5`. The extra layers keep their own KV cache, so the mode is chosen at load:
+
+```bash
+inference serve -m thinkingmachines/Inkling-2-Mini --loop-guidance-logits --loop-guidance 0.5
+```
+
+`with_loop_guidance_logits` in the Rust SDK. While loaded, decode runs about 11% slower at strength 0, and about 16%
+slower with guidance on (the second read of the output head); the strength still switches live. The control tokens
+(message, block and tool-call markers) keep the last pass's logits. On MATH-500 levels 4 and 5 (integer answers,
+thinking on, a 6144-token thinking budget), Inkling 2 Mini went from 150 to 153 of 156 with `w_max = 0.5`.
+
 ## Notes
 
 - Cached prompt states depend on the vectors, so the prefix cache keys them on the active set, and steered requests are not written to the disk prefix cache.

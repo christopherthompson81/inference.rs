@@ -1762,7 +1762,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         set: crate::control_vectors::ControlVectorSet,
     ) -> Result<bool> {
         self.control_vectors
-            .replace(set, &self.layer_devices, self.hidden_size, self.dtype)
+            .replace(set, &self.layer_devices, self.hidden_size, self.dtype, None)
     }
 
     pub fn control_vectors(&self) -> crate::control_vectors::ControlVectorSet {

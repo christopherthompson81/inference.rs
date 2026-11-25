@@ -1263,6 +1263,19 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub control_vector_layer_range: Option<Vec<usize>>,
 
+    /// A looped model's (Inkling 2's) loop guidance strength: the coda's input pushed away from the first pass's
+    /// output by this much (LoopCD-Hidden; about 0.2 to 0.3 for generation), or with `--loop-guidance-logits` the
+    /// adaptive strength's ceiling (0.5 is the authors' recipe)
+    #[arg(long, value_name = "W")]
+    #[serde(default)]
+    pub loop_guidance: Option<f32>,
+
+    /// Load a looped model for LoopCD-Logits: the coda also runs on the first pass's output (in KV slots of its own,
+    /// about 11% slower decode) and loop guidance contrasts the two passes' logits
+    #[arg(long)]
+    #[serde(default)]
+    pub loop_guidance_logits: bool,
+
     /// Keep MoE experts (GGUF or EXL3, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs
     /// a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus
     #[arg(long, value_name = "EXPERTS")]
@@ -1600,16 +1613,39 @@ pub struct BenchRuntimeOptions {
     /// Steer only layers START..=END (0-based) by the control vectors
     #[arg(long, num_args = 2, value_names = ["START", "END"])]
     pub control_vector_layer_range: Option<Vec<usize>>,
+
+    /// A looped model's (Inkling 2's) loop guidance strength (LoopCD-Hidden; about 0.2 to 0.3 for generation), or
+    /// with `--loop-guidance-logits` the adaptive strength's ceiling (0.5 is the authors' recipe)
+    #[arg(long, value_name = "W")]
+    pub loop_guidance: Option<f32>,
+
+    /// Load a looped model for LoopCD-Logits (the coda also runs on the first pass's output; about 11% slower decode)
+    #[arg(long)]
+    pub loop_guidance_logits: bool,
 }
 
-/// `--control-vector` values and the layer range as the engine's control vectors: `FILE:SCALE` splits at the last
-/// colon only where what follows is a number, so a path with colons stays whole.
+/// The HF config overrides with `--loop-guidance-logits` merged in.
+pub fn loop_guidance_overrides(
+    overrides: Option<inference_api::engine::HfConfigOverrides>,
+    logits: bool,
+) -> anyhow::Result<Option<inference_api::engine::HfConfigOverrides>> {
+    if !logits {
+        return Ok(overrides);
+    }
+    let mut value = overrides.map_or_else(|| serde_json::json!({}), |o| o.as_value().clone());
+    value["loop_guidance_logits"] = serde_json::Value::Bool(true);
+    Ok(Some(inference_api::engine::HfConfigOverrides::new(value)?))
+}
+
+/// `--control-vector` values, the layer range and `--loop-guidance` as the engine's control vectors: `FILE:SCALE`
+/// splits at the last colon only where what follows is a number, so a path with colons stays whole.
 pub fn control_vectors(
     files: &[String],
     texts: &[String],
     range: Option<&[usize]>,
+    loop_guidance: Option<f32>,
 ) -> anyhow::Result<Option<inference_api::operations::ControlVectors>> {
-    if files.is_empty() && texts.is_empty() {
+    if files.is_empty() && texts.is_empty() && loop_guidance.is_none() {
         return Ok(None);
     }
     let lines = |path: &str| -> anyhow::Result<Vec<String>> {
@@ -1660,6 +1696,7 @@ pub fn control_vectors(
         files,
         derived,
         layer_range: range.and_then(|r| Some([*r.first()?, *r.get(1)?])),
+        loop_guidance,
     }))
 }
 
@@ -1792,6 +1829,8 @@ impl Default for RuntimeOptions {
             control_vectors: Vec::new(),
             control_vector_texts: Vec::new(),
             control_vector_layer_range: None,
+            loop_guidance: None,
+            loop_guidance_logits: false,
             moe_expert_cache: None,
             max_prefill_chunk_tokens: None,
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),

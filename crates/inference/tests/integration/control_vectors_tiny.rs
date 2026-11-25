@@ -58,6 +58,7 @@ fn vectors(path: &Path, scale: f32, layer_range: Option<[usize; 2]>) -> ControlV
         }],
         derived: Vec::new(),
         layer_range,
+        loop_guidance: None,
     }
 }
 
@@ -163,6 +164,27 @@ async fn a_loaded_model_takes_new_vectors_from_its_next_request() -> anyhow::Res
         model.control_vectors(None).await?.vectors,
         ControlVectors::default()
     );
+    Ok(())
+}
+
+// a model that runs each layer once refuses loop guidance, at load and live
+#[tokio::test]
+async fn a_model_without_a_loop_refuses_loop_guidance() -> anyhow::Result<()> {
+    let checkpoint = support::tiny_llama_checkpoint()?;
+    let refused = builder(&checkpoint).with_loop_guidance(0.3).build().await;
+    anyhow::ensure!(refused.is_err(), "a Llama took loop guidance at load");
+    let model = builder(&checkpoint).build().await?;
+    let guided = ControlVectors {
+        loop_guidance: Some(0.3),
+        ..Default::default()
+    };
+    let live = model
+        .set_control_vectors(SetControlVectorsRequest {
+            model: None,
+            vectors: guided,
+        })
+        .await;
+    anyhow::ensure!(live.is_err(), "a Llama took loop guidance live");
     Ok(())
 }
 

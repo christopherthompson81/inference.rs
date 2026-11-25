@@ -113,6 +113,8 @@ export interface SlotForm {
   steerScale?: number;
   /** `first-last` (0-based) to steer only those layers; "" steers every layer. */
   steerLayers?: string;
+  /** A looped model's loop guidance strength (about 0.2 to 0.3); null or 0 for none. */
+  loopGuidance?: number | null;
 }
 
 /** The steering a slot's form sets up, or null when it sets none. */
@@ -124,13 +126,20 @@ export function controlVectors(form: SlotForm): manager.ControlVectors | null {
       .filter((line) => line !== "");
   const positive = lines(form.steerPositive);
   const negative = lines(form.steerNegative);
-  if (!form.steer || positive.length === 0 || negative.length === 0) return null;
-  const vectors: manager.ControlVectors = {
-    derived: [{ positive, negative, scale: form.steerScale ?? DEFAULT_STEER_SCALE }],
-  };
-  const range = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(form.steerLayers ?? "");
-  if (range) vectors.layer_range = [Number(range[1]), Number(range[2])];
-  return vectors;
+  const vectors: manager.ControlVectors = {};
+  if (form.steer && positive.length > 0 && negative.length > 0) {
+    vectors.derived = [{ positive, negative, scale: form.steerScale ?? DEFAULT_STEER_SCALE }];
+    const range = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(form.steerLayers ?? "");
+    if (range) vectors.layer_range = [Number(range[1]), Number(range[2])];
+  }
+  const guidance = form.loopGuidance;
+  if (typeof guidance === "number" && Number.isFinite(guidance) && guidance > 0) vectors.loop_guidance = guidance;
+  return Object.keys(vectors).length > 0 ? vectors : null;
+}
+
+/** Whether a model loops part of its stack (Inkling 2), so it takes loop guidance. */
+export function loops(model: InventoryModel | undefined): boolean {
+  return /inkling2/i.test(model?.architecture ?? "");
 }
 
 /** The scale a new slot's steering starts at. */
@@ -449,9 +458,11 @@ class ManagerStore {
 // a kept load's steering as the form's fields: its first derived vector (the form makes one)
 function steerFields(vectors: manager.ControlVectors | undefined): Partial<SlotForm> {
   const derived = vectors?.derived?.[0];
-  if (!derived) return { steer: false };
+  const loopGuidance = vectors?.loop_guidance ?? null;
+  if (!derived) return { steer: false, loopGuidance };
   const range = vectors?.layer_range;
   return {
+    loopGuidance,
     steer: true,
     steerPositive: derived.positive.join("\n"),
     steerNegative: derived.negative.join("\n"),

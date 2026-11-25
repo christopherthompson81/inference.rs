@@ -7,6 +7,7 @@
     displayName,
     baseName,
     formatBytes,
+    loops,
     type Slot,
     type SlotId,
   } from "../stores/manager.svelte";
@@ -342,6 +343,21 @@
                 class="w-20 rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs dark:border-gray-700 dark:bg-gray-950"
                 placeholder="all"
                 bind:value={form.steerLayers}
+                onchange={() => managerStore.persistForms()}
+                disabled={activity.busy}
+              />
+            </label>
+          {/if}
+          {#if loops(entry)}
+            <label class="flex flex-col gap-1" title="Loop guidance (LoopCD): the last pass's output pushed away from the first's before the final layers, sharpening uncertain choices; about 0.2 to 0.3 for chat, empty or 0 for none">
+              <span class="text-[11px] text-gray-500 dark:text-gray-400">Loop guidance</span>
+              <input
+                type="number"
+                min="0"
+                step="0.05"
+                class="w-20 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+                placeholder="none"
+                bind:value={form.loopGuidance}
                 onchange={() => managerStore.persistForms()}
                 disabled={activity.busy}
               />

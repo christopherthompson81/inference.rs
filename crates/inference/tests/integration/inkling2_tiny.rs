@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use inference::{
-    ChatRequest, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder, TextMessageRole,
-    TextMessages, TextModelBuilder,
+    ChatRequest, ControlVectors, HfConfigOverrides, ModelDType, PromptInput, PromptLogitsRequest,
+    RequestBuilder, SetControlVectorsRequest, TextMessageRole, TextMessages, TextModelBuilder,
 };
 use inference_tensor::{DType, Device, Tensor};
 use rand::{SeedableRng, rngs::StdRng};
@@ -62,6 +62,11 @@ const EXPERTS: usize = 4;
 const TOP_K: usize = 2;
 const WEIGHT_STD: f32 = 0.2;
 const WEIGHT_SEED: u64 = 0x696e_6b6c;
+// a loop guidance strength in the paper's generation range, and the logits form's adaptive ceiling (the authors')
+const GUIDANCE: f32 = 0.3;
+const LOGITS_GUIDANCE: f32 = 0.5;
+// tokens a scoring prompt takes
+const PROMPT_LEN: usize = 24;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
 // the GGUF load's kernels against the checkpoint load's, the same weights (an unquantized recipe scored ~1e-3 off)
@@ -413,6 +418,200 @@ async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
         return Ok(());
     }
     long_prompt_scores_as_on_the_cpu("cuda:0", CUDA_LOGPROB_TOLERANCE).await
+}
+
+fn guided(strength: Option<f32>) -> SetControlVectorsRequest {
+    SetControlVectorsRequest {
+        model: None,
+        vectors: ControlVectors {
+            loop_guidance: strength,
+            ..Default::default()
+        },
+    }
+}
+
+// loop guidance (LoopCD-Hidden) moves the scores as a load with it does; 0 and clearing it leave the plain model's bits
+#[tokio::test]
+async fn loop_guidance_moves_the_scores_and_clearing_it_restores_them() -> anyhow::Result<()> {
+    let dir = checkpoint()?;
+    let tokens: Vec<u32> = (0..PROMPT_LEN as u32).collect();
+    let model = builder(&dir, None).build().await?;
+    let plain = prompt_logprobs(&model, tokens.clone()).await?;
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    model.set_control_vectors(guided(Some(0.0))).await?;
+    assert_eq!(
+        bits(&prompt_logprobs(&model, tokens.clone()).await?),
+        bits(&plain)
+    );
+    model.set_control_vectors(guided(Some(GUIDANCE))).await?;
+    let live = prompt_logprobs(&model, tokens.clone()).await?;
+    anyhow::ensure!(
+        bits(&live) != bits(&plain),
+        "guidance left the scores as they were"
+    );
+    let loaded = builder(&dir, None)
+        .with_loop_guidance(GUIDANCE)
+        .build()
+        .await?;
+    assert_eq!(
+        bits(&prompt_logprobs(&loaded, tokens.clone()).await?),
+        bits(&live)
+    );
+    model.set_control_vectors(guided(None)).await?;
+    assert_eq!(bits(&prompt_logprobs(&model, tokens).await?), bits(&plain));
+    Ok(())
+}
+
+fn overrides(value: serde_json::Value) -> HfConfigOverrides {
+    HfConfigOverrides::new(value).expect("an object")
+}
+
+// LoopCD-Logits (its own coda slots for the first pass): at strength 0 the last pass's logits bit for bit, so the extra
+// coda leaves the model's own path alone; a strength moves the scores as a load with it does
+#[tokio::test]
+async fn loop_guidance_on_logits_contrasts_the_passes_and_leaves_strength_zero_plain()
+-> anyhow::Result<()> {
+    let dir = checkpoint()?;
+    let tokens: Vec<u32> = (0..PROMPT_LEN as u32).collect();
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let plain = prompt_logprobs(&builder(&dir, None).build().await?, tokens.clone()).await?;
+    let logits_mode = || builder(&dir, None).with_loop_guidance_logits();
+    let model = logits_mode().build().await?;
+    assert_eq!(
+        bits(&prompt_logprobs(&model, tokens.clone()).await?),
+        bits(&plain)
+    );
+    model.set_control_vectors(guided(Some(0.0))).await?;
+    assert_eq!(
+        bits(&prompt_logprobs(&model, tokens.clone()).await?),
+        bits(&plain)
+    );
+    model
+        .set_control_vectors(guided(Some(LOGITS_GUIDANCE)))
+        .await?;
+    let live = prompt_logprobs(&model, tokens.clone()).await?;
+    anyhow::ensure!(
+        bits(&live) != bits(&plain),
+        "logit guidance left the scores as they were"
+    );
+    let loaded = logits_mode()
+        .with_loop_guidance(LOGITS_GUIDANCE)
+        .build()
+        .await?;
+    assert_eq!(bits(&prompt_logprobs(&loaded, tokens).await?), bits(&live));
+    Ok(())
+}
+
+// fewer passes than trained run (and score differently); the drafter taps the run layout's counterparts of its visits
+#[tokio::test]
+async fn fewer_loop_passes_run_and_keep_drafting_on_cuda() -> anyhow::Result<()> {
+    let dir = checkpoint()?;
+    let tokens: Vec<u32> = (0..PROMPT_LEN as u32).collect();
+    let two = overrides(serde_json::json!({"loop_config": {"run_passes": PASSES - 1}}));
+    let full = prompt_logprobs(&builder(&dir, None).build().await?, tokens.clone()).await?;
+    let fewer = prompt_logprobs(
+        &builder(&dir, None)
+            .with_hf_config_overrides(two)
+            .build()
+            .await?,
+        tokens,
+    )
+    .await?;
+    anyhow::ensure!(full != fewer, "a pass fewer scored the same");
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let drafter = drafter_checkpoint()?;
+    // top-level, as `--loop-guidance-logits` sends its key: the nested checkpoint config takes it too
+    let two = serde_json::json!({"loop_config": {"run_passes": PASSES - 1}});
+    let request = || chat("say something long");
+    let run = |drafting, passes: Option<serde_json::Value>| {
+        let dir = &drafter;
+        async move {
+            let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
+                .with_load_recipes(false)
+                .with_dtype(ModelDType::BF16)
+                .with_prefix_cache_n(None)
+                .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+            if let Some(passes) = passes {
+                builder = builder.with_hf_config_overrides(overrides(passes));
+            }
+            if drafting {
+                builder =
+                    builder.with_mtp_model(dir.path().to_string_lossy(), Some(DRAFT_BLOCK - 1));
+            }
+            anyhow::Ok(
+                traces::greedy(&builder.build().await?, request(), DRAFT_DECODE_LEN)
+                    .await?
+                    .0,
+            )
+        }
+    };
+    let plain = run(false, Some(two.clone())).await?;
+    anyhow::ensure!(
+        run(false, None).await? != plain,
+        "the checkpoint ran every pass under `run_passes`"
+    );
+    let drafted = run(true, Some(two)).await?;
+    ensure_same_greedy(&drafted, &plain)
+}
+
+// a new strength rewrites the scalar the captured decode graphs read: no capture again, the fresh load's tokens
+#[tokio::test]
+async fn a_new_loop_guidance_strength_keeps_the_captured_graphs_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let dir = checkpoint()?;
+    let gpu = |strength| {
+        TextModelBuilder::new(dir.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_prefix_cache_n(None)
+            .with_load_recipes(false)
+            .with_paged_attn(
+                inference::PagedAttentionMetaBuilder::default()
+                    .build()
+                    .expect("default paged attention"),
+            )
+            .with_loop_guidance(strength)
+    };
+    let model = gpu(GUIDANCE).build().await?;
+    decode_graphs::prompt_trace(&model, decode_graphs::GRAPH_PROMPTS[0], MAX_LEN).await?;
+    let captures = |counters: &decode_graphs::Counters| {
+        counters.total(decode_graphs::EVENTS, &[("event", "capture")])
+    };
+    anyhow::ensure!(
+        captures(&decode_graphs::Counters::take(&snapshotter)) > 0,
+        "the decode steps captured no graph"
+    );
+    model
+        .set_control_vectors(guided(Some(2.0 * GUIDANCE)))
+        .await?;
+    let stronger =
+        decode_graphs::prompt_trace(&model, decode_graphs::GRAPH_PROMPTS[0], MAX_LEN).await?;
+    let after = decode_graphs::Counters::take(&snapshotter);
+    assert_eq!(
+        captures(&after),
+        0,
+        "the new strength captured again: {after:?}"
+    );
+    anyhow::ensure!(
+        after.total(decode_graphs::EVENTS, &[("event", "replay")]) > 0,
+        "the stronger decode replayed no graph: {after:?}"
+    );
+    drop(model);
+    let fresh = decode_graphs::prompt_trace(
+        &gpu(2.0 * GUIDANCE).build().await?,
+        decode_graphs::GRAPH_PROMPTS[0],
+        MAX_LEN,
+    )
+    .await?;
+    assert_eq!(
+        stronger.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+        fresh.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+    );
+    Ok(())
 }
 
 async fn paged_model(dtype: ModelDType) -> anyhow::Result<(tempfile::TempDir, inference::Model)> {

@@ -151,10 +151,28 @@ impl DeviceMappedModelLoader for Inkling2Loader {
 
 /// The text model's config: the checkpoint's own `text_config` where it nests one beside the vision tower's, whose
 /// experts' precisions (`hf_quant_config.json`) the checkpoint binding reads in place of its ModelOpt declaration.
+// a run's loop options; checkpoint configs nest the text model's under `text_config`, GGUF's are flat
+const RUN_OPTIONS: [&str; 2] = ["loop_guidance_logits", "loop_config"];
+
 pub fn inkling2_text_config(config: &str) -> Result<crate::inkling2::Config> {
     let value: serde_json::Value = serde_json::from_str(config)?;
     match value.get("text_config") {
         Some(text) => {
+            // the run options read the same top-level keys a GGUF's flat config has (`--loop-guidance-logits`)
+            let mut text = text.clone();
+            for key in RUN_OPTIONS {
+                if let (Some(option), Some(text)) = (value.get(key), text.as_object_mut()) {
+                    match (text.get_mut(key), option) {
+                        (
+                            Some(serde_json::Value::Object(into)),
+                            serde_json::Value::Object(from),
+                        ) => into.extend(from.clone()),
+                        _ => {
+                            text.insert(key.to_string(), option.clone());
+                        }
+                    }
+                }
+            }
             let mut cfg = crate::inkling2::Config::from_json(&text.to_string())?;
             cfg.quantization_config = None;
             Ok(cfg)

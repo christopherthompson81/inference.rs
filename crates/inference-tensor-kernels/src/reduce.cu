@@ -326,12 +326,16 @@ fast_max(const size_t src_numel, const size_t el_to_sum_per_block,
   size_t stop_idx = min(start_idx + el_to_sum_per_block, src_numel);
   size_t idx = start_idx + tid;
 
-  while (idx < stop_idx) {
-    // TODO: Fast version for the contiguous case.
-    size_t strided_i = get_strided_index(idx, num_dims, dims, strides);
-    shr[tid] = maxg(shr[tid], src[strided_i]);
-    idx += blockDim.x;
+  // contiguous rows skip the per-element index divides (a 200K-wide row took ~10x the sum)
+  T acc = shr[tid];
+  if (is_contiguous(num_dims, dims, strides)) {
+    for (; idx < stop_idx; idx += blockDim.x)
+      acc = maxg(acc, src[idx]);
+  } else {
+    for (; idx < stop_idx; idx += blockDim.x)
+      acc = maxg(acc, src[get_strided_index(idx, num_dims, dims, strides)]);
   }
+  shr[tid] = acc;
 
   // Parallel reduction, see the slides:
   // https://www.olcf.ornl.gov/wp-content/uploads/2019/12/05_Atomics_Reductions_Warp_Shuffle.pdf
@@ -366,12 +370,16 @@ fast_min(const size_t src_numel, const size_t el_to_sum_per_block,
   size_t stop_idx = min(start_idx + el_to_sum_per_block, src_numel);
   size_t idx = start_idx + tid;
 
-  while (idx < stop_idx) {
-    // TODO: Fast version for the contiguous case.
-    size_t strided_i = get_strided_index(idx, num_dims, dims, strides);
-    shr[tid] = ming(shr[tid], src[strided_i]);
-    idx += blockDim.x;
+  // contiguous rows skip the per-element index divides (a 200K-wide row took ~10x the sum)
+  T acc = shr[tid];
+  if (is_contiguous(num_dims, dims, strides)) {
+    for (; idx < stop_idx; idx += blockDim.x)
+      acc = ming(acc, src[idx]);
+  } else {
+    for (; idx < stop_idx; idx += blockDim.x)
+      acc = ming(acc, src[get_strided_index(idx, num_dims, dims, strides)]);
   }
+  shr[tid] = acc;
 
   // Parallel reduction, see the slides:
   // https://www.olcf.ornl.gov/wp-content/uploads/2019/12/05_Atomics_Reductions_Warp_Shuffle.pdf
