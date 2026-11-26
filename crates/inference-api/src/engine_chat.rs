@@ -792,6 +792,11 @@ async fn parse_request_inner(
             seed: oairequest.seed,
             return_logprobs: oairequest.logprobs,
             is_streaming,
+            continuous_usage: oairequest
+                .stream_options
+                .as_ref()
+                .and_then(|options| options.continuous_usage_stats)
+                .unwrap_or(false),
             constraint,
             sequential_tool_calls: oairequest.parallel_tool_calls == Some(false),
             web_search_options: normalized_tools.web_search_options,
@@ -1262,7 +1267,10 @@ impl ChatStream {
                 ChatStreamEvent::Error(ApiError::from_error(e.as_ref(), ApiErrorKind::Internal))
             }
             Response::Chunk(mut response) => {
-                if response.choices.iter().all(|x| x.finish_reason.is_some()) {
+                // a chunk with no choices reports usage while output is held back; it ends nothing
+                if !response.choices.is_empty()
+                    && response.choices.iter().all(|x| x.finish_reason.is_some())
+                {
                     self.finished = true;
                 }
                 InferenceRs::maybe_log_response(self.state.clone(), &response);

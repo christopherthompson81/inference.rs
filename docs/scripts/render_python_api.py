@@ -103,6 +103,7 @@ GROUPS = [
         lambda n: n.startswith(
             (
                 "ChatCompletion",
+                "ChatStreamOptions",
                 "Completion",
                 "Embedding",
                 "Rerank",

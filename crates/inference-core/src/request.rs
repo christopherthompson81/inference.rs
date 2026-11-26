@@ -187,6 +187,8 @@ pub struct NormalRequest {
     pub response: Sender<Response>,
     pub return_logprobs: bool,
     pub is_streaming: bool,
+    /// Streamed chunks carry the usage so far, and held-back output sends usage-only chunks.
+    pub continuous_usage: bool,
     pub id: usize,
     #[doc(hidden)]
     #[serde(skip)]
@@ -410,6 +412,7 @@ impl NormalRequest {
             tool_choice,
             return_logprobs: false,
             is_streaming: false,
+            continuous_usage: false,
             constraint: Constraint::None,
             suffix: None,
             logits_processors: None,

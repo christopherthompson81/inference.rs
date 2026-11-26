@@ -1439,8 +1439,12 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     };
                     match resp {
                         Response::Chunk(chunk) => {
+                            // a usage-only chunk (held-back output) is progress, passed on as it came
+                            let Some(first_choice) = chunk.choices.first() else {
+                                let _ = user_sender.send(Response::Chunk(chunk.clone())).await;
+                                continue;
+                            };
                             // Suppress tool-call chunks. Forwarding them would surface a premature finish_reason before the tool loop continues.
-                            let first_choice = &chunk.choices[0];
                             if let Some(reasoning_content) = &first_choice.delta.reasoning_content {
                                 round_reasoning_content.push_str(reasoning_content);
                             }

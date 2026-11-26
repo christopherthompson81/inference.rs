@@ -185,6 +185,7 @@ Chat completion request following OpenAI's specification
 | `stop` | `StopTokens \| None` | optional |
 | `stop_token_ids` | `list[int] \| None` | optional |
 | `stream` | `bool \| None` | optional |
+| `stream_options` | `ChatStreamOptions \| None` | optional |
 | `temperature` | `float \| None` | optional |
 | `thinking_budget` | `int \| None` | optional |
 | `tool_choice` | `ToolChoice \| None` | optional |
@@ -231,6 +232,16 @@ Chat completion request following OpenAI's specification
 | `reasoning_content` | `str \| None` | optional |
 | `role` | `str` | required |
 | `tool_calls` | `list[Any] \| None` | optional |
+
+
+## `ChatStreamOptions`
+
+What a streamed chat reply reports besides its deltas.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `continuous_usage_stats` | `bool \| None` | optional |
+| `include_usage` | `bool \| None` | optional |
 
 
 ## `CompletionChunkChoice`

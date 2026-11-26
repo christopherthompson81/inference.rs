@@ -25,23 +25,36 @@ pub struct Turn {
 pub struct Delta {
     pub content: Option<String>,
     pub reasoning: Option<String>,
+    /// The reply's tokens so far, where the chunk carried its usage.
+    pub completion_tokens: Option<usize>,
 }
 
 impl Turn {
     /// Folds one chunk in. Tool call fragments merge by index: ids and names arrive once, arguments in pieces (a server
     /// may also send a whole call in one chunk).
     pub fn apply(&mut self, chunk: &Value) -> Delta {
+        let completion_tokens = chunk
+            .get("usage")
+            .and_then(|usage| usage.get("completion_tokens"))
+            .and_then(Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok());
         if let Some(usage) = chunk.get("usage").filter(|usage| !usage.is_null()) {
             self.usage = Some(usage.clone());
         }
         let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) else {
-            return Delta::default();
+            return Delta {
+                completion_tokens,
+                ..Delta::default()
+            };
         };
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.finish_reason = Some(reason.to_string());
         }
         let Some(delta) = choice.get("delta") else {
-            return Delta::default();
+            return Delta {
+                completion_tokens,
+                ..Delta::default()
+            };
         };
         let text = |key: &str| {
             delta
@@ -98,7 +111,11 @@ impl Turn {
                 }
             }
         }
-        Delta { content, reasoning }
+        Delta {
+            content,
+            reasoning,
+            completion_tokens,
+        }
     }
 
     /// The turn as a history message. Reasoning goes back in, so a template that renders it re-renders this turn as
@@ -126,6 +143,16 @@ impl Turn {
 mod tests {
     use super::{ToolCall, Turn};
     use serde_json::json;
+
+    #[test]
+    fn a_usage_only_chunk_reports_the_tokens_so_far() {
+        let mut turn = Turn::default();
+        let delta = turn.apply(&json!({"choices": [], "usage": {"completion_tokens": 42}}));
+        assert_eq!(delta.completion_tokens, Some(42));
+        assert_eq!(delta.content, None);
+        let delta = turn.apply(&json!({"choices": [{"delta": {"content": "hi"}}]}));
+        assert_eq!(delta.completion_tokens, None);
+    }
 
     #[test]
     fn deltas_merge_into_text_reasoning_and_tool_calls() {

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::{future::BoxFuture, stream::BoxStream};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const CHAT_PATH: &str = "/v1/chat/completions";
 const MODELS_PATH: &str = "/v1/models";
@@ -77,8 +77,13 @@ impl EngineBackend {
 }
 
 impl ChatBackend for EngineBackend {
-    fn stream(&self, request: Value) -> BoxFuture<'_, Result<BoxStream<'static, Result<Value>>>> {
+    fn stream(
+        &self,
+        mut request: Value,
+    ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Value>>>> {
         Box::pin(async move {
+            // the engine reports its token count as it goes, a tool call it holds back until whole included
+            request["stream_options"] = json!({"continuous_usage_stats": true});
             let request = serde_json::from_value(request).context("building the chat request")?;
             let stream = self
                 .engine

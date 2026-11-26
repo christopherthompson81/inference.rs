@@ -667,6 +667,7 @@ impl AnthropicMessagesRequest {
             temperature: self.temperature,
             top_p: self.top_p,
             stream: self.stream,
+            stream_options: None,
             tools,
             tool_choice,
             response_format,

@@ -461,12 +461,14 @@ impl Engine {
         let (stop_toks, stop_strings) =
             self.stop_criteria(request.sampling_params.stop_toks.as_ref())?;
 
-        let group = Arc::new(tokio::sync::Mutex::new(SequenceGroup::new(
+        let mut group = SequenceGroup::new(
             request.sampling_params.n_choices,
             request.is_streaming,
             extras.is_chat,
             extras.best_of,
-        )));
+        );
+        group.continuous_usage = request.is_streaming && request.continuous_usage;
+        let group = Arc::new(tokio::sync::Mutex::new(group));
 
         let tokenizer = get_mut_arcmutex!(self.pipeline).tokenizer();
         let control_vector_hash = get_mut_arcmutex!(self.pipeline).control_vectors().hash();

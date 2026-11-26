@@ -37,6 +37,8 @@ export type CodeEvent =
   | { type: "caught_up"; elapsed_ms: number }
   /** A request of about `prompt_tokens` (the harness's estimate) went to the model. */
   | { type: "round_start"; prompt_tokens: number }
+  /** The reply has generated `tokens` so far (the server's count, a tool call it holds back included). */
+  | { type: "progress"; tokens: number }
   | { type: "text"; delta: string }
   | { type: "reasoning"; delta: string }
   | {

@@ -1996,6 +1996,8 @@ pub struct SequenceGroup {
     streaming_finished_choices: HashSet<usize>,
     pub is_streaming: bool,
     pub is_chat: bool,
+    /// Every chunk carries the usage so far, and held-back output reports it in chunks with no choices.
+    pub continuous_usage: bool,
 }
 
 impl SequenceGroup {
@@ -2027,6 +2029,7 @@ impl SequenceGroup {
             is_streaming,
             is_chat,
             best_of,
+            continuous_usage: false,
         }
     }
 
@@ -2235,9 +2238,11 @@ impl SequenceGroup {
                         model: model.clone(),
                         system_fingerprint: SYSTEM_FINGERPRINT.to_string(),
                         object: "chat.completion.chunk".to_string(),
-                        usage: (idx + 1 == response_count)
-                            .then(|| usage_opt.clone())
-                            .flatten(),
+                        usage: if idx + 1 == response_count {
+                            usage_opt.clone().or_else(|| self.progress_usage())
+                        } else {
+                            None
+                        },
                         adapter_generation: seq
                             .adapter_generation()
                             .map(|generation| generation.to_string()),
@@ -2281,6 +2286,42 @@ impl SequenceGroup {
                     .await?;
             }
         }
+        Ok(())
+    }
+
+    /// The usage so far for a group that streams it on every chunk (its sequence's `update_time_info` brings it up to
+    /// date first).
+    fn progress_usage(&self) -> Option<Usage> {
+        self.continuous_usage.then(|| self.get_usage())
+    }
+
+    /// A chunk with no choices that reports the usage so far, while the sequence's output is held back.
+    pub async fn send_usage_progress(
+        &self,
+        seq: &Sequence,
+        model: String,
+    ) -> Result<(), Box<SendError<Response>>> {
+        let Some(usage) = self
+            .progress_usage()
+            .filter(|_| self.is_streaming && self.is_chat)
+        else {
+            return Ok(());
+        };
+        seq.responder()
+            .send(Response::Chunk(ChatCompletionChunkResponse {
+                id: seq.id.to_string(),
+                choices: Vec::new(),
+                created: seq.creation_time() as u128,
+                model,
+                system_fingerprint: SYSTEM_FINGERPRINT.to_string(),
+                object: "chat.completion.chunk".to_string(),
+                usage: Some(usage),
+                adapter_generation: seq
+                    .adapter_generation()
+                    .map(|generation| generation.to_string()),
+                session_id: None,
+            }))
+            .await?;
         Ok(())
     }
 

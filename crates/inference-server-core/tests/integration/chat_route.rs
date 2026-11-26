@@ -84,6 +84,56 @@ async fn chat_completions_stream_and_json_agree() -> anyhow::Result<()> {
     Ok(())
 }
 
+// each streamed chunk's usage so far, where the request asked for it in every chunk
+async fn streamed_usage(app: axum::Router, continuous: bool) -> anyhow::Result<Vec<Option<u64>>> {
+    let mut body = json!({
+        "model": "default",
+        "messages": [{"role": "user", "content": PROMPT}],
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.0,
+        "top_k": 1,
+        "stream": true,
+    });
+    if continuous {
+        body["stream_options"] = json!({"continuous_usage_stats": true});
+    }
+    let request = Request::post("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))?;
+    let sse = body_text(app.oneshot(request).await?).await?;
+    sse.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .map(|data| {
+            let chunk: Value = serde_json::from_str(data)?;
+            Ok(chunk["usage"]["completion_tokens"].as_u64())
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continuous_usage_stats_count_the_reply_as_it_streams() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let app = router(dir.path()).await?;
+
+    let plain = streamed_usage(app.clone(), false).await?;
+    let (last, before) = plain.split_last().expect("a streamed reply");
+    assert!(before.iter().all(Option::is_none), "{plain:?}");
+    let total = last.expect("the last chunk carries the usage");
+
+    let counts = streamed_usage(app, true).await?;
+    let counts = counts
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .expect("every chunk carries the usage so far");
+    assert!(
+        counts.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{counts:?}"
+    );
+    assert_eq!(counts.last(), Some(&total));
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ask_permission_without_streaming_is_a_validation_error() -> anyhow::Result<()> {
     let dir = support::tiny_checkpoint()?;
