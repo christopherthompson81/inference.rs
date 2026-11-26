@@ -9,7 +9,6 @@ pub mod postprocess;
 pub mod preprocess;
 
 use std::path::Path;
-use std::sync::OnceLock;
 
 use image::RgbImage;
 use inference_tensor::nn::VarBuilder;
@@ -22,7 +21,6 @@ pub use postprocess::{LayoutDetection, PostprocessArgs};
 pub use preprocess::Preprocessor;
 
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
-const RAYON_THREADS_ENV: &str = "RAYON_NUM_THREADS";
 
 fn parse_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T> {
     serde_json::from_str(s).map_err(inference_tensor::Error::wrap)
@@ -30,25 +28,6 @@ fn parse_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T> {
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     parse_json(&std::fs::read_to_string(path).map_err(inference_tensor::Error::wrap)?)
-}
-
-static CPU_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-
-/// Process-wide pool for the AVX2 kernels: hyperthreads slow them (16 -> 8 threads: 0.78 -> 0.63 s), so use physical
-/// cores, capped by the CPUs this process may run on (affinity, cgroup quota). `None` defers to rayon's global pool.
-fn cpu_pool() -> Option<&'static rayon::ThreadPool> {
-    CPU_POOL
-        .get_or_init(|| {
-            if std::env::var_os(RAYON_THREADS_ENV).is_some() || !crate::cpu_direct::available() {
-                return None;
-            }
-            let allowed = std::thread::available_parallelism().map_or(1, |n| n.get());
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(num_cpus::get_physical().min(allowed))
-                .build()
-                .ok()
-        })
-        .as_ref()
 }
 
 /// Loads an HF-format `PP-DocLayoutV3_safetensors` directory or a GGUF of it and runs detection end to end.
@@ -107,7 +86,7 @@ impl PPDocLayoutV3Detector {
         let labels = cfg.labels();
         let model = PPDocLayoutV3::new(cfg, (preprocessor.height, preprocessor.width), vb)?;
         let pool = if device.is_cpu() {
-            cpu_pool().map(Pool::Shared)
+            crate::cpu_pool().map(Pool::Shared)
         } else {
             None
         };

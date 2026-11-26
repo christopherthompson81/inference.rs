@@ -34,6 +34,9 @@ const IMATRIX_GGUF_TYPE: &str = "imatrix";
 const PROJECTOR_GGUF_ARCHITECTURE: &str = "clip";
 // inference_layout's `model_type` and GGUF `general.architecture`; that crate's kernels are too heavy to depend on here
 const LAYOUT_ARCHITECTURE: &str = "pp_doclayout_v3";
+// DocLayout-YOLO ships one `torch.save` checkpoint named for the model, with no config beside it
+const DOCLAYOUT_YOLO_ARCHITECTURE: &str = "doclayout_yolo";
+const DOCLAYOUT_YOLO_EXTENSION: &str = "pt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,7 +61,7 @@ pub enum InventoryKind {
     LanguageId,
     /// A multimodal projector (mmproj GGUF), loaded beside a text GGUF rather than on its own.
     Projector,
-    /// A document layout detector (PP-DocLayoutV3), loaded apart from the engine.
+    /// A document layout detector (PP-DocLayoutV3, DocLayout-YOLO), loaded apart from the engine.
     Layout,
     /// A speculative decoding drafter (DFlash, DSpark, DSpine), attached to the model it drafts for (`mtp.model`).
     Drafter,
@@ -393,7 +396,7 @@ fn scan_dir(
     });
     // a config without checkpoint weights (a cache entry only probed, a GGUF repo's config) is no checkpoint
     let checkpoint = model_dir && walk_files(dir).iter().any(|file| is_weight_file(file));
-    if checkpoint {
+    if checkpoint || files.iter().any(|file| is_doclayout_yolo(file)) {
         found.push(dir_model(dir, origin));
     }
     found.extend(gguf_models_in(&gguf_groups(&files), &files, origin));
@@ -731,6 +734,11 @@ fn dir_model(dir: &Path, origin: Origin<'_>) -> InventoryModel {
         dir.file_name()
             .map(|name| name.to_string_lossy().into_owned())
     });
+    if !dir.join("config.json").exists() && files.iter().any(|file| is_doclayout_yolo(file)) {
+        model.architecture = Some(DOCLAYOUT_YOLO_ARCHITECTURE.to_string());
+        model.kind = Some(InventoryKind::Layout);
+        return model;
+    }
     if let Ok(config) = fs::read_to_string(dir.join("config.json"))
         && let Ok(config) = serde_json::from_str::<serde_json::Value>(&config)
     {
@@ -851,6 +859,11 @@ fn modified(path: &Path) -> Option<u64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs())
+}
+
+fn is_doclayout_yolo(path: &Path) -> bool {
+    has_extension(path, DOCLAYOUT_YOLO_EXTENSION)
+        && file_name(path).starts_with(DOCLAYOUT_YOLO_ARCHITECTURE)
 }
 
 fn is_weight_file(path: &Path) -> bool {
@@ -1087,11 +1100,19 @@ mod tests {
             &dir.path().join("layout-detector.gguf"),
             &[("general.architecture", text(LAYOUT_ARCHITECTURE))],
         );
+        let yolo = dir.path().join("DocLayout-YOLO-DocStructBench");
+        fs::create_dir(&yolo).unwrap();
+        fs::write(yolo.join("doclayout_yolo_docstructbench_imgsz1024.pt"), b"").unwrap();
+        fs::write(yolo.join("README.md"), b"").unwrap();
         let scan = scan_models(&ScanRequest {
             folders: vec![dir.path().to_path_buf()],
             ..Default::default()
         });
-        for name in ["layout-detector", "layout-detector.gguf"] {
+        for name in [
+            "layout-detector",
+            "layout-detector.gguf",
+            "DocLayout-YOLO-DocStructBench",
+        ] {
             let model = by_name(&scan, name);
             assert_eq!(model.kind, Some(InventoryKind::Layout), "{model:?}");
             assert_eq!(model.error, None);

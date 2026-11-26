@@ -8473,7 +8473,7 @@
               "null"
             ],
             "format": "float",
-            "description": "Lowest score kept, 0 to 1."
+            "description": "Lowest score kept, 0 to 1; unset uses the model's own (PP-DocLayoutV3 0.5, DocLayout-YOLO 0.2)."
           }
         },
         "additionalProperties": false
@@ -8506,7 +8506,7 @@
       },
       "LayoutRegion": {
         "type": "object",
-        "description": "One region of a page, in its predicted reading order.",
+        "description": "One region of a page, in reading order (predicted by PP-DocLayoutV3, from the boxes' layout for DocLayout-YOLO).",
         "required": [
           "label",
           "score",

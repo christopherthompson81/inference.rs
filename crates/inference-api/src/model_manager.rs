@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 
 use base64::Engine as _;
 use inference_core::default_hf_cache_dir;
-use inference_layout::pp_doclayout_v3::{DEFAULT_THRESHOLD, PPDocLayoutV3Detector};
+use inference_layout::LayoutDetector;
 use inference_selection::inventory::{InventoryKind, InventoryModel, ModelFormat, ModelScan};
 use inference_tensor::Device;
 use serde::Serialize;
@@ -221,12 +221,12 @@ pub struct LayoutDetectRequest {
     pub model: String,
     /// The page image (PNG, JPEG, ...) as base64 or a `data:` URL.
     pub image: String,
-    /// Lowest score kept, 0 to 1.
+    /// Lowest score kept, 0 to 1; unset uses the model's own (PP-DocLayoutV3 0.5, DocLayout-YOLO 0.2).
     #[serde(default)]
     pub threshold: Option<f32>,
 }
 
-/// One region of a page, in its predicted reading order.
+/// One region of a page, in reading order (predicted by PP-DocLayoutV3, from the boxes' layout for DocLayout-YOLO).
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LayoutRegion {
     /// The region's class (`text`, `table`, `formula`, `chart`, ...).
@@ -271,7 +271,7 @@ struct Loaded {
 }
 
 struct LayoutModel {
-    detector: Arc<PPDocLayoutV3Detector>,
+    detector: Arc<LayoutDetector>,
     source: String,
 }
 
@@ -522,7 +522,7 @@ impl ModelManager {
             };
             let path = PathBuf::from(&entry.path);
             let detector =
-                tokio::task::spawn_blocking(move || PPDocLayoutV3Detector::load(&path, &device))
+                tokio::task::spawn_blocking(move || LayoutDetector::load(&path, &device))
                     .await
                     .map_err(|_| ApiError::internal())?
                     .map_err(|error| {
@@ -730,7 +730,9 @@ impl ModelManager {
                     Some("model"),
                 )
             })?;
-        let threshold = request.threshold.unwrap_or(DEFAULT_THRESHOLD);
+        let threshold = request
+            .threshold
+            .unwrap_or_else(|| detector.default_threshold());
         if !(0.0..=1.0).contains(&threshold) {
             return Err(ApiError::invalid_request(format!(
                 "threshold {threshold} is outside [0, 1]"

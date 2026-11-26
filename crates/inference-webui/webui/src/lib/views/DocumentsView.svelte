@@ -18,15 +18,16 @@
   } from "../services/documentExport";
   import { download } from "../services/transcriptExport";
 
-  // PaddleOCR-VL's task prompts by PP-DocLayoutV3 label; every other text kind takes the text prompt
+  // PaddleOCR-VL's task prompts by layout label (PP-DocLayoutV3's and DocLayout-YOLO's); other text takes the text prompt
   const TASK_PROMPTS: Record<string, string> = {
     table: "Table Recognition:",
     display_formula: "Formula Recognition:",
     inline_formula: "Formula Recognition:",
+    isolate_formula: "Formula Recognition:",
     chart: "Chart Recognition:",
   };
-  // the PP-DocLayoutV3 labels of regions with no text to read
-  const PICTURES = new Set(["image", "header_image", "footer_image", "seal"]);
+  // the labels of regions with no text to read
+  const PICTURES = new Set(["image", "header_image", "footer_image", "seal", "figure"]);
   // region badges scale with the page, so they read the same on a phone photo and a 300 dpi scan
   const BADGE_PAGE_FRACTION = 1 / 40;
   // a kept single-page job from before documents had pages

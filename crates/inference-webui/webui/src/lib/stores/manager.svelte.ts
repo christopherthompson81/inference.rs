@@ -60,7 +60,7 @@ export const SLOTS = {
     title: "Layout model",
     kinds: ["layout"],
     device: true,
-    hint: "PP-DocLayoutV3, as its directory or GGUF",
+    hint: "PP-DocLayoutV3 (its directory or GGUF) or DocLayout-YOLO (its .pt folder)",
   },
   ocr: {
     id: "ocr",

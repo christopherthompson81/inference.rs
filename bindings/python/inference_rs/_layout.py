@@ -65,7 +65,10 @@ class LayoutDetection:
 
 
 class LayoutModel:
-    """A PP-DocLayoutV3 document layout detector, from an HF directory or a GGUF of it. Close it, or use `with`."""
+    """A document layout detector: PP-DocLayoutV3 from an HF directory or a GGUF of it, or DocLayout-YOLO from its `.pt`.
+
+    Close it, or use `with`.
+    """
 
     def __init__(self, path, backend: str | None = None, device: int = 0, threads: int = 0):
         config = _native.BackendConfig(c_string_arg(backend, "backend"), device, threads)

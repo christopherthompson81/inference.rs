@@ -118,22 +118,24 @@ typedef struct inference_image {
     int32_t format;
 } inference_image;
 
-/* Document layout detection (PP-DocLayoutV3). */
+/* Document layout detection (PP-DocLayoutV3, DocLayout-YOLO). */
 
 typedef struct inference_layout_model inference_layout_model;
 typedef struct inference_layout_result inference_layout_result;
 
-/* Pass as `threshold` to use the model's default score threshold (0.5). */
+/* Pass as `threshold` to use the model's default score threshold (PP-DocLayoutV3 0.5, DocLayout-YOLO 0.2). */
 #define INFERENCE_LAYOUT_DEFAULT_THRESHOLD (-1.0f)
 
 /* Loads PP-DocLayoutV3 from an HF-format directory (config.json, preprocessor_config.json, model.safetensors) or
- * from a GGUF file of it (`examples/pp_doclayout_v3_gguf.rs` in inference-layout writes one). */
+ * from a GGUF file of it (`examples/pp_doclayout_v3_gguf.rs` in inference-layout writes one), or DocLayout-YOLO
+ * from its `.pt` checkpoint or a directory holding only that one. */
 INFERENCE_API inference_status inference_layout_model_load(const char *path,
                                                           const inference_backend_config *backend,
                                                           inference_layout_model **out_model);
 INFERENCE_API void inference_layout_model_free(inference_layout_model *model);
 
-/* The model's class labels, indexed by class id (from its config; the Paddle names for the stock 25-class model). */
+/* The model's class labels, indexed by class id (from its config or checkpoint; the Paddle names for the stock
+ * 25-class PP-DocLayoutV3). */
 INFERENCE_API size_t inference_layout_model_label_count(const inference_layout_model *model);
 INFERENCE_API inference_status inference_layout_model_label(const inference_layout_model *model, size_t index,
                                                            const char **out_label);
@@ -143,21 +145,23 @@ INFERENCE_API inference_status inference_layout_model_label(const inference_layo
 INFERENCE_API inference_status inference_layout_detect(const inference_layout_model *model,
                                                       const inference_image *image, float threshold,
                                                       inference_layout_result **out_result);
-/* Detects on `count` images in one batched forward; fills out_results[0..count). On failure every entry is NULL. */
+/* Detects on `count` images (one batched forward for PP-DocLayoutV3, one per image for DocLayout-YOLO); fills
+ * out_results[0..count). On failure every entry is NULL. */
 INFERENCE_API inference_status inference_layout_detect_batch(const inference_layout_model *model,
                                                             const inference_image *images, size_t count,
                                                             float threshold,
                                                             inference_layout_result **out_results);
 INFERENCE_API void inference_layout_result_free(inference_layout_result *result);
 
-/* Detections are ordered by predicted reading order (index == reading order). */
+/* Detections are ordered by reading order (index == reading order): PP-DocLayoutV3 predicts it, DocLayout-YOLO's
+ * comes from the boxes' layout (bands top to bottom, columns left to right). */
 INFERENCE_API size_t inference_layout_result_count(const inference_layout_result *result);
 /* out_bbox receives 4 floats: x1, y1, x2, y2 in source-image pixels. */
 INFERENCE_API inference_status inference_layout_result_detection(const inference_layout_result *result, size_t index,
                                                                 int32_t *out_class_id, const char **out_label,
                                                                 float *out_score, float *out_bbox);
 /* The region's outline from its mask: *out_count (four or more) vertices as x, y float pairs in source-image pixels, the
- * box's corners when the mask gives no polygon. *out_points is borrowed until inference_layout_result_free(result). */
+ * box's corners when the mask gives no polygon (always, for DocLayout-YOLO, which predicts no masks). *out_points is borrowed until inference_layout_result_free(result). */
 INFERENCE_API inference_status inference_layout_result_polygon(const inference_layout_result *result, size_t index,
                                                               const float **out_points, size_t *out_count);
 

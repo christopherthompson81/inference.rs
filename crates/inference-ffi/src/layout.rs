@@ -2,9 +2,7 @@ use std::ffi::{CString, c_char};
 use std::sync::Arc;
 
 use image::RgbImage;
-use inference_layout::pp_doclayout_v3::{
-    DEFAULT_THRESHOLD, LayoutDetection, PPDocLayoutV3Detector,
-};
+use inference_layout::{LayoutDetection, LayoutDetector};
 
 use crate::FfiResult;
 use crate::inference_status::*;
@@ -16,7 +14,7 @@ use crate::{
 // the header promises a model handle may be shared across threads
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<PPDocLayoutV3Detector>();
+    assert_send_sync::<LayoutDetector>();
 };
 
 pub use inference_api::model_manager::MAX_LAYOUT_IMAGE_PIXELS as MAX_IMAGE_PIXELS;
@@ -32,7 +30,7 @@ pub const INFERENCE_PIXEL_GRAY8: i32 = 4;
 /// Opaque `inference_layout_model`.
 #[allow(non_camel_case_types)]
 pub struct inference_layout_model {
-    detector: PPDocLayoutV3Detector,
+    detector: LayoutDetector,
     /// NUL-terminated class names by id, shared with every result so labels outlive the model.
     labels: Arc<[CString]>,
 }
@@ -120,9 +118,9 @@ unsafe fn to_rgb(img: &inference_image) -> FfiResult<RgbImage> {
     }
 }
 
-fn threshold_arg(threshold: f32) -> FfiResult<f32> {
+fn threshold_arg(threshold: f32, detector: &LayoutDetector) -> FfiResult<f32> {
     if threshold == INFERENCE_LAYOUT_DEFAULT_THRESHOLD {
-        return Ok(DEFAULT_THRESHOLD);
+        return Ok(detector.default_threshold());
     }
     if !(0. ..=1.).contains(&threshold) {
         return Err(Failure::invalid(format!(
@@ -150,8 +148,7 @@ pub unsafe extern "C" fn inference_layout_model_load(
             let load_failed = |e: inference_tensor::Error| {
                 Failure::new(INFERENCE_ERR_LOAD_FAILED, format!("{path}: {e}"))
             };
-            let mut detector =
-                PPDocLayoutV3Detector::load(path, &backend.device).map_err(load_failed)?;
+            let mut detector = LayoutDetector::load(path, &backend.device).map_err(load_failed)?;
             if let Some(threads) = backend.cpu_threads {
                 detector = detector.with_cpu_threads(threads).map_err(load_failed)?;
             }
@@ -226,7 +223,7 @@ unsafe fn detect_into(
         if images.is_null() && count > 0 {
             return Err(Failure::invalid("images is NULL"));
         }
-        let threshold = threshold_arg(threshold)?;
+        let threshold = threshold_arg(threshold, &model.detector)?;
         let rgb = (0..count)
             .map(|i| {
                 to_rgb(&*images.add(i))

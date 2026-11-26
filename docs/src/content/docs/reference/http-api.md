@@ -45,6 +45,13 @@ Each successful load is kept on the server under its `model_id`, its request wit
 
 `POST /v1/audio/diarization` takes a multipart form with the audio as `file` and returns who speaks when, from a diarization model such as Nemotron-3 Diarization or Streaming Sortformer: `{"duration", "num_speakers", "segments": [{"speaker", "start", "end"}], "frame_seconds"}`, times in seconds and speakers numbered by the model's output slots. `threshold` (0.5) is the probability, from 0 to 1, at which a speaker counts as speaking; `return_probabilities=true` adds `probabilities`, one row of every speaker's probability per `frame_seconds` (10 ms); `response_format=rttm` answers with NIST RTTM `SPEAKER` lines instead. See [speech models](/guides/models/use-speech-models/).
 
+## Document layout
+
+`POST /v1/layout/detect` (`{"model", "image", "threshold"}`) returns a page's regions from a loaded layout model, each with its `label`, `score`, `bbox` and `polygon` in page pixels, in reading order. Two models load as `layout`:
+
+- **PP-DocLayoutV3**, from its Hugging Face directory (`PaddlePaddle/PP-DocLayoutV3_safetensors`) or a GGUF of it: 25 classes (`text`, `doc_title`, `paragraph_title`, `table`, `display_formula`, `chart`, `image`, `header`, ...), a predicted reading order, and outlines traced from its masks. `threshold` defaults to 0.5.
+- **DocLayout-YOLO**, from the folder holding its `torch.save` checkpoint (`juliozhao/DocLayout-YOLO-DocStructBench`, whose file is `doclayout_yolo_docstructbench_imgsz1024.pt`): the classes and input size its checkpoint records (DocStructBench: `title`, `plain text`, `abandon` for headers, footers and page numbers, `figure`, `figure_caption`, `table`, `table_caption`, `table_footnote`, `isolate_formula`, `formula_caption`). It predicts no reading order, so the regions are ordered from their boxes (bands top to bottom, columns left to right), and each polygon is its box's corners. `threshold` defaults to 0.2, the model's own.
+
 ## LoRA adapter routing and management
 
 Chat Completions, Completions, and Responses requests can select dynamic LoRA with the top-level `adapter` field. A string selects a loaded alias; `{"generation":"<generation-id>"}` selects one exact generation. Replacing or unloading an alias does not change an in-flight request.
