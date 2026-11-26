@@ -67,7 +67,7 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
 | MTP | Gemma 4 | Gemma 4 assistant checkpoints (`--mtp-model`) | Supported with paged attention |
 | MTP | Qwen3.5 (dense and MoE), Qwen3.8, Qwen3.8-Flash-Next | Built into the checkpoint (`--mtp`), or a GGUF head file | Supported with paged attention |
 | MTP | ERNIE 4.5 MoE | Built into the checkpoint (`--mtp`) | Supported with paged attention |
-| DFlash / DFlash 2 / DSpark / DSpine | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next | DFlash, DSpark and DSpine draft checkpoints (`--mtp-model`) | Supported with paged attention |
+| DFlash / DFlash 2 / DSpark / DSpine | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next, Inkling 2 (DFlash 2) | DFlash, DSpark and DSpine draft checkpoints (`--mtp-model`) | Supported with paged attention |
 | EAGLE-3 | Llama, Qwen3 (dense and MoE) and the other models on the shared decoder, Qwen3.5 / Qwen3.6, gpt-oss, Gemma 4 | EAGLE-3 draft checkpoints (`--mtp-model`) | Supported with paged attention on CUDA |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
@@ -135,7 +135,7 @@ python3 scripts/gguf_add_hf_tensors.py ERNIE-4.5-21B-A3B-PT-Q4_K_M.gguf ERNIE-4.
 On an RTX 3090 with that Q4_K_M, one draft per step accepts about 90% of drafts and runs a code completion at
 about 206 tok/s sampled against 199 without MTP.
 
-## DFlash and DFlash 2 (Qwen3.5 / Qwen3.8)
+## DFlash and DFlash 2 (Qwen3.5 / Qwen3.8 / Inkling 2)
 
 [DFlash](https://arxiv.org/abs/2602.06036) drafters are small block-diffusion models that propose a
 whole block of tokens in one pass, conditioned on hidden states tapped from the target's
@@ -148,6 +148,13 @@ when present:
 inference serve -m Qwen/Qwen3.8-27B --quant 4 \
   --mtp-model incoai/Qwen3.8-27B-DFlash2
 ```
+
+Inkling-2-Mini takes `incoai/Inkling-2-Mini-DFlash2` the same way, in place of the checkpoint's own drafter. On a 3090
+(q8 KV, LoopCD-Logits 0.5, `--mtp-n-predict 7 --mtp-auto-depth`, five chat prompts of up to 512 tokens) it decoded
+107.0 tok/s sampled at temperature 1 against 83.7 with the checkpoint's drafter and 82.0 plain, and 101.7 greedy
+against 98.3 and 84.3. Its candidates are cut to the model's real vocabulary (the head's last rows are padding), and its
+config's `selector_softcap_mode: after_correction` caps each candidate's corrected score with the model's softcap when
+sampling.
 
 `--mtp-draft-sampling` defaults to `auto`. A DFlash 2 checkpoint uses probabilistic drafting when
 its CUDA candidate selector is supported, while DFlash 1 and unsupported devices use greedy

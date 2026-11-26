@@ -1448,6 +1448,7 @@ inference_tensor::kernel_library! {
             hidden_dtype: i32,
             predecessor_dtype: i32,
             successor_dtype: i32,
+            softcap: f32,
             stream: i64,
         );
         pub fn sparse_rejection_categorical_f32(

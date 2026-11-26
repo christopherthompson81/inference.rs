@@ -155,6 +155,7 @@ fn dflash_sample_selector_reference(
     input: DFlashSelectorReference<'_>,
     inverse_temperatures: &[f32],
     uniforms: &[f32],
+    softcap: Option<f32>,
 ) -> (Vec<u32>, Vec<u32>, Vec<f32>) {
     let packed_width = 2 * input.k;
     let mut selected = Vec::with_capacity(input.anchors.len() * input.positions);
@@ -180,7 +181,8 @@ fn dflash_sample_selector_reference(
                     .map(|((pred, hidden), succ)| pred * hidden * succ)
                     .sum::<f32>();
                 candidate_ids.push(candidate as u32);
-                scores.push(packed[candidate_slot] + dot);
+                let score = packed[candidate_slot] + dot;
+                scores.push(softcap.map_or(score, |cap| cap * (score / cap).tanh()));
             }
 
             let inverse_temperature = inverse_temperatures[batch];
@@ -247,6 +249,7 @@ inference_tensor::gpu_cases!(
         cuda_cached_batched_top1_tracks_batch_shape,
         cuda_cached_top1_honors_view_offset,
         cuda_cached_top1_marks_nan_distribution,
+        cuda_dflash_sample_selector_caps_the_corrected_scores,
         cuda_dflash_sample_selector_marks_invalid_sampling_params,
         cuda_dflash_sample_selector_matches_sequential_reference,
         cuda_dflash_selector_matches_reference_with_bf16_codebooks,
@@ -2467,6 +2470,17 @@ fn cuda_dflash_selector_supports_max_k_and_stable_ties() -> inference_tensor::Re
 
 #[cfg(feature = "cuda")]
 fn cuda_dflash_sample_selector_matches_sequential_reference() -> inference_tensor::Result<()> {
+    sample_selector_matches_reference(None)
+}
+
+// a cap small enough to reorder nothing yet flatten the sampling distribution
+#[cfg(feature = "cuda")]
+fn cuda_dflash_sample_selector_caps_the_corrected_scores() -> inference_tensor::Result<()> {
+    sample_selector_matches_reference(Some(0.75))
+}
+
+#[cfg(feature = "cuda")]
+fn sample_selector_matches_reference(softcap: Option<f32>) -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const BATCH: usize = 2;
     const POSITIONS: usize = 3;
@@ -2511,6 +2525,7 @@ fn cuda_dflash_sample_selector_matches_sequential_reference() -> inference_tenso
         },
         &inverse_temperatures,
         &uniforms,
+        softcap,
     );
 
     let device = Device::new_cuda(0)?;
@@ -2523,6 +2538,7 @@ fn cuda_dflash_sample_selector_matches_sequential_reference() -> inference_tenso
         anchors: &Tensor::new(&anchors, &device)?,
         inverse_temperatures: &Tensor::new(&inverse_temperatures, &device)?,
         uniforms: &Tensor::from_vec(uniforms.to_vec(), (BATCH, POSITIONS), &device)?,
+        softcap,
     })?;
     let actual_tokens = output
         .tokens
@@ -2573,6 +2589,7 @@ fn cuda_dflash_sample_selector_marks_invalid_sampling_params() -> inference_tens
         anchors: &Tensor::new(&[0u32], &device)?,
         inverse_temperatures: &Tensor::new(&[f32::INFINITY], &device)?,
         uniforms: &Tensor::new(&[[0.5f32]], &device)?,
+        softcap: None,
     })?;
 
     assert_eq!(

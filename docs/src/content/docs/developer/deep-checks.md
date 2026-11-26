@@ -16,6 +16,8 @@ set in `~/.cargo/config.toml` under `[env]` (build scripts track those variables
 | `INFERENCE_TEST_PADDLEOCR_VL_MODEL` | PaddleOCR-VL Hugging Face directory | `paddleocr_vl` |
 | `INFERENCE_TEST_PADDLEOCR_VL_GGUF` | a directory holding PaddleOCR-VL-1.6's official GGUF and its mmproj | `paddleocr_vl` |
 | `INFERENCE_TEST_QWEN3_5_MODEL` | Qwen3.5-0.8B Hugging Face directory | `qwen3_5_mtp` |
+| `INFERENCE_TEST_INKLING2_MODEL` | Inkling 2 Mini Hugging Face directory | `inkling2_dflash2` |
+| `INFERENCE_TEST_INKLING2_DFLASH2` | its DFlash 2 drafter (`incoai/Inkling-2-Mini-DFlash2`) | `inkling2_dflash2` |
 | `INFERENCE_TEST_QWEN3_5_GGUF` | a Q8_0 GGUF of the same model | `qwen3_5_mtp`, `qwen3_5_tool_call` (CUDA only) |
 | `INFERENCE_TEST_QWEN3_5_MOE_GGUF` | a Qwen3.5-MoE GGUF that keeps its MTP (`nextn`) block, such as unsloth's Qwen3.6-35B-A3B-MTP | `qwen3_5_mtp` |
 | `INFERENCE_TEST_IQ4_XS_GGUF` | a Qwen3.8-27B IQ4_XS GGUF file | `gguf_iq::iq4_xs_greedy_continuation_matches_llama_cpp` |

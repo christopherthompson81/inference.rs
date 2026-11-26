@@ -25,6 +25,7 @@ mod granite4_vision_tiny;
 mod granite_speech_tiny;
 mod granite_tiny;
 mod hidream_o1_tiny;
+mod inkling2_dflash2;
 mod inkling2_tiny;
 mod jina_v5_tiny;
 mod kimi_linear_tiny;

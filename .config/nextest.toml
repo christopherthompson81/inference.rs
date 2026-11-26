@@ -15,7 +15,7 @@ metal-model = { max-threads = 4 }
 [profile.default]
 default-filter = """
 not (
-    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
+    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq|inkling2_dflash2)::/))
     | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::|^voxels_job::a_voxel_job_cuts_out|^image_to_3d_job::an_image_to_3d_job_writes|^image_to_mesh_job::an_image_to_mesh_job_writes|^refine_mesh_job::a_refine_mesh_job_writes|^image_to_splat_job::an_image_to_splat_job_writes/))
     | (package(inference-ffi) & test(detections))
     | (package(inference-server-core) & test(/^flux::/))
@@ -30,7 +30,7 @@ threads-required = 'num-test-threads'
 [profile.cuda]
 default-filter = """
 not (
-    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
+    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq|inkling2_dflash2)::/))
     | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::|^voxels_job::a_voxel_job_cuts_out|^image_to_3d_job::an_image_to_3d_job_writes|^image_to_mesh_job::an_image_to_mesh_job_writes|^refine_mesh_job::a_refine_mesh_job_writes|^image_to_splat_job::an_image_to_splat_job_writes/))
     | (package(inference-ffi) & test(detections))
     | (package(inference-server-core) & test(/^flux::/))
@@ -45,7 +45,7 @@ threads-required = 'num-test-threads'
 
 [profile.deep]
 default-filter = """
-(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
+(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq|inkling2_dflash2)::/))
     | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::|^voxels_job::a_voxel_job_cuts_out|^image_to_3d_job::an_image_to_3d_job_writes|^image_to_mesh_job::an_image_to_mesh_job_writes|^refine_mesh_job::a_refine_mesh_job_writes|^image_to_splat_job::an_image_to_splat_job_writes/))
 | (package(inference-ffi) & test(detections))
 | (package(inference-server-core) & test(/^flux::/))
@@ -59,7 +59,7 @@ threads-required = 'num-test-threads'
 priority = 100
 
 [[profile.deep.overrides]]
-filter = '(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call)::/))'
+filter = '(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|inkling2_dflash2)::/))'
 test-group = 'gpu-model'
 
 # Metal keeps the default profile's filter; only the memory-hungry tests are held back.

@@ -236,6 +236,10 @@ pub struct DFlashSpecificConfig {
     pub selector_top_k: Option<usize>,
     pub conv_kernel_size: Option<usize>,
     pub conv_group_size: Option<usize>,
+    // the target's final softcap on the selector's scores: on the logits before the selector's correction (the
+    // default), or on each candidate's corrected score
+    pub final_logit_softcapping: Option<f64>,
+    pub selector_softcap_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, inference_json::FromJson)]
@@ -282,6 +286,8 @@ pub struct DFlashLoadTarget<'a> {
     pub yarn_rope_config: Option<&'a YarnRopeConfig>,
     pub device: &'a Device,
     pub dtype: DType,
+    /// The target's vocabulary where its head has padding rows past it: the drafts are cut to it.
+    pub logit_vocab: Option<usize>,
 }
 
 impl DFlashConfig {
@@ -767,9 +773,21 @@ struct CandidateSelector {
     successor_codebook: Tensor,
     hidden_projection: Tensor,
     top_k: usize,
-    #[cfg(feature = "cuda")]
+    // the candidates' vocabulary: the codebooks' rows, and the logits' columns it reads
     vocab_size: usize,
+    softcap: Option<SelectorSoftcap>,
 }
+
+// only CUDA samples, so only it reads the cap after the correction
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum SelectorSoftcap {
+    BeforeCorrection(f64),
+    AfterCorrection(f32),
+}
+
+const SOFTCAP_BEFORE_CORRECTION: &str = "before_correction";
+const SOFTCAP_AFTER_CORRECTION: &str = "after_correction";
 
 fn resolve_dflash_sampling_policy(
     method: MtpDraftSamplingMethod,
@@ -862,6 +880,29 @@ fn validate_candidate_selector_cuda(
 }
 
 impl CandidateSelector {
+    /// `logits` cut to the candidates' vocabulary (a padded head's extra columns dropped), softcapped when the cap
+    /// comes before the correction.
+    fn candidate_logits(&self, logits: &Tensor) -> Result<Tensor> {
+        let logits = if logits.dim(D::Minus1)? > self.vocab_size {
+            logits.narrow(D::Minus1, 0, self.vocab_size)?.contiguous()?
+        } else {
+            logits.clone()
+        };
+        match self.softcap {
+            Some(SelectorSoftcap::BeforeCorrection(cap)) => (logits / cap)?.tanh()? * cap,
+            _ => Ok(logits),
+        }
+    }
+
+    // the corrected-score cap the sampling kernel applies (greedy picks keep their order without it)
+    #[cfg(feature = "cuda")]
+    fn score_softcap(&self) -> Option<f32> {
+        match self.softcap {
+            Some(SelectorSoftcap::AfterCorrection(cap)) => Some(cap),
+            _ => None,
+        }
+    }
+
     fn load(vb: ShardedVarBuilder, cfg: &DFlashConfig) -> Result<Self> {
         let rank = cfg
             .dflash_config
@@ -871,15 +912,42 @@ impl CandidateSelector {
             .dflash_config
             .selector_top_k
             .ok_or_else(|| inference_tensor::Error::msg("DFlash2 config has no selector_top_k"))?;
+        let vocab = cfg.logit_vocab_size.unwrap_or(cfg.vocab_size);
+        let specific = &cfg.dflash_config;
+        #[allow(clippy::cast_possible_truncation)]
+        let softcap = match (
+            specific.final_logit_softcapping,
+            specific.selector_softcap_mode.as_deref(),
+        ) {
+            (None, _) => None,
+            (Some(cap), None | Some(SOFTCAP_BEFORE_CORRECTION)) => {
+                Some(SelectorSoftcap::BeforeCorrection(cap))
+            }
+            (Some(cap), Some(SOFTCAP_AFTER_CORRECTION)) => {
+                Some(SelectorSoftcap::AfterCorrection(cap as f32))
+            }
+            (Some(_), Some(mode)) => {
+                inference_tensor::bail!("unknown DFlash2 selector_softcap_mode `{mode}`")
+            }
+        };
+        // rows past the target's vocabulary are its head's padding, never a candidate
+        let codebook = |name: &str| -> Result<Tensor> {
+            let table = vb.get_unchecked(name)?;
+            if table.dim(0)? > vocab {
+                table.narrow(0, 0, vocab)?.contiguous()
+            } else {
+                Ok(table)
+            }
+        };
         Ok(Self {
-            predecessor_codebook: vb.get_unchecked("predecessor_codebook")?,
-            successor_codebook: vb.get_unchecked("successor_codebook")?,
+            predecessor_codebook: codebook("predecessor_codebook")?,
+            successor_codebook: codebook("successor_codebook")?,
             hidden_projection: vb
                 .pp("hidden_projection")
                 .get((rank, cfg.hidden_size), "weight")?,
             top_k,
-            #[cfg(feature = "cuda")]
-            vocab_size: cfg.vocab_size,
+            vocab_size: vocab,
+            softcap,
         })
     }
 
@@ -974,6 +1042,7 @@ impl CandidateSelector {
             anchors,
             inverse_temperatures,
             uniforms,
+            softcap: self.score_softcap(),
         })
     }
 
@@ -1468,7 +1537,7 @@ struct DFlashCudaGraphRun<'a> {
     start_positions: &'a [usize],
     sampling: Option<DFlashSamplingInputs<'a>>,
     attention_batch: &'a WindowedKvBatch,
-    token_embedding: &'a Arc<dyn QuantMethod>,
+    token_embedding: TargetEmbedding<'a>,
     lm_head: &'a Arc<dyn QuantMethod>,
     real_batch: usize,
 }
@@ -1900,10 +1969,10 @@ impl DFlashCudaGraphBuffers {
 impl DFlashCudaGraphEntry {
     fn matches_dependencies(
         &self,
-        token_embedding: &Arc<dyn QuantMethod>,
+        table: &Arc<dyn QuantMethod>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> bool {
-        Arc::ptr_eq(&self.token_embedding, token_embedding) && Arc::ptr_eq(&self.lm_head, lm_head)
+        Arc::ptr_eq(&self.token_embedding, table) && Arc::ptr_eq(&self.lm_head, lm_head)
     }
 
     fn launch(&mut self, real_batch: usize) -> Result<DFlashProposalBatch> {
@@ -2085,7 +2154,7 @@ impl DFlashCudaGraphState {
         key: DFlashCudaGraphKey,
         rows: &DFlashGraphHostRows,
         attention_batch: &WindowedKvBatch,
-        token_embedding: &Arc<dyn QuantMethod>,
+        token_embedding: TargetEmbedding<'_>,
         lm_head: &Arc<dyn QuantMethod>,
         real_batch: usize,
     ) -> Result<DFlashProposalBatch> {
@@ -2104,7 +2173,7 @@ impl DFlashCudaGraphState {
         key: DFlashCudaGraphKey,
         host_rows: DFlashGraphHostRows,
         attention_batch: &WindowedKvBatch,
-        token_embedding: &Arc<dyn QuantMethod>,
+        token_embedding: TargetEmbedding<'_>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> Result<DFlashCudaGraphEntry> {
         let graph_event =
@@ -2209,7 +2278,7 @@ impl DFlashCudaGraphState {
             key,
             staging,
             buffers,
-            token_embedding: token_embedding.clone(),
+            token_embedding: token_embedding.table.clone(),
             lm_head: lm_head.clone(),
             mask_token_id: model.mask_token_id,
             host_rows,
@@ -2232,7 +2301,7 @@ impl DFlashCudaGraphState {
             real_batch,
         } = run;
         if let Some(position) = self.entries.iter().position(|entry| {
-            entry.key == key && entry.matches_dependencies(token_embedding, lm_head)
+            entry.key == key && entry.matches_dependencies(token_embedding.table, lm_head)
         }) {
             let mut entry = self.entries.remove(position);
             match entry.replay(
@@ -2653,13 +2722,21 @@ pub fn windowed_kv_cache_size_in_bytes(
         .ok_or_else(|| inference_tensor::Error::msg("DFlash windowed KV byte size overflow"))
 }
 
+/// The target's token embedding: its table, which keys the captured graphs, and the function a draft embeds with
+/// (the table, then a norm on targets that have one).
+#[derive(Clone, Copy)]
+pub struct TargetEmbedding<'a> {
+    pub table: &'a Arc<dyn QuantMethod>,
+    pub embed: &'a dyn Fn(&Tensor) -> Result<Tensor>,
+}
+
 pub struct DFlashGraphProposalInputs<'a> {
     pub seq_ids: &'a [usize],
     pub anchors: &'a [u32],
     pub start_positions: &'a [usize],
     pub n_predict: usize,
     pub sampling: Option<DFlashSamplingInputs<'a>>,
-    pub token_embedding: &'a Arc<dyn QuantMethod>,
+    pub token_embedding: TargetEmbedding<'a>,
     pub lm_head: &'a Arc<dyn QuantMethod>,
 }
 
@@ -2690,12 +2767,17 @@ impl DFlashDraftModel {
             yarn_rope_config,
             device,
             dtype,
+            logit_vocab,
         } = target;
         let path = config.resolve_path()?;
         let raw = drafter_config_text(config)?.ok_or_else(|| {
             inference_tensor::Error::msg("a DFlash draft model is a directory with its config")
         })?;
-        let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
+        let mut cfg: DFlashConfig =
+            serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
+        if logit_vocab.is_some() {
+            cfg.logit_vocab_size = logit_vocab;
+        }
         if !cfg.is_dflash() {
             inference_tensor::bail!(
                 "`--mtp-model` for this target must be a DFlash draft model; got architectures {:?}",
@@ -3241,7 +3323,7 @@ impl DFlashDraftModel {
     pub fn precapture_cuda_graphs(
         &self,
         max_n: usize,
-        token_embedding: &Arc<dyn QuantMethod>,
+        token_embedding: TargetEmbedding<'_>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> Result<()> {
         if !inference_nn::cuda::graph_capture::cuda_decode_graphs_enabled()
@@ -3306,7 +3388,7 @@ impl DFlashDraftModel {
                     selector_mode,
                 };
                 if state.entries.iter().any(|entry| {
-                    entry.key == key && entry.matches_dependencies(token_embedding, lm_head)
+                    entry.key == key && entry.matches_dependencies(token_embedding.table, lm_head)
                 }) || state.failed.contains(&key)
                 {
                     continue;
@@ -5081,13 +5163,12 @@ impl DFlashDraftModel {
         key: DFlashCudaGraphKey,
         buffers: &DFlashCudaGraphBuffers,
         attention_batch: &WindowedKvBatch,
-        token_embedding: &Arc<dyn QuantMethod>,
+        token_embedding: TargetEmbedding<'_>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> Result<DFlashCudaGraphOutput> {
-        let mut noise = self.with_own_mask_rows(
-            token_embedding
-                .embedding_forward(&buffers.token_ids.as_detached_tensor(), self.dtype)?,
-        )?;
+        let mut noise = self.with_own_mask_rows((token_embedding.embed)(
+            &buffers.token_ids.as_detached_tensor(),
+        )?)?;
         if (self.input_embedding_scale - 1.0).abs() > f64::EPSILON {
             noise = (noise * self.input_embedding_scale)?;
         }
@@ -5160,6 +5241,9 @@ impl DFlashDraftModel {
             logits = (logits * self.output_multiplier)?;
         }
         let hidden = &drafted.rows;
+        if let Some(selector) = &self.selector {
+            logits = selector.candidate_logits(&logits)?;
+        }
         match key.selector_mode {
             DFlashSelectorMode::Disabled => Ok(DFlashCudaGraphOutput {
                 tokens: self
@@ -5231,6 +5315,9 @@ impl DFlashDraftModel {
         let mut logits = lm_head.forward(hidden)?;
         if (self.output_multiplier - 1.0).abs() > f64::EPSILON {
             logits = (logits * self.output_multiplier)?;
+        }
+        if let Some(selector) = &self.selector {
+            logits = selector.candidate_logits(&logits)?;
         }
         if let Some(sampling) = sampling {
             let selector = self.selector.as_ref().ok_or_else(|| {
@@ -5451,20 +5538,23 @@ fn repeat_kv(x: &Tensor, groups: usize) -> Result<Tensor> {
 mod tests {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     use inference_nn::skip_without_cuda;
-    use std::{collections::HashSet, sync::Arc};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     use inference_quant::QuantMethod;
-    use inference_tensor::{D, Device, Result, Tensor};
+    use inference_tensor::{D, DType, Device, Result, Tensor};
 
     use super::{
-        ADAPT_FULL_DEPTH_MAX_BATCH, DEFAULT_BLOCK_SIZE, DFlashConfig, DFlashGraphHostInput,
-        DFlashSamplingInputs, DFlashSequenceEviction, MarkovHead, contiguous_row_range,
-        copy_dflash_graph_output_rows, dflash_adaptive_env_value, dflash_adaptive_supported,
-        dflash_graph_host_rows, dflash_graph_plans, dflash_graph_positions_fit,
-        dflash_graph_precapture_shapes, dflash_prefix_replay, dflash_rope_from_positions,
-        drain_dflash_lru_entries, gather_ctx_taps, linear_from_weight,
-        resolve_dflash_sampling_policy, select_ctx_kv_rows, select_dflash_depth,
-        update_dormant_sequences,
+        ADAPT_FULL_DEPTH_MAX_BATCH, CandidateSelector, DEFAULT_BLOCK_SIZE, DFlashConfig,
+        DFlashGraphHostInput, DFlashSamplingInputs, DFlashSequenceEviction, MarkovHead,
+        SelectorSoftcap, contiguous_row_range, copy_dflash_graph_output_rows,
+        dflash_adaptive_env_value, dflash_adaptive_supported, dflash_graph_host_rows,
+        dflash_graph_plans, dflash_graph_positions_fit, dflash_graph_precapture_shapes,
+        dflash_prefix_replay, dflash_rope_from_positions, drain_dflash_lru_entries,
+        gather_ctx_taps, linear_from_weight, resolve_dflash_sampling_policy, select_ctx_kv_rows,
+        select_dflash_depth, update_dormant_sequences,
     };
     #[cfg(feature = "cuda")]
     use super::{CandidateSelectorCudaSpec, validate_candidate_selector_cuda};
@@ -5940,6 +6030,84 @@ mod tests {
         assert!(dflash_graph_positions_fit(&[u32::MAX as usize - 7], 8));
         assert!(!dflash_graph_positions_fit(&[u32::MAX as usize - 6], 8));
         assert!(!dflash_graph_positions_fit(&[100_000], 0));
+    }
+
+    fn selector_config(extra: &str) -> DFlashConfig {
+        serde_json::from_str(&format!(
+            r#"{{
+                "architectures": ["DFlash2DraftModel"],
+                "hidden_size": 2,
+                "intermediate_size": 4,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 1,
+                "num_key_value_heads": 1,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": 6,
+                "logit_vocab_size": 4,
+                "dflash_config": {{"selector_rank": 2, "selector_top_k": 2{extra}}}
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    fn tiny_selector(cfg: &DFlashConfig) -> Result<CandidateSelector> {
+        let device = Device::Cpu;
+        let table = Tensor::arange(0f32, 12., &device)?.reshape((6, 2))?;
+        let vb = inference_quant::ShardedSafeTensors::wrap(
+            HashMap::from([
+                ("predecessor_codebook".to_string(), table.clone()),
+                ("successor_codebook".to_string(), table),
+                (
+                    "hidden_projection.weight".to_string(),
+                    Tensor::ones((2, 2), DType::F32, &device)?,
+                ),
+            ]),
+            DType::F32,
+            device,
+        );
+        CandidateSelector::load(vb, cfg)
+    }
+
+    // a padded head's rows past the target's vocabulary are never candidates: the codebooks and logits are cut to it
+    #[test]
+    fn a_padded_head_is_cut_to_the_target_vocabulary() -> Result<()> {
+        let selector = tiny_selector(&selector_config(""))?;
+        assert_eq!(selector.predecessor_codebook.dims(), [4, 2]);
+        assert_eq!(selector.successor_codebook.dims(), [4, 2]);
+        // the padding columns hold the largest logits
+        let logits = Tensor::new(&[[[0.5f32, 0.1, 0.2, 0.3, 9.0, 9.0]]], &Device::Cpu)?;
+        let cut = selector.candidate_logits(&logits)?;
+        assert_eq!(cut.to_vec3::<f32>()?, [[[0.5, 0.1, 0.2, 0.3]]]);
+        let hidden = Tensor::zeros((1, 1, 2), DType::F32, &Device::Cpu)?;
+        assert_eq!(selector.select_greedy_batch(&hidden, &cut, &[0])?, [[0]]);
+        Ok(())
+    }
+
+    #[test]
+    fn the_selector_softcap_goes_where_its_mode_says() -> Result<()> {
+        let cap = ", \"final_logit_softcapping\": 2.0";
+        let logits = Tensor::new(&[[[4.0f32, -4.0, 1.0, 0.0]]], &Device::Cpu)?;
+        let before = tiny_selector(&selector_config(cap))?.candidate_logits(&logits)?;
+        let expected = [4f32, -4., 1., 0.].map(|x| 2. * (x / 2.).tanh());
+        for (got, want) in before.flatten_all()?.to_vec1::<f32>()?.iter().zip(expected) {
+            assert!((got - want).abs() < 1e-6, "{got} vs {want}");
+        }
+        // after the correction, the logits pass as they are and the sampling kernel caps each corrected score
+        let after = tiny_selector(&selector_config(&format!(
+            "{cap}, \"selector_softcap_mode\": \"after_correction\""
+        )))?;
+        assert_eq!(
+            after.candidate_logits(&logits)?.to_vec3::<f32>()?,
+            logits.to_vec3::<f32>()?
+        );
+        assert!(matches!(after.softcap, Some(SelectorSoftcap::AfterCorrection(c)) if c == 2.0));
+        assert!(
+            tiny_selector(&selector_config(&format!(
+                "{cap}, \"selector_softcap_mode\": \"sideways\""
+            )))
+            .is_err()
+        );
+        Ok(())
     }
 
     fn qwen35_dflash_config() -> DFlashConfig {
