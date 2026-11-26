@@ -924,6 +924,7 @@ class ChatCompletionRequest:
     stop: StopTokens | None = None
     stop_token_ids: list[int] | None = None
     stream: bool | None = None
+    stream_options: ChatStreamOptions | None = None
     temperature: float | None = None
     thinking_budget: int | None = None
     tool_choice: ToolChoice | None = None
@@ -964,6 +965,14 @@ class ChatCompletionResponseMessage:
     reasoning_content: str | None = None
     role: str
     tool_calls: list[Any] | None = None
+
+
+@dataclass(kw_only=True)
+class ChatStreamOptions:
+    """What a streamed chat reply reports besides its deltas."""
+
+    continuous_usage_stats: bool | None = None
+    include_usage: bool | None = None
 
 
 @dataclass(kw_only=True)

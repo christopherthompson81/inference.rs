@@ -5020,6 +5020,17 @@
             "description": "Stream the response as server-sent events.",
             "example": true
           },
+          "stream_options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChatStreamOptions",
+                "description": "What a streamed reply reports besides its deltas."
+              }
+            ]
+          },
           "temperature": {
             "type": [
               "number",
@@ -5222,6 +5233,26 @@
               "null"
             ],
             "items": {}
+          }
+        }
+      },
+      "ChatStreamOptions": {
+        "type": "object",
+        "description": "What a streamed chat reply reports besides its deltas.",
+        "properties": {
+          "continuous_usage_stats": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Every chunk carries the usage so far (vLLM's extension), and a chunk with no choices reports progress while\noutput is held back (a tool call being written streams whole once it is complete)."
+          },
+          "include_usage": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Accepted for OpenAI compatibility: the last chunk always carries the reply's usage."
           }
         }
       },

@@ -1133,6 +1133,18 @@ fn normalize_openai_tools(
     })
 }
 
+/// What a streamed chat reply reports besides its deltas.
+#[derive(Debug, Clone, Default, inference_json::FromJson, Serialize, ToSchema)]
+pub struct ChatStreamOptions {
+    /// Accepted for OpenAI compatibility: the last chunk always carries the reply's usage.
+    #[serde(default)]
+    pub include_usage: Option<bool>,
+    /// Every chunk carries the usage so far (vLLM's extension), and a chunk with no choices reports progress while
+    /// output is held back (a tool call being written streams whole once it is complete).
+    #[serde(default)]
+    pub continuous_usage_stats: Option<bool>,
+}
+
 /// Chat completion request following OpenAI's specification
 #[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ChatCompletionRequest {
@@ -1198,6 +1210,10 @@ pub struct ChatCompletionRequest {
     /// Stream the response as server-sent events.
     #[schema(example = true)]
     pub stream: Option<bool>,
+    /// What a streamed reply reports besides its deltas.
+    #[serde(default)]
+    #[schema(example = json!(Option::None::<ChatStreamOptions>))]
+    pub stream_options: Option<ChatStreamOptions>,
     /// Tools the model may call.
     #[schema(example = json!(Option::None::<Vec<OpenAiTool>>))]
     pub tools: Option<Vec<OpenAiTool>>,

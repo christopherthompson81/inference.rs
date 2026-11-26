@@ -90,6 +90,8 @@
     promptTokens: number;
     firstAt: number | null;
     chars: number;
+    // the server's count of the reply's tokens, where it reports one (else the streamed characters estimate it)
+    tokens: number | null;
     // false once a late page joined past the prefill, which it didn't see
     prefillSeen: boolean;
   }
@@ -129,6 +131,8 @@
   let running = $state(false);
   let error = $state("");
   let usage = $state<Record<string, any> | null>(null);
+  // the prompt's replies so far: their tokens and decode seconds, from each reply's usage
+  let replies = $state({ count: 0, tokens: 0, seconds: 0 });
   // time the agent worked on the last prompt, less the time it waited for an approval
   let agentMs = $state(0);
   let activeSince = $state<number | null>(null);
@@ -139,7 +143,7 @@
   let round = $state<Round | null>(null);
   let live = $derived.by(() => {
     if (!round) return null;
-    const tokens = Math.round(round.chars / CHARS_PER_TOKEN);
+    const tokens = round.tokens ?? Math.round(round.chars / CHARS_PER_TOKEN);
     const decoding = round.firstAt != null ? (now - round.firstAt) / 1000 : 0;
     return {
       context: round.promptTokens + tokens,
@@ -375,8 +379,9 @@
         activeSince = Date.now() - event.elapsed_ms;
         // the replayed output arrived at once: rate what streams from here, with what came before in the prompt
         if (round) {
-          round.promptTokens += Math.round(round.chars / CHARS_PER_TOKEN);
+          round.promptTokens += round.tokens ?? Math.round(round.chars / CHARS_PER_TOKEN);
           round.chars = 0;
+          round.tokens = null;
           round.start = Date.now();
           if (round.firstAt != null) {
             round.firstAt = Date.now();
@@ -385,7 +390,20 @@
         }
         break;
       case "round_start":
-        round = { start: Date.now(), promptTokens: event.prompt_tokens, firstAt: null, chars: 0, prefillSeen: true };
+        round = {
+          start: Date.now(),
+          promptTokens: event.prompt_tokens,
+          firstAt: null,
+          chars: 0,
+          tokens: null,
+          prefillSeen: true,
+        };
+        break;
+      case "progress":
+        if (round) {
+          round.firstAt ??= Date.now();
+          round.tokens = event.tokens;
+        }
         break;
       case "text":
       case "reasoning":
@@ -443,6 +461,11 @@
       }
       case "usage":
         usage = event.usage;
+        replies = {
+          count: replies.count + 1,
+          tokens: replies.tokens + Number(event.usage.completion_tokens ?? 0),
+          seconds: replies.seconds + Number(event.usage.total_completion_time_sec ?? 0),
+        };
         round = null;
         break;
       case "label":
@@ -698,6 +721,7 @@
     running = true;
     replaying = late;
     agentMs = 0;
+    replies = { count: 0, tokens: 0, seconds: 0 };
     activeSince = null;
     if (!late) syncClock();
     const id = sessionId;
@@ -1349,7 +1373,13 @@
                 {@const drafted = drafts(usage)}
                 <span>{count(usage.prompt_tokens_details?.cached_tokens ?? 0)} cached</span>
                 <span>prefill {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s{read ? ` (${read})` : ""}</span>
-                <span>{Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)} tok/s</span>
+                {#if replies.count > 1 && replies.seconds > 0}
+                  <span title="Decode speed over the prompt's {replies.count} replies, then the last reply's">
+                    {(replies.tokens / replies.seconds).toFixed(1)} tok/s ({count(replies.tokens)} tokens), last {Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)}
+                  </span>
+                {:else}
+                  <span>{Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)} tok/s</span>
+                {/if}
                 {#if drafted}<span title="Speculative decoding: draft tokens the model accepted per step, and the share of drafts accepted">{drafted}</span>{/if}
               {/if}
             </div>

@@ -1320,8 +1320,8 @@ impl futures::Stream for OpenResponsesStreamer {
                         }
 
                         // Check if all choices are finished
-                        let all_finished =
-                            chat_chunk.choices.iter().all(|c| c.finish_reason.is_some());
+                        let all_finished = !chat_chunk.choices.is_empty()
+                            && chat_chunk.choices.iter().all(|c| c.finish_reason.is_some());
 
                         for choice in &chat_chunk.choices {
                             if let Some(reasoning) = &choice.delta.reasoning_content {
@@ -2016,6 +2016,7 @@ fn parse_openresponses_request(
         temperature: oairequest.temperature,
         top_p: oairequest.top_p,
         stream: oairequest.stream,
+        stream_options: None,
         tools: oairequest.tools,
         tool_choice: oairequest.tool_choice,
         response_format,

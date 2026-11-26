@@ -71,6 +71,10 @@ pub trait AgentUi: Send {
     fn round_start(&mut self, prompt_tokens: usize) {
         let _ = prompt_tokens;
     }
+    /// The reply has generated `completion_tokens` so far (a backend that reports it as it streams).
+    fn progress(&mut self, completion_tokens: usize) {
+        let _ = completion_tokens;
+    }
     /// One model reply finished; its usage says how full the context is.
     fn round_end(&mut self, turn: &Turn) {
         let _ = turn;
@@ -615,6 +619,9 @@ impl Agent {
                         }
                         if let Some(content) = &delta.content {
                             ui.text(content);
+                        }
+                        if let Some(tokens) = delta.completion_tokens {
+                            ui.progress(tokens);
                         }
                     }
                     None if turn.finish_reason.is_none() => bail!("the reply stream ended before the reply finished"),

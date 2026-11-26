@@ -38,6 +38,8 @@ const MAX_LIVE_SESSIONS: usize = 32;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 // a summary's progress reaches the page at most this often, instead of an event per token
 const SUMMARY_PROGRESS_EVERY: Duration = Duration::from_millis(500);
+// a reply's token count reaches the page at most this often
+const REPLY_PROGRESS_EVERY: Duration = Duration::from_millis(250);
 // how a usage event's JSON opens ("type" sorts before "usage")
 const USAGE_EVENT: &str = r#"{"type":"usage""#;
 const DEMO_DIR_PREFIX: &str = "inference-code-demo-";
@@ -654,6 +656,7 @@ pub(crate) async fn send(
             runs: RunTracker::default(),
             summary_chars: 0,
             summary_sent: None,
+            progress_sent: None,
         };
         let event = if request.prompt.trim() == COMPACT_COMMAND {
             match agent.compact(&mut ui).await {
@@ -817,6 +820,8 @@ struct WebUi {
     // characters of summary output not yet reported, and when the last report went
     summary_chars: usize,
     summary_sent: Option<Instant>,
+    // when the reply's token count last went
+    progress_sent: Option<Instant>,
 }
 
 // what a run's label request needs, for a task of its own beside the agent's
@@ -881,6 +886,16 @@ impl AgentUi for WebUi {
         self.emit(json!({"type": "reasoning", "delta": delta}));
     }
 
+    fn progress(&mut self, completion_tokens: usize) {
+        if self
+            .progress_sent
+            .is_none_or(|sent| sent.elapsed() >= REPLY_PROGRESS_EVERY)
+        {
+            self.progress_sent = Some(Instant::now());
+            self.emit(json!({"type": "progress", "tokens": completion_tokens}));
+        }
+    }
+
     fn tool_start(&mut self, call: &ToolCall, args: &Value) {
         self.runs.call(&call.id, &call.name, args);
         self.emit(json!({"type": "tool_start", "id": call.id, "name": call.name, "args": args}));
@@ -927,6 +942,7 @@ impl AgentUi for WebUi {
     }
 
     fn round_start(&mut self, prompt_tokens: usize) {
+        self.progress_sent = None;
         self.emit(json!({"type": "round_start", "prompt_tokens": prompt_tokens}));
     }
 

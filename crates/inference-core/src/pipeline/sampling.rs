@@ -496,6 +496,10 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                 seq.get_mut_group().total_toks = 0;
                 Some(usage)
             } else {
+                // a group that streams its usage takes it up to date onto this chunk
+                if seq.get_mut_group().continuous_usage {
+                    seq.update_time_info();
+                }
                 None
             };
 
@@ -506,6 +510,21 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                 .is_err()
             {
                 // If we can't send the response, cancel the sequence
+                seq.set_state(crate::sequence::SequenceState::Done(
+                    crate::sequence::StopReason::Canceled,
+                ));
+                this.release_sequence_state(*seq.id());
+            }
+        }
+        // output held back (a tool call being written) still reports its progress where the request asked for it
+        else if seq.get_mut_group().continuous_usage {
+            seq.update_time_info();
+            if seq
+                .get_mut_group()
+                .send_usage_progress(seq, this.name().clone())
+                .await
+                .is_err()
+            {
                 seq.set_state(crate::sequence::SequenceState::Done(
                     crate::sequence::StopReason::Canceled,
                 ));
