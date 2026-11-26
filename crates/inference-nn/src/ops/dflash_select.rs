@@ -234,6 +234,7 @@ pub fn cuda_dflash_sample_select(
         anchors,
         inverse_temperatures,
         uniforms,
+        softcap,
     } = input;
     let packed_topk = &topk.packed;
     let k = topk.k;
@@ -469,6 +470,7 @@ pub fn cuda_dflash_sample_select(
             hidden_dtype,
             predecessor_dtype,
             successor_dtype,
+            softcap.unwrap_or(0.0),
             stream.cu_stream() as i64,
         );
     }
@@ -522,6 +524,8 @@ pub struct DFlashSelectorSampleInput<'a> {
     pub anchors: &'a Tensor,
     pub inverse_temperatures: &'a Tensor,
     pub uniforms: &'a Tensor,
+    /// Caps each candidate's corrected score at `softcap * tanh(score / softcap)` before sampling.
+    pub softcap: Option<f32>,
 }
 
 #[cfg(feature = "cuda")]

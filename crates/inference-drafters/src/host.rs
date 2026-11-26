@@ -22,7 +22,7 @@ use inference_nn::cuda::graph_capture::{CudaGraphComponent, CudaGraphEvent, Cuda
 use crate::dflash::{
     AUTO_DEPTHS, CtxAppend, DEFAULT_MAX_DRAFTS, DFlashDraftModel, DFlashGraphProposalInputs,
     DFlashLoadTarget, DFlashPagedCache, DFlashPreparedContext, DFlashProposalBatch,
-    DFlashSamplingInputs, dflash_adaptive_requested, windowed_kv_capacities,
+    DFlashSamplingInputs, TargetEmbedding, dflash_adaptive_requested, windowed_kv_capacities,
 };
 
 // rows plain steps buffer a sequence before they reach the drafter's context
@@ -305,8 +305,13 @@ impl ExternalDrafter {
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     pub fn precapture(&self, target: &dyn DrafterTarget, n: usize) -> Result<()> {
+        let embed = |ids: &Tensor| target.embed_tokens(ids);
+        let embedding = TargetEmbedding {
+            table: target.token_embedding(),
+            embed: &embed,
+        };
         self.drafter
-            .precapture_cuda_graphs(n, target.token_embedding(), &target.draft_lm_head())
+            .precapture_cuda_graphs(n, embedding, &target.draft_lm_head())
     }
 
     /// The noise rows `[anchor, mask, ...]` that draft `n` tokens, `[batch, rows, hidden]`, embedded in one call.
@@ -551,7 +556,10 @@ impl ExternalDrafter {
             start_positions: ctx.base_lens,
             n_predict,
             sampling,
-            token_embedding: target.token_embedding(),
+            token_embedding: TargetEmbedding {
+                table: target.token_embedding(),
+                embed: &|ids| target.embed_tokens(ids),
+            },
             lm_head: &lm_head,
         })?;
         if let Some(proposals) = graph_proposals {

@@ -194,6 +194,7 @@ impl Model {
                     yarn_rope_config: None,
                     device: &self.device,
                     dtype: self.dtype,
+                    logit_vocab: Some(self.cfg.unpadded_vocab_size),
                 },
                 checkpoint_lanes,
                 recurrent_capacity,

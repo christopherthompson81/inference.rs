@@ -342,6 +342,7 @@ impl Qwen3_5TextModel {
                     yarn_rope_config: self.yarn_rope_config.as_ref(),
                     device: &self.device,
                     dtype: self.dtype,
+                    logit_vocab: None,
                 },
                 checkpoint_lanes: self.cache.hybrid().checkpoint_lanes(),
                 recurrent_capacity,

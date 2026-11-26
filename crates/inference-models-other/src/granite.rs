@@ -4589,6 +4589,7 @@ impl GraniteMoeHybrid {
                     yarn_rope_config: None,
                     device: &self.device,
                     dtype: self.dtype,
+                    logit_vocab: None,
                 },
                 checkpoint_lanes,
                 recurrent_capacity,

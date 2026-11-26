@@ -122,7 +122,7 @@ __global__ void dflash_sample_select_kernel(
     float *__restrict__ candidate_probs, const int batch, const int positions,
     const int rank, const int vocab, const int k, const int packed_width,
     const int hidden_dtype, const int predecessor_dtype,
-    const int successor_dtype) {
+    const int successor_dtype, const float softcap) {
   const int sequence = blockIdx.x;
   if (sequence >= batch) {
     return;
@@ -174,6 +174,10 @@ __global__ void dflash_sample_select_kernel(
         dot = warp_sum(dot);
         if (lane == 0) {
           score = packed_row[candidate_slot] + dot;
+          // a softcap > 0 caps the corrected score (it keeps the order, so greedy picks need none)
+          if (softcap > 0.0f) {
+            score = softcap * tanhf(score / softcap);
+          }
         }
       }
       if (lane == 0) {
@@ -284,12 +288,12 @@ extern "C" void dflash_sample_select(
     const float *uniforms, uint32_t *selected, uint32_t *candidate_ids,
     float *candidate_probs, int batch, int positions, int rank, int vocab,
     int k, int packed_width, int hidden_dtype, int predecessor_dtype,
-    int successor_dtype, int64_t stream) {
+    int successor_dtype, float softcap, int64_t stream) {
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   dflash_sample_select_kernel<<<batch, DFLASH_SELECTOR_BLOCK_SIZE, 0,
                                 cuda_stream>>>(
       packed_topk, projected_hidden, predecessor_codebook, successor_codebook,
       anchors, inverse_temperatures, uniforms, selected, candidate_ids,
       candidate_probs, batch, positions, rank, vocab, k, packed_width,
-      hidden_dtype, predecessor_dtype, successor_dtype);
+      hidden_dtype, predecessor_dtype, successor_dtype, softcap);
 }

@@ -187,6 +187,9 @@ inference serve -m thinkingmachines/Inkling-2-Mini \
   --pa-cache-type q8 --pa-context-len 229376
 ```
 
+`incoai/Inkling-2-Mini-DFlash2` drafts in its place (`--mtp-model incoai/Inkling-2-Mini-DFlash2`), faster than the
+checkpoint's drafter most of all when sampling: see [DFlash 2](/guides/perf/speculative-decoding/#dflash-and-dflash-2-qwen35--qwen38--inkling-2).
+
 Beside a GGUF target, the drafter's projections default to Q8_0. With q8 KV the full 262,144-token context fits for
 one sequence; how much fits beside four depends on how much of the card other programs hold. On CUDA the cache can be
 any of `--pa-cache-type` f8e4m3, q8 or q2 to q6, with K and V at one width (`q8/q4` and other mixes fail the load).
