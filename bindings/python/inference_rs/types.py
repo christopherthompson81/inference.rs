@@ -1727,7 +1727,7 @@ class LayoutDetectResponse:
 
 @dataclass(kw_only=True)
 class LayoutRegion:
-    """One region of a page, in its predicted reading order."""
+    """One region of a page, in reading order (predicted by PP-DocLayoutV3, from the boxes' layout for DocLayout-YOLO)."""
 
     bbox: list[float]
     label: str

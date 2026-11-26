@@ -60,16 +60,17 @@ public sealed partial class DocumentViewModel : ObservableObject, IDisposable
     private const int OcrMaxTokens = 2048;
     private static readonly Vector Dpi = new(96, 96);
 
-    // PaddleOCR-VL's task prompts by PP-DocLayoutV3 label; every other text kind takes the text prompt
+    // PaddleOCR-VL's task prompts by layout label (PP-DocLayoutV3's and DocLayout-YOLO's); other text takes the text prompt
     private static readonly Dictionary<string, string> TaskPrompts = new()
     {
         ["table"] = "Table Recognition:",
         ["display_formula"] = "Formula Recognition:",
         ["inline_formula"] = "Formula Recognition:",
+        ["isolate_formula"] = "Formula Recognition:",
         ["chart"] = "Chart Recognition:",
     };
-    // the PP-DocLayoutV3 labels of regions with no text to read
-    private static readonly HashSet<string> Pictures = ["image", "header_image", "footer_image", "seal"];
+    // the labels of regions with no text to read
+    private static readonly HashSet<string> Pictures = ["image", "header_image", "footer_image", "seal", "figure"];
 
     private readonly IFileService _files;
     private byte[]? _pagePixels;
@@ -78,8 +79,8 @@ public sealed partial class DocumentViewModel : ObservableObject, IDisposable
     {
         _files = files;
         LayoutSlot = new ModelSlotViewModel(
-            "Layout model (PP-DocLayoutV3)",
-            "PaddlePaddle/PP-DocLayoutV3_safetensors directory, or its .gguf",
+            "Layout model (PP-DocLayoutV3 or DocLayout-YOLO)",
+            "PaddlePaddle/PP-DocLayoutV3_safetensors directory or its .gguf, or a DocLayout-YOLO .pt",
             Specs.Layout,
             files);
         OcrSlot = new ModelSlotViewModel(

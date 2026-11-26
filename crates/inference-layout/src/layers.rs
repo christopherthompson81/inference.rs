@@ -374,8 +374,23 @@ impl ConvNormSpec {
         self.build((w + w1)?, (b + b1)?)
     }
 
+    /// A conv with its own bias and no BatchNorm, its weight and bias directly under `vb`.
+    pub fn load_plain(self, vb: VarBuilder) -> Result<ConvNorm> {
+        let w = vb.get(
+            (
+                self.out_c,
+                self.in_c / self.groups,
+                self.kernel,
+                self.kernel,
+            ),
+            "weight",
+        )?;
+        let b = vb.get(self.out_c, "bias")?;
+        self.build(w, b)
+    }
+
     /// Conv weight and bias with the BatchNorm folded in.
-    fn folded(&self, vb: VarBuilder) -> Result<(Tensor, Tensor)> {
+    pub(crate) fn folded(&self, vb: VarBuilder) -> Result<(Tensor, Tensor)> {
         let w = vb.pp(self.names.0).get(
             (
                 self.out_c,
@@ -396,7 +411,7 @@ impl ConvNormSpec {
         Ok((w, b))
     }
 
-    fn build(self, w: Tensor, b: Tensor) -> Result<ConvNorm> {
+    pub(crate) fn build(self, w: Tensor, b: Tensor) -> Result<ConvNorm> {
         let geom = (self.kernel, self.stride, self.padding);
         let conv = if self.groups > 1 && self.groups == self.in_c && self.in_c == self.out_c {
             Conv::Depthwise(Depthwise::new(&w, &b, geom, self.act)?)

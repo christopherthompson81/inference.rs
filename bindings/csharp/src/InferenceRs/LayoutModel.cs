@@ -16,10 +16,10 @@ public sealed record LayoutDetection(int ClassId, string Label, float Score, flo
 /// <param name="Stride">Bytes per row; 0 means tightly packed.</param>
 public sealed record LayoutImage(byte[] Pixels, uint Width, uint Height, PixelFormat Format, uint Stride = 0);
 
-/// <summary>A PP-DocLayoutV3 document layout detector.</summary>
+/// <summary>A document layout detector: PP-DocLayoutV3 or DocLayout-YOLO.</summary>
 public sealed unsafe class LayoutModel : IDisposable
 {
-    /// <summary>Pass as a threshold to use the model's default (0.5).</summary>
+    /// <summary>Pass as a threshold to use the model's default (PP-DocLayoutV3 0.5, DocLayout-YOLO 0.2).</summary>
     public const float DefaultThreshold = -1.0f;
 
     private const int BoxFloats = 4;

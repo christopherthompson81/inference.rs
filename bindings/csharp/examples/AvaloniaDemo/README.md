@@ -9,7 +9,7 @@ A desktop app (Avalonia 12, Linux, Windows and macOS) that runs the engine throu
 - **Text to speech:** a WAV from Kokoro or Dia, played with the system player or saved.
 - **Images:** text to image with HiDream-O1 or FLUX, and HiDream-O1's edits: one reference image to edit, or several
   as subjects for a new scene.
-- **Documents:** PP-DocLayoutV3 layout regions drawn over the page, each read by an OCR model such as PaddleOCR-VL with
+- **Documents:** PP-DocLayoutV3 or DocLayout-YOLO layout regions drawn over the page, each read by an OCR model such as PaddleOCR-VL with
   the prompt for its kind (text, table, formula, chart).
 - **Engine:** the chat engine's models with unload and reload, its cache and speculative-decoding metrics, and the
   system report.

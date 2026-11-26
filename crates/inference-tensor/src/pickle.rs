@@ -131,6 +131,10 @@ pub enum Object {
 type OResult<T> = std::result::Result<T, Object>;
 
 impl Object {
+    fn is_unicode(&self, s: &str) -> bool {
+        matches!(self, Self::Unicode(u) if u == s)
+    }
+
     pub fn unicode(self) -> OResult<String> {
         match self {
             Self::Unicode(t) => Ok(t),
@@ -675,6 +679,20 @@ pub fn read_pth_tensor_info<P: AsRef<std::path::Path>>(
     tensor_infos(&PthSource::whole(file.as_ref())?, verbose, key)
 }
 
+/// The unpickled object of a `torch.save` file (its first `data.pkl`), for the non-tensor values a checkpoint keeps.
+pub fn read_pth_object<P: AsRef<std::path::Path>>(file: P) -> Result<Object> {
+    let mut zip = PthSource::whole(file.as_ref())?.open()?;
+    let name = zip
+        .file_names()
+        .find(|f| f.ends_with("data.pkl"))
+        .map(str::to_owned)
+        .context("no data.pkl in the archive")?;
+    let mut reader = std::io::BufReader::new(zip.by_name(&name)?);
+    let mut stack = Stack::empty();
+    stack.read_loop(&mut reader)?;
+    stack.finalize()
+}
+
 // a torch zip as a byte range of a file, so one stored inside an uncompressed archive (a `.nemo` tar) reads in place
 #[derive(Debug, Clone)]
 struct PthSource {
@@ -792,7 +810,12 @@ fn tensor_infos(source: &PthSource, verbose: bool, key: Option<&str>) -> Result<
             obj
         };
 
-        // If the object is a dict, then we can extract the tensor info from it.
+        // a whole pickled `nn.Module` reads as its state dict
+        let obj = match module_state(obj, "") {
+            Ok(entries) => Object::Dict(entries),
+            Err(obj) => obj,
+        };
+
         // NOTE: We are assuming that the `obj` is state_dict by this stage.
         match obj {
             Object::Dict(key_values) => {
@@ -812,6 +835,59 @@ fn tensor_infos(source: &PthSource, verbose: bool, key: Option<&str>) -> Result<
         }
     }
     Ok(tensor_infos)
+}
+
+const MODULE_TENSOR_FIELDS: [&str; 2] = ["_parameters", "_buffers"];
+const MODULE_CHILDREN_FIELD: &str = "_modules";
+
+// `torch.save(module)` pickles each module as its `__dict__`: tensors under `_parameters`/`_buffers`, children under
+// `_modules`; flattened to `state_dict()` names. `Err` hands back an object that is not a module.
+fn module_state(obj: Object, prefix: &str) -> OResult<Vec<(Object, Object)>> {
+    let fields = match obj {
+        Object::Build { callable, args } => match *args {
+            Object::Dict(fields)
+                if fields
+                    .iter()
+                    .any(|(k, _)| k.is_unicode(MODULE_CHILDREN_FIELD)) =>
+            {
+                fields
+            }
+            args => {
+                return Err(Object::Build {
+                    callable,
+                    args: Box::new(args),
+                });
+            }
+        },
+        obj => return Err(obj),
+    };
+    let mut out = Vec::new();
+    for (key, value) in fields {
+        let Object::Unicode(field) = key else {
+            continue;
+        };
+        let Object::Dict(entries) = value else {
+            continue;
+        };
+        let tensors = MODULE_TENSOR_FIELDS.contains(&field.as_str());
+        if !tensors && field != MODULE_CHILDREN_FIELD {
+            continue;
+        }
+        for (name, value) in entries {
+            let Object::Unicode(name) = name else {
+                continue;
+            };
+            let path = format!("{prefix}{name}");
+            if tensors {
+                if value != Object::None {
+                    out.push((Object::Unicode(path), value));
+                }
+            } else if let Ok(child) = module_state(value, &format!("{path}.")) {
+                out.extend(child);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Lazy tensor loader.
@@ -1058,6 +1134,40 @@ mod tests {
             [0.5]
         );
         assert!(tensors.get("module.missing")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_pickled_module_reads_as_its_state_dict() -> Result<()> {
+        let tensors = PthTensors::new(fixture("pickled_module.pt"), Some("model"))?;
+        let mut names: Vec<_> = tensors.tensor_infos().keys().cloned().collect();
+        names.sort();
+        let expected = [
+            "0.weight",
+            "1.bias",
+            "1.num_batches_tracked",
+            "1.running_mean",
+            "1.running_var",
+            "1.weight",
+        ];
+        assert_eq!(names, expected);
+        let w = tensors
+            .get("0.weight")?
+            .expect("w")
+            .to_dtype(crate::DType::F32)?;
+        assert_eq!(w.flatten_all()?.to_vec1::<f32>()?, [3., -1.]);
+        let mean = tensors
+            .get("1.running_mean")?
+            .expect("mean")
+            .to_dtype(crate::DType::F32)?;
+        assert_eq!(mean.to_vec1::<f32>()?, [0.5, 0.25]);
+        let super::Object::Dict(top) = super::read_pth_object(fixture("pickled_module.pt"))? else {
+            panic!("a dict checkpoint")
+        };
+        assert!(top.contains(&(
+            super::Object::Unicode("epoch".into()),
+            super::Object::Int(3)
+        )));
         Ok(())
     }
 }

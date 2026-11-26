@@ -1,4 +1,4 @@
-/** A region of a page as read: PP-DocLayoutV3's label for it, its box in page pixels and the OCR model's text. */
+/** A region of a page as read: the layout model's label for it, its box in page pixels and the OCR model's text. */
 export interface ReadRegion {
   label: string;
   score: number;
@@ -24,10 +24,13 @@ export const DOCUMENT_FORMATS: { format: DocumentFormat; label: string; mime: st
   { format: "json", label: "JSON (regions and boxes)", mime: "application/json" },
 ];
 
+// labels of both layout models: PP-DocLayoutV3's, then DocLayout-YOLO's (its `abandon` is headers, footers and numbers)
 // page furniture the reading leaves out of the document's text; JSON keeps everything
-const FURNITURE = new Set(["header", "footer", "number", "formula_number", "header_image", "footer_image"]);
-const PICTURES = new Set(["image", "seal"]);
-const FORMULAS = new Set(["display_formula", "inline_formula"]);
+const FURNITURE = new Set(["header", "footer", "number", "formula_number", "header_image", "footer_image", "abandon"]);
+const PICTURES = new Set(["image", "seal", "figure"]);
+const FORMULAS = new Set(["display_formula", "inline_formula", "isolate_formula"]);
+// DocLayout-YOLO's `title` covers section headings as well as the document's title
+const HEADINGS = new Set(["paragraph_title", "title"]);
 // PaddleOCR-VL writes tables in OTSL: a cell per tag, rows ended by <nl>
 const OTSL_CELL = /<(fcel|ecel|lcel|ucel|xcel)>([^<]*)/g;
 const OTSL_ROW = "<nl>";
@@ -71,7 +74,7 @@ function pageMarkdown(page: ReadPage): string {
       const text = region.text.trim();
       if (PICTURES.has(region.label)) return `*[${region.label.replace(/_/g, " ")}]*`;
       if (region.label === "doc_title") return `# ${text}`;
-      if (region.label === "paragraph_title") return `## ${text}`;
+      if (HEADINGS.has(region.label)) return `## ${text}`;
       if (FORMULAS.has(region.label)) return `$$\n${text}\n$$`;
       const rows = region.label === "table" ? otslRows(text) : null;
       return rows ? markdownTable(rows) : text;
@@ -97,7 +100,7 @@ function pageHtml(page: ReadPage): string {
       const text = region.text.trim();
       if (PICTURES.has(region.label)) return `<p><em>[${escapeHtml(region.label.replace(/_/g, " "))}]</em></p>`;
       if (region.label === "doc_title") return `<h1>${escapeHtml(text)}</h1>`;
-      if (region.label === "paragraph_title") return `<h2>${escapeHtml(text)}</h2>`;
+      if (HEADINGS.has(region.label)) return `<h2>${escapeHtml(text)}</h2>`;
       if (FORMULAS.has(region.label)) return `<pre class="formula">${escapeHtml(text)}</pre>`;
       const rows = region.label === "table" ? otslRows(text) : null;
       return rows ? htmlTable(rows) : `<p>${escapeHtml(text)}</p>`;

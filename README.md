@@ -43,7 +43,7 @@ bindings over that ABI, so every surface does the same things.
 | **Speaker, language and voice activity** | Nemotron-3 Diarization and Streaming Sortformer (who speaks when), VoxLingua107 (spoken language), Silero VAD |
 | **Speech synthesis** | Kokoro (9 languages), Qwen3-TTS (preset, described and cloned voices, 10 languages; safetensors and GGUF, including audio.cpp's for both) and Dia |
 | **Image generation** | FLUX.1 and HiDream-O1-Image (text to image, editing and subject references), from safetensors or GGUF |
-| **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding, BERT-family, ModernBERT and Nomic encoders; cross-encoder rerankers; PP-DocLayoutV3 document layout detection |
+| **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding, BERT-family, ModernBERT and Nomic encoders; cross-encoder rerankers; PP-DocLayoutV3 and DocLayout-YOLO document layout detection |
 | **Decisions** | Laya, Julia-1 and d1-omni: typed questions about a text (choose, score, true or false), answered in one forward pass with probabilities over the options |
 | **3D** | WorldMirror 2.0 reconstruction (cameras, depth, normals, points and 3D Gaussian splats from photos or a video); HY-World 2.0 world generation from one panorama with WorldStereo-2; 3D models from one image: TRELLIS.2 textured meshes (GLB with baked base color and metallic-roughness textures, or per-vertex colors; a 1024 cascade in about 40 s on one RTX 3090), TRELLIS.2's texturing of a mesh you supply from an image, Hi3D's refinement of a coarse mesh under an image (up to 1536^3, on one 24 GB GPU), LATO.2 low-poly meshes with artist-like topology, Idol 3D Gaussian splats with the input's camera, and JoVox 64^3 voxel structures meshed by TRELLIS.2's second stage, backgrounds removed with BiRefNet |
 
@@ -153,7 +153,7 @@ https://github.com/user-attachments/assets/8ae4b318-f7ad-4fa4-b2ad-4f9ce83ba693
 
 https://github.com/user-attachments/assets/fe9413c7-2896-4a7c-b5e9-bbb84086d930
 
-**Documents:** PP-DocLayoutV3 finds a page's regions and PaddleOCR-VL reads them, tables included.
+**Documents:** PP-DocLayoutV3 or DocLayout-YOLO finds a page's regions and PaddleOCR-VL reads them, tables included.
 
 https://github.com/user-attachments/assets/ecfffb43-e2dd-4b67-8e23-e5d8c13930fe
 

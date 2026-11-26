@@ -226,7 +226,7 @@ GROUPS = [
     (
         "Layout",
         "layout",
-        "PP-DocLayoutV3 document layout detection, in process and over HTTP.",
+        "PP-DocLayoutV3 and DocLayout-YOLO document layout detection, in process and over HTTP.",
         lambda n: n in {"LayoutModel", "LayoutImage", "LayoutDetection", "PixelFormat"}
         or n.startswith(("LayoutDetect", "LayoutRegion")),
     ),

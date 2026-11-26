@@ -1,6 +1,6 @@
 ---
 title: Layout
-description: "PP-DocLayoutV3 document layout detection, in process and over HTTP."
+description: "PP-DocLayoutV3 and DocLayout-YOLO document layout detection, in process and over HTTP."
 sidebar:
   order: 9
 ---
@@ -59,7 +59,9 @@ __post_init__()
 
 ## `LayoutModel`
 
-A PP-DocLayoutV3 document layout detector, from an HF directory or a GGUF of it. Close it, or use `with`.
+A document layout detector: PP-DocLayoutV3 from an HF directory or a GGUF of it, or DocLayout-YOLO from its `.pt`.
+
+Close it, or use `with`.
 
 ### `LayoutModel.__init__`
 
@@ -125,7 +127,7 @@ __exit__()
 
 ## `LayoutRegion`
 
-One region of a page, in its predicted reading order.
+One region of a page, in reading order (predicted by PP-DocLayoutV3, from the boxes' layout for DocLayout-YOLO).
 
 | Field | Type |
 | --- | --- |

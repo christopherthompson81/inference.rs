@@ -11,7 +11,7 @@ C# bindings for `libinference_ffi`, the inference.rs C ABI (`crates/inference-ff
   Streaming calls return an `EngineStream` of `StreamEvent`s. Failures throw `InferenceException`, whose `Detail` is the
   protocol's error JSON.
 - `HostCallbacks` registers host tools, a search backend and a model-load progress listener (`Progress`, each stage's counts) when an engine loads.
-- `LayoutModel` runs PP-DocLayoutV3 document layout detection, from the HF directory or a GGUF of it.
+- `LayoutModel` runs document layout detection: PP-DocLayoutV3 from the HF directory or a GGUF of it, or DocLayout-YOLO from its `.pt` checkpoint.
 
 The bindings check the library's ABI version on first use and refuse any other: the ABI is unstable while it is
 0.0.x.
