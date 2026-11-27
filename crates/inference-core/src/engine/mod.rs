@@ -733,6 +733,16 @@ impl Engine {
             prefix_policy,
         );
 
+        let prompt_activations_admitted = {
+            let pipeline = get_mut_arcmutex!(pipeline);
+            pipeline.device().is_cuda()
+                && pipeline
+                    .get_metadata()
+                    .prompt_activation_bytes_per_token
+                    .is_some()
+        };
+        get_mut_arcmutex!(scheduler).set_prompt_activations_admitted(prompt_activations_admitted);
+
         // Configure prefix caching on the scheduler based on the global no_prefix_cache flag
         // This ensures PagedAttention prefix caching respects the same setting
         get_mut_arcmutex!(scheduler).set_prefix_caching_enabled(!no_prefix_cache);

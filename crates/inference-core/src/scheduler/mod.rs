@@ -325,6 +325,10 @@ pub trait Scheduler: Send + Sync {
     ) {
     }
 
+    /// Whether each prompt step's activations are checked against free memory (the model reports their size), so a
+    /// prompt with nothing decoding beside it may take the whole token budget in one chunk.
+    fn set_prompt_activations_admitted(&mut self, _admitted: bool) {}
+
     fn defer_prompt_tail(&mut self, _first_omitted_sequence_id: usize) {}
 
     fn set_waiting_prompt_preemption_enabled(&mut self, _enabled: bool) {}

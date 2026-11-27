@@ -36,6 +36,9 @@ use crate::paged_attention::CacheConfig;
 type BucketKey = (usize, usize, Option<usize>, u8, usize);
 
 const RAGGED_PROMPT_BUCKET_TOKENS: usize = 256;
+// the shortest chunk memory pressure halves a lone prompt's down to; below it the step runs as planned
+#[cfg(any(test, feature = "cuda"))]
+const MIN_SHRUNK_PROMPT_CHUNK_TOKENS: usize = 256;
 #[derive(Clone, Copy)]
 enum BatchKind {
     Prompt,
@@ -149,6 +152,39 @@ pub struct PagedAttentionSchedulerOutput {
 }
 
 impl PagedAttentionSchedulerOutput {
+    /// The block-aligned end halving a lone causal prompt chunk would leave it, while that keeps at least
+    /// `MIN_SHRUNK_PROMPT_CHUNK_TOKENS`.
+    #[cfg(any(test, feature = "cuda"))]
+    pub(crate) fn halved_prompt_chunk_end(&self, block_size: usize) -> Option<usize> {
+        let [chunk] = self.scheduled_prompt_chunks.as_deref()? else {
+            return None;
+        };
+        if chunk.attention_policy
+            != crate::paged_attention::block_hash::MultimodalAttentionPolicy::Causal
+        {
+            return None;
+        }
+        let block_size = block_size.max(1);
+        let end = (chunk.start + (chunk.end - chunk.start) / 2) / block_size * block_size;
+        (end >= chunk.start + MIN_SHRUNK_PROMPT_CHUNK_TOKENS).then_some(end)
+    }
+
+    /// Halves a lone prompt chunk as `halved_prompt_chunk_end` says; false when it cannot shrink.
+    #[cfg(any(test, feature = "cuda"))]
+    pub(crate) fn halve_prompt_chunk(&mut self, block_size: usize) -> bool {
+        let Some(end) = self.halved_prompt_chunk_end(block_size) else {
+            return false;
+        };
+        if let Some(chunk) = self
+            .scheduled_prompt_chunks
+            .as_mut()
+            .and_then(|c| c.first_mut())
+        {
+            chunk.end = end;
+        }
+        true
+    }
+
     #[cfg(any(test, feature = "cuda"))]
     pub(crate) fn retain_prompt_prefix(&mut self, retained: usize) -> Option<usize> {
         assert!(retained > 0);
@@ -190,6 +226,7 @@ pub struct PagedAttentionScheduler {
     prefill_has_per_sequence_state: bool,
     scheduler_visible_prompt_chunks: bool,
     prompt_chunks_require_block_alignment: bool,
+    prompt_activations_admitted: bool,
     prefix_policy: SpeculativePrefixCheckpointPolicy,
     decode_steps_since_prefill: usize,
     prompt_admission_epoch: bool,
@@ -238,6 +275,7 @@ impl PagedAttentionScheduler {
             prefill_has_per_sequence_state: false,
             scheduler_visible_prompt_chunks: false,
             prompt_chunks_require_block_alignment: false,
+            prompt_activations_admitted: false,
             prefix_policy: SpeculativePrefixCheckpointPolicy::default(),
             decode_steps_since_prefill: 0,
             prompt_admission_epoch: false,
@@ -300,7 +338,12 @@ impl PagedAttentionScheduler {
         latency_bounded: bool,
     ) -> PromptBatch {
         let token_budget = self.prefill_token_budget(latency_bounded);
-        let chunk_size = self.config.max_prefill_chunk_tokens.min(token_budget);
+        // the chunk bounds a step's stall of the decodes beside it; with none, admission bounds its memory instead
+        let chunk_size = if latency_bounded || !self.prompt_activations_admitted {
+            self.config.max_prefill_chunk_tokens.min(token_budget)
+        } else {
+            token_budget
+        };
         let chunk_plans = candidates
             .iter()
             .map(|seq| {
@@ -1678,6 +1721,10 @@ impl Scheduler for PagedAttentionScheduler {
         self.scheduler_visible_prompt_chunks = enabled;
         self.prompt_chunks_require_block_alignment = require_block_alignment;
         self.prefix_policy = prefix_policy;
+    }
+
+    fn set_prompt_activations_admitted(&mut self, admitted: bool) {
+        self.prompt_activations_admitted = admitted;
     }
 
     fn defer_prompt_tail(&mut self, first_omitted_sequence_id: usize) {

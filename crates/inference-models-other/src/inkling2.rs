@@ -334,8 +334,8 @@ fn linear(
     ReplicatedLayer::new(in_dim, out_dim, &cfg.quantization_config, false, vb)
 }
 
-/// One forward's block stacks for the depth mixes, by the stacked tensors' ids: a block's layers read the same
-/// blocks, so they are stacked once. Kept for the forward only (a captured graph frees nothing it did not allocate).
+/// The latest block stack for the depth mixes, by the stacked tensors' ids: a block's layers read the same blocks, so
+/// they are stacked once. Only the latest is kept: every stack kept would hold n(n+1)/2 block states a prompt token.
 // read by the CUDA mix only
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 #[derive(Default)]
@@ -351,7 +351,7 @@ impl BlockStacks {
             return Ok(hit.clone());
         }
         let stacked = Tensor::stack(blocks, 0)?;
-        self.stacks.borrow_mut().push((ids, stacked.clone()));
+        *self.stacks.borrow_mut() = vec![(ids, stacked.clone())];
         Ok(stacked)
     }
 }

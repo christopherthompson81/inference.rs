@@ -496,9 +496,11 @@ impl Engine {
                     ));
                 }
             };
-            // a batch of prompts multiplies the step's activations, so they decide whether to split it; one prompt's
-            // chunk is admitted on its attention workspace alone, the estimate covering more than it needs
-            let workspace_bytes = if output.scheduled.len() > 1 {
+            // a batch of prompts multiplies the step's activations, so they decide whether to split it; a lone prompt's
+            // decide whether to halve its chunk, and one that cannot shrink further runs on its attention workspace
+            let counts_activations =
+                output.scheduled.len() > 1 || output.halved_prompt_chunk_end(block_size).is_some();
+            let workspace_bytes = if counts_activations {
                 workspace.bytes.saturating_add(
                     prompt_activation_bytes_per_token
                         .saturating_mul(query_lens.iter().sum::<usize>()),
@@ -521,6 +523,11 @@ impl Engine {
                         .expect("reduced prompt batch must omit a tail");
                     get_mut_arcmutex!(self.scheduler).defer_prompt_tail(first_omitted_id);
                     cuda_memory::record_prompt_batch_reduction(previous, retained);
+                }
+                cuda_memory::PromptBatchMemoryAction::Reject
+                    if output.halve_prompt_chunk(block_size) =>
+                {
+                    metrics::counter!("inference_cuda_prompt_chunk_reductions_total").increment(1);
                 }
                 cuda_memory::PromptBatchMemoryAction::Reject => {
                     if !memory_status.insufficient_total_capacity {
