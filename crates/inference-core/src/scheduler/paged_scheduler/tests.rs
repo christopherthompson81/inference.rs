@@ -3187,7 +3187,10 @@ fn a_lone_recurrent_prompt_takes_the_whole_budget_only_where_admission_bounds_it
             .select_prompt_batch(VecDeque::from([seq]))
             .chunk_size
     };
-    assert_eq!(lone_prompt_chunk(true, false), Some(4096));
+    assert_eq!(
+        lone_prompt_chunk(true, false),
+        Some(LONE_PROMPT_CHUNK_TOKENS)
+    );
     // a decode beside it keeps the latency chunk, as does a model whose activations admission cannot see
     assert_eq!(lone_prompt_chunk(true, true), Some(512));
     assert_eq!(lone_prompt_chunk(false, false), Some(512));

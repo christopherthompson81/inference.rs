@@ -34,6 +34,7 @@ use crate::{
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
+pub(crate) use speculative::INKLING_AUTO_DEPTHS;
 
 serde_default_fn!(usize, default_max_position_embeddings, 1_048_576);
 

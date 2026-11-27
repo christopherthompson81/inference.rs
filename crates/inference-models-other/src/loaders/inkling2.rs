@@ -124,6 +124,10 @@ impl DeviceMappedModelLoader for Inkling2Loader {
         Ok(Some(logits + taps + stash))
     }
 
+    fn speculative_auto_depths(&self) -> &'static [usize] {
+        &crate::inkling2::INKLING_AUTO_DEPTHS
+    }
+
     // the routed experts load as stored (NVFP4 bytes, MXFP8 values), MXFP8's E8M0 scales widened to f32
     fn checkpoint_tensor_bytes(
         &self,

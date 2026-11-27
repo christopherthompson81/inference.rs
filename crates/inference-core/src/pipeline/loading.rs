@@ -1996,24 +1996,38 @@ fn reserve_speculative_rows(
         return Ok(());
     };
     let serving = cfg.serving_capacity.unwrap_or(1);
-    #[cfg(feature = "cuda")]
-    let graph_rows = (1..=serving)
-        .filter_map(|batch| {
-            inference_nn::cuda::graph_capture::cuda_graph_batch_bucket(
-                inference_nn::cuda::graph_capture::CudaGraphComponent::Target,
-                rows,
-                batch,
-            )
-        })
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .sum::<usize>();
-    #[cfg(not(feature = "cuda"))]
-    let graph_rows = serving;
-    let bytes = row_bytes
-        .checked_mul(rows - 1)
-        .and_then(|bytes| bytes.checked_mul(graph_rows))
-        .ok_or_else(|| anyhow::anyhow!("speculative row reservation overflow"))?;
+    // each batch bucket's graph up to `max_batch` holds `rows - 1` extra rows a sequence
+    let graph_bytes = |rows: usize, max_batch: usize| -> anyhow::Result<usize> {
+        #[cfg(feature = "cuda")]
+        let graph_rows = (1..=max_batch)
+            .filter_map(|batch| {
+                inference_nn::cuda::graph_capture::cuda_graph_batch_bucket(
+                    inference_nn::cuda::graph_capture::CudaGraphComponent::Target,
+                    rows,
+                    batch,
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .sum::<usize>();
+        #[cfg(not(feature = "cuda"))]
+        let graph_rows = max_batch;
+        row_bytes
+            .checked_mul(rows - 1)
+            .and_then(|bytes| bytes.checked_mul(graph_rows))
+            .ok_or_else(|| anyhow::anyhow!("speculative row reservation overflow"))
+    };
+    let mut bytes = graph_bytes(rows, serving)?;
+    // an auto-depth target's shallower graphs too, which otherwise evict each other and the full depth's once the
+    // cache has filled the card
+    if cfg.speculative_auto_depth {
+        let small_batches = serving.min(crate::speculative::AUTO_EXTRA_DEPTH_GRAPH_MAX_BATCH);
+        for &depth in loader.speculative_auto_depths() {
+            if depth > 0 && depth + 1 < rows {
+                bytes = bytes.saturating_add(graph_bytes(depth + 1, small_batches)?);
+            }
+        }
+    }
     info!(
         mb = bytes.div_ceil(1024 * 1024),
         "Reserving speculative verify rows in the captured graphs"

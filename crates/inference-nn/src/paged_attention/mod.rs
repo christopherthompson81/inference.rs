@@ -268,6 +268,8 @@ pub struct PagedAttentionConfig {
     /// The rows a speculative verify step runs a sequence (the anchor and its drafts), 1 without a proposer: the load
     /// reserves what each row past the first holds in its captured graphs.
     pub speculative_query_rows: usize,
+    /// The proposer picks its depth per step, so the shallower depths' verify graphs are captured beside the full one's.
+    pub speculative_auto_depth: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -303,11 +305,17 @@ impl PagedAttentionConfig {
             draft_head_isq: None,
             prompt_chunk_tokens: None,
             speculative_query_rows: 1,
+            speculative_auto_depth: false,
         })
     }
 
     pub fn with_speculative_query_rows(mut self, rows: usize) -> Self {
         self.speculative_query_rows = rows.max(1);
+        self
+    }
+
+    pub fn with_speculative_auto_depth(mut self, auto_depth: bool) -> Self {
+        self.speculative_auto_depth = auto_depth;
         self
     }
 

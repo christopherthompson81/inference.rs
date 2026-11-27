@@ -126,6 +126,9 @@ impl DeviceMappedModelLoader for Inkling2VlLoader {
     fn speculative_row_bytes(&self, config: &str) -> Result<Option<usize>> {
         Inkling2Loader.speculative_row_bytes(config)
     }
+    fn speculative_auto_depths(&self) -> &'static [usize] {
+        Inkling2Loader.speculative_auto_depths()
+    }
     fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
         Inkling2Loader.prompt_activation_bytes_per_token(config)
     }

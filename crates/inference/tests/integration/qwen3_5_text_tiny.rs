@@ -490,6 +490,56 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
     Ok(())
 }
 
+// a reply a regex forces from its first token on
+const FORCED_REPLY: &str = "abcabcabcabcabcabcabcabc";
+const FORCED_REPLY_MAX_TOKENS: usize = 48;
+
+// A grammar that forces the reply drafts only what it forces, which verification takes whatever the drafter guessed;
+// the random-weight drafter's own guesses would mostly miss
+async fn a_grammar_forced_reply_drafts_only_forced_tokens() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dflash(DFLASH_WINDOW)?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(DFLASH_N_PREDICT))
+        .build()
+        .await?;
+    let request = serde_json::json!({
+        "model": "default", "max_tokens": FORCED_REPLY_MAX_TOKENS, "temperature": 0.0,
+        "messages": [{"role": "user", "content": "abc"}],
+        "grammar": {"type": "regex", "value": FORCED_REPLY},
+    });
+    let response: serde_json::Value = serde_json::from_str(
+        &model
+            .chat_json(request.to_string().as_bytes(), Default::default())
+            .await?,
+    )?;
+    let content = response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or_default();
+    anyhow::ensure!(
+        content == FORCED_REPLY,
+        "the forced reply came out {content:?}"
+    );
+    let (proposed, accepted) = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .fold((0, 0), |(p, a), m| {
+            (p + m.draft_tokens_proposed, a + m.draft_tokens_accepted)
+        });
+    anyhow::ensure!(proposed > 0, "the forced reply never drafted");
+    anyhow::ensure!(
+        accepted == proposed,
+        "{accepted} of {proposed} drafts landed in a reply the grammar forced"
+    );
+    Ok(())
+}
+
 // An EAGLE 3.1 drafter (per-tap norms, normed chain) over three of the tiny target's four layers, in its own vocabulary
 const EAGLE3: tiny_eagle3::Eagle3Shape = tiny_eagle3::Eagle3Shape {
     hidden: HIDDEN,
@@ -1529,6 +1579,7 @@ concurrent_cases!(
         a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart: 422,
         a_stored_prefix_restores_with_a_full_attention_drafter_after_a_restart: 422,
         a_new_final_message_resumes_at_the_previous_one: 354,
+        a_grammar_forced_reply_drafts_only_forced_tokens: 454,
         a_new_user_message_after_role_tokens_resumes_after_the_system_prompt: 354,
         a_prefix_the_drafter_dropped_restores_from_the_disk_store: 454,
         a_prefix_the_recurrent_pool_reclaimed_restores_from_the_disk_store: 388,

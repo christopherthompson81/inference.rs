@@ -3,7 +3,7 @@
 pub const AUTO_DEPTHS: [usize; 4] = [1, 2, 3, 4];
 pub const AUTO_MAX_DEPTH: usize = AUTO_DEPTHS[AUTO_DEPTHS.len() - 1];
 // Depths other than a drafter's primary one are graphed up to this batch; larger batches run them eagerly
-const AUTO_EXTRA_DEPTH_GRAPH_MAX_BATCH: usize = 8;
+pub const AUTO_EXTRA_DEPTH_GRAPH_MAX_BATCH: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpeculativeBatchPlan {

@@ -39,6 +39,7 @@ const STALE_DECISIONS: u64 = 4096;
 const WARMUP_SAMPLES: u32 = 2;
 const WARMUP_PROBE_INTERVAL: u64 = 4;
 
+const DEPTH_DECISIONS_METRIC: &str = "inference_speculative_depth_decisions_total";
 #[cfg(test)]
 const TEST_POPULATION_RATE: f64 = 0.9;
 
@@ -469,6 +470,7 @@ impl SpeculativeAutotuner {
             curve = ?self.position_rates(max_depth),
             "speculative depth decision"
         );
+        metrics::counter!(DEPTH_DECISIONS_METRIC, "depth" => selected.to_string()).increment(1);
         selected
     }
 
