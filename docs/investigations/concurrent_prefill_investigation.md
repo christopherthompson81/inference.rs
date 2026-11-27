@@ -201,3 +201,15 @@ prefill throughput levels off from 2048 (Run 1). Three runs of five after: no `o
 
 Test: `a_grammar_forced_reply_drafts_only_forced_tokens` (tiny Qwen3.5 + tiny DFlash, a regex forcing the reply): 0
 of 46 drafts landed before, all after.
+
+## Run 7 - 2026-11-27 16:40
+
+Regression from Run 6: the web UI's Code tab slowed after the redeploy. Its tool calls run under a grammar, and the
+step rule from Run 6 (a step of only grammar-constrained sequences drafts no deeper than its grammars force) took
+drafting away from the whole tool-call body, where the arguments are free text the drafter reads well. A
+`write_file` tool call writing ~2,000 tokens of Python: 80 tok/s with 58 draft tokens proposed over both requests.
+
+The cap is gone; constrained steps draft at the tuner's depth again, keeping the forced tokens as the leading drafts
+and the drafter skipped where every draft is forced. The same request: 180-191 tok/s, 3,321 of 4,080 draft tokens
+landing. The short json_schema answers of Run 6 go back to ~0.3 s; `a_grammar_forced_reply_lands_every_draft` (a
+fully forced reply) still lands every draft.

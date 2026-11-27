@@ -174,7 +174,6 @@ pub trait SpeculativePipelineExt: Pipeline {
 fn plan_speculative_step(
     target: &dyn SpeculativePipelineExt,
     seq_ids: &[usize],
-    forced: Option<usize>,
 ) -> Option<SpeculativeBatchPlan> {
     let mut plan = target.speculative_plan(seq_ids.len())?;
     let candidates = target.speculative_target().speculative_depth_candidates();
@@ -187,36 +186,7 @@ fn plan_speculative_step(
     if tuner.is_active() && plan.proposal_len > 0 {
         plan.proposal_len = tuner.choose(seq_ids, plan.proposal_len);
     }
-    // a constrained verify samples each row on the host under the grammar, so beyond what the grammar forces a draft
-    // seldom lands and costs more than a plain step (Inkling 2: ~35 ms against ~13); the depth keeps to one captured
-    if let Some(forced) = forced {
-        let limit = forced.min(plan.proposal_len);
-        plan.proposal_len = candidates
-            .iter()
-            .copied()
-            .chain(std::iter::once(plan.proposal_len))
-            .filter(|&depth| depth <= limit)
-            .max()
-            .unwrap_or(0);
-    }
     Some(plan)
-}
-
-/// The fewest draft tokens the grammars of a batch force next, when every sequence in it is grammar-constrained.
-fn grammar_forced_len<'a>(seqs: impl IntoIterator<Item = &'a mut Sequence>) -> Option<usize> {
-    let mut forced = None::<usize>;
-    for seq in seqs {
-        let SequenceRecognizer::Llguidance(matcher) = &mut seq.recognizer else {
-            return None;
-        };
-        let len = if matcher.is_stopped() {
-            0
-        } else {
-            matcher.compute_ff_tokens().len()
-        };
-        forced = Some(forced.map_or(len, |forced| forced.min(len)));
-    }
-    forced
 }
 
 /// Drop staged speculative proposals when the next step cannot verify them.
@@ -310,10 +280,7 @@ where
             trim_mixed_staged_allocations(seqs, cache)?;
             clear_staged_speculative_tokens(seqs);
             let seq_ids = seqs.iter().map(|seq| *seq.id()).collect::<Vec<_>>();
-            // the step samples its next token before drafting, and that token is the first one forced
-            let forced = grammar_forced_len(seqs.iter_mut().map(|seq| &mut **seq))
-                .map(|forced| forced.saturating_sub(1));
-            let Some(plan) = plan_speculative_step(target, &seq_ids, forced) else {
+            let Some(plan) = plan_speculative_step(target, &seq_ids) else {
                 return Ok(false);
             };
             if plan.proposal_len == 0 {
@@ -335,10 +302,7 @@ where
         }
         StagedBatchState::None => {
             let seq_ids = seqs.iter().map(|seq| *seq.id()).collect::<Vec<_>>();
-            // the step samples its next token before drafting, and that token is the first one forced
-            let forced = grammar_forced_len(seqs.iter_mut().map(|seq| &mut **seq))
-                .map(|forced| forced.saturating_sub(1));
-            let Some(plan) = plan_speculative_step(target, &seq_ids, forced) else {
+            let Some(plan) = plan_speculative_step(target, &seq_ids) else {
                 return Ok(false);
             };
             if plan.proposal_len == 0 {
@@ -852,19 +816,7 @@ where
         .iter()
         .map(|idx| *seqs[*idx].id())
         .collect::<Vec<_>>();
-    let plan = match plan {
-        Some(plan) => Some(plan),
-        None => {
-            let forced = grammar_forced_len(
-                seqs.iter_mut()
-                    .enumerate()
-                    .filter(|(idx, _)| active_indices.contains(idx))
-                    .map(|(_, seq)| &mut **seq),
-            );
-            plan_speculative_step(target, &seq_ids, forced)
-        }
-    };
-    let Some(plan) = plan else {
+    let Some(plan) = plan.or_else(|| plan_speculative_step(target, &seq_ids)) else {
         target.speculative_bypass(&seq_ids)?;
         clear_active_staged(seqs, active_indices);
         return Ok(());
