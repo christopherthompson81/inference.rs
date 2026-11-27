@@ -226,6 +226,7 @@ pub struct PagedAttentionScheduler {
     prefill_has_per_sequence_state: bool,
     scheduler_visible_prompt_chunks: bool,
     prompt_chunks_require_block_alignment: bool,
+    prompt_activations_admitted: bool,
     prefix_policy: SpeculativePrefixCheckpointPolicy,
     decode_steps_since_prefill: usize,
     prompt_admission_epoch: bool,
@@ -274,6 +275,7 @@ impl PagedAttentionScheduler {
             prefill_has_per_sequence_state: false,
             scheduler_visible_prompt_chunks: false,
             prompt_chunks_require_block_alignment: false,
+            prompt_activations_admitted: false,
             prefix_policy: SpeculativePrefixCheckpointPolicy::default(),
             decode_steps_since_prefill: 0,
             prompt_admission_epoch: false,
@@ -336,7 +338,12 @@ impl PagedAttentionScheduler {
         latency_bounded: bool,
     ) -> PromptBatch {
         let token_budget = self.prefill_token_budget(latency_bounded);
-        let chunk_size = self.config.max_prefill_chunk_tokens.min(token_budget);
+        // the chunk bounds a step's stall of the decodes beside it; with none, admission bounds its memory instead
+        let chunk_size = if latency_bounded || !self.prompt_activations_admitted {
+            self.config.max_prefill_chunk_tokens.min(token_budget)
+        } else {
+            token_budget
+        };
         let chunk_plans = candidates
             .iter()
             .map(|seq| {
@@ -1714,6 +1721,10 @@ impl Scheduler for PagedAttentionScheduler {
         self.scheduler_visible_prompt_chunks = enabled;
         self.prompt_chunks_require_block_alignment = require_block_alignment;
         self.prefix_policy = prefix_policy;
+    }
+
+    fn set_prompt_activations_admitted(&mut self, admitted: bool) {
+        self.prompt_activations_admitted = admitted;
     }
 
     fn defer_prompt_tail(&mut self, first_omitted_sequence_id: usize) {

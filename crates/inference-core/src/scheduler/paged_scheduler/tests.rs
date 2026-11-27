@@ -3168,3 +3168,27 @@ fn memory_pressure_halves_a_lone_causal_prompt_chunk_to_a_floor() {
         None
     );
 }
+
+#[test]
+fn a_lone_recurrent_prompt_takes_the_whole_budget_only_where_admission_bounds_it() {
+    let lone_prompt_chunk = |admitted: bool, decoding: bool| {
+        let mut scheduler = test_scheduler();
+        scheduler.scheduler_visible_prompt_chunks = true;
+        scheduler.prefill_has_per_sequence_state = true;
+        scheduler.prompt_activations_admitted = admitted;
+        scheduler.config.max_num_batched_tokens = 4096;
+        scheduler.config.max_prefill_chunk_tokens = 512;
+        if decoding {
+            scheduler.running.push_back(test_sequence(9, 8));
+        }
+        let seq = test_sequence(0, 8192);
+        get_mut_arcmutex!(seq).set_state(SequenceState::RunningPrompt);
+        scheduler
+            .select_prompt_batch(VecDeque::from([seq]))
+            .chunk_size
+    };
+    assert_eq!(lone_prompt_chunk(true, false), Some(4096));
+    // a decode beside it keeps the latency chunk, as does a model whose activations admission cannot see
+    assert_eq!(lone_prompt_chunk(true, true), Some(512));
+    assert_eq!(lone_prompt_chunk(false, false), Some(512));
+}

@@ -95,3 +95,40 @@ chunks and split 2 batches. Against the 512 default beside decoders (1,092 / 888
 
 Implies: memory no longer pins the chunk at 512; what the chunk should be is now the latency trade, the adaptive
 scheduling's job.
+
+## Run 4 - 2026-11-27 13:40
+
+Change: a recurrent model's lone prompt with nothing decoding beside it took `max_prefill_chunk_tokens` (512) per step
+anyway (`select_recurrent_prompt_batch`); where admission sees its activations (the model reports a per-token figure,
+on CUDA) it now takes the whole token budget (4096), admission halving it under pressure. 160K, default flags: one
+1.9K-token prompt 1,543 -> 1,820 tok/s, two at once 1,813 -> 1,866.
+
+The shared-system-prompt workload (12 requests, ~2K new tokens each, json_schema answers) with that build:
+
+```
+flags                         serial wall  4-concurrent wall
+default                       18.4 s       19.8 s
+chunk 2048                    19.4 s       18.0 s
+chunk 2048, 1 decode step     18.5 s       18.3 s
+```
+
+Little from the interleave: the workload is prefill-bound at the GPU ceiling. Split by streaming one request: TTFT
+0.86-2.59 s (prefill ~1,400-1,550 tok/s from a 1,984-token cached prefix), then 10 completion tokens
+(`{"choice":"test"}`) in 0.33-0.40 s, ~28 tok/s: the grammar-constrained decode of mostly forced tokens costs as much
+as ~600 prompt tokens.
+
+Decode-heavy (dec.py: 300-token essays, ignore_eos), aggregate tok/s:
+
+```
+load                   1 stream  2 streams  4 streams
+DFlash 2, auto depth   90.5      122.2      150.2
+DFlash 2, depth 3      85.8      122.4      175.9
+no drafter             86.1      125.9      181.4
+```
+
+At 4 streams the drafter costs 17% against none, though the autotuner has a plain step (depth 0) among its
+candidates per batch size; a plain step with a drafter loaded still feeds it the context, and the tuner exposes no
+metric of what it chose.
+
+Implies: by load, the levers left are speculation (draft less, or not at all, as streams grow, with the plain step's
+real cost), forced grammar tokens (jump ahead without a model step), and mixed decode + prefill steps.
