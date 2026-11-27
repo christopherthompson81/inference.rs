@@ -39,6 +39,9 @@ const RAGGED_PROMPT_BUCKET_TOKENS: usize = 256;
 // the shortest chunk memory pressure halves a lone prompt's down to; below it the step runs as planned
 #[cfg(any(test, feature = "cuda"))]
 const MIN_SHRUNK_PROMPT_CHUNK_TOKENS: usize = 256;
+// a lone prompt's chunk with nothing decoding beside it: prefill throughput levels off from here (Inkling 2 on a 3090:
+// 1,543 tok/s at 512, 1,864 at 2048, 1,929 at 4096), and a longer one leaves too little room on a card the cache fills
+const LONE_PROMPT_CHUNK_TOKENS: usize = 2048;
 #[derive(Clone, Copy)]
 enum BatchKind {
     Prompt,
@@ -342,7 +345,7 @@ impl PagedAttentionScheduler {
         let chunk_size = if latency_bounded || !self.prompt_activations_admitted {
             self.config.max_prefill_chunk_tokens.min(token_budget)
         } else {
-            token_budget
+            token_budget.min(LONE_PROMPT_CHUNK_TOKENS.max(self.config.max_prefill_chunk_tokens))
         };
         let chunk_plans = candidates
             .iter()
