@@ -218,12 +218,12 @@ impl Loader for GGMLLoader {
         );
 
         let max_seq_len = model.max_seq_len();
-        let llg_factory = build_llg_factory(tokenizer.clone())?;
         let num_hidden_layers = model.num_hidden_layers();
         let generation_defaults = gen_conf
             .as_ref()
             .and_then(GenerationConfig::generation_defaults);
         let eos = calculate_eos_tokens(&chat_template, gen_conf.as_ref(), &tokenizer)?;
+        let llg_factory = build_llg_factory(tokenizer.clone(), &eos)?;
         Ok(Arc::new(Mutex::new(GGMLPipeline {
             model,
             tokenizer: tokenizer.into(),

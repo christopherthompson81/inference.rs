@@ -9,7 +9,8 @@ use crate::Constraint;
 mod byte_tokenizer;
 use byte_tokenizer::{ByteTokenizer, ByteTokenizerEnv};
 
-pub fn build_llg_factory(mut tokenizer: Tokenizer) -> Result<Arc<ParserFactory>> {
+// an ended grammar allows only its EOS; a name-guessed one the model never stops on (a pad) is sampled as text
+pub fn build_llg_factory(mut tokenizer: Tokenizer, eos: &[u32]) -> Result<Arc<ParserFactory>> {
     let decoder = match tokenizer.get_decoder() {
         Some(DecoderWrapper::Sequence(sequence)) if sequence.get_decoders().len() == 1 => {
             match &sequence.get_decoders()[0] {
@@ -40,7 +41,12 @@ pub fn build_llg_factory(mut tokenizer: Tokenizer) -> Result<Arc<ParserFactory>>
         .collect();
 
     let bt = ByteTokenizer::from_tokenizer(tokenizer)?;
-    let info = bt.tokrx_info();
+    let mut info = bt.tokrx_info();
+    if let Some(&model_eos) = eos.first()
+        && !eos.contains(&info.tok_eos)
+    {
+        info.tok_eos = model_eos;
+    }
     let mut token_bytes = bt.token_bytes();
 
     // Fix up special tokens that from_tokenizer() may have missed.
@@ -263,5 +269,35 @@ mod tests {
             dec(&after, s).is_empty(),
             "special=true token stays dropped"
         );
+    }
+
+    // a grammar that has ended must end on the model's stop token, not the tokenizer's name-guessed `<|endoftext|>`
+    #[test]
+    fn an_ended_grammar_allows_the_model_eos_not_a_pad() {
+        use tokenizers::{
+            AddedToken, decoders::byte_level::ByteLevel as ByteLevelDecoder,
+            models::bpe::BpeBuilder,
+        };
+        let vocab = ahash::AHashMap::from([("a".to_string(), 0u32)]);
+        let bpe = BpeBuilder::new()
+            .vocab_and_merges(vocab, vec![])
+            .build()
+            .unwrap();
+        let mut tok = Tokenizer::new(bpe);
+        tok.with_decoder(Some(ByteLevelDecoder::new(true, false, false)));
+        tok.add_tokens([
+            AddedToken::from("<|endoftext|>", true),
+            AddedToken::from("<|stop_here|>", true),
+        ])
+        .unwrap();
+        let pad = tok.token_to_id("<|endoftext|>").unwrap();
+        let stop = tok.token_to_id("<|stop_here|>").unwrap();
+        let factory = build_llg_factory(tok, &[stop]).unwrap();
+        let mut matcher =
+            constraint_from_llg_grammar(&factory, TopLevelGrammar::from_regex("a")).unwrap();
+        matcher.consume_token(0).unwrap();
+        let mask = matcher.compute_mask_or_eos().unwrap();
+        assert!(mask.is_allowed(stop), "the model's EOS ends the grammar");
+        assert!(!mask.is_allowed(pad), "the pad is never sampled");
     }
 }

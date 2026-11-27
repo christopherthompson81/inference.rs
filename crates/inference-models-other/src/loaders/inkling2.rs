@@ -4,6 +4,9 @@ use super::*;
 const VERIFY_LOGIT_COPIES: usize = 3;
 // the drafter's taps: three layer visits and the normed output
 const VERIFY_TAPS: usize = 4;
+// a prompt token's activations past its routed experts' (the block stack, LoopCD's second coda), per hidden unit:
+// 4 x 6K concurrent prompts on a 3090 took ~725 KB a token, the shared MoE estimate ~342 KB of it
+const PROMPT_EXTRA_HIDDEN_BYTES: usize = 170;
 
 /// `NormalLoader` for Inkling 2's looped text model.
 pub struct Inkling2Loader;
@@ -97,6 +100,17 @@ impl DeviceMappedModelLoader for Inkling2Loader {
     // the weight layers; the cache's slots (each pass of the looped core its own) are `model_config`'s
     fn num_layers(&self, config: &str) -> Result<usize> {
         Ok(inkling2_text_config(config)?.num_hidden_layers)
+    }
+
+    fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
+        let cfg = inkling2_text_config(config)?;
+        let moe = inference_nn::loaders::moe_prompt_activation_bytes_per_token(
+            cfg.num_experts_per_tok,
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            cfg.hidden_size,
+        );
+        Ok(Some(moe + PROMPT_EXTRA_HIDDEN_BYTES * cfg.hidden_size))
     }
 
     // a verify row's logits (f32, the softcap's copies), the four taps and each slot's conv stash (its state and
