@@ -3225,6 +3225,7 @@ class ResponsesUsage:
 class RuntimeSpec:
     chat_template: str | None = None
     control_vectors: ControlVectors | None = None
+    decode_latency_target_ms: int | None = None
     device: str | None = None
     device_layers: list[str] | None = None
     disable_eos_stop: bool | None = None

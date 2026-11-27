@@ -67,6 +67,7 @@ inference agent [OPTIONS] [COMMAND]
 | `--moe-expert-cache <EXPERTS>` |  | Keep MoE experts (GGUF or EXL3, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs a GGUF layer's other experts, and the GPU reads an EXL3 layer's over the bus |
 | `--max-prefill-chunk-tokens <MAX_PREFILL_CHUNK_TOKENS>` |  | CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching [default: 512, or for MoE experts in host memory the longest chunk the expert cache leaves room for, up to 8192] |
 | `--max-decode-steps-before-prefill <MAX_DECODE_STEPS_BEFORE_PREFILL>` | `8` | Maximum decode steps before a waiting prefill batch is admitted |
+| `--decode-latency-target-ms <DECODE_LATENCY_TARGET_MS>` |  | The longest a running decode should wait between tokens while prompts prefill, in milliseconds: prompt steps beside decodes are sized to it from the measured prefill rate, and decodes wait at most one of them (in place of the decode steps above). Unset: the fixed chunk and decode steps |
 | `--no-kv-cache` | `false` | Disable KV cache entirely |
 | `--prefix-cache-n <PREFIX_CACHE_N>` | `16` | Number of prefix caches to hold (0 to disable) |
 | `--prefix-cache-dir <PREFIX_CACHE_DIR>` |  | Directory that keeps prefix cache entries on disk too, so long sessions (agent loops) survive eviction and restarts. Hybrid models on CUDA with paged attention |

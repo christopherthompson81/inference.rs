@@ -44,6 +44,12 @@ const MIN_SHRUNK_PROMPT_CHUNK_TOKENS: usize = 256;
 // a lone prompt's chunk with nothing decoding beside it: prefill throughput levels off from here (Inkling 2 on a 3090:
 // 1,543 tok/s at 512, 1,864 at 2048, 1,929 at 4096), and a longer one leaves too little room on a card the cache fills
 const LONE_PROMPT_CHUNK_TOKENS: usize = 2048;
+// the shortest prompt step a latency target sizes: below it a step is mostly fixed cost
+const MIN_LATENCY_CHUNK_TOKENS: usize = 256;
+// how a latency target's chunk moves on a measured gap: down past the target, up well under it
+const LATENCY_CHUNK_SHRINK: (usize, usize) = (3, 4);
+const LATENCY_CHUNK_GROW: (usize, usize) = (23, 20);
+const LATENCY_CHUNK_GROW_BELOW: (u32, u32) = (7, 10);
 #[derive(Clone, Copy)]
 enum BatchKind {
     Prompt,
@@ -210,11 +216,38 @@ impl PagedAttentionSchedulerOutput {
     }
 }
 
+/// A latency target's prompt chunk after a decode waited `gap`: smaller past the target, larger well under it,
+/// block-aligned between `MIN_LATENCY_CHUNK_TOKENS` and the step budget.
+fn next_latency_chunk(
+    chunk: usize,
+    gap: std::time::Duration,
+    target: std::time::Duration,
+    block_size: usize,
+    budget: usize,
+) -> usize {
+    let (num, den) = if gap > target {
+        LATENCY_CHUNK_SHRINK
+    } else if gap * LATENCY_CHUNK_GROW_BELOW.1 < target * LATENCY_CHUNK_GROW_BELOW.0 {
+        LATENCY_CHUNK_GROW
+    } else {
+        return chunk;
+    };
+    let block = block_size.max(1);
+    (chunk * num / den / block * block).clamp(
+        MIN_LATENCY_CHUNK_TOKENS,
+        budget.max(MIN_LATENCY_CHUNK_TOKENS),
+    )
+}
+
 pub struct PagedAttentionSchedulerConfig {
     pub max_num_seqs: usize,
     pub max_num_batched_tokens: usize,
     pub max_prefill_chunk_tokens: usize,
     pub max_decode_steps_before_prefill: usize,
+    /// See `SchedulerLimits::decode_latency_target`.
+    pub decode_latency_target: Option<std::time::Duration>,
+    /// `max_prefill_chunk_tokens` was set, so the latency target does not size the chunk.
+    pub prefill_chunk_pinned: bool,
 }
 
 pub struct PagedAttentionScheduler {
@@ -233,6 +266,9 @@ pub struct PagedAttentionScheduler {
     prompt_chunks_require_block_alignment: bool,
     prompt_activations_admitted: bool,
     mixed_paged_steps: bool,
+    // a latency target's prompt chunk beside decodes, and the gap measurements that move it
+    latency_chunk: usize,
+    latency_checked: Option<std::time::Instant>,
     prefix_policy: SpeculativePrefixCheckpointPolicy,
     decode_steps_since_prefill: usize,
     prompt_admission_epoch: bool,
@@ -250,7 +286,54 @@ pub struct PagedAttentionScheduler {
 }
 
 impl PagedAttentionScheduler {
+    /// A prompt step's tokens beside running decodes: under a latency target, the chunk the measured gaps have
+    /// settled on, else `max_prefill_chunk_tokens`.
+    fn latency_chunk_tokens(&self) -> usize {
+        match (
+            self.config.decode_latency_target,
+            self.config.prefill_chunk_pinned,
+        ) {
+            (Some(_), false) => self.latency_chunk,
+            _ => self.config.max_prefill_chunk_tokens,
+        }
+    }
+
+    /// Under a latency target, the longest wait a decode's token saw since the last look, while prompts were in
+    /// flight, moves the chunk: down past the target, up well under it.
+    fn adapt_latency_chunk(&mut self) {
+        let Some(target) = self.config.decode_latency_target else {
+            return;
+        };
+        let since = self.latency_checked.replace(std::time::Instant::now());
+        let prompts = !self.waiting.is_empty()
+            || self
+                .running
+                .iter()
+                .any(|seq| get_mut_arcmutex!(seq).is_prompt());
+        if !prompts {
+            return;
+        }
+        let Some(gap) = self
+            .running
+            .iter()
+            .filter_map(|seq| get_mut_arcmutex!(seq).token_gap())
+            .filter(|(at, _)| since.is_none_or(|since| *at > since))
+            .map(|(_, gap)| gap)
+            .max()
+        else {
+            return;
+        };
+        self.latency_chunk = next_latency_chunk(
+            self.latency_chunk,
+            gap,
+            target,
+            self.block_size,
+            self.config.max_num_batched_tokens,
+        );
+    }
+
     pub fn new(config: PagedAttentionSchedulerConfig, cache_config: CacheConfig) -> Self {
+        let latency_chunk = config.max_prefill_chunk_tokens;
         assert!(config.max_num_seqs > 0);
         assert!(config.max_num_batched_tokens > 0);
         assert!(config.max_prefill_chunk_tokens > 0);
@@ -283,6 +366,8 @@ impl PagedAttentionScheduler {
             prompt_chunks_require_block_alignment: false,
             prompt_activations_admitted: false,
             mixed_paged_steps: false,
+            latency_chunk,
+            latency_checked: None,
             prefix_policy: SpeculativePrefixCheckpointPolicy::default(),
             decode_steps_since_prefill: 0,
             prompt_admission_epoch: false,
@@ -301,7 +386,7 @@ impl PagedAttentionScheduler {
         (batch_size > 0).then(|| {
             let chunk_size = (self.prefill_token_budget(latency_bounded) / batch_size).max(1);
             if self.scheduler_visible_prompt_chunks && latency_bounded {
-                chunk_size.min(self.config.max_prefill_chunk_tokens)
+                chunk_size.min(self.latency_chunk_tokens())
             } else {
                 chunk_size
             }
@@ -315,7 +400,7 @@ impl PagedAttentionScheduler {
             }
             self.config
                 .max_num_batched_tokens
-                .min(self.config.max_prefill_chunk_tokens)
+                .min(self.latency_chunk_tokens())
         } else {
             self.config.max_num_batched_tokens
         }
@@ -347,7 +432,7 @@ impl PagedAttentionScheduler {
         let token_budget = self.prefill_token_budget(latency_bounded);
         // the chunk bounds a step's stall of the decodes beside it; with none, admission bounds its memory instead
         let chunk_size = if latency_bounded || !self.prompt_activations_admitted {
-            self.config.max_prefill_chunk_tokens.min(token_budget)
+            self.latency_chunk_tokens().min(token_budget)
         } else {
             token_budget.min(LONE_PROMPT_CHUNK_TOKENS.max(self.config.max_prefill_chunk_tokens))
         };
@@ -688,11 +773,13 @@ impl PagedAttentionScheduler {
         }
 
         let has_prompt = has_running_prompt || has_waiting_prompt;
-        let max_decode_steps = if self.prompt_admission_epoch {
-            1
-        } else {
-            self.config.max_decode_steps_before_prefill
-        };
+        // a latency target bounds each prompt step instead, so a decode waits one step at most
+        let max_decode_steps =
+            if self.prompt_admission_epoch || self.config.decode_latency_target.is_some() {
+                1
+            } else {
+                self.config.max_decode_steps_before_prefill
+            };
         !has_prompt || self.decode_steps_since_prefill < max_decode_steps
     }
 
@@ -1086,6 +1173,7 @@ impl PagedAttentionScheduler {
             }
         }
         self.update_prompt_admission_epoch();
+        self.adapt_latency_chunk();
         let mut scheduled: VecDeque<Arc<Mutex<Sequence>>> = VecDeque::new();
         let mut for_waiting_again: VecDeque<Arc<Mutex<Sequence>>> = VecDeque::new();
         let completion_due = self.completion_is_due();

@@ -15172,6 +15172,15 @@
               }
             ]
           },
+          "decode_latency_target_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The longest a running decode should wait between tokens while prompts prefill, in milliseconds: prompt steps\nbeside decodes are sized to it from the measured prefill rate, and decodes wait at most one of them.",
+            "minimum": 1
+          },
           "device": {
             "type": [
               "string",

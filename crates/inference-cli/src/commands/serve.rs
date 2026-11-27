@@ -209,6 +209,9 @@ pub(crate) fn runtime_options_spec(
         ),
         moe_expert_cache: runtime.moe_expert_cache,
         max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),
+        decode_latency_target_ms: runtime
+            .decode_latency_target_ms
+            .map(std::num::NonZeroU64::get),
         throughput_logging: Some(throughput_logging),
         ..base
     })

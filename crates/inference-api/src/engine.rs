@@ -458,6 +458,11 @@ pub struct RuntimeSpec {
     #[serde(default)]
     #[schema(minimum = 1)]
     pub max_decode_steps_before_prefill: Option<usize>,
+    /// The longest a running decode should wait between tokens while prompts prefill, in milliseconds: prompt steps
+    /// beside decodes are sized to it from the measured prefill rate, and decodes wait at most one of them.
+    #[serde(default)]
+    #[schema(minimum = 1)]
+    pub decode_latency_target_ms: Option<u64>,
     /// Byte budget for cached multimodal encoder outputs.
     #[serde(default)]
     pub encoder_cache_memory_bytes: Option<usize>,
@@ -927,6 +932,9 @@ impl EngineSpec {
                 "max_decode_steps_before_prefill",
                 steps,
             )?);
+        }
+        if let Some(ms) = runtime.decode_latency_target_ms {
+            builder = builder.with_decode_latency_target(std::time::Duration::from_millis(ms));
         }
         if let Some(bytes) = runtime.encoder_cache_memory_bytes {
             builder = builder.with_encoder_cache_memory_bytes(bytes);

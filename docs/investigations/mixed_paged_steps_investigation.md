@@ -84,3 +84,34 @@ either way.
 
 Implies: mixing widens the trade rather than settling it; where to sit on it is the adaptive policy's choice (load,
 queue depth, a latency target), with the chunk size setting the gap.
+
+## Run 3 - 2026-11-27 16:40
+
+The adaptive policy: `--decode-latency-target-ms` (runtime `decode_latency_target_ms`), the longest a running
+decode should wait between tokens while prompts prefill. With it set (and no `--max-prefill-chunk-tokens`), the
+prompt chunk beside decodes moves with the gaps decodes actually see: each sequence now records when its latest token
+landed and the wait before it, and each schedule looks at the longest wait since the last look while prompts are in
+flight, shrinking the chunk x0.75 past the target and growing it x1.15 under 70% of it (block-aligned, 256 tokens to
+the step budget). Prefill and decode steps alternate one for one under a target; with nothing decoding a prompt takes
+the full chunk as before.
+
+Two dead ends first, both from CUDA prompt steps returning at submission (~9 ms, the work showing in the next step):
+a prefill rate from each step's execution time read ~200K tok/s, so the chunk took the whole budget (370 ms steps,
+380-650 ms gaps); and a gap from wall time between schedule calls misattributed the same way (340-655 ms with mixing).
+Tokens landing on sequences is the measure that holds.
+
+Qwen3-8B Q4_K_M, `itl.py` (two streaming decoders, eight ~2K-token prompts, one / four at a time), target 50 ms:
+
+```
+                      prompts          decoders during   max gap
+no target, mixing off 4.32 / 4.93 s    70 / 90 tok/s     116 ms
+target, mixing off    4.09 / 3.74 s    35 / 33 tok/s     138 / 72 ms
+target, mixing on     4.02 / 4.06 s    57 / 52 tok/s     126 / 75 ms
+```
+
+The four-at-a-time gap settles near the 256-token floor (~58 ms a step here, plus the decode rows); the one-at-a-time
+maximum includes the first prompt, before the chunk has moved down from 512. Mixing keeps more of the decoders' rate
+under the same bound.
+
+Implies: the target bounds the gap at some decoder throughput, mixing recovers part of it. The floor sets the
+tightest bound a model can hold; a smaller one is a fixed-cost question per model.

@@ -23,7 +23,10 @@ use inference_api::{
     engine::{DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_SEQS, TokenSource},
     engine_chat::ReasoningEffort,
 };
-use std::{num::NonZeroUsize, path::PathBuf};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    path::PathBuf,
+};
 
 /// Fast LLM inference engine
 #[derive(Parser)]
@@ -1383,6 +1386,13 @@ pub struct RuntimeOptions {
     #[serde(default = "default_max_decode_steps_before_prefill")]
     pub max_decode_steps_before_prefill: NonZeroUsize,
 
+    /// The longest a running decode should wait between tokens while prompts prefill, in milliseconds: prompt steps
+    /// beside decodes are sized to it from the measured prefill rate, and decodes wait at most one of them (in place
+    /// of the decode steps above). Unset: the fixed chunk and decode steps
+    #[arg(long)]
+    #[serde(default)]
+    pub decode_latency_target_ms: Option<NonZeroU64>,
+
     /// Disable KV cache entirely
     #[arg(long)]
     #[serde(default)]
@@ -1926,6 +1936,7 @@ impl Default for RuntimeOptions {
             moe_expert_cache: None,
             max_prefill_chunk_tokens: None,
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),
+            decode_latency_target_ms: None,
             no_kv_cache: false,
             prefix_cache_n: 16,
             prefix_cache_dir: None,

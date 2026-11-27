@@ -759,6 +759,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | --- | --- | --- |
 | `chat_template` | `str \| None` | optional |
 | `control_vectors` | `ControlVectors \| None` | optional |
+| `decode_latency_target_ms` | `int \| None` | optional |
 | `device` | `str \| None` | optional |
 | `device_layers` | `list[str] \| None` | optional |
 | `disable_eos_stop` | `bool \| None` | optional |

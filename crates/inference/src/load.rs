@@ -397,6 +397,12 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// The longest a running decode should wait between tokens while prompts prefill, in milliseconds.
+        pub fn with_decode_latency_target_ms(mut self, ms: u64) -> Self {
+            self.options.runtime.decode_latency_target_ms = Some(ms);
+            self
+        }
+
         pub fn with_hf_config_overrides(mut self, overrides: $crate::load::Overrides) -> Self {
             self.options.runtime.hf_config_overrides = Some(overrides);
             self

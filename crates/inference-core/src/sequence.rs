@@ -334,6 +334,9 @@ pub struct Sequence {
     pub total_prompt_time: Option<u128>,
     pub total_completion_time: Option<u128>,
     pub step_start_instant: Option<Instant>,
+    // when the latest generated token landed, and its wait since the one before
+    last_token_at: Option<Instant>,
+    token_gap: Option<Duration>,
     step_timing_kind: Option<StepTimingKind>,
     group: Arc<Mutex<SequenceGroup>>,
     state: RwLock<SequenceState>,
@@ -485,6 +488,8 @@ impl Sequence {
             control_vectors_storable: true,
             total_prompt_time: None,
             total_completion_time: None,
+            last_token_at: None,
+            token_gap: None,
             step_start_instant: None,
             step_timing_kind: None,
             reasoning_parser: None,
@@ -1138,6 +1143,10 @@ impl Sequence {
         completion_bytes: Vec<u8>,
         mut is_done: Option<StopReason>,
     ) -> Option<StopReason> {
+        let now = Instant::now();
+        if let Some(previous) = self.last_token_at.replace(now) {
+            self.token_gap = Some(now.duration_since(previous));
+        }
         let stopped_by_token = matches!(
             is_done,
             Some(StopReason::Eos) | Some(StopReason::StopTok(_))
@@ -1247,6 +1256,11 @@ impl Sequence {
 
     pub(crate) fn response_is_closed(&self) -> bool {
         self.responder.is_closed()
+    }
+
+    /// When the latest generated token landed, and how long it waited after the one before.
+    pub(crate) fn token_gap(&self) -> Option<(Instant, Duration)> {
+        Some((self.last_token_at?, self.token_gap?))
     }
 
     pub fn creation_time(&self) -> u64 {
