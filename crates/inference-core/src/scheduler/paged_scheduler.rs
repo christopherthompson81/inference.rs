@@ -36,6 +36,8 @@ use crate::paged_attention::CacheConfig;
 type BucketKey = (usize, usize, Option<usize>, u8, usize);
 
 const RAGGED_PROMPT_BUCKET_TOKENS: usize = 256;
+/// Decode rows a prompt step carried.
+pub const MIXED_DECODE_ROWS_METRIC: &str = "inference_paged_mixed_decode_rows_total";
 // the shortest chunk memory pressure halves a lone prompt's down to; below it the step runs as planned
 #[cfg(any(test, feature = "cuda"))]
 const MIN_SHRUNK_PROMPT_CHUNK_TOKENS: usize = 256;
@@ -230,6 +232,7 @@ pub struct PagedAttentionScheduler {
     scheduler_visible_prompt_chunks: bool,
     prompt_chunks_require_block_alignment: bool,
     prompt_activations_admitted: bool,
+    mixed_paged_steps: bool,
     prefix_policy: SpeculativePrefixCheckpointPolicy,
     decode_steps_since_prefill: usize,
     prompt_admission_epoch: bool,
@@ -279,6 +282,7 @@ impl PagedAttentionScheduler {
             scheduler_visible_prompt_chunks: false,
             prompt_chunks_require_block_alignment: false,
             prompt_activations_admitted: false,
+            mixed_paged_steps: false,
             prefix_policy: SpeculativePrefixCheckpointPolicy::default(),
             decode_steps_since_prefill: 0,
             prompt_admission_epoch: false,
@@ -419,6 +423,53 @@ impl PagedAttentionScheduler {
             && !seq.has_suffix_only_prefill_toks()
             && !((seq.has_images() || seq.has_audios() || seq.has_videos())
                 && seq.mm_features().is_empty())
+    }
+
+    /// Running decodes join a scheduler-visible prompt batch as one-token final chunks: their last sampled token is the
+    /// chunk, the rest of the sequence its cached prefix. A row whose slot does not fit waits for the next step.
+    fn add_mixed_decode_rows(&mut self, batch: &mut PromptBatch) {
+        let Some(chunks) = batch.chunks.as_mut() else {
+            return;
+        };
+        let scheduled = batch
+            .scheduled
+            .iter()
+            .map(|seq| *get_mut_arcmutex!(seq).id())
+            .collect::<HashSet<_>>();
+        let decoding = self
+            .running
+            .iter()
+            .filter(|seq| {
+                let seq = get_mut_arcmutex!(seq);
+                seq.is_completion()
+                    && !scheduled.contains(seq.id())
+                    && seq.num_uncomputed_tokens() <= 1
+                    && seq.active_staged_speculative_len() == 0
+                    && !seq.return_raw_logits
+                    && !(seq.has_images() || seq.has_audios() || seq.has_videos())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut kv_mgr = get_mut_arcmutex!(self.kv_cache_manager);
+        for seq in decoding {
+            let (seq_id, len, uncomputed) = {
+                let seq = get_mut_arcmutex!(seq);
+                (*seq.id(), seq.len(), seq.num_uncomputed_tokens())
+            };
+            // the decode step's own reservation: a sequence that counts its last token computed needs one slot past it
+            let slots = if uncomputed > 0 { len } else { len + 1 };
+            if kv_mgr.allocate_slots(seq_id, slots, &[]).is_none() {
+                continue;
+            }
+            chunks.push(PromptChunkPlan {
+                start: len - 1,
+                end: len,
+                attention_policy:
+                    crate::paged_attention::block_hash::MultimodalAttentionPolicy::Causal,
+            });
+            batch.scheduled.push_back(seq);
+            metrics::counter!(MIXED_DECODE_ROWS_METRIC).increment(1);
+        }
     }
 
     fn materialize_prompt_chunks(&self, batch: &PromptBatch) {
@@ -1293,8 +1344,11 @@ impl PagedAttentionScheduler {
         self.waiting.extend(for_waiting_again);
 
         if !scheduled.is_empty() {
-            let prompt_batch = self.select_prompt_batch(scheduled);
+            let mut prompt_batch = self.select_prompt_batch(scheduled);
             self.materialize_prompt_chunks(&prompt_batch);
+            if self.mixed_paged_steps {
+                self.add_mixed_decode_rows(&mut prompt_batch);
+            }
 
             let PromptBatch {
                 scheduled,
@@ -1728,6 +1782,10 @@ impl Scheduler for PagedAttentionScheduler {
 
     fn set_prompt_activations_admitted(&mut self, admitted: bool) {
         self.prompt_activations_admitted = admitted;
+    }
+
+    fn set_mixed_paged_steps(&mut self, enabled: bool) {
+        self.mixed_paged_steps = enabled;
     }
 
     fn defer_prompt_tail(&mut self, first_omitted_sequence_id: usize) {

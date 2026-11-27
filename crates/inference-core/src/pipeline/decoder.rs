@@ -1255,6 +1255,13 @@ impl Pipeline for DecoderPipeline {
             )
     }
 
+    fn supports_mixed_paged_steps(&self) -> bool {
+        self.supports_packed_prefill()
+            && !self.model.has_speculative_proposer()
+            && !self.cache().is_hybrid()
+            && self.core.metadata.sliding_window.is_none()
+    }
+
     fn encode_prompt_media(&self, seq: &mut Sequence) -> Result<(), inference_tensor::Error> {
         match self.model.multimodal() {
             Some(model) => model.encode_prompt_media(seq),

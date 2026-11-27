@@ -480,6 +480,70 @@ async fn paged_gpu_decode_through_the_gather_matches_the_cpu() -> anyhow::Result
     Ok(())
 }
 
+// what turns mixed steps on, and the counter of decode rows they carried
+const MIXED_STEPS_ENV: &str = "INFERENCE_RS_MIXED_PAGED_STEPS";
+const MIXED_DECODE_ROWS: &str = "inference_paged_mixed_decode_rows_total";
+// a decode long enough that a prompt arriving after its first tokens lands while it runs
+const MIXED_DECODE_LEN: usize = 256;
+const MIXED_PROMPT_DELAY: std::time::Duration = std::time::Duration::from_millis(2);
+const MIXED_PROMPT_LEN: usize = 8;
+// packed prefill runs at BF16, where a decode row through the prefill kernels rounds otherwise than a decode step
+const MIXED_LOGPROB_TOLERANCE: f32 = 0.06;
+
+// Greedy traces agree until they first pick different tokens, and only where those tokens were near-ties: a long BF16
+// trace on random weights meets ties, and one rounding apart then sends the rest elsewhere
+fn agree_until_a_tie(a: &[(u32, f32)], b: &[(u32, f32)], tolerance: f32) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .find(|(x, y)| x.0 != y.0 || (x.1 - y.1).abs() >= tolerance)
+            .is_none_or(|(x, y)| (x.1 - y.1).abs() < tolerance)
+}
+
+fn long_prompt_request() -> RequestBuilder {
+    RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, LONG_PROMPT))
+}
+
+// A decode that rides another prompt's step, as a one-token chunk over its cached prefix, decodes as it does alone
+#[tokio::test]
+async fn a_decode_riding_a_prompt_step_decodes_as_alone() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    // SAFETY: before the first model loads, no other thread reads the environment
+    unsafe { std::env::set_var(MIXED_STEPS_ENV, "1") };
+    let checkpoint = tiny_llama_checkpoint_with(serde_json::json!({ "head_dim": GRAPH_HEAD_DIM }))?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_prefix_cache_n(None)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .build()
+        .await?;
+    let alone_decode = greedy(&model, prompt_request(), MIXED_DECODE_LEN).await?.0;
+    let alone_prompt = greedy(&model, long_prompt_request(), MIXED_PROMPT_LEN)
+        .await?
+        .0;
+    decode_graphs::Counters::take(&snapshotter);
+    let (decode, prompt) =
+        tokio::join!(greedy(&model, prompt_request(), MIXED_DECODE_LEN), async {
+            tokio::time::sleep(MIXED_PROMPT_DELAY).await;
+            greedy(&model, long_prompt_request(), MIXED_PROMPT_LEN).await
+        });
+    let carried = decode_graphs::Counters::take(&snapshotter).total(MIXED_DECODE_ROWS, &[]);
+    anyhow::ensure!(carried > 0, "no decode rode a prompt step");
+    for (name, together, alone) in [
+        ("decode", decode?.0, alone_decode),
+        ("prompt", prompt?.0, alone_prompt),
+    ] {
+        anyhow::ensure!(
+            agree_until_a_tie(&together, &alone, MIXED_LOGPROB_TOLERANCE),
+            "the {name} beside the other {together:?} differs from it alone {alone:?}"
+        );
+    }
+    Ok(())
+}
+
 // the committed config's 16 decodes through the gather, which a graph cannot capture
 const GRAPH_HEAD_DIM: usize = 64;
 

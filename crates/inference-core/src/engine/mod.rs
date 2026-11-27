@@ -141,6 +141,8 @@ impl FromStr for SearchEmbeddingModel {
 }
 
 const SEED: u64 = 0;
+/// `1` lets a prompt step carry the running decodes where the pipeline supports it (`supports_mixed_paged_steps`).
+pub const MIXED_PAGED_STEPS_ENV: &str = "INFERENCE_RS_MIXED_PAGED_STEPS";
 /// Terminate all sequences on the next scheduling step. Be sure to reset this.
 /// This is a global flag for terminating all engines at once (e.g., Ctrl+C).
 pub static TERMINATE_ALL_NEXT_STEP: AtomicBool = AtomicBool::new(false);
@@ -742,6 +744,11 @@ impl Engine {
                     .is_some()
         };
         get_mut_arcmutex!(scheduler).set_prompt_activations_admitted(prompt_activations_admitted);
+        // opt-in while it is measured against alternating steps
+        let mixed_paged_steps = std::env::var(MIXED_PAGED_STEPS_ENV)
+            .is_ok_and(|value| value == "1")
+            && get_mut_arcmutex!(pipeline).supports_mixed_paged_steps();
+        get_mut_arcmutex!(scheduler).set_mixed_paged_steps(mixed_paged_steps);
 
         // Configure prefix caching on the scheduler based on the global no_prefix_cache flag
         // This ensures PagedAttention prefix caching respects the same setting

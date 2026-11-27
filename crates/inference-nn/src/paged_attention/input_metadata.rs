@@ -1174,4 +1174,7 @@ pub struct PagedAttentionMeta {
     pub is_final_prompt_chunk: bool,
     /// False when the pipeline discards this forward's logits, so models skip the lm_head.
     pub needs_logits: bool,
+    /// Which scheduled rows' chunks end their sequence, in a scheduler-visible prompt step: those sample, a mixed
+    /// step's other prompt rows do not. Empty otherwise.
+    pub final_prompt_rows: Vec<bool>,
 }

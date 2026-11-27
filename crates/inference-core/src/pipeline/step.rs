@@ -353,6 +353,12 @@ impl dyn Pipeline {
         let scheduler_visible_prompt_step = scheduled_prompt_chunks.is_some();
         let scheduler_visible_prompt_is_final =
             scheduler_visible_prompt_step && metadata.is_final_prompt_chunk;
+        // a mixed step's rows whose chunk ends the sequence (its decode rows and last prompt chunks) sample, the rest
+        // only advance
+        let mixed_final_rows = (scheduler_visible_prompt_step
+            && !metadata.is_final_prompt_chunk
+            && metadata.final_prompt_rows.contains(&true))
+        .then(|| metadata.final_prompt_rows.clone());
         // Vulkan's later chunks attend over the paged cache in place (paged_prefill), as CUDA's do; an iGPU chunks too,
         // since a whole long prompt's dispatches outrun the driver's job timeout
         let chunk_size = if !scheduler_visible_prompt_step
@@ -459,6 +465,19 @@ impl dyn Pipeline {
 
         if let Some(spent) = outputs.respond_without_generation(input_seqs).await? {
             return Ok(StepSubmission::ready(exec_duration + spent));
+        }
+        if let Some(final_rows) = mixed_final_rows {
+            let start = Instant::now();
+            let (mut seqs, results): (Vec<_>, Vec<_>) = input_seqs
+                .iter_mut()
+                .zip(outputs.into_generation())
+                .zip(final_rows)
+                .filter_map(|((seq, result), last)| last.then_some((&mut **seq, result)))
+                .unzip();
+            self.dispatch_generation(&mut seqs, results, ctx, None)
+                .await?;
+            start_decoding_prompt_rows(&mut seqs);
+            return Ok(StepSubmission::ready(exec_duration + start.elapsed()));
         }
         if !should_sample_step(
             is_prompt,
@@ -687,7 +706,12 @@ impl dyn Pipeline {
             let mut chunk_metadata = metadata.clone();
             chunk_metadata.prompt_chunk_attention_policy = attention_policy;
             chunk_metadata.is_final_prompt_chunk = is_final_prompt_chunk;
-            chunk_metadata.needs_logits = is_final_prompt_chunk || ctx.return_raw_logits;
+            // a scheduler-visible step wants logits where any row's chunk ends its sequence
+            chunk_metadata.needs_logits = if scheduler_visible {
+                metadata.needs_logits
+            } else {
+                is_final_prompt_chunk || ctx.return_raw_logits
+            };
             let mut active_input_seqs = input_seqs
                 .iter_mut()
                 .enumerate()
