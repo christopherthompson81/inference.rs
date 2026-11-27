@@ -207,7 +207,8 @@ pub fn reserve_external_mtp_memory_with_runtime(
         }
         cache_config = cache_config
             .with_recurrent_checkpoint_lanes(drafts + 1)?
-            .with_speculative_query_rows(drafts + 1);
+            .with_speculative_query_rows(drafts + 1)
+            .with_speculative_auto_depth(mtp_config.auto_depth);
         cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
         drafter_runtime = dflash_config.runtime_bytes(dtype, device);
         drafter_host = dflash_config.host_bytes(dtype, device);

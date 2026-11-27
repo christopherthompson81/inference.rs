@@ -12,14 +12,46 @@ use inference_tensor::{DType, Module, Result, Tensor};
 use crate::kv_cache::HybridLayerCache;
 use crate::speculative::{
     MtpConfig, MtpRuntimeConfig, SpeculativeAttachInfo, SpeculativeCommitRow, SpeculativeConfig,
-    auto_depth_graph_plans, depths_up_to,
+    SpeculativeGraphPlan, depths_up_to,
 };
 
 use super::Model;
 
 // the drafting depths auto depth weighs below the drafter's own (with a plain step, depth 0); each candidate costs
 // exploration steps, and 0 / 2 / 3 at drafts 3 beat 0 / 2 / 4 / 7 at drafts 7
-const INKLING_AUTO_DEPTHS: [usize; 1] = [2];
+pub(crate) const INKLING_AUTO_DEPTHS: [usize; 1] = [2];
+// auto depth drafts deeper than INKLING_AUTO_DEPTHS only this many sequences at a time: a verify reads each expert its
+// rows route to, and beside other sequences a deep one's rows reach most of them (4 streams on a 3090: depth 2 or
+// none ~175 tok/s, depth 7 ~125)
+const INKLING_FULL_DEPTH_MAX_BATCH: usize = 1;
+
+/// The most drafts a step of `batch` sequences may take: past `INKLING_FULL_DEPTH_MAX_BATCH`, auto depth keeps to
+/// its shallow depths.
+fn auto_depth_cap(n_predict: usize, batch: usize, auto_depth: bool) -> usize {
+    if !auto_depth || batch <= INKLING_FULL_DEPTH_MAX_BATCH {
+        return n_predict;
+    }
+    INKLING_AUTO_DEPTHS
+        .iter()
+        .copied()
+        .filter(|&depth| depth <= n_predict)
+        .max()
+        .unwrap_or(n_predict)
+}
+
+// a plain step (depth 0) runs the decode graphs, not a verify's; a full depth past the shallow ones drafts a lone
+// sequence only
+fn auto_graph_plans(candidates: &[usize], full: usize) -> Vec<SpeculativeGraphPlan> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&depth| depth > 0)
+        .map(|depth| {
+            let deep = depth == full && !INKLING_AUTO_DEPTHS.contains(&depth);
+            SpeculativeGraphPlan::new(depth, deep.then_some(INKLING_FULL_DEPTH_MAX_BATCH))
+        })
+        .collect()
+}
 
 /// A verify step's convolution state of one cache slot before the step, and the inputs its convs took over the
 /// step's rows: a row that keeps `k` of them keeps the last `width - 1` of `[state, inputs[..k]]`.
@@ -409,7 +441,8 @@ impl crate::speculative::SpeculativeTargetMixin for Model {
         batch_size: usize,
     ) -> Option<crate::speculative::SpeculativeBatchPlan> {
         let drafter = self.spec.drafter()?;
-        Some(drafter.plan(drafter.n_predict(), batch_size))
+        let n = auto_depth_cap(drafter.n_predict(), batch_size, self.spec.auto_depth);
+        Some(drafter.plan(n, batch_size))
     }
 
     fn speculative_graph_plans(&self) -> Vec<crate::speculative::SpeculativeGraphPlan> {
@@ -419,13 +452,7 @@ impl crate::speculative::SpeculativeTargetMixin for Model {
         if !self.spec.auto_depth {
             return drafter.graph_plans(drafter.n_predict());
         }
-        // a plain step (depth 0) runs the decode graphs, not a verify's
-        let drafting = self
-            .speculative_depth_candidates()
-            .into_iter()
-            .filter(|&depth| depth > 0)
-            .collect::<Vec<_>>();
-        auto_depth_graph_plans(&drafting, drafter.n_predict())
+        auto_graph_plans(&self.speculative_depth_candidates(), drafter.n_predict())
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -552,5 +579,30 @@ impl crate::speculative::SpeculativeTargetMixin for Model {
             Some(drafter) => drafter.commit_terminal(self, rows),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_depth_drafts_deep_only_for_a_lone_sequence() {
+        assert_eq!(auto_depth_cap(7, 1, true), 7);
+        assert_eq!(auto_depth_cap(7, 4, true), 2);
+        assert_eq!(auto_depth_cap(7, 4, false), 7);
+        // a configured depth under the shallow ones stays as it is
+        assert_eq!(auto_depth_cap(1, 4, true), 1);
+        assert_eq!(
+            auto_graph_plans(&[0, 2, 7], 7),
+            [
+                SpeculativeGraphPlan::new(2, None),
+                SpeculativeGraphPlan::new(7, Some(INKLING_FULL_DEPTH_MAX_BATCH)),
+            ]
+        );
+        assert_eq!(
+            auto_graph_plans(&[0, 2], 2),
+            [SpeculativeGraphPlan::new(2, None)]
+        );
     }
 }

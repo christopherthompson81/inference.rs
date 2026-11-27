@@ -14,8 +14,8 @@ pub use config::{
 };
 pub use logging::{SpeculativeAttachInfo, SpeculativeAttachKind};
 pub use policy::{
-    AUTO_DEPTHS, AUTO_MAX_DEPTH, SpeculativeBatchObservation, SpeculativeBatchPlan,
-    SpeculativeGraphPlan, auto_depth_graph_plans, depths_up_to,
+    AUTO_DEPTHS, AUTO_EXTRA_DEPTH_GRAPH_MAX_BATCH, AUTO_MAX_DEPTH, SpeculativeBatchObservation,
+    SpeculativeBatchPlan, SpeculativeGraphPlan, auto_depth_graph_plans, depths_up_to,
 };
 pub use proposer::{
     DraftSequence, SparseSpeculativeProbs, SpeculativeCommitRow, SpeculativeFollowCtx,

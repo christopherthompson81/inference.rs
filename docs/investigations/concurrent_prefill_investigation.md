@@ -132,3 +132,39 @@ metric of what it chose.
 
 Implies: by load, the levers left are speculation (draft less, or not at all, as streams grow, with the plain step's
 real cost), forced grammar tokens (jump ahead without a model step), and mixed decode + prefill steps.
+
+## Run 5 - 2026-11-27 13:15
+
+Question: why does auto depth lose to a fixed depth at 4 streams (Run 4)?
+
+A new counter, `inference_speculative_depth_decisions_total{depth}`, and the tuner's debug log: at 4 streams it
+picked depth 2 (340 of 419 steps) and predicted ~190 tok/s, while fixed depth 2 ran 164-180 and auto 127-150. The
+cost it misses is CUDA graphs: per 17 s run, auto evicted 16 graphs under memory pressure and captured 40 (fixed depth
+2: none and 22), and a warm 16-request run kept evicting (123 evictions, 127-136 tok/s). The tuner drops every sample a
+capture spans, so the thrash never reaches its costs. Auto keeps the full depth's graphs at every batch plus depth 2's
+up to batch 8; the load reserved only the full depth's (356 MB), and the cache fills the card to its floor.
+
+(A first theory, that a drafted step's timing missed the work after verification, was wrong: the next step is planned
+before the verification is recorded, so both kinds span one cycle. Reverted.)
+
+Fixed depths, 152K, aggregate tok/s, 300-token essays:
+
+```
+                 1 stream  4 streams
+auto (0/2/7)     82-90     127-150
+depth 2          81        164-180
+depth 3          86        159-176
+depth 7          76        121-131
+no drafter       86        165-181
+```
+
+Changes: the load also reserves an auto-depth target's shallower verify graphs (Inkling: 356 -> 458 MB; evictions
+123 -> 69, 144-150 tok/s), and Inkling's auto depth drafts its full depth for a lone sequence only, keeping to depth 2
+or a plain step beside others, with the full depth's graphs captured for batch 1 alone. Warm runs after:
+
+```
+auto, 1 stream    84.1 / 77.7 tok/s
+auto, 4 streams   166.3 / 172.9 tok/s   (2520 steps at depth 2, 498 plain, 34 at 7; no evictions)
+```
+
+Implies: at 4 streams auto now sits with the best fixed depth (+25% over before), one stream unchanged.

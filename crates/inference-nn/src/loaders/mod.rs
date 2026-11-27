@@ -194,6 +194,11 @@ pub trait DeviceMappedModelLoader {
     fn speculative_row_bytes(&self, _config: &str) -> Result<Option<usize>> {
         Ok(None)
     }
+    /// The depths below the configured one an auto-depth target also captures verify graphs for, up to
+    /// `AUTO_EXTRA_DEPTH_GRAPH_MAX_BATCH` sequences.
+    fn speculative_auto_depths(&self) -> &'static [usize] {
+        &[]
+    }
     /// A checkpoint tensor's bytes once loaded (`dtype` the safetensors name), where the loader keeps it otherwise
     /// than the inventory assumes (a float tensor at the model's dtype, any other as stored); `None` for that.
     fn checkpoint_tensor_bytes(
