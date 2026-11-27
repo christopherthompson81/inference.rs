@@ -168,3 +168,36 @@ auto, 4 streams   166.3 / 172.9 tok/s   (2520 steps at depth 2, 498 plain, 34 at
 ```
 
 Implies: at 4 streams auto now sits with the best fixed depth (+25% over before), one stream unchanged.
+
+## Run 6 - 2026-11-27 14:00
+
+Question: why does a 10-token json_schema answer (`{"choice":"test"}`) take ~0.35 s with the drafter?
+
+Token arrival times (streamed, one request, 152K load) showed a ~100-160 ms gap after the first token, then verify
+steps of ~35 ms landing 1-2 drafts each. Without the drafter the same answer streams a token every ~13 ms (0.11-0.20 s
+in all). A constrained row is verified on the host under the grammar (each row's logits read back, a mask a row), so
+a draft that may not land costs more than a plain step. llguidance reports the tokens a grammar forces next
+(`compute_ff_tokens`), which the engine never asked for.
+
+Changes: a step of only grammar-constrained sequences drafts as deep as their grammars force (the deepest captured
+depth within it), else takes a plain step; the drafts' leading tokens are replaced by the forced ones; and when every
+draft is forced the drafter only takes the context. The step that samples its next token before drafting counts one
+forced token fewer (that token is the first forced). After:
+
+```
+                        answer (after the first token)   drafts landed
+before                  0.23-0.35 s                       9 of 53
+forced-only drafting    0.19-0.20 s, ~13 ms a token       10 of 10
+no drafter (reference)  0.11-0.20 s
+```
+
+The gap after the first token stays (~100 ms, with or without schema or drafter). Not the prefix write-through: that
+runs inside the prompt step (~50 ms a prompt, ~30 ms of it exporting Inkling's recurrent state with its window rings;
+batching its host copies saved ~6 ms, reverted). Open.
+
+Also: a lone prompt's chunk with nothing decoding is capped at 2048 (from the whole budget): one 2,944-token step ran
+out of memory in the MoE experts at 152K though admission saw no pressure (graph pools claim room after it looks), and
+prefill throughput levels off from 2048 (Run 1). Three runs of five after: no `out of memory`.
+
+Test: `a_grammar_forced_reply_drafts_only_forced_tokens` (tiny Qwen3.5 + tiny DFlash, a regex forcing the reply): 0
+of 46 drafts landed before, all after.
