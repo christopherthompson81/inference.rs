@@ -268,6 +268,10 @@ impl Pipeline for AnyMoePipeline {
         get_mut_arcmutex!(self.target).supports_packed_prefill()
     }
 
+    fn supports_mixed_paged_steps(&self) -> bool {
+        get_mut_arcmutex!(self.target).supports_mixed_paged_steps()
+    }
+
     fn adapter_runtime(&self) -> Option<Arc<crate::DynamicLoraRuntime>> {
         get_mut_arcmutex!(self.target).adapter_runtime()
     }

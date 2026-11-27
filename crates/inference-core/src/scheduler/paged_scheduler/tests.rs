@@ -17,6 +17,8 @@ fn test_scheduler() -> PagedAttentionScheduler {
             max_num_batched_tokens: 4096,
             max_prefill_chunk_tokens: 4096,
             max_decode_steps_before_prefill: 8,
+            decode_latency_target: None,
+            prefill_chunk_pinned: false,
         },
         CacheConfig {
             block_size: 8,
@@ -689,6 +691,8 @@ fn cache_pressure_discards_staged_prefix_admission_until_retry_succeeds() {
             max_num_batched_tokens: 4096,
             max_prefill_chunk_tokens: 4096,
             max_decode_steps_before_prefill: 8,
+            decode_latency_target: None,
+            prefill_chunk_pinned: false,
         },
         CacheConfig {
             block_size: 8,
@@ -736,6 +740,8 @@ fn disabled_waiting_prompt_preemption_preserves_decode_state() {
             max_num_batched_tokens: 4096,
             max_prefill_chunk_tokens: 4096,
             max_decode_steps_before_prefill: 8,
+            decode_latency_target: None,
+            prefill_chunk_pinned: false,
         },
         CacheConfig {
             block_size: 8,
@@ -2702,6 +2708,8 @@ fn lazy_prompt_reservation_pressure_preserves_decode_and_staged_validation() {
             max_num_batched_tokens: 8,
             max_prefill_chunk_tokens: 8,
             max_decode_steps_before_prefill: 1,
+            decode_latency_target: None,
+            prefill_chunk_pinned: false,
         },
         CacheConfig {
             block_size: 8,
@@ -2836,6 +2844,8 @@ fn lazy_prompt_still_rejects_a_full_request_over_capacity() {
             max_num_batched_tokens: 8,
             max_prefill_chunk_tokens: 8,
             max_decode_steps_before_prefill: 8,
+            decode_latency_target: None,
+            prefill_chunk_pinned: false,
         },
         CacheConfig {
             block_size: 8,
@@ -3194,4 +3204,19 @@ fn a_lone_recurrent_prompt_takes_the_whole_budget_only_where_admission_bounds_it
     // a decode beside it keeps the latency chunk, as does a model whose activations admission cannot see
     assert_eq!(lone_prompt_chunk(true, true), Some(512));
     assert_eq!(lone_prompt_chunk(false, false), Some(512));
+}
+
+#[test]
+fn a_latency_target_moves_the_chunk_toward_its_gap() {
+    use std::time::Duration;
+    let target = Duration::from_millis(50);
+    let next =
+        |chunk, gap_ms| next_latency_chunk(chunk, Duration::from_millis(gap_ms), target, 32, 4096);
+    // a wait past the target shrinks it, block-aligned, down to the floor
+    assert_eq!(next(512, 120), 384);
+    assert_eq!(next(288, 120), MIN_LATENCY_CHUNK_TOKENS);
+    // within reach of the target it holds, well under it grows, up to the step budget
+    assert_eq!(next(512, 45), 512);
+    assert_eq!(next(512, 20), 576);
+    assert_eq!(next(4000, 5), 4096);
 }

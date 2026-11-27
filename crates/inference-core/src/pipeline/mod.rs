@@ -1347,6 +1347,12 @@ pub trait Pipeline:
         false
     }
 
+    /// Whether a prompt step may also carry decode rows as one-token final chunks: packed prefill over cached
+    /// prefixes, no recurrent state, no proposer and no sliding window.
+    fn supports_mixed_paged_steps(&self) -> bool {
+        false
+    }
+
     /// A hybrid model's prompt chunks may run past a recurrent checkpoint, which the forward captures in passing.
     fn captures_recurrent_state_mid_chunk(&self) -> bool {
         false

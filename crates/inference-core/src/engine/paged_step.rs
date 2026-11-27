@@ -147,9 +147,15 @@ impl Engine {
             }
         }
         if !output.scheduled.is_empty() {
-            for seq in output.scheduled.iter() {
+            // a mixed step's decode rows are timed and counted as decode
+            let prompt_rows = output
+                .scheduled
+                .iter()
+                .map(|seq| is_prompt && get_mut_arcmutex!(seq).is_prompt())
+                .collect::<Vec<_>>();
+            for (seq, &prompt_row) in output.scheduled.iter().zip(&prompt_rows) {
                 let mut seq_guard = get_mut_arcmutex!(seq);
-                if is_prompt {
+                if prompt_row {
                     seq_guard.start_prompt_timing();
                 } else {
                     seq_guard.start_completion_timing();
@@ -285,8 +291,8 @@ impl Engine {
             if is_prompt && !scheduler_visible_prompt_step {
                 start_decoding_prompt_rows(&mut guards_mut);
             }
-            for seq in guards_mut.iter_mut() {
-                if is_prompt {
+            for (seq, &prompt_row) in guards_mut.iter_mut().zip(&prompt_rows) {
+                if prompt_row {
                     seq.finish_prompt_timing(step_exec_time);
                 } else {
                     seq.finish_completion_timing(step_exec_time);
@@ -294,8 +300,17 @@ impl Engine {
             }
 
             if is_prompt {
-                self.logger
-                    .add_prefill_tokens_processed(progress.scheduled.iter().sum());
+                let prefill = progress
+                    .scheduled
+                    .iter()
+                    .zip(&prompt_rows)
+                    .filter_map(|(tokens, &prompt_row)| prompt_row.then_some(*tokens))
+                    .sum();
+                self.logger.add_prefill_tokens_processed(prefill);
+                if prompt_rows.contains(&false) {
+                    self.logger
+                        .add_decode_tokens_processed(progress.generated(&guards_mut));
+                }
             } else {
                 self.logger
                     .add_decode_tokens_processed(progress.generated(&guards_mut));
@@ -760,12 +775,19 @@ fn paged_attention_meta(
         .and_then(|chunks| chunks.first())
         .map(|chunk| chunk.attention_policy)
         .unwrap_or(crate::paged_attention::block_hash::MultimodalAttentionPolicy::Causal);
-    let is_final_prompt_chunk = scheduled_prompt_chunks.as_ref().is_none_or(|chunks| {
-        chunks
-            .iter()
-            .zip(seqs.iter())
-            .all(|(chunk, seq)| chunk.end == seq.get_toks().len())
-    });
+    let final_prompt_rows = scheduled_prompt_chunks
+        .as_ref()
+        .map(|chunks| {
+            chunks
+                .iter()
+                .zip(seqs.iter())
+                .map(|(chunk, seq)| chunk.end == seq.get_toks().len())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let is_final_prompt_chunk = final_prompt_rows.iter().all(|row| *row);
+    let any_final_prompt_row =
+        scheduled_prompt_chunks.is_none() || final_prompt_rows.contains(&true);
     PagedAttentionMeta {
         block_size,
         max_paged_context_len,
@@ -796,6 +818,7 @@ fn paged_attention_meta(
         full_mm_prefix_ranges_by_seq_id: HashMap::new(),
         enable_packed_prefill: pipeline.supports_packed_prefill(),
         is_final_prompt_chunk,
-        needs_logits: is_final_prompt_chunk || seqs[0].return_raw_logits,
+        needs_logits: any_final_prompt_row || seqs[0].return_raw_logits,
+        final_prompt_rows,
     }
 }

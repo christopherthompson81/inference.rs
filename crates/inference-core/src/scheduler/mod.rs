@@ -68,6 +68,8 @@ pub enum SchedulerConfig {
         max_num_batched_tokens: usize,
         max_prefill_chunk_tokens: usize,
         max_decode_steps_before_prefill: usize,
+        decode_latency_target: Option<std::time::Duration>,
+        prefill_chunk_pinned: bool,
         config: CacheConfig,
     },
 }
@@ -80,6 +82,10 @@ pub struct SchedulerLimits {
     /// `None`: the chunk the load planned (an offloaded MoE model's), else the default.
     pub max_prefill_chunk_tokens: Option<usize>,
     pub max_decode_steps_before_prefill: usize,
+    /// The longest a running decode should wait between its tokens while prompts prefill: each prompt step beside
+    /// decodes is sized to it from the measured prefill rate, and decides the interleave. `None`: the fixed chunk and
+    /// decode steps.
+    pub decode_latency_target: Option<std::time::Duration>,
 }
 
 impl Default for SchedulerLimits {
@@ -88,6 +94,7 @@ impl Default for SchedulerLimits {
             max_num_batched_tokens: None,
             max_prefill_chunk_tokens: None,
             max_decode_steps_before_prefill: DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL,
+            decode_latency_target: None,
         }
     }
 }
@@ -131,6 +138,8 @@ impl SchedulerConfig {
                 max_num_batched_tokens,
                 max_prefill_chunk_tokens,
                 max_decode_steps_before_prefill: limits.max_decode_steps_before_prefill,
+                decode_latency_target: limits.decode_latency_target,
+                prefill_chunk_pinned: limits.max_prefill_chunk_tokens.is_some(),
                 config,
             });
         }
@@ -170,6 +179,8 @@ impl SchedulerConfig {
                 max_num_batched_tokens,
                 max_prefill_chunk_tokens,
                 max_decode_steps_before_prefill,
+                decode_latency_target,
+                prefill_chunk_pinned,
                 config,
             } => Arc::new(Mutex::new(PagedAttentionScheduler::new(
                 PagedAttentionSchedulerConfig {
@@ -177,6 +188,8 @@ impl SchedulerConfig {
                     max_num_batched_tokens,
                     max_prefill_chunk_tokens,
                     max_decode_steps_before_prefill,
+                    decode_latency_target,
+                    prefill_chunk_pinned,
                 },
                 config,
             ))),
@@ -329,6 +342,9 @@ pub trait Scheduler: Send + Sync {
     /// prompt with nothing decoding beside it may take the whole token budget in one chunk.
     fn set_prompt_activations_admitted(&mut self, _admitted: bool) {}
 
+    /// Whether a prompt step also carries the running decodes, as one-token final chunks.
+    fn set_mixed_paged_steps(&mut self, _enabled: bool) {}
+
     fn defer_prompt_tail(&mut self, _first_omitted_sequence_id: usize) {}
 
     fn set_waiting_prompt_preemption_enabled(&mut self, _enabled: bool) {}
@@ -392,6 +408,8 @@ mod tests {
             max_num_batched_tokens: 4096,
             max_prefill_chunk_tokens: 512,
             max_decode_steps_before_prefill: 8,
+            decode_latency_target: None,
+            prefill_chunk_pinned: false,
             config: cache_config(128),
         };
 
@@ -403,6 +421,7 @@ mod tests {
             max_prefill_chunk_tokens,
             max_decode_steps_before_prefill,
             config,
+            ..
         } = scheduler
         else {
             panic!("expected PagedAttention scheduler")
@@ -432,6 +451,8 @@ mod tests {
             max_num_batched_tokens: 4096,
             max_prefill_chunk_tokens: 512,
             max_decode_steps_before_prefill: 8,
+            decode_latency_target: None,
+            prefill_chunk_pinned: false,
             config: cache_config(128),
         };
         assert!(scheduler.refresh_paged_cache_config(None).is_err());

@@ -216,10 +216,11 @@ pub mod text_models_inputs_processor {
             && !return_raw_logits
             && last_n_context_len.is_none()
             && chunk_offset_toks == 0
-            && !has_any_cache_hit
+            // the packed prefix-attention path reads whole cached prefixes, not sliding-window ones
+            && (!has_any_cache_hit || sliding_window.is_none())
             && paged_attn_metadata.as_ref().is_some_and(|metadata| {
                 metadata.enable_packed_prefill
-                    && metadata.is_final_prompt_chunk
+                    && metadata.needs_logits
                     && metadata.prompt_chunk_attention_policy == MultimodalAttentionPolicy::Causal
             });
         if packed_prefill {

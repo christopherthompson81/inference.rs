@@ -227,6 +227,9 @@ pub struct InferenceRsForServerBuilder {
     /// Maximum decode steps before a waiting prefill batch is admitted.
     max_decode_steps_before_prefill: NonZeroUsize,
 
+    /// The longest a running decode should wait between tokens while prompts prefill.
+    decode_latency_target: Option<std::time::Duration>,
+
     /// Use no KV cache.
     no_kv_cache: bool,
 
@@ -349,6 +352,7 @@ impl Default for InferenceRsForServerBuilder {
                 defaults::MAX_DECODE_STEPS_BEFORE_PREFILL,
             )
             .unwrap(),
+            decode_latency_target: None,
             no_kv_cache: defaults::NO_KV_CACHE,
             chat_template: defaults::CHAT_TEMPLATE,
             jinja_explicit: defaults::JINJA_EXPLICIT,
@@ -506,6 +510,12 @@ impl InferenceRsForServerBuilder {
         max_decode_steps_before_prefill: NonZeroUsize,
     ) -> Self {
         self.max_decode_steps_before_prefill = max_decode_steps_before_prefill;
+        self
+    }
+
+    /// Sets the longest a running decode should wait between tokens while prompts prefill.
+    pub fn with_decode_latency_target(mut self, target: std::time::Duration) -> Self {
+        self.decode_latency_target = Some(target);
         self
     }
 
@@ -922,6 +932,7 @@ impl InferenceRsForServerBuilder {
             max_num_batched_tokens: self.max_num_batched_tokens.map(NonZeroUsize::get),
             max_prefill_chunk_tokens: self.max_prefill_chunk_tokens.map(NonZeroUsize::get),
             max_decode_steps_before_prefill: self.max_decode_steps_before_prefill.get(),
+            decode_latency_target: self.decode_latency_target,
         }
     }
 
