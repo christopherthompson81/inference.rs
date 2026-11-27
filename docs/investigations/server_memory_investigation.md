@@ -56,3 +56,38 @@ happened).
 Reverted. The remedy is upstream of the step: the load left ~450 MB for everything else on the card because its
 context was typed in (216K, a 4.08 GB cache) past what sizing to free VRAM picks (105,344 tokens, 2.19 GB, ~2.1 GB
 left at a two-sequence peak). The web UI now has a "Fit to VRAM" checkbox that leaves the length to that sizing.
+
+## Run 3 - 2026-11-27 03:50
+
+Question: why do four concurrent prompts of a few thousand tokens fail together on the 196K chat load (another client's
+classification evals, 4 at once, a JSON schema each), when one at a time works? Dev server (`serve -p 18083`) with the
+LAN's saved chat load (196,608 q8, vision, DFlash 2 at 7 auto, LoopCD-Logits 0.5): 23,104 MiB of the card after the
+load. A script sends 4 concurrent requests with random-word prompts (temperature 0, the schema, thinking off).
+
+| prompts | result |
+|---|---|
+| 4 x 1.2K | all ok |
+| 4 x 3.2K, twice | all ok; between them a lazy graph capture's upload failed (`CUDA_ERROR_OUT_OF_MEMORY`), decode graphs were disabled, and releasing them logged "Failed to bind CUDA context while restoring graph memory pool" and 124 "invalid argument" errors |
+| 4 x 6.3K | 1 ok, 3 fail (500, `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` in the step) |
+| 1 x 1.2K, then 4 x 1.2K | 1 ok; then 3 of 4 fail, `moe experts forward ... out of memory`: without graphs, a batch that ran before no longer fits |
+
+The 124-error burst is the same one the LAN log shows twice on 2026-11-25 (reloads during the loop-guidance runs); a
+clean unload logs none (checked below), so it comes from releasing graphs after a failed upload.
+
+Peak card memory at a 96K load (KV 1,836 MB, 21,412 MiB loaded), 6K-token prompts: one at a time +320 MB, four at once
++1,408 MB, about 725 KB per prompt token of a step (512-token chunks, four sequences: 2,048 a step). At 196K the cache
+is 1,836 MB larger: 23,248 + 1,408 = 24,656 MiB of a 24,576 MiB card.
+
+The scheduler splits a prompt batch whose activations would not fit (`admit_cuda_prompt`: the attention workspace plus
+`prompt_activation_bytes_per_token` x the step's prompt tokens, when more than one prompt runs), but only Qwen 3.5 and
+Nemotron-H report a per-token figure. Inkling reported none, so its batches were admitted on the attention workspace
+alone. The shared MoE estimate (`moe_prompt_activation_bytes_per_token`: top-k 8, hidden 2304, expert width 1152)
+gives ~342 KB; Inkling's loaders now report it plus 170 bytes per hidden unit for the rest (~733 KB), from the 725 KB
+measured above (with LoopCD-Logits, whose second coda pass is in it).
+
+After: the same 196K load, 4 x 1.2K, 3.2K twice, 6.3K twice: 20 of 20 ok, no errors or warnings in the log,
+`inference_cuda_prompt_batch_reductions_total` 38. The unload after logged no "invalid argument" errors.
+
+Implies: admission covers Inkling now. Still open: a failed lazy graph upload disables graphs for good and leaves the
+eager path short of memory (the 4 x 1.2K failures above), and its release logs the error burst; that is Run 2's
+recovery question again, now with a cause that admission avoids.

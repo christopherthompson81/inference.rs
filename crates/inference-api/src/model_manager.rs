@@ -829,7 +829,11 @@ impl ModelManager {
                 if entry.format == ModelFormat::Gguf
                     && matches!(
                         entry.kind,
-                        Some(InventoryKind::Text | InventoryKind::Multimodal)
+                        Some(
+                            InventoryKind::Text
+                                | InventoryKind::Multimodal
+                                | InventoryKind::Embedding
+                        )
                     ) =>
             {
                 let first = Path::new(&entry.files[0]);

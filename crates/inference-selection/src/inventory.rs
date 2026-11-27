@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use inference_core::{DetectedModelKind, default_hf_cache_dir, detect_local_model};
 use inference_gguf::base_model::source_hf_base_model_id;
+use inference_gguf::embedding_gguf::EmbeddingGgufArchitecture;
 use inference_nn::paged_attention::{KvFingerprint, kv_profile_name};
 use inference_quant::GgufDType;
 use inference_tensor::quantized::gguf_file::{self, Value};
@@ -654,6 +655,14 @@ fn gguf_models_in(
                 model.kind = Some(InventoryKind::Projector);
             } else if facts.architecture.as_deref() == Some(LAYOUT_ARCHITECTURE) {
                 model.kind = Some(InventoryKind::Layout);
+            } else if facts
+                .architecture
+                .as_deref()
+                .and_then(EmbeddingGgufArchitecture::from_architecture)
+                .is_some()
+            {
+                // a decision model on an encoder (laya) loads through the same GGUF embedding path
+                model.kind = Some(InventoryKind::Embedding);
             } else {
                 // a HiDream GGUF names its Qwen3-VL backbone's text architecture: detection routes it to diffusion
                 let hidream = inference_core::DiffusionLoaderType::auto_detect_hidream_gguf(
@@ -1115,6 +1124,31 @@ mod tests {
         ] {
             let model = by_name(&scan, name);
             assert_eq!(model.kind, Some(InventoryKind::Layout), "{model:?}");
+            assert_eq!(model.error, None);
+        }
+    }
+
+    #[test]
+    fn encoder_ggufs_are_embedding_models() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gguf(
+            &dir.path().join("Encoder-Q8_0.gguf"),
+            &[("general.architecture", text("bert"))],
+        );
+        write_gguf(
+            &dir.path().join("Decider-BF16.gguf"),
+            &[
+                ("general.architecture", text("modern-bert")),
+                ("modern-bert.decision.type", text("laya")),
+            ],
+        );
+        let scan = scan_models(&ScanRequest {
+            folders: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        });
+        for name in ["Encoder-Q8_0.gguf", "Decider-BF16.gguf"] {
+            let model = by_name(&scan, name);
+            assert_eq!(model.kind, Some(InventoryKind::Embedding), "{model:?}");
             assert_eq!(model.error, None);
         }
     }
