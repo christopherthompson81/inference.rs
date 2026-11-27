@@ -252,3 +252,35 @@ before) and `a_prefix_under_loop_guidance_restores_from_the_disk_store_on_cuda` 
 disk store" before; another strength restores nothing).
 
 Implies: redeploy and rerun the shared-system-prompt workload, serial and at 4.
+
+## Run 9 - 2026-11-27 17:45
+
+Question: with Run 8's fixes deployed, does the shared system prompt reuse?
+
+Workload (scratchpad `shared.py`): a ~2K-token system prompt, user messages of 800-3000 random words, json_schema,
+thinking off, 12 requests serial then 12 at 4 concurrent. First deploy: still `cached 0` on all 24 (serial 3.29 s
+mean). The disk store now took 25 entries (one at 62 blocks, the system prompt), and the misses read `matched=1984
+reused=0 cause="snapshot_reclaimed"`: the final-message snapshot was taken, then the recurrent pool took its slot back
+for the next prompt's snapshots. This load fitted 1 sequence (capacity 3: a browser and editor GPU process had grown
+by ~0.7 GB), so the pool had a single spare slot.
+
+The disk restore should have covered it but never ran: `try_promote_stored_prefix` asks the GPU cache for its longest
+prefix first, and `peek_longest_paged_recurrent_prefix` counts an entry whose snapshot was reclaimed, so it saw 62
+blocks "on the GPU" and skipped the store's 62-block entry. Fix: entries whose snapshot the pool no longer holds are
+dropped there before the comparison. Test: `a_prefix_the_recurrent_pool_reclaimed_restores_from_the_disk_store` (a
+prefix cache larger than the pool's spare slots, so the first prompt's entry outlives its snapshot; "the reclaimed
+prefix did not restore" before).
+
+Second deploy (capacity 6 this time):
+
+```
+                 mean/request  wall    cached
+before, serial   3.29 s        39.5 s  0 / 51,879
+before, 4 conc   10.40 s       36.2 s  0 / 48,171
+after, serial    1.87 s        22.5 s  23,808 / 50,723  (1984 on every request)
+after, 4 conc    8.34 s        25.3 s  23,808 / 51,545
+```
+
+7 of the 24 hits were disk restores of the 62-block prefix (`Restored a prefix from the disk store blocks=62`), the
+rest GPU snapshots; no misses. Implies: 4 concurrent is still no faster in wall time than serial; prefill (~1,300 tok/s
+on this load) is the bound, which batching four prompts does not raise.

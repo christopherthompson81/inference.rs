@@ -1186,6 +1186,58 @@ async fn check_dropped_prefix_restores(host: HostStore) -> anyhow::Result<()> {
     Ok(())
 }
 
+// distinct prompts after the first: their snapshots take the recurrent pool's spare slots, the first's among them
+const RECLAIMING_PROMPTS: usize = 6;
+// prefixes kept past the pool's spare slots, so the first's entry outlives its snapshot
+const RECLAIMING_PREFIX_SEQS: usize = 16;
+
+// A prefix whose GPU snapshot the recurrent pool took back restores from the disk store: the GPU entry it leaves holds
+// nothing, so it must not count as the longer prefix
+async fn a_prefix_the_recurrent_pool_reclaimed_restores_from_the_disk_store() -> anyhow::Result<()>
+{
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let store = tempfile::tempdir()?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_prefix_cache_n(Some(RECLAIMING_PREFIX_SEQS))
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_prefix_cache_dir(store.path().to_string_lossy(), None)
+        .build()
+        .await?;
+    let prompts = (0..=RECLAIMING_PROMPTS)
+        .map(|i| agent_tokens(AGENT_PROMPT_LEN, 1 + i))
+        .collect::<Vec<_>>();
+    agent_turn(&model, &prompts[0], PREFIX_MAX_LEN).await?;
+    for _ in 0..STORE_POLLS {
+        if stored_entries(store.path()) > 0 {
+            break;
+        }
+        tokio::time::sleep(STORE_POLL).await;
+    }
+    anyhow::ensure!(
+        stored_entries(store.path()) > 0,
+        "the first prompt did not reach the disk store"
+    );
+    for prompt in &prompts[1..] {
+        agent_turn(&model, prompt, PREFIX_MAX_LEN).await?;
+    }
+    let mut next = prompts[0].clone();
+    next.extend(agent_tokens(AGENT_FOLLOW_UP_LEN, 0));
+    let (warm, cached) = agent_turn(&model, &next, PREFIX_MAX_LEN).await?;
+    drop(model);
+    let cold_model = stored_model(checkpoint.path(), None, None).await?;
+    let (cold, _) = agent_turn(&cold_model, &next, PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(cached > 0, "the reclaimed prefix did not restore");
+    anyhow::ensure!(
+        traces::close(&warm, &cold, CACHED_LOGPROB_TOLERANCE),
+        "a restored prefix changed decoding: {warm:?} vs {cold:?}"
+    );
+    Ok(())
+}
+
 async fn a_prefix_the_drafter_dropped_restores_from_the_disk_store() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -1479,6 +1531,7 @@ concurrent_cases!(
         a_new_final_message_resumes_at_the_previous_one: 354,
         a_new_user_message_after_role_tokens_resumes_after_the_system_prompt: 354,
         a_prefix_the_drafter_dropped_restores_from_the_disk_store: 454,
+        a_prefix_the_recurrent_pool_reclaimed_restores_from_the_disk_store: 388,
         a_prefix_the_drafter_dropped_restores_from_the_memory_store: 454,
         a_prefix_the_drafter_dropped_restores_without_a_configured_store: 454,
         a_finished_reply_is_prefilled_for_the_next_turn: 388,

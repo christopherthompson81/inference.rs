@@ -34,9 +34,26 @@ impl Engine {
         }
         // a hit leaves the last token to compute, as the scheduler's match does
         let usable = (tokens.len().saturating_sub(1) / block_size).min(hashes.len());
-        let on_gpu = get_mut_arcmutex!(self.prefix_cacher)
-            .peek_longest_paged_recurrent_prefix(&hashes, usable)
-            .map_or(0, |(n_blocks, _)| n_blocks);
+        // an entry whose snapshot the recurrent pool took back holds nothing, so it must not shadow a stored one
+        let on_gpu = {
+            let pipeline = get_mut_arcmutex!(self.pipeline);
+            let mut prefix_cacher = get_mut_arcmutex!(self.prefix_cacher);
+            loop {
+                let Some((n_blocks, checkpoint)) =
+                    prefix_cacher.peek_longest_paged_recurrent_prefix(&hashes, usable)
+                else {
+                    break 0;
+                };
+                if pipeline
+                    .cache()
+                    .hybrid()
+                    .recurrent_snapshot_held(checkpoint.recurrent_snapshot)
+                {
+                    break n_blocks;
+                }
+                prefix_cacher.drop_paged_recurrent_prefix(&hashes[..n_blocks]);
+            }
+        };
         let values = hashes[..usable]
             .iter()
             .map(|hash| hash.value())
