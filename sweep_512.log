@@ -1,9 +1,0 @@
-[2m2026-11-27T17:41:21.155465Z[0m [32m INFO[0m [2minference_core::inference_rs[0m[2m:[0m inference.rs version: 0.0.27
-[2m2026-11-27T17:41:21.155506Z[0m [32m INFO[0m [2minference_core::inference_rs[0m[2m:[0m git revision: f80421275ed223f6a2eb561e502abe32fd181e48
-[2m2026-11-27T17:41:21.155805Z[0m [32m INFO[0m [2minference_server_core::inference_server_router_builder[0m[2m:[0m model manager: admins load, download and delete models in these folders and the Hugging Face cache [3mfolders[0m[2m=[0m["/mnt/data/models"]
-[2m2026-11-27T17:41:21.158361Z[0m [32m INFO[0m [2minference::commands::serve[0m[2m:[0m UI available at http://0.0.0.0:18083/ui
-[2m2026-11-27T17:41:21.158375Z[0m [33m WARN[0m [2minference::commands::serve[0m[2m:[0m The web UI is single-user without API keys: anyone who can reach /ui sees every saved chat, and through them its sessions and files. Give the server keys (--api-keys-file) or pass --no-ui.
-[2m2026-11-27T17:41:21.158408Z[0m [32m INFO[0m [2minference_server_core::serve[0m[2m:[0m Server listening on http://0.0.0.0:18083
-[2m2026-11-27T17:41:21.158413Z[0m [32m INFO[0m [2minference_server_core::serve[0m[2m:[0m OpenAI-compatible API: http://localhost:18083/v1
-[2m2026-11-27T17:41:21.158416Z[0m [32m INFO[0m [2minference_server_core::serve[0m[2m:[0m Anthropic-compatible API: http://localhost:18083
-[2m2026-11-27T17:41:21.158418Z[0m [32m INFO[0m [2minference_server_core::serve[0m[2m:[0m Swagger UI docs: http://localhost:18083/docs
