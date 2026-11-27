@@ -187,6 +187,22 @@ __device__ __forceinline__ void load_span_at(const Q8* row, int off, float (&o)[
   }
 }
 
+// values a prefill tile's staging takes in one load: 8 bytes of a q8 row, inside one scale group
+constexpr int STAGE_SPAN = 8;
+
+// values d0..d0 + STAGE_SPAN of a q8 row as halves (d0 a multiple of STAGE_SPAN; rows are 4-byte aligned)
+template <int HD, typename O>
+__device__ __forceinline__ void stage_q8_span(const Q8* row, int d0, O* o) {
+  const float scale = __half2float(reinterpret_cast<const __half*>(row + HD)[d0 / Q8_GROUP]) / Q8_MID;
+  const uint32_t lo = *reinterpret_cast<const uint32_t*>(row + d0);
+  const uint32_t hi = *reinterpret_cast<const uint32_t*>(row + d0 + 4);
+#pragma unroll
+  for (int r = 0; r < STAGE_SPAN; r++) {
+    const uint32_t word = r < 4 ? lo : hi;
+    o[r] = O((float((word >> (8 * (r % 4))) & 0xFFu) + 0.5f - Q8_MID) * scale);
+  }
+}
+
 // the power of 2 putting x's magnitude in [0.5, 1) (0 for 0), within what pow2 makes; its value
 constexpr int POW2_LIMIT = 125;
 __device__ __forceinline__ int exponent_of(float x) {
@@ -435,13 +451,28 @@ __global__ void prefill_kernel(Args<T> a) {
   const int first = valid ? first_key(a.window, pos) : 0;
   for (int base = lo; base <= hi; base += KEY_TILE) {
     __syncthreads();
-    for (int e = threadIdx.x; e < KEY_TILE * HD; e += blockDim.x) {
-      const int j = e / HD;
-      const int d = e % HD;
-      const int key = base + j;
-      const bool in = key < keys;
-      kt[j][d] = in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits)), d, a.k.bits) : 0.0f;
-      vt[j][d] = in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits)), d, a.v.bits) : 0.0f;
+    if constexpr (std::is_same<T, Q8>::value) {
+      for (int e = threadIdx.x; e < KEY_TILE * (HD / STAGE_SPAN); e += blockDim.x) {
+        const int j = e / (HD / STAGE_SPAN);
+        const int d0 = e % (HD / STAGE_SPAN) * STAGE_SPAN;
+        const int key = base + j;
+        if (key < keys) {
+          stage_q8_span<HD>(a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits)), d0, &kt[j][d0]);
+          stage_q8_span<HD>(a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits)), d0, &vt[j][d0]);
+        } else {
+#pragma unroll
+          for (int r = 0; r < STAGE_SPAN; r++) kt[j][d0 + r] = vt[j][d0 + r] = 0.0f;
+        }
+      }
+    } else {
+      for (int e = threadIdx.x; e < KEY_TILE * HD; e += blockDim.x) {
+        const int j = e / HD;
+        const int d = e % HD;
+        const int key = base + j;
+        const bool in = key < keys;
+        kt[j][d] = in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits)), d, a.k.bits) : 0.0f;
+        vt[j][d] = in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits)), d, a.v.bits) : 0.0f;
+      }
     }
     __syncthreads();
     if (!valid) continue;
@@ -507,7 +538,7 @@ __global__ void __launch_bounds__(MMA_WARPS * WARP) prefill_mma_kernel(Args<T> a
   constexpr int KSTEPS = HD / 16;
   constexpr int SN = MMA_KEYS / 8;
   constexpr int ON = HD / 8;
-  __shared__ __half ks[MMA_KEYS][HD + MMA_PAD];
+  __shared__ __align__(16) __half ks[MMA_KEYS][HD + MMA_PAD];
   __shared__ __half vt[HD][MMA_KEYS + MMA_PAD];
   const int warp = threadIdx.x / WARP;
   const int lane = threadIdx.x % WARP;
@@ -559,13 +590,34 @@ __global__ void __launch_bounds__(MMA_WARPS * WARP) prefill_mma_kernel(Args<T> a
   const int hi = past + last;
   for (int base = lo; base <= hi; base += MMA_KEYS) {
     __syncthreads();
-    for (int e = threadIdx.x; e < MMA_KEYS * HD; e += blockDim.x) {
-      const int j = e / HD;
-      const int d = e % HD;
-      const int key = base + j;
-      const bool in = key < keys;
-      ks[j][d] = __float2half(in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits)), d, a.k.bits) : 0.0f);
-      vt[d][j] = __float2half(in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits)), d, a.v.bits) : 0.0f);
+    if constexpr (std::is_same<T, Q8>::value) {
+      // a span of STAGE_SPAN values a thread: one load and one group scale where a value a load waited on memory
+      for (int e = threadIdx.x; e < MMA_KEYS * (HD / STAGE_SPAN); e += blockDim.x) {
+        const int j = e / (HD / STAGE_SPAN);
+        const int d0 = e % (HD / STAGE_SPAN) * STAGE_SPAN;
+        const int key = base + j;
+        __align__(16) __half kh[STAGE_SPAN];
+        __half vh[STAGE_SPAN];
+        if (key < keys) {
+          stage_q8_span<HD>(a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits)), d0, kh);
+          stage_q8_span<HD>(a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits)), d0, vh);
+        } else {
+#pragma unroll
+          for (int r = 0; r < STAGE_SPAN; r++) kh[r] = vh[r] = __float2half(0.0f);
+        }
+        *reinterpret_cast<uint4*>(&ks[j][d0]) = *reinterpret_cast<const uint4*>(kh);
+#pragma unroll
+        for (int r = 0; r < STAGE_SPAN; r++) vt[d0 + r][j] = vh[r];
+      }
+    } else {
+      for (int e = threadIdx.x; e < MMA_KEYS * HD; e += blockDim.x) {
+        const int j = e / HD;
+        const int d = e % HD;
+        const int key = base + j;
+        const bool in = key < keys;
+        ks[j][d] = __float2half(in ? load_at<HD>(a.k.row(batch, kvh, key, row_len<T>(HD, a.k.bits)), d, a.k.bits) : 0.0f);
+        vt[d][j] = __float2half(in ? load_at<HD>(a.v.row(batch, kvh, key, row_len<T>(HD, a.v.bits)), d, a.v.bits) : 0.0f);
+      }
     }
     __syncthreads();
     float sc[SN][4];

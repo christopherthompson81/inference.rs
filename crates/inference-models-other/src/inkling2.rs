@@ -1519,6 +1519,8 @@ impl DecoderLayer {
             stacks,
         } = step;
         let dtype = x.dtype();
+        let span = |name| inference_tensor::profile::span(name, Some(x.device()));
+        let mix_span = span("inkling.attention_inputs");
         let mut inputs: [Tensor; 3] = match &self.attention_query {
             Some(query) => {
                 let m = mix(blocks, x, query, dtype, stacks)?;
@@ -1560,8 +1562,11 @@ impl DecoderLayer {
             }
         };
 
+        drop(mix_span);
+
         let kv_dim = cfg.kv_dim();
         let hidden = cfg.hidden_size;
+        let attn_span = span("inkling.attention");
         let (attn, k_state, v_state) = self.attn.forward(
             cfg,
             AttentionInputs {
@@ -1575,6 +1580,8 @@ impl DecoderLayer {
             paged.as_ref(),
             conv_state,
         )?;
+        drop(attn_span);
+        let conv_span = span("inkling.post_attention_conv");
         let (attn, attn_state) = self.post_attention_conv.forward(
             &attn,
             None,
@@ -1582,6 +1589,8 @@ impl DecoderLayer {
             dtype,
         )?;
         let attn = attn.to_dtype(dtype)?;
+        drop(conv_span);
+        let ffn_mix_span = span("inkling.ffn_inputs");
 
         // a block's first layer starts a new residual stream; the one before it joins the mixed blocks
         let ffn_in = if self.block_start {
@@ -1595,7 +1604,12 @@ impl DecoderLayer {
             let message = messages.narrow(2, FFN_CONTROLLER, 1)?.squeeze(2)?;
             h = lp.controllers[FFN_CONTROLLER].forward(&h, &message)?;
         }
-        let h = self.moe.forward(&self.ffn_norm.forward(&h)?)?;
+        let h = self.ffn_norm.forward(&h)?;
+        drop(ffn_mix_span);
+        let moe_span = span("inkling.moe");
+        let h = self.moe.forward(&h)?;
+        drop(moe_span);
+        let tail_span = span("inkling.post_mlp_conv");
         let (h, ffn_state) = self.post_mlp_conv.forward(
             &h,
             None,
@@ -1609,6 +1623,7 @@ impl DecoderLayer {
             }
             _ => None,
         };
+        drop(tail_span);
         Ok((out, state))
     }
 }
@@ -1897,6 +1912,7 @@ impl Model {
 
     // `x` is the normed token embeddings, image rows already in place
     pub fn forward_embeds(&self, x: Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
+        let _span = inference_tensor::profile::span("inkling.forward", Some(x.device()));
         let cfg = &self.cfg;
         let (b, t, _) = x.dims3()?;
         let recurrent = ctx
