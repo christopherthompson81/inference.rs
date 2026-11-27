@@ -1062,6 +1062,54 @@ async fn a_new_final_message_resumes_at_the_previous_one() -> anyhow::Result<()>
     Ok(())
 }
 
+// a template opening each role with its own token (system `<s>`, user `</s>`, the reply `<|begin_of_sentence|>`), every
+// turn closed by `<|end_of_sentence|>`: the generation prompt's token opens no earlier turn
+const ROLE_TOKEN_TEMPLATE: &str = "{%- for message in messages -%}{%- if message['role'] == 'system' -%}<s>\
+{%- else -%}</s>{%- endif -%}{{ message['content'] }}<|end_of_sentence|>{%- endfor -%}\
+{%- if add_generation_prompt -%}<|begin_of_sentence|>{%- endif -%}";
+
+// The same with a token per role, a system prompt shared and a different user message: the user turn's start is found
+// from where the system turn ends
+async fn a_new_user_message_after_role_tokens_resumes_after_the_system_prompt() -> anyhow::Result<()>
+{
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    std::fs::write(
+        checkpoint.path().join("chat_template.jinja"),
+        ROLE_TOKEN_TEMPLATE,
+    )?;
+    let model = stored_model(checkpoint.path(), None, None).await?;
+    let system = "abc ".repeat(SHARED_HISTORY_CHARS / 4);
+    let cached_tokens = |last: String| {
+        let request = serde_json::json!({
+            "model": "default", "max_tokens": 2, "temperature": 0.0,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": last}],
+        });
+        let model = &model;
+        async move {
+            let response: serde_json::Value = serde_json::from_str(
+                &model
+                    .chat_json(request.to_string().as_bytes(), Default::default())
+                    .await?,
+            )?;
+            anyhow::Ok(
+                response["usage"]["prompt_tokens_details"]["cached_tokens"]
+                    .as_u64()
+                    .unwrap_or_default() as usize,
+            )
+        }
+    };
+    cached_tokens("first ".repeat(FINAL_MESSAGE_CHARS / 6)).await?;
+    let cached = cached_tokens("other ".repeat(FINAL_MESSAGE_CHARS / 6)).await?;
+    anyhow::ensure!(
+        cached >= SHARED_HISTORY_CHARS / 2,
+        "the changed user message reused only {cached} tokens"
+    );
+    Ok(())
+}
+
 // distinct prompts sent before the first is extended: more than a disk-backed drafter keeps on the GPU
 const EVICTING_PROMPTS: usize = 4;
 // prompts past the GPU's prefixes that a model without a configured store must drop
@@ -1131,6 +1179,58 @@ async fn check_dropped_prefix_restores(host: HostStore) -> anyhow::Result<()> {
     let cold_model = stored_model(checkpoint.path(), Some(drafter.path()), None).await?;
     let (cold, _) = agent_turn(&cold_model, &next, PREFIX_MAX_LEN).await?;
     anyhow::ensure!(cached > 0, "the dropped prefix did not restore");
+    anyhow::ensure!(
+        traces::close(&warm, &cold, CACHED_LOGPROB_TOLERANCE),
+        "a restored prefix changed decoding: {warm:?} vs {cold:?}"
+    );
+    Ok(())
+}
+
+// distinct prompts after the first: their snapshots take the recurrent pool's spare slots, the first's among them
+const RECLAIMING_PROMPTS: usize = 6;
+// prefixes kept past the pool's spare slots, so the first's entry outlives its snapshot
+const RECLAIMING_PREFIX_SEQS: usize = 16;
+
+// A prefix whose GPU snapshot the recurrent pool took back restores from the disk store: the GPU entry it leaves holds
+// nothing, so it must not count as the longer prefix
+async fn a_prefix_the_recurrent_pool_reclaimed_restores_from_the_disk_store() -> anyhow::Result<()>
+{
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let store = tempfile::tempdir()?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_prefix_cache_n(Some(RECLAIMING_PREFIX_SEQS))
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_prefix_cache_dir(store.path().to_string_lossy(), None)
+        .build()
+        .await?;
+    let prompts = (0..=RECLAIMING_PROMPTS)
+        .map(|i| agent_tokens(AGENT_PROMPT_LEN, 1 + i))
+        .collect::<Vec<_>>();
+    agent_turn(&model, &prompts[0], PREFIX_MAX_LEN).await?;
+    for _ in 0..STORE_POLLS {
+        if stored_entries(store.path()) > 0 {
+            break;
+        }
+        tokio::time::sleep(STORE_POLL).await;
+    }
+    anyhow::ensure!(
+        stored_entries(store.path()) > 0,
+        "the first prompt did not reach the disk store"
+    );
+    for prompt in &prompts[1..] {
+        agent_turn(&model, prompt, PREFIX_MAX_LEN).await?;
+    }
+    let mut next = prompts[0].clone();
+    next.extend(agent_tokens(AGENT_FOLLOW_UP_LEN, 0));
+    let (warm, cached) = agent_turn(&model, &next, PREFIX_MAX_LEN).await?;
+    drop(model);
+    let cold_model = stored_model(checkpoint.path(), None, None).await?;
+    let (cold, _) = agent_turn(&cold_model, &next, PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(cached > 0, "the reclaimed prefix did not restore");
     anyhow::ensure!(
         traces::close(&warm, &cold, CACHED_LOGPROB_TOLERANCE),
         "a restored prefix changed decoding: {warm:?} vs {cold:?}"
@@ -1429,7 +1529,9 @@ concurrent_cases!(
         a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart: 422,
         a_stored_prefix_restores_with_a_full_attention_drafter_after_a_restart: 422,
         a_new_final_message_resumes_at_the_previous_one: 354,
+        a_new_user_message_after_role_tokens_resumes_after_the_system_prompt: 354,
         a_prefix_the_drafter_dropped_restores_from_the_disk_store: 454,
+        a_prefix_the_recurrent_pool_reclaimed_restores_from_the_disk_store: 388,
         a_prefix_the_drafter_dropped_restores_from_the_memory_store: 454,
         a_prefix_the_drafter_dropped_restores_without_a_configured_store: 454,
         a_finished_reply_is_prefilled_for_the_next_turn: 388,

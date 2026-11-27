@@ -1634,7 +1634,7 @@ impl Scheduler for PagedAttentionScheduler {
                     && !seq.is_prefix_warmup()
                     && !seq.return_raw_logits
                     && seq.mm_features().is_empty()
-                    && !seq.custom_states())
+                    && seq.storable_states())
                 .then(|| (toks.to_vec(), prompt))
             })
             .collect()

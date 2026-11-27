@@ -68,6 +68,11 @@ impl ControlVectorSet {
         Ok(rows)
     }
 
+    /// Whether [`Self::key`] alone fixes the states the vectors make: no file, whose contents could change under its path.
+    pub fn key_fixes_states(&self) -> bool {
+        self.files.is_empty()
+    }
+
     /// [`Self::key`] hashed (64-bit FNV-1a, stable across builds): `None` for no vectors, which leaves keys as they were.
     pub fn hash(&self) -> Option<u64> {
         (!self.is_empty()).then(|| {
