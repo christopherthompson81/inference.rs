@@ -263,6 +263,8 @@ pub struct Sequence {
     adapter: Option<AdapterLease>,
     // the control vectors the model ran under when the sequence started (`ControlVectorSet::hash`)
     control_vector_hash: Option<u64>,
+    // the control vectors' key alone fixes their states, so a store that outlives the setting may keep them
+    control_vectors_storable: bool,
 
     // Multimodal data (images, diffusion settings, pixel caches)
     pub multimodal: MultimodalData,
@@ -480,6 +482,7 @@ impl Sequence {
             eos_tokens,
             adapter: None,
             control_vector_hash: None,
+            control_vectors_storable: true,
             total_prompt_time: None,
             total_completion_time: None,
             step_start_instant: None,
@@ -553,8 +556,9 @@ impl Sequence {
         &self.id
     }
 
-    pub(crate) fn set_control_vector_hash(&mut self, hash: Option<u64>) {
+    pub(crate) fn set_control_vector_hash(&mut self, hash: Option<u64>, storable: bool) {
         self.control_vector_hash = hash;
+        self.control_vectors_storable = storable;
         self.block_hash_revision = self.block_hash_revision.wrapping_add(1);
     }
 
@@ -568,10 +572,11 @@ impl Sequence {
             .collect()
     }
 
-    /// Whether the sequence's states depend on more than its tokens and media (an adapter, control vectors), so no
-    /// store that outlives the model's settings may keep them.
-    pub fn custom_states(&self) -> bool {
-        self.adapter_generation().is_some() || self.control_vector_hash.is_some()
+    /// Whether a store that outlives the model's settings may keep the sequence's states: no adapter, and control
+    /// vectors only where their key fixes the states (the store's keys carry it).
+    pub fn storable_states(&self) -> bool {
+        self.adapter_generation().is_none()
+            && (self.control_vector_hash.is_none() || self.control_vectors_storable)
     }
 
     pub fn control_vector_hash(&self) -> Option<u64> {

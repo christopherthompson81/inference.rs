@@ -612,6 +612,82 @@ async fn a_repeat_reuses_its_prefix_under_loop_guidance_on_cuda() -> anyhow::Res
     Ok(())
 }
 
+// the writer thread stores a prefix well within this
+const STORE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const STORE_POLLS: usize = 200;
+const STORE_ENTRY_FILE: &str = "key.bin";
+
+fn stored_entries(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                stored_entries(&path)
+            } else {
+                usize::from(path.file_name().is_some_and(|n| n == STORE_ENTRY_FILE))
+            }
+        })
+        .sum()
+}
+
+// loop guidance keys a prefix, not bars it from the disk store: a restart restores it at the same strength and a new
+// strength finds nothing of it
+#[tokio::test]
+async fn a_prefix_under_loop_guidance_restores_from_the_disk_store_on_cuda() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = checkpoint()?;
+    let store = tempfile::tempdir()?;
+    let prompt = "a long enough prompt to fill several cache blocks ".repeat(8);
+    let (dir, store_dir) = (dir.path(), store.path());
+    let model = |strength: f32| async move {
+        TextModelBuilder::new(dir.to_string_lossy())
+            .with_dtype(ModelDType::F32)
+            .with_load_recipes(false)
+            .with_device("cuda:0")
+            .with_loop_guidance_logits()
+            .with_loop_guidance(strength)
+            .with_prefix_cache_dir(store_dir.to_string_lossy(), None)
+            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+            .build()
+            .await
+    };
+    let (first, _) = {
+        let model = model(LOGITS_GUIDANCE).await?;
+        let first = traces::greedy(&model, chat(&prompt), MAX_LEN).await?;
+        for _ in 0..STORE_POLLS {
+            if stored_entries(store.path()) > 0 {
+                break;
+            }
+            tokio::time::sleep(STORE_POLL).await;
+        }
+        first
+    };
+    anyhow::ensure!(
+        stored_entries(store.path()) > 0,
+        "no prefix reached the disk store"
+    );
+    let restarted = model(LOGITS_GUIDANCE).await?;
+    let (repeat, cached) = traces::greedy(&restarted, chat(&prompt), MAX_LEN).await?;
+    drop(restarted);
+    anyhow::ensure!(cached > 0, "the restarted engine restored nothing");
+    assert_eq!(
+        first.iter().map(|t| t.0).collect::<Vec<_>>(),
+        repeat.iter().map(|t| t.0).collect::<Vec<_>>()
+    );
+    let other = model(GUIDANCE).await?;
+    let (_, cached) = traces::greedy(&other, chat(&prompt), MAX_LEN).await?;
+    anyhow::ensure!(
+        cached == 0,
+        "another strength reused {cached} tokens stored under the first"
+    );
+    Ok(())
+}
+
 // a new strength rewrites the scalar the captured decode graphs read: no capture again, the fresh load's tokens
 #[tokio::test]
 async fn a_new_loop_guidance_strength_keeps_the_captured_graphs_on_cuda() -> anyhow::Result<()> {

@@ -223,3 +223,32 @@ Finding:
 
 Implication: a reply ending on a block boundary keeps its final snapshot; an agent's next turn no longer depends on
 the warm-up to cover it.
+
+## Run 8 - 2026-11-27 17:20
+
+Question: why does an Inkling 2 Mini server (the LAN chat load: LoopCD-Logits 0.5, DFlash 2 drafter, q8 KV) reuse
+nothing of a shared ~2K-token system prompt, serially (2.39 s per request) or at 4 concurrent (8.04 s)?
+
+The server's logger read `Prefix cache hitrate 0.06%`. Every miss logged `matched=1568 reused=0
+reason="no_replay_boundary" cause="snapshot_beyond_match"`: KV matched to the end of the system prompt, but the only
+recurrent snapshot along those blocks was each prompt's own last full block, past where the next prompt diverges.
+The final-message checkpoint (#540) was never taken. It finds the final message as the second-to-last copy of the
+token that opens the generation prompt, which works where every turn opens alike (`<|im_start|>`). Inkling opens each
+role with its own token (`<|message_system|>`, `<|message_user|>`, `<|message_model|>`), so `<|message_model|>`
+appears once and no start was found.
+
+Also: this load's disk store (`/mnt/data/prefix-cache/2924f4137b973727`) had 0 entries since 2026-11-25, while the
+same model without LoopCD wrote 370. Loop guidance sets a control-vector hash, which made `custom_states()` true and
+turned off write-through, restores and the progressive checkpoints. At 4 concurrent the 2 spare recurrent slots
+(capacity 6 at `max_num_seqs` 4) also churned (755 drafter checkpoint pool evictions, 320 reclaimed snapshots), but
+the serial run shows that was not the cause.
+
+Fix: the template's turn end (the probe turn's last added token, `<|end_message|>` here) is learned too, and where the
+turn start occurs only once the final message starts after the second-to-last turn end. Control vectors whose key
+fixes their states (loop guidance alone, no file whose contents could change under its path) may be stored; the
+disk restore hashes blocks with the sequence's keys, as a captured prefix's are. Tests:
+`a_new_user_message_after_role_tokens_resumes_after_the_system_prompt` (Qwen3.5 tiny, a per-role template; reused 0
+before) and `a_prefix_under_loop_guidance_restores_from_the_disk_store_on_cuda` (Inkling tiny; "no prefix reached the
+disk store" before; another strength restores nothing).
+
+Implies: redeploy and rerun the shared-system-prompt workload, serial and at 4.

@@ -1062,6 +1062,54 @@ async fn a_new_final_message_resumes_at_the_previous_one() -> anyhow::Result<()>
     Ok(())
 }
 
+// a template opening each role with its own token (system `<s>`, user `</s>`, the reply `<|begin_of_sentence|>`), every
+// turn closed by `<|end_of_sentence|>`: the generation prompt's token opens no earlier turn
+const ROLE_TOKEN_TEMPLATE: &str = "{%- for message in messages -%}{%- if message['role'] == 'system' -%}<s>\
+{%- else -%}</s>{%- endif -%}{{ message['content'] }}<|end_of_sentence|>{%- endfor -%}\
+{%- if add_generation_prompt -%}<|begin_of_sentence|>{%- endif -%}";
+
+// The same with a token per role, a system prompt shared and a different user message: the user turn's start is found
+// from where the system turn ends
+async fn a_new_user_message_after_role_tokens_resumes_after_the_system_prompt() -> anyhow::Result<()>
+{
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    std::fs::write(
+        checkpoint.path().join("chat_template.jinja"),
+        ROLE_TOKEN_TEMPLATE,
+    )?;
+    let model = stored_model(checkpoint.path(), None, None).await?;
+    let system = "abc ".repeat(SHARED_HISTORY_CHARS / 4);
+    let cached_tokens = |last: String| {
+        let request = serde_json::json!({
+            "model": "default", "max_tokens": 2, "temperature": 0.0,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": last}],
+        });
+        let model = &model;
+        async move {
+            let response: serde_json::Value = serde_json::from_str(
+                &model
+                    .chat_json(request.to_string().as_bytes(), Default::default())
+                    .await?,
+            )?;
+            anyhow::Ok(
+                response["usage"]["prompt_tokens_details"]["cached_tokens"]
+                    .as_u64()
+                    .unwrap_or_default() as usize,
+            )
+        }
+    };
+    cached_tokens("first ".repeat(FINAL_MESSAGE_CHARS / 6)).await?;
+    let cached = cached_tokens("other ".repeat(FINAL_MESSAGE_CHARS / 6)).await?;
+    anyhow::ensure!(
+        cached >= SHARED_HISTORY_CHARS / 2,
+        "the changed user message reused only {cached} tokens"
+    );
+    Ok(())
+}
+
 // distinct prompts sent before the first is extended: more than a disk-backed drafter keeps on the GPU
 const EVICTING_PROMPTS: usize = 4;
 // prompts past the GPU's prefixes that a model without a configured store must drop
@@ -1429,6 +1477,7 @@ concurrent_cases!(
         a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart: 422,
         a_stored_prefix_restores_with_a_full_attention_drafter_after_a_restart: 422,
         a_new_final_message_resumes_at_the_previous_one: 354,
+        a_new_user_message_after_role_tokens_resumes_after_the_system_prompt: 354,
         a_prefix_the_drafter_dropped_restores_from_the_disk_store: 454,
         a_prefix_the_drafter_dropped_restores_from_the_memory_store: 454,
         a_prefix_the_drafter_dropped_restores_without_a_configured_store: 454,

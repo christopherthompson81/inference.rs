@@ -471,7 +471,10 @@ impl Engine {
         let group = Arc::new(tokio::sync::Mutex::new(group));
 
         let tokenizer = get_mut_arcmutex!(self.pipeline).tokenizer();
-        let control_vector_hash = get_mut_arcmutex!(self.pipeline).control_vectors().hash();
+        let (control_vector_hash, control_vectors_storable) = {
+            let vectors = get_mut_arcmutex!(self.pipeline).control_vectors();
+            (vectors.hash(), vectors.key_fixes_states())
+        };
 
         let sampler = Sampler::new(
             Some(request.sampling_params.temperature.unwrap_or(1.0)),
@@ -592,7 +595,7 @@ impl Engine {
             if let Some(adapter_lease) = &adapter_lease {
                 seq.bind_adapter(adapter_lease.clone());
             }
-            seq.set_control_vector_hash(control_vector_hash);
+            seq.set_control_vector_hash(control_vector_hash, control_vectors_storable);
 
             seq.set_cancellation(request.cancellation.clone());
             seq.set_prefix_warmup(request.prefix_warmup);
@@ -760,7 +763,8 @@ impl Engine {
 
     fn checkpoint_hints(&self, seq: &Sequence, is_chat: bool) -> crate::pipeline::CheckpointHints {
         // progressive checkpoints are worth their copies only where the store keeps them, which takes plain text only
-        let stored = seq.mm_features().is_empty() && !seq.custom_states() && !seq.return_raw_logits;
+        let stored =
+            seq.mm_features().is_empty() && seq.storable_states() && !seq.return_raw_logits;
         let interval = get_mut_arcmutex!(self.prefix_cacher)
             .disk_tier()
             .map(|tier| tier.checkpoint_tokens)
@@ -773,23 +777,15 @@ impl Engine {
         }
     }
 
-    // Where a chat prompt's final message starts, so a hybrid model also checkpoints its recurrent state there: the
-    // second-to-last turn-start token, the last opening the generation prompt
+    // Where a chat prompt's final message starts, so a hybrid model also checkpoints its recurrent state there
     fn final_message_start(&self, tokens: &[u32]) -> Option<usize> {
-        let turn = self.turn_start_token()?;
-        tokens
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, token)| **token == turn)
-            .nth(1)
-            .map(|(pos, _)| pos)
-            .filter(|pos| *pos > 0)
+        final_message_start(tokens, self.turn_markers()?)
     }
 
-    // The token the template opens a turn with: the first of the generation prompt it appends to a probe turn
-    fn turn_start_token(&self) -> Option<u32> {
-        *self.turn_start_token.get_or_init(|| {
+    // The tokens the template opens and closes a turn with, from a probe turn: the generation prompt's first, and the
+    // last marker token of the turn itself
+    fn turn_markers(&self) -> Option<TurnMarkers> {
+        *self.turn_markers.get_or_init(|| {
             let pipeline = &*get_mut_arcmutex!(self.pipeline);
             if !pipeline.cache().is_hybrid() {
                 return None;
@@ -816,14 +812,18 @@ impl Engine {
                     .map(|(ids, _)| ids)
             };
             let (with, without) = (render(true)?, render(false)?);
-            let turn = (with.len() > without.len() && with.starts_with(&without))
-                .then(|| with[without.len()])?;
-            // a template without a marker token (`role: text` lines) gives a word, which starts no turn
-            pipeline
-                .tokenizer()?
-                .get_added_tokens_decoder()
-                .contains_key(&turn)
-                .then_some(turn)
+            // a template without marker tokens (`role: text` lines) gives words, which open and close no turn
+            let tokenizer = pipeline.tokenizer()?;
+            let added = tokenizer.get_added_tokens_decoder();
+            let start = (with.len() > without.len() && with.starts_with(&without))
+                .then(|| with[without.len()])
+                .filter(|token| added.contains_key(token));
+            let end = without
+                .iter()
+                .rev()
+                .find(|token| added.contains_key(token))
+                .copied();
+            (start.is_some() || end.is_some()).then_some(TurnMarkers { start, end })
         })
     }
 
@@ -1486,6 +1486,31 @@ impl Engine {
     }
 }
 
+/// The marker tokens a chat template opens and closes each turn with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TurnMarkers {
+    pub(crate) start: Option<u32>,
+    pub(crate) end: Option<u32>,
+}
+
+// The second-to-last turn start (the last opens the generation prompt); a template opening each role with its own token
+// has one start, so then the token after the second-to-last turn end (the last closes the final message)
+fn final_message_start(tokens: &[u32], markers: TurnMarkers) -> Option<usize> {
+    let nth_last = |marker: Option<u32>| {
+        let marker = marker?;
+        tokens
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, token)| **token == marker)
+            .nth(1)
+            .map(|(pos, _)| pos)
+    };
+    nth_last(markers.start)
+        .or_else(|| nth_last(markers.end).map(|pos| pos + 1))
+        .filter(|pos| *pos > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1494,6 +1519,35 @@ mod tests {
     use indexmap::IndexMap;
     use inference_protocol::chat_template::{ChatTemplateValue, apply_chat_template_to};
     use tokenizers::{Tokenizer, models::wordlevel::WordLevel};
+
+    #[test]
+    fn the_final_message_starts_after_its_turn_markers() {
+        const SYSTEM: u32 = 1;
+        const USER: u32 = 2;
+        const MODEL: u32 = 3;
+        const END: u32 = 4;
+        const TEXT: u32 = 9;
+        let shared = TurnMarkers {
+            start: Some(USER),
+            end: Some(END),
+        };
+        // one opening token for every role: the final message is the second-to-last opening
+        let prompt = [TEXT, USER, TEXT, END, USER, TEXT, TEXT, END, USER];
+        assert_eq!(final_message_start(&prompt, shared), Some(4));
+        // a token per role opens the generation prompt once, so the previous turn's end bounds the final message
+        let per_role = TurnMarkers {
+            start: Some(MODEL),
+            end: Some(END),
+        };
+        let prompt = [SYSTEM, TEXT, END, USER, TEXT, TEXT, END, MODEL];
+        assert_eq!(final_message_start(&prompt, per_role), Some(3));
+        // a lone message has nothing before it to resume from
+        assert_eq!(final_message_start(&[USER, TEXT, END, USER], shared), None);
+        assert_eq!(
+            final_message_start(&[USER, TEXT, END, MODEL], per_role),
+            None
+        );
+    }
 
     #[test]
     fn choice_seeds_are_stable_and_distinct() {

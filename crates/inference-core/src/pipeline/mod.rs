@@ -1665,7 +1665,7 @@ pub trait Pipeline:
             .copied()
             .expect("recurrent prefix owner requires a full block");
         if write_through
-            && !seq.custom_states()
+            && seq.storable_states()
             && let Some(disk) = prefix_cacher.disk_tier().cloned()
             && let Err(error) = self.write_prefix_through(
                 &disk,

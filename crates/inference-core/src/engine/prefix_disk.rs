@@ -17,7 +17,7 @@ impl Engine {
 
     fn try_promote_stored_prefix(&self, seq: &Sequence) -> Result<()> {
         // only plain text prompts are written through
-        if seq.return_raw_logits || !seq.mm_features().is_empty() || seq.custom_states() {
+        if seq.return_raw_logits || !seq.mm_features().is_empty() || !seq.storable_states() {
             return Ok(());
         }
         let Some(disk) = get_mut_arcmutex!(self.prefix_cacher).disk_tier().cloned() else {
@@ -27,7 +27,8 @@ impl Engine {
             return Ok(());
         };
         let tokens = seq.get_toks();
-        let hashes = compute_block_hashes(tokens, block_size, &[], &[]);
+        // keyed as a captured prefix is, with the control vectors the states ran under
+        let hashes = compute_block_hashes(tokens, block_size, &[], &seq.block_hash_keys());
         if hashes.is_empty() {
             return Ok(());
         }
