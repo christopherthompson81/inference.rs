@@ -36,6 +36,9 @@ use crate::paged_attention::CacheConfig;
 type BucketKey = (usize, usize, Option<usize>, u8, usize);
 
 const RAGGED_PROMPT_BUCKET_TOKENS: usize = 256;
+// the shortest chunk memory pressure halves a lone prompt's down to; below it the step runs as planned
+#[cfg(any(test, feature = "cuda"))]
+const MIN_SHRUNK_PROMPT_CHUNK_TOKENS: usize = 256;
 #[derive(Clone, Copy)]
 enum BatchKind {
     Prompt,
@@ -149,6 +152,39 @@ pub struct PagedAttentionSchedulerOutput {
 }
 
 impl PagedAttentionSchedulerOutput {
+    /// The block-aligned end halving a lone causal prompt chunk would leave it, while that keeps at least
+    /// `MIN_SHRUNK_PROMPT_CHUNK_TOKENS`.
+    #[cfg(any(test, feature = "cuda"))]
+    pub(crate) fn halved_prompt_chunk_end(&self, block_size: usize) -> Option<usize> {
+        let [chunk] = self.scheduled_prompt_chunks.as_deref()? else {
+            return None;
+        };
+        if chunk.attention_policy
+            != crate::paged_attention::block_hash::MultimodalAttentionPolicy::Causal
+        {
+            return None;
+        }
+        let block_size = block_size.max(1);
+        let end = (chunk.start + (chunk.end - chunk.start) / 2) / block_size * block_size;
+        (end >= chunk.start + MIN_SHRUNK_PROMPT_CHUNK_TOKENS).then_some(end)
+    }
+
+    /// Halves a lone prompt chunk as `halved_prompt_chunk_end` says; false when it cannot shrink.
+    #[cfg(any(test, feature = "cuda"))]
+    pub(crate) fn halve_prompt_chunk(&mut self, block_size: usize) -> bool {
+        let Some(end) = self.halved_prompt_chunk_end(block_size) else {
+            return false;
+        };
+        if let Some(chunk) = self
+            .scheduled_prompt_chunks
+            .as_mut()
+            .and_then(|c| c.first_mut())
+        {
+            chunk.end = end;
+        }
+        true
+    }
+
     #[cfg(any(test, feature = "cuda"))]
     pub(crate) fn retain_prompt_prefix(&mut self, retained: usize) -> Option<usize> {
         assert!(retained > 0);

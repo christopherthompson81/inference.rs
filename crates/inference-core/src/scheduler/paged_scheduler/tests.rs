@@ -3124,3 +3124,47 @@ fn a_prompt_extending_an_unfinished_reply_warmup_waits_for_it() {
             .any(|seq| *get_mut_arcmutex!(seq).id() == 1)
     );
 }
+
+#[test]
+fn memory_pressure_halves_a_lone_causal_prompt_chunk_to_a_floor() {
+    use crate::paged_attention::block_hash::MultimodalAttentionPolicy;
+    const BLOCK: usize = 32;
+    let output =
+        |chunks: Vec<(usize, usize, MultimodalAttentionPolicy)>| PagedAttentionSchedulerOutput {
+            scheduled: Vec::new(),
+            num_cached_tokens: Vec::new(),
+            prompt_chunk_size: None,
+            scheduled_prompt_chunks: Some(
+                chunks
+                    .into_iter()
+                    .map(|(start, end, attention_policy)| PromptChunkPlan {
+                        start,
+                        end,
+                        attention_policy,
+                    })
+                    .collect(),
+            ),
+        };
+    let causal = MultimodalAttentionPolicy::Causal;
+    let mut lone = output(vec![(64, 64 + 2048, causal)]);
+    let mut ends = Vec::new();
+    while lone.halve_prompt_chunk(BLOCK) {
+        ends.push(lone.scheduled_prompt_chunks.as_ref().unwrap()[0].end);
+    }
+    // block-aligned halves, stopping before one would fall under the floor
+    assert_eq!(ends, [64 + 1024, 64 + 512, 64 + 256]);
+    // an unaligned start halves to a block boundary
+    assert_eq!(
+        output(vec![(40, 40 + 1000, causal)]).halved_prompt_chunk_end(BLOCK),
+        Some(512)
+    );
+    assert_eq!(
+        output(vec![(0, 2048, MultimodalAttentionPolicy::NonCausal)])
+            .halved_prompt_chunk_end(BLOCK),
+        None
+    );
+    assert_eq!(
+        output(vec![(0, 2048, causal), (0, 2048, causal)]).halved_prompt_chunk_end(BLOCK),
+        None
+    );
+}

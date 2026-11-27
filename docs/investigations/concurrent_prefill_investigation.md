@@ -69,3 +69,29 @@ decode rows with a prompt chunk in this engine, so the two always trade.
 Implies: options are a chunk limit admission can lower per step (raise the default, shrink one prompt's chunk when its
 activations do not fit), the prompt activation estimate brought down to the new measurement, a prefill-first
 interleave while prompts wait, and mixed decode + prefill steps (the larger change).
+
+## Run 3 - 2026-11-27 12:55
+
+Change: a lone prompt's step now counts its activations too, and under memory pressure its chunk halves
+(block-aligned, down to 256 tokens; `inference_cuda_prompt_chunk_reductions_total`) where it used to be rejected or
+run out of memory; one that cannot shrink further runs on its attention workspace as before. Inkling's estimate comes
+down to the measurement (moe + 32 bytes a hidden unit, ~416 KB, from 170: ~733 KB).
+
+160K load, prefill tok/s (decoders = 2 looping 48-token replies):
+
+```
+chunk  words  decoders  N=1    N=2    N=4
+2048   1800   0         1805   1844   1839
+2048   1800   2         1591   1550   1506
+4096   1800   0         1862   1846   1853
+4096   1800   2         1753   1511   1559
+4096   6000   0         1758   1766
+4096   6000   2         1435   1447
+```
+
+No `out of memory` in any log (chunk 2048 beside decoders failed every case in Run 2). The 6K-word run halved 12
+chunks and split 2 batches. Against the 512 default beside decoders (1,092 / 888 / 1,651) a lone prompt prefills
+~45% faster; the decoders stall for the longer steps (0-20 tok/s in these windows).
+
+Implies: memory no longer pins the chunk at 512; what the chunk should be is now the latency trade, the adaptive
+scheduling's job.

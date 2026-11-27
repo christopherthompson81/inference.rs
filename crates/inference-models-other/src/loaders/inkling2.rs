@@ -5,8 +5,8 @@ const VERIFY_LOGIT_COPIES: usize = 3;
 // the drafter's taps: three layer visits and the normed output
 const VERIFY_TAPS: usize = 4;
 // a prompt token's activations past its routed experts' (the block stack, LoopCD's second coda), per hidden unit:
-// 4 x 6K concurrent prompts on a 3090 took ~725 KB a token, the shared MoE estimate ~342 KB of it
-const PROMPT_EXTRA_HIDDEN_BYTES: usize = 170;
+// a 1.9K-token prompt in one 2048-token chunk on a 3090 took ~408 KB a token, the shared MoE estimate ~342 KB of it
+const PROMPT_EXTRA_HIDDEN_BYTES: usize = 32;
 
 /// `NormalLoader` for Inkling 2's looped text model.
 pub struct Inkling2Loader;
