@@ -67,3 +67,29 @@ on the expert format, 31%), then the MMA attention (11%), the depth mixes (6.5%)
 
 Implies: the copies and depth mixes are the next look; the attention kernel still runs at low occupancy (registers),
 and the experts' MMQ is llama.cpp's.
+
+## Run 3 - 2026-11-27 17:10
+
+Per-op spans (`INFERENCE_PROFILE=1`: each span ends on a device sync, so the parts serialize but each is its own
+cost; the CLI now prints the report after every command): Inkling's layer (attention inputs, attention, the two
+convs, FFN inputs, experts), its whole forward, and the step's forward, drafter prefill and prefix snapshots. `inference
+bench --prompt-len 2048 --gen-len 1` on the LAN chat load at 32K: TTFT 2,595 tok/s (789 ms). A step, ~630 ms under the
+syncs:
+
+```
+inkling.moe               282 ms  45%
+inkling.attention         192 ms  30%   (the kernels ~95 ms of it; projections, norms, the bias table, KV writes)
+inkling.attention_inputs   90 ms  14%   (depth mixes, controllers, norms)
+inkling.ffn_inputs         40 ms   6%
+convs                      24 ms   4%
+step.drafter_prefill        3 ms
+step.prefix_snapshots       0 ms
+```
+
+The experts run near 58 TOPS at ~127 MFLOP a token a visit, ~40% of the 3090's int8 tensor rate (MMQ on the NVFP4
+experts). Dropping the attention kernel's f16 remainder products (one mma where two kept ~f32 precision) cut the
+attention span 6% and TTFT 2.5% (2,587 -> 2,658 tok/s), changing two pinned Inkling decode traces: not kept. The
+relative-bias table is `[tokens, heads, 1025]` f32 a visit (~200 MB at 2,048 tokens), worth ~20 ms a step if fused.
+
+Implies: what is left is spread (experts near their kernel's reach, attention half kernel half around it, the mixes);
+no single item past ~15% with an easy fix.

@@ -851,6 +851,8 @@ impl dyn Pipeline {
             let captured = self.install_recurrent_captures(&recurrent_captures, &seq_indices)?;
             let start = Instant::now();
             let bf16 = self.get_metadata().bf16_matmuls;
+            let device = self.device();
+            let forward_span = inference_tensor::profile::span("step.forward", Some(&device));
             #[cfg(feature = "cuda")]
             let forward = if cuda_decode_lookahead {
                 let _work = inference_tensor::utils::InFlight::enter();
@@ -883,7 +885,9 @@ impl dyn Pipeline {
             let result = forward
                 .output
                 .into_cpu_for_batch(input_seqs.len(), preserve_causal_generation)?;
+            drop(forward_span);
             if let Some(prompt_chunk) = prompt_chunk.as_ref() {
+                let _span = inference_tensor::profile::span("step.drafter_prefill", Some(&device));
                 self.speculative_prompt_chunk(input_seqs, prompt_chunk, speculative_metadata)?;
             }
             for (seq_idx, end) in computed_updates {
@@ -891,6 +895,8 @@ impl dyn Pipeline {
             }
             exec_duration += start.elapsed();
 
+            let snapshot_span =
+                inference_tensor::profile::span("step.prefix_snapshots", Some(&device));
             for (seq_idx, end) in recurrent_boundaries {
                 self.snapshot_paged_recurrent_prefix(
                     &*input_seqs[seq_idx],
@@ -911,6 +917,7 @@ impl dyn Pipeline {
                     Some(snapshot),
                 )?;
             }
+            drop(snapshot_span);
 
             let keep_batched_causal_logits = !ctx.is_prompt
                 && preserve_causal_generation
