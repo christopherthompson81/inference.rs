@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use serde_json::{Map, Value, json};
 use tokio::sync::Notify;
 
-use crate::backend::ChatBackend;
+use crate::backend::{ChatBackend, TransientFailure};
 use crate::changes::Changes;
 use crate::permission::{Approval, Decision, Permissions};
 use crate::session::{
@@ -31,6 +31,8 @@ const LENGTH_FINISH: &str = "length";
 const REPLY_CUT: &str = "the reply was cut at the token limit";
 const INTERRUPTED: &str = "interrupted by the user";
 const DECLINED: &str = "the user declined this call";
+// resends of a request that failed on the model's side before any of its reply arrived
+const TURN_RETRIES: usize = 1;
 /// What a front end's user types to fold the session's history into a summary now.
 pub const COMPACT_COMMAND: &str = "/compact";
 // past this share of the model's context a round folds the older history into a summary first
@@ -75,6 +77,10 @@ pub trait AgentUi: Send {
     fn progress(&mut self, completion_tokens: usize) {
         let _ = completion_tokens;
     }
+    /// The request failed on the model's side with `reason` before any reply arrived, and is being sent again.
+    fn retrying(&mut self, reason: &str) {
+        let _ = reason;
+    }
     /// One model reply finished; its usage says how full the context is.
     fn round_end(&mut self, turn: &Turn) {
         let _ = turn;
@@ -95,6 +101,12 @@ pub trait AgentUi: Send {
     fn compacted(&mut self, compaction: &Compaction, context_tokens: usize) {
         let _ = (compaction, context_tokens);
     }
+}
+
+// a turn's request failing, and whether any of its reply had arrived (a resend would repeat what the UI showed)
+struct TurnFailure {
+    error: anyhow::Error,
+    replied: bool,
 }
 
 /// A Ctrl-C the UI raises and the loop answers at its next await.
@@ -604,16 +616,41 @@ impl Agent {
         ui: &mut dyn AgentUi,
         interrupt: &Interrupt,
     ) -> Result<(Turn, bool)> {
+        let mut retries = 0;
+        loop {
+            match self.stream_turn_once(pending, ui, interrupt).await {
+                Err(TurnFailure { error, replied }) => {
+                    let transient = error.downcast_ref::<TransientFailure>().is_some();
+                    if replied || !transient || retries == TURN_RETRIES {
+                        return Err(error);
+                    }
+                    retries += 1;
+                    ui.retrying(&error.to_string());
+                }
+                Ok(done) => return Ok(done),
+            }
+        }
+    }
+
+    async fn stream_turn_once(
+        &self,
+        pending: &[Value],
+        ui: &mut dyn AgentUi,
+        interrupt: &Interrupt,
+    ) -> std::result::Result<(Turn, bool), TurnFailure> {
         let mut turn = Turn::default();
+        let mut replied = false;
+        let failed = |error, replied| TurnFailure { error, replied };
         let mut stream = tokio::select! {
-            stream = self.backend.stream(self.request(pending)) => stream?,
+            stream = self.backend.stream(self.request(pending)) => stream.map_err(|error| failed(error, false))?,
             () = interrupt.wait() => return Ok((turn, true)),
         };
         loop {
             tokio::select! {
                 chunk = stream.next() => match chunk {
                     Some(chunk) => {
-                        let delta = turn.apply(&chunk?);
+                        let delta = turn.apply(&chunk.map_err(|error| failed(error, replied))?);
+                        replied |= delta.content.is_some() || delta.reasoning.is_some() || !turn.tool_calls.is_empty();
                         if let Some(reasoning) = &delta.reasoning {
                             ui.reasoning(reasoning);
                         }
@@ -624,7 +661,9 @@ impl Agent {
                             ui.progress(tokens);
                         }
                     }
-                    None if turn.finish_reason.is_none() => bail!("the reply stream ended before the reply finished"),
+                    None if turn.finish_reason.is_none() => {
+                        return Err(failed(anyhow::anyhow!("the reply stream ended before the reply finished"), replied));
+                    }
                     None => return Ok((turn, false)),
                 },
                 () = interrupt.wait() => return Ok((turn, true)),
@@ -729,7 +768,7 @@ mod tests {
         Agent, AgentConfig, AgentUi, CLIP_MARK, CLIPPED_RESULT_CHARS, COMPACT_PROMPT, IMAGE_CHARS,
         Interrupt, TurnEnd, clipped, message_chars,
     };
-    use crate::backend::ChatBackend;
+    use crate::backend::{ChatBackend, TransientFailure};
     use crate::permission::{Approval, PermissionMode, Permissions};
     use crate::session::{Compaction, Session, summary_message};
     use crate::tools::{ToolKind, ToolOutcome, default_tools};
@@ -792,8 +831,15 @@ mod tests {
             } else {
                 self.replies.lock().unwrap().remove(0)
             };
+            // a `fail` chunk stands for the server failing there
+            let chunks = chunks
+                .into_iter()
+                .map(|chunk| match chunk["fail"].as_str() {
+                    Some(reason) => Err(TransientFailure(reason.to_string()).into()),
+                    None => Ok(chunk),
+                });
             Box::pin(async move {
-                Ok(Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))) as BoxStream<_>)
+                Ok(Box::pin(futures::stream::iter(chunks.collect::<Vec<_>>())) as BoxStream<_>)
             })
         }
 
@@ -818,6 +864,7 @@ mod tests {
         tools: Vec<(String, bool)>,
         approvals: usize,
         compactions: Vec<Compaction>,
+        retries: Vec<String>,
     }
 
     impl AgentUi for Recorder {
@@ -839,6 +886,9 @@ mod tests {
             Box::pin(async { Approval::Once })
         }
         fn round_end(&mut self, _: &Turn) {}
+        fn retrying(&mut self, reason: &str) {
+            self.retries.push(reason.to_string());
+        }
         fn compacted(&mut self, compaction: &Compaction, _: usize) {
             self.compactions.push(compaction.clone());
         }
@@ -848,6 +898,55 @@ mod tests {
         json!({"choices": [{"delta": {"tool_calls": [
             {"index": 0, "id": id, "function": {"name": name, "arguments": args.to_string()}}]},
             "finish_reason": "tool_calls"}]})
+    }
+
+    fn reply(text: &str) -> Value {
+        json!({"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]})
+    }
+
+    async fn send_scripted(replies: Vec<Vec<Value>>) -> (Result<TurnEnd>, Recorder, usize) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = scripted(replies, None);
+        let session = Session::create(&dir.path().join("sessions"), &root, "m", "sys").unwrap();
+        let config = AgentConfig {
+            model: "m".into(),
+            max_rounds: 10,
+            max_reply_tokens: 64,
+            thinking_budget: None,
+            request: Map::new(),
+        };
+        let mut agent = Agent::new(
+            backend.clone(),
+            default_tools(),
+            Permissions::new(PermissionMode::Ask),
+            session,
+            config,
+        );
+        let mut ui = Recorder::default();
+        let end = agent.send("hi", &mut ui, &Interrupt::default()).await;
+        let sent = backend.requests.lock().unwrap().len();
+        (end, ui, sent)
+    }
+
+    #[tokio::test]
+    async fn a_server_failure_before_the_reply_is_sent_again_once() {
+        let fail = json!({"fail": "out of device memory"});
+        let (end, ui, sent) = send_scripted(vec![vec![fail.clone()], vec![reply("Hello.")]]).await;
+        end.unwrap();
+        assert_eq!((ui.text.as_str(), sent), ("Hello.", 2));
+        assert_eq!(ui.retries, ["out of device memory"]);
+
+        let (end, ui, sent) = send_scripted(vec![vec![fail.clone()], vec![fail.clone()]]).await;
+        assert_eq!(end.unwrap_err().to_string(), "out of device memory");
+        assert_eq!((ui.retries.len(), sent), (1, 2));
+
+        // once some of the reply showed, a resend would show it twice
+        let partial = json!({"choices": [{"delta": {"content": "Hel"}}]});
+        let (end, ui, sent) = send_scripted(vec![vec![partial, fail], vec![reply("Hello.")]]).await;
+        assert!(end.is_err());
+        assert_eq!((ui.retries.len(), sent), (0, 1));
     }
 
     #[tokio::test]

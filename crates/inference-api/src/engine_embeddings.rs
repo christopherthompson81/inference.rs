@@ -287,8 +287,9 @@ async fn process_embedding_response(
                 Err(anyhow!(e))
             }
             Response::ModelError(msg, _) => {
+                let error = ApiError::model_failure(&msg);
                 InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg));
-                Err(AnyhowError::new(ApiError::model_error()))
+                Err(AnyhowError::new(error))
             }
             Response::Done(_)
             | Response::Chunk(_)

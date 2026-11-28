@@ -83,6 +83,10 @@ struct MaintainedDevice {
     _retention: Option<crate::pipeline::cuda_graph::CudaMemoryPoolRetention>,
     last_trim: Option<Instant>,
     capture_deferred: bool,
+    // pool use when the latest prompt step was admitted, and the most a prompt step has drawn above its start
+    step_start_used: Option<usize>,
+    step_estimate: usize,
+    step_peak: usize,
 }
 
 pub(super) struct CudaMemoryPoolMaintenance {
@@ -117,6 +121,9 @@ impl CudaMemoryPoolMaintenance {
                     _retention: retention,
                     last_trim: None,
                     capture_deferred: false,
+                    step_start_used: None,
+                    step_estimate: 0,
+                    step_peak: 0,
                 }
             })
             .collect();
@@ -214,6 +221,9 @@ fn maintain_device(
         return Ok(maintenance_failure_outcome());
     };
     record_allocator_metrics(&maintained.device, snapshot);
+    if point == MaintenancePoint::PromptBoundary {
+        record_step_peak(maintained, snapshot);
+    }
 
     let thresholds = PressureThresholds::from_snapshot(snapshot);
     let exceeds_physical_capacity = transient_bytes > snapshot.total;
@@ -305,7 +315,12 @@ fn maintain_device(
         let pool = snapshot
             .async_pool
             .expect("reclaimable CUDA pool bytes require an async pool");
-        let target = pool.current.used.saturating_add(thresholds.warm_cache);
+        let step_bytes = if transient_bytes > 0 {
+            transient_bytes.max(maintained.step_peak)
+        } else {
+            0
+        };
+        let target = trim_target(pool.current.used, thresholds.warm_cache, step_bytes);
         let before = pool.current.reserved;
         MemoryUsage.trim_cuda_memory_pool(&maintained.device, target)?;
         let after = MemoryUsage
@@ -329,6 +344,9 @@ fn maintain_device(
     let transient_required = thresholds.transient_required_available(transient_bytes, cached);
     let transient_pressure = transient_required > 0 && snapshot.available < transient_required;
     let insufficient_total_capacity = exceeds_physical_capacity;
+    if point == MaintenancePoint::PromptPreflight {
+        start_step_peak(maintained, snapshot, transient_bytes);
+    }
     if graph_pressure && !hard_pressure && !preflight_pressure {
         record_pressure(
             &maintained.device,
@@ -349,6 +367,49 @@ fn maintain_device(
         capture_active: false,
         reclaim_deferred: false,
     })
+}
+
+// a trim for a prompt step about to run keeps what the step will draw, which would otherwise come back from the driver
+// mid-step, where anything else on the device may have taken it
+fn trim_target(used: usize, warm_cache: usize, step_bytes: usize) -> usize {
+    used.saturating_add(warm_cache.max(step_bytes))
+}
+
+fn start_step_peak(
+    maintained: &mut MaintainedDevice,
+    snapshot: CudaAllocatorSnapshot,
+    estimate: usize,
+) {
+    let Some(pool) = snapshot.async_pool else {
+        return;
+    };
+    match MemoryUsage.reset_cuda_memory_pool_high(&maintained.device) {
+        Ok(true) => {
+            maintained.step_start_used = Some(pool.current.used);
+            maintained.step_estimate = estimate;
+        }
+        Ok(false) => {}
+        Err(err) => tracing::debug!("CUDA memory pool high-water reset failed: {err}"),
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn record_step_peak(maintained: &mut MaintainedDevice, snapshot: CudaAllocatorSnapshot) {
+    let (Some(start), Some(pool)) = (maintained.step_start_used.take(), snapshot.async_pool) else {
+        return;
+    };
+    let peak = pool.used_high.saturating_sub(start);
+    maintained.step_peak = maintained.step_peak.max(peak);
+    tracing::debug!(
+        peak_mib = peak / BYTES_PER_MIB,
+        estimate_mib = maintained.step_estimate / BYTES_PER_MIB,
+        "CUDA prompt step drew from the memory pool"
+    );
+    metrics::gauge!(
+        "inference_cuda_prompt_step_peak_bytes",
+        "device" => maintained.device.device_pretty_repr()
+    )
+    .set(peak as f64);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -610,6 +671,18 @@ mod tests {
             assert_eq!(threshold(&device)?, original);
         }
         Ok(())
+    }
+
+    #[test]
+    fn a_trim_for_a_prompt_step_keeps_what_the_step_draws() {
+        let warm = 256 * BYTES_PER_MIB;
+        let used = 20 * GIB;
+        assert_eq!(
+            trim_target(used, warm, 900 * BYTES_PER_MIB),
+            used + 900 * BYTES_PER_MIB
+        );
+        assert_eq!(trim_target(used, warm, 100 * BYTES_PER_MIB), used + warm);
+        assert_eq!(trim_target(used, warm, 0), used + warm);
     }
 
     #[test]

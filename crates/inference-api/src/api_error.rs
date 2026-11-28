@@ -8,6 +8,13 @@ pub const MODEL_ERROR_MESSAGE: &str = "The model failed to process the request."
 /// The `code` of [`ApiError::model_error`]: the model failed mid-request.
 pub const MODEL_ERROR_CODE: &str = "model_error";
 pub const SERVICE_UNAVAILABLE_MESSAGE: &str = "The service is temporarily unavailable.";
+pub const OUT_OF_DEVICE_MEMORY_MESSAGE: &str =
+    "The model ran out of device memory processing the request; it may succeed if retried.";
+/// The `code` of a model failure that ran out of device memory, which a retry may get past.
+pub const OUT_OF_DEVICE_MEMORY_CODE: &str = "out_of_device_memory";
+// how device allocators word an exhausted device in the model's error chain
+const OUT_OF_DEVICE_MEMORY_MARKERS: [&str; 2] =
+    ["CUDA_ERROR_OUT_OF_MEMORY", "cudaErrorMemoryAllocation"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApiErrorKind {
@@ -93,6 +100,24 @@ impl ApiError {
             Some(MODEL_ERROR_CODE),
             None,
         )
+    }
+
+    /// A model failure as a client sees it: the engine's message stays private, but an exhausted device is named,
+    /// since it is transient and worth a retry.
+    pub fn model_failure(message: &str) -> Self {
+        if OUT_OF_DEVICE_MEMORY_MARKERS
+            .iter()
+            .any(|marker| message.contains(marker))
+        {
+            Self::new(
+                ApiErrorKind::Overloaded,
+                OUT_OF_DEVICE_MEMORY_MESSAGE,
+                Some(OUT_OF_DEVICE_MEMORY_CODE),
+                None,
+            )
+        } else {
+            Self::model_error()
+        }
     }
 
     pub fn from_error(error: &(dyn std::error::Error + 'static), fallback: ApiErrorKind) -> Self {
@@ -333,6 +358,21 @@ impl std::error::Error for ModelErrorMessage {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_failure_names_an_exhausted_device_and_hides_the_rest() {
+        let oom = ApiError::model_failure(
+            "moe experts forward\nDriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\")",
+        );
+        assert_eq!(oom.kind, ApiErrorKind::Overloaded);
+        assert_eq!(oom.code.as_deref(), Some(OUT_OF_DEVICE_MEMORY_CODE));
+        assert_eq!(oom.openai_type(), "server_error");
+        assert!(!oom.message.contains("moe"));
+        assert_eq!(
+            ApiError::model_failure("index out of range in a private place"),
+            ApiError::model_error()
+        );
+    }
 
     #[test]
     fn lora_errors_keep_their_specific_codes() {

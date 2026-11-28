@@ -17,6 +17,29 @@ const VISION: &str = "vision";
 // a turn's prefill can take minutes at long context; the stream itself has no deadline
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A failure on the model's side that a resend may get past (a server error, a device out of memory).
+#[derive(Debug)]
+pub struct TransientFailure(pub String);
+
+impl std::fmt::Display for TransientFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TransientFailure {}
+
+// the OpenAI error `type` of a failure on the server's side
+const SERVER_ERROR_TYPE: &str = "server_error";
+
+fn engine_failure(error: &inference_api::api_error::ApiError) -> anyhow::Error {
+    if error.openai_type() == SERVER_ERROR_TYPE {
+        TransientFailure(error.to_string()).into()
+    } else {
+        anyhow::anyhow!("{error}")
+    }
+}
+
 /// A chat model that streams OpenAI chat completion chunks for an OpenAI chat request.
 pub trait ChatBackend: Send + Sync {
     fn stream(&self, request: Value) -> BoxFuture<'_, Result<BoxStream<'static, Result<Value>>>>;
@@ -89,7 +112,7 @@ impl ChatBackend for EngineBackend {
                 .engine
                 .chat_stream(request, Default::default())
                 .await
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                .map_err(|error| engine_failure(&error))?;
             let chunks = futures::stream::unfold(stream, |mut stream| async move {
                 loop {
                     match stream.next_event().await? {
@@ -97,7 +120,7 @@ impl ChatBackend for EngineBackend {
                             return Some((serde_json::to_value(chunk).map_err(Into::into), stream));
                         }
                         inference_api::engine_chat::ChatStreamEvent::Error(error) => {
-                            return Some((Err(anyhow::anyhow!("{error}")), stream));
+                            return Some((Err(engine_failure(&error)), stream));
                         }
                         // the harness runs its own tools, so the engine's agent events never come
                         _ => continue,
@@ -173,7 +196,11 @@ impl ChatBackend for HttpBackend {
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
-                anyhow::bail!("{status} from {}: {body}", self.url);
+                let message = format!("{status} from {}: {body}", self.url);
+                if status.is_server_error() {
+                    return Err(TransientFailure(message).into());
+                }
+                anyhow::bail!(message);
             }
             // bytes, not text, until an event is whole: a chunk can end inside a multi-byte character
             let chunks = futures::stream::unfold(
@@ -265,7 +292,12 @@ fn parse_sse_event(event: &str) -> SseEvent {
                             .get("message")
                             .and_then(Value::as_str)
                             .map_or_else(|| error.to_string(), str::to_string);
-                        Err(anyhow::anyhow!("server error: {message}"))
+                        let message = format!("server error: {message}");
+                        if error.get("type").and_then(Value::as_str) == Some(SERVER_ERROR_TYPE) {
+                            Err(TransientFailure(message).into())
+                        } else {
+                            Err(anyhow::anyhow!(message))
+                        }
                     }
                     None => Ok(chunk),
                 }),

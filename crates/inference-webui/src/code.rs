@@ -956,6 +956,10 @@ impl AgentUi for WebUi {
         self.emit(json!({"type": "compacting", "end": end}));
     }
 
+    fn retrying(&mut self, reason: &str) {
+        self.emit(json!({"type": "retrying", "reason": reason}));
+    }
+
     fn summary_text(&mut self, delta: &str) {
         self.summary_chars += delta.len();
         // the first goes at once: it marks where the request's prefill ended

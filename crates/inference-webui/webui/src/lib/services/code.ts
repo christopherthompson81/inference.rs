@@ -72,6 +72,8 @@ export type CodeEvent =
       type: "done";
       end: "done" | "interrupted" | "round_limit" | "reply_limit" | "compacted" | "nothing_to_compact";
     }
+  /** The request failed on the model's side with `reason` before any reply arrived, and was sent again. */
+  | { type: "retrying"; reason: string }
   | { type: "error"; message: string };
 
 function url(path: string): string {

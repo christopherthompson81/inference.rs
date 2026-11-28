@@ -156,8 +156,9 @@ async fn dispatch(
                 Err(ApiError::from_error(error.as_ref(), ApiErrorKind::Internal))
             }
             Response::CompletionModelError(message, _) => {
+                let error = ApiError::model_failure(&message);
                 InferenceRs::maybe_log_error(state, &ModelErrorMessage(message));
-                Err(ApiError::model_error())
+                Err(error)
             }
             response => Ok(response),
         },
