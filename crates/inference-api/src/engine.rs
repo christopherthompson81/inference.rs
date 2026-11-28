@@ -1279,9 +1279,10 @@ impl Engine {
                 Ok(response)
             }
             Response::ModelError(msg, response) => {
+                let error = ApiError::model_failure(&msg);
                 InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg));
                 InferenceRs::maybe_log_response(state, &response);
-                Err(ApiError::model_error())
+                Err(error)
             }
             Response::ValidationError(error) => Err(ApiError::from_error(
                 error.as_ref(),
@@ -1392,9 +1393,10 @@ impl Engine {
                 Ok(response)
             }
             Response::CompletionModelError(msg, response) => {
+                let error = ApiError::model_failure(&msg);
                 InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg));
                 InferenceRs::maybe_log_response(state, &response);
-                Err(ApiError::model_error())
+                Err(error)
             }
             Response::ValidationError(error) => Err(ApiError::from_error(
                 error.as_ref(),

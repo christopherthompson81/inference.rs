@@ -1252,7 +1252,7 @@ impl ChatStream {
                     &ModelErrorMessage(msg.to_string()),
                 );
                 self.finished = true;
-                ChatStreamEvent::Error(ApiError::model_error())
+                ChatStreamEvent::Error(ApiError::model_failure(&msg))
             }
             Response::ValidationError(e) => {
                 self.finished = true;

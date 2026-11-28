@@ -504,6 +504,9 @@
         if (event.end === "reply_limit")
           items.push({ kind: "notice", text: "A reply hit the token limit (the model was likely repeating itself)" });
         break;
+      case "retrying":
+        items.push({ kind: "notice", text: `The model failed (${event.reason}); sent the request again` });
+        break;
       case "error":
         error = event.message;
         break;

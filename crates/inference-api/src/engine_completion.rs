@@ -293,9 +293,10 @@ impl CompletionStream {
     fn map(&mut self, response: Response) -> Option<CompletionStreamEvent> {
         Some(match response {
             Response::CompletionModelError(msg, _) => {
+                let error = ApiError::model_failure(&msg);
                 InferenceRs::maybe_log_error(self.state.clone(), &ModelErrorMessage(msg));
                 self.finished = true;
-                CompletionStreamEvent::Error(ApiError::model_error())
+                CompletionStreamEvent::Error(error)
             }
             Response::ValidationError(e) => {
                 self.finished = true;
